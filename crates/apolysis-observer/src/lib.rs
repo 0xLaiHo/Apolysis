@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Audit-only observer pipeline for kernel-derived events.
+//! Observer pipeline for kernel-derived events.
 //!
-//! M4 establishes the userspace contract that a future Aya loader will feed:
+//! M4 established the userspace contract that a future Aya loader will feed:
 //! raw ring-buffer records are preserved, analyzed into canonical events, and
-//! written into the same JSONL session timeline used by the runtime adapters.
+//! written into the JSONL timeline. M5 adds policy evaluation, downgrade
+//! metadata, and agent-facing feedback while keeping real blocking disabled
+//! until BPF-LSM support is proven at runtime.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use apolysis_core::{CanonicalEvent, EventSource, EventType, RawKernelEvent};
-use apolysis_policy::Policy;
+use apolysis_core::{CanonicalEvent, EventSource, EventType, PolicyViolation, RawKernelEvent};
+use apolysis_feedback::FeedbackWriter;
+use apolysis_policy::{DecisionDowngrade, Policy, PolicyRuntimeCapabilities};
 use apolysis_store::JsonlStore;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,6 +23,7 @@ pub struct FixtureObserveRequest {
     pub output_path: PathBuf,
     pub policy_path: PathBuf,
     pub session_id: String,
+    pub feedback_dir: Option<PathBuf>,
 }
 
 impl FixtureObserveRequest {
@@ -34,7 +38,13 @@ impl FixtureObserveRequest {
             output_path: output_path.into(),
             policy_path: policy_path.into(),
             session_id: session_id.into(),
+            feedback_dir: None,
         }
+    }
+
+    pub fn with_feedback_dir(mut self, feedback_dir: Option<impl Into<PathBuf>>) -> Self {
+        self.feedback_dir = feedback_dir.map(Into::into);
+        self
     }
 }
 
@@ -150,8 +160,15 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
     let mut store = JsonlStore::create(&request.output_path)
         .map_err(|error| format!("failed to create observer timeline: {error}"))?;
     let runner_plan = ObserverRunnerPlan::m4_default();
+    let capabilities = PolicyRuntimeCapabilities::detect();
+    let feedback = request.feedback_dir.clone().map(FeedbackWriter::new);
 
-    write_observer_metadata(&request.session_id, &runner_plan, &mut store)?;
+    write_observer_metadata(
+        &request.session_id,
+        &runner_plan,
+        policy.startup_downgrade(&capabilities),
+        &mut store,
+    )?;
 
     let input = fs::read_to_string(&request.input_path)
         .map_err(|error| format!("failed to read observer fixture: {error}"))?;
@@ -174,6 +191,13 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
         store
             .append(&canonical)
             .map_err(|error| format!("failed to write canonical event: {error}"))?;
+        append_policy_evaluation(
+            &canonical,
+            &policy,
+            &capabilities,
+            feedback.as_ref(),
+            &mut store,
+        )?;
         canonical_count += 1;
     }
 
@@ -192,6 +216,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
 fn write_observer_metadata(
     session_id: &str,
     runner_plan: &ObserverRunnerPlan,
+    startup_downgrade: Option<DecisionDowngrade>,
     store: &mut JsonlStore,
 ) -> Result<(), String> {
     for (resource, action) in [
@@ -218,6 +243,66 @@ fn write_observer_metadata(
         store
             .append(&event)
             .map_err(|error| format!("failed to write observer metadata: {error}"))?;
+    }
+
+    if let Some(downgrade) = startup_downgrade {
+        let event = CanonicalEvent::new(
+            session_id,
+            EventSource::RuntimeMetadata,
+            EventType::RuntimeMetadata,
+            std::process::id(),
+            0,
+            "policy",
+            "bpf-lsm",
+            format!(
+                "unavailable:downgrade:{}->{}",
+                downgrade.from.as_str(),
+                downgrade.to.as_str()
+            ),
+        );
+        store
+            .append(&event)
+            .map_err(|error| format!("failed to write policy metadata: {error}"))?;
+    }
+
+    Ok(())
+}
+
+fn append_policy_evaluation(
+    canonical: &CanonicalEvent,
+    policy: &Policy,
+    capabilities: &PolicyRuntimeCapabilities,
+    feedback: Option<&FeedbackWriter>,
+    store: &mut JsonlStore,
+) -> Result<(), String> {
+    let evaluation = policy.evaluate_event(canonical, capabilities);
+    if evaluation.decision.is_allow() {
+        return Ok(());
+    }
+
+    let rule_id = evaluation
+        .decision
+        .rule_id()
+        .ok_or_else(|| "policy violation missing rule id".to_string())?;
+    let reason = evaluation
+        .decision
+        .reason()
+        .ok_or_else(|| "policy violation missing reason".to_string())?;
+    let violation = PolicyViolation::new(
+        &canonical.session_id,
+        rule_id,
+        evaluation.decision.core_decision(),
+        reason,
+        canonical.pid,
+        &canonical.resource,
+        evaluation.enforcement_backend,
+    );
+    store
+        .append(&violation)
+        .map_err(|error| format!("failed to write policy violation: {error}"))?;
+
+    if let Some(writer) = feedback {
+        writer.write_last_violation(&violation)?;
     }
 
     Ok(())

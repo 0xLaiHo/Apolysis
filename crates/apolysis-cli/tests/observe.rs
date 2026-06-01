@@ -84,6 +84,57 @@ fn observe_fixture_reports_runner_plan_metadata() {
     let _ = std::fs::remove_file(&output);
 }
 
+#[test]
+fn observe_fixture_emits_policy_violations_and_feedback_file() {
+    let output = temp_jsonl("apolysis-observe-policy");
+    let feedback_dir = temp_dir("apolysis-feedback");
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_dir_all(&feedback_dir);
+
+    let status = apolysis_command()
+        .env("APOLYSIS_BPF_LSM_AVAILABLE", "0")
+        .args([
+            "observe",
+            "--backend",
+            "fixture",
+            "--input",
+            "tests/fixtures/raw-kernel-events.txt",
+            "--session",
+            "session-m5-policy",
+            "--policy",
+            "tests/fixtures/policies/m5-block-policy.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--feedback-dir",
+            feedback_dir.to_str().expect("utf-8 feedback path"),
+        ])
+        .status()
+        .expect("run apolysis observe with policy feedback");
+
+    assert!(status.success());
+    let timeline = std::fs::read_to_string(&output).expect("read observer timeline");
+    assert!(timeline.contains(r#""record_type":"policy_violation""#));
+    assert!(timeline.contains(r#""rule_id":"credentials.deny_read""#));
+    assert!(timeline.contains(r#""rule_id":"network.allow_egress""#));
+    assert!(timeline.contains(r#""rule_id":"workspace.allow_write""#));
+    assert!(!timeline.contains(r#""rule_id":"workspace.allow_read""#));
+    assert!(timeline.contains(r#""decision":"notify""#));
+    assert!(timeline.contains(r#""enforcement_backend":"tracepoint_notify""#));
+    assert!(timeline.contains(r#""actor":"policy""#));
+    assert!(timeline.contains(r#""resource":"bpf-lsm""#));
+    assert!(timeline.contains(r#""action":"unavailable:downgrade:block->notify""#));
+
+    let feedback =
+        std::fs::read_to_string(feedback_dir.join("last-violation.txt")).expect("read feedback");
+    assert!(feedback.contains("session_id: session-m5-policy"));
+    assert!(feedback.contains("rule_id:"));
+    assert!(feedback.contains("decision: notify"));
+    assert!(feedback.contains("APOLYSIS_VIOLATION"));
+
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_dir_all(&feedback_dir);
+}
+
 fn apolysis_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_apolysis"));
     command.current_dir(workspace_root());
@@ -100,6 +151,10 @@ fn workspace_root() -> std::path::PathBuf {
 
 fn temp_jsonl(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}.jsonl", std::process::id()))
+}
+
+fn temp_dir(prefix: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()))
 }
 
 fn assert_expected_fragments(timeline: &str, relative_path: &str) {

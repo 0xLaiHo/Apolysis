@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+
+version: 1
+enforcement:
+  requested: block
+  fallback: notify
+credentials:
+  deny_read:
+    - ~/.ssh
+workspace:
+  allow_read:
+    - ./tests
+  allow_write:
+    - ./.apolysis
+commands:
+  deny:
+    - rm -rf /
+network:
+  allow_egress:
+    - 127.0.0.1:0
+runtime:
+  max_seconds: 60
+  max_processes: 128

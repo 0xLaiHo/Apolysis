@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/apolysis-core",
+    "crates/apolysis-feedback",
     "crates/apolysis-policy",
     "crates/apolysis-store",
     "crates/apolysis-observer",

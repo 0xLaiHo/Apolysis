@@ -52,12 +52,15 @@ fn observe_command(args: Vec<String>) -> Result<i32, String> {
     let request = ObserveRequest::parse(args)?;
     match request.backend {
         ObserverBackendSelection::Fixture => {
-            observe_fixture(FixtureObserveRequest::new(
-                request.input_path,
-                request.output_path,
-                request.policy_path,
-                request.session_id,
-            ))?;
+            observe_fixture(
+                FixtureObserveRequest::new(
+                    request.input_path,
+                    request.output_path,
+                    request.policy_path,
+                    request.session_id,
+                )
+                .with_feedback_dir(request.feedback_dir),
+            )?;
             Ok(0)
         }
     }
@@ -171,6 +174,7 @@ struct ObserveRequest {
     output_path: String,
     policy_path: String,
     session_id: String,
+    feedback_dir: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -189,6 +193,7 @@ impl ObserveRequest {
         let mut output_path = None;
         let mut policy_path = None;
         let mut session_id = None;
+        let mut feedback_dir = None;
         let mut i = 1;
 
         while i < args.len() {
@@ -213,6 +218,10 @@ impl ObserveRequest {
                     i += 1;
                     session_id = args.get(i).cloned();
                 }
+                "--feedback-dir" => {
+                    i += 1;
+                    feedback_dir = args.get(i).cloned();
+                }
                 unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
             }
             i += 1;
@@ -232,10 +241,11 @@ impl ObserveRequest {
             output_path: output_path.ok_or_else(|| format!("missing --output\n{}", usage()))?,
             policy_path: policy_path.ok_or_else(|| format!("missing --policy\n{}", usage()))?,
             session_id: session_id.ok_or_else(|| format!("missing --session\n{}", usage()))?,
+            feedback_dir,
         })
     }
 }
 
 fn usage() -> String {
-    "usage: apolysis run [--runtime local|docker] [--image <image>] [--docker-runtime <oci-runtime>] --policy <path> [--output <path>] -- <command> [args...]\n       apolysis observe --backend fixture --input <path> --session <id> --policy <path> --output <path>".to_string()
+    "usage: apolysis run [--runtime local|docker] [--image <image>] [--docker-runtime <oci-runtime>] --policy <path> [--output <path>] -- <command> [args...]\n       apolysis observe --backend fixture --input <path> --session <id> --policy <path> --output <path> [--feedback-dir <path>]".to_string()
 }

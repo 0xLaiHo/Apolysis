@@ -15,10 +15,18 @@ name = "apolysis-core"
 version = "0.1.0"
 
 [[package]]
+name = "apolysis-feedback"
+version = "0.1.0"
+dependencies = [
+ "apolysis-core",
+]
+
+[[package]]
 name = "apolysis-observer"
 version = "0.1.0"
 dependencies = [
  "apolysis-core",
+ "apolysis-feedback",
  "apolysis-policy",
  "apolysis-store",
 ]
@@ -26,6 +34,9 @@ dependencies = [
 [[package]]
 name = "apolysis-policy"
 version = "0.1.0"
+dependencies = [
+ "apolysis-core",
+]
 
 [[package]]
 name = "apolysis-runtime"

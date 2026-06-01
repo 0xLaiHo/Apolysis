@@ -39,11 +39,13 @@ When all three layers agree, the platform can trust the session with higher
 confidence. When they diverge, Apolysis treats OS/runtime evidence as the
 starting point for investigation and future enforcement.
 
-M4 implements the audit-only observer foundation for the third layer. It records
+M5 implements the first policy-feedback loop for the third layer. It records
 local sessions, process-tree attribution, Docker runtime metadata, fixture
-ring-buffer events, raw kernel-event records, canonical side-effect events, and
-JSONL timelines. The repository now includes the eBPF observer ABI and attach
-point skeleton; BPF-LSM enforcement is planned but not enabled yet.
+ring-buffer events, raw kernel-event records, canonical side-effect events,
+policy violations, downgrade metadata, feedback files, and JSONL timelines. The
+repository now includes the eBPF observer ABI and attach point skeleton;
+BPF-LSM enforcement is modeled and capability-gated, but real kernel blocking
+is not enabled yet.
 
 ## 🚀 Runtime Scenarios
 
@@ -71,7 +73,7 @@ point skeleton; BPF-LSM enforcement is planned but not enabled yet.
 
 ## 🛠️ Build And Run
 
-Requirements for M4:
+Requirements for M5:
 
 - 🦀 Rust stable toolchain
 - 📦 Cargo
@@ -168,13 +170,31 @@ events. The M4 event set covers `exec`, `open/openat/openat2`, `creat`,
 The default runner plan enables process/system runners and keeps stdio plus
 SSL/HTTP uprobes disabled until later milestones.
 
+🛡️ Run the M5 policy-feedback path:
+
+```bash
+APOLYSIS_BPF_LSM_AVAILABLE=0 cargo run -p apolysis-cli -- observe \
+  --backend fixture \
+  --input tests/fixtures/raw-kernel-events.txt \
+  --session session-m5-demo \
+  --policy tests/fixtures/policies/m5-block-policy.yaml \
+  --output .apolysis/policy-timeline.jsonl \
+  --feedback-dir .sandbox
+```
+
+When a policy requests `block` but BPF-LSM is unavailable, Apolysis writes an
+explicit `unavailable:downgrade:block->notify` metadata event, emits
+`policy_violation` records with `tracepoint_notify`, and updates
+`.sandbox/last-violation.txt` for future Claude/Codex hook integration.
+
 ## 📁 Repository Layout
 
 ```text
 crates/
   apolysis-core/    Shared schema and JSONL records.
+  apolysis-feedback/ Agent-facing violation feedback files.
   apolysis-observer/ Audit-only raw kernel event observer pipeline.
-  apolysis-policy/  M1 policy parser and audit-only decisions.
+  apolysis-policy/  YAML/JSON policy parser and M5 decision logic.
   apolysis-runtime/ Local runner and Docker runtime adapter.
   apolysis-store/   Append-only JSONL timeline writer.
   apolysis-cli/     Local `apolysis run` command wrapper.
@@ -196,7 +216,7 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 | M2 | Local process session model, process-tree attribution, timeout notify, richer fixtures | ✅ **Completed in this iteration** |
 | M3 | Docker adapter with safe defaults, optional OCI runtime, and container metadata | ✅ **Completed in this iteration** |
 | M4 | Audit-only observer pipeline, raw kernel event schema, eBPF ring-buffer ABI, exec/file/network canonicalization | ✅ **Completed in this iteration** |
-| M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | 🟡 Planned |
+| M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | ✅ **Completed in this iteration** |
 | M6 | Kubernetes / Agent Sandbox metadata integration | 🟡 Planned |
 | M7 | gVisor/Kata/Firecracker visibility validation | 🟡 Planned |
 
