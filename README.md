@@ -258,10 +258,14 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 | M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | ✅ **Completed in this iteration** |
 | M6 | Kubernetes / Agent Sandbox metadata integration | ✅ **Completed in this iteration** |
 | M7 | gVisor/Kata/Firecracker visibility validation | ✅ **Completed in this iteration** |
+| M8 | Real eBPF observability pipeline: Aya loader, CO-RE compile pipeline, tracepoint lifecycle, event deduplication, ring-buffer overflow handling | 🚧 **Planned** |
+| M9 | Real policy enforcement: BPF-LSM hooks, seccomp-bpf fallback, ptrace-based `Kill`, immutable downgrade audit records | 🚧 **Planned** |
+| M10| Storage layer upgrade: `TimelineSink` trait, Kafka/gRPC streaming, hash-chain integrity, HSM/KMS signing, WORM archive integration | 🚧 **Planned** |
+| M11| Kubernetes production integration: DaemonSet, Sidecar, Mutating Webhook, `kube-rs` API client, CRI integration | 🚧 **Planned** |
+| M12| Policy engine v2: OPA/Rego integration, hot reload, policy versioning and lineage, rule priority and conflict resolution | 🚧 **Planned** |
+| M13| Observability and operations: Prometheus metrics, Grafana dashboards, PagerDuty/OpsGenie alerting, Kubernetes Operator, Helm Chart, GitOps sync | 🚧 **Planned** |
+| M14| Large-scale production hardening: multi-tenant RBAC, namespace isolation, policy federation, per-session quotas, mTLS, chaos testing, eBPF CI tests, performance benchmarks, Falco /Tetragonintegration | 🚧 **Planned** |
 
-The table above is the repository-local progress summary. Detailed internal
-development progress is tracked outside this repository in the surrounding
-research workspace.
 
 ## 📜 License
 

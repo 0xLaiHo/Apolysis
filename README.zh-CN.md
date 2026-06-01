@@ -199,15 +199,21 @@ tests/fixtures/     本地/Docker 命令测试夹具和预期 timeline 片段。
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
-| M1 | Rust workspace、核心 schema、policy parser、JSONL store、本地 CLI wrapper、README | ✅ **本轮已完成** |
-| M2 | 本地进程 session model、process-tree 归属、超时 notify、更丰富的 fixtures | ✅ **本轮已完成** |
-| M3 | 带安全默认值、可选 OCI runtime 和 container metadata 的 Docker adapter | ✅ **本轮已完成** |
-| M4 | audit-only observer pipeline、raw kernel event schema、eBPF ring-buffer ABI、exec/file/network 归一化 | ✅ **本轮已完成** |
-| M5 | 策略引擎集成、`Notify`/`Block`/`Kill`/`Review`、feedback hook | ✅ **本轮已完成** |
-| M6 | Kubernetes / Agent Sandbox metadata 集成 | ✅ **本轮已完成** |
-| M7 | gVisor/Kata/Firecracker 可观测性验证 | ✅ **本轮已完成** |
+| M1 | Rust workspace、核心 schema、policy parser、JSONL store、本地 CLI wrapper、README | ✅ **Completed** |
+| M2 | 本地进程 session model、process-tree 归属、超时 notify、更丰富的 fixtures | ✅ **Completed** |
+| M3 | Docker adapter（安全默认值、可选 OCI runtime、容器元数据） | ✅ **Completed** |
+| M4 | Audit-only observer pipeline（raw kernel event schema、eBPF ring-buffer ABI、exec/file/network 归一化） | ✅ **Completed** |
+| M5 | 策略引擎集成（`Notify`/`Block`/`Kill`/`Review`、feedback hook） | ✅ **Completed** |
+| M6 | Kubernetes / Agent Sandbox metadata 集成 | ✅ **Completed** |
+| M7 | gVisor/Kata/Firecracker 可观测性验证 | ✅ **Completed** |
+| M8 | 真实 eBPF 观测管道（Aya loader、CO-RE 编译流水线、tracepoint 生命周期、事件去重、ring-buffer 溢出处理） | 🚧 **Planned** |
+| M9 | 真实策略执行（BPF-LSM 钩子、seccomp-bpf fallback、ptrace-based Kill、不可篡改降级审计记录） | 🚧 **Planned** |
+| M10 | 存储层升级（`TimelineSink` trait、Kafka/gRPC 流式输出、哈希链完整性、HSM/KMS 签名、WORM 归档集成） | 🚧 **Planned** |
+| M11 | Kubernetes 生产集成（DaemonSet、Sidecar、Mutating Webhook、`kube-rs` API 客户端、CRI 集成） | 🚧 **Planned** |
+| M12 | 策略引擎 v2（OPA/Rego 集成、热重载、策略版本与血缘、规则优先级与冲突解决） | 🚧 **Planned** |
+| M13 | 可观测性与运维（Prometheus 指标、Grafana 面板、PagerDuty/OpsGenie 告警、Kubernetes Operator、Helm Chart、GitOps 同步） | 🚧 **Planned** |
+| M14 | 大规模生产加固（多租户 RBAC、命名空间隔离、策略联邦、按 session 配额、mTLS、混沌测试、eBPF CI 集成测试、性能基准、Falco/Tetragon 集成） | 🚧 **Planned** |
 
-上表是仓库内的简要进度摘要。详细的内部开发进度记录放在本仓库外层的 research workspace 中。
 
 ## 📜 许可证
 
