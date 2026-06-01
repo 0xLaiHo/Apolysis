@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example RuntimeClass objects. The handlers must match runtimes installed on
+# the node, such as runsc for gVisor or kata-qemu for Kata Containers.
+
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-qemu
+handler: kata-qemu

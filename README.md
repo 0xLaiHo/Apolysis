@@ -39,13 +39,13 @@ When all three layers agree, the platform can trust the session with higher
 confidence. When they diverge, Apolysis treats OS/runtime evidence as the
 starting point for investigation and future enforcement.
 
-M5 implements the first policy-feedback loop for the third layer. It records
-local sessions, process-tree attribution, Docker runtime metadata, fixture
-ring-buffer events, raw kernel-event records, canonical side-effect events,
-policy violations, downgrade metadata, feedback files, and JSONL timelines. The
-repository now includes the eBPF observer ABI and attach point skeleton;
-BPF-LSM enforcement is modeled and capability-gated, but real kernel blocking
-is not enabled yet.
+M6 implements the first Kubernetes / Agent Sandbox metadata path for the third
+layer. It records local sessions, process-tree attribution, Docker runtime
+metadata, Kubernetes pod metadata, fixture ring-buffer events, raw kernel-event
+records, canonical side-effect events, policy violations, downgrade metadata,
+feedback files, and JSONL timelines. The repository now includes the eBPF
+observer ABI and attach point skeleton; BPF-LSM enforcement is modeled and
+capability-gated, but real kernel blocking is not enabled yet.
 
 ## 🚀 Runtime Scenarios
 
@@ -73,7 +73,7 @@ is not enabled yet.
 
 ## 🛠️ Build And Run
 
-Requirements for M5:
+Requirements for M6:
 
 - 🦀 Rust stable toolchain
 - 📦 Cargo
@@ -187,14 +187,33 @@ explicit `unavailable:downgrade:block->notify` metadata event, emits
 `policy_violation` records with `tracepoint_notify`, and updates
 `.sandbox/last-violation.txt` for future Claude/Codex hook integration.
 
+☸️ Add M6 Kubernetes / Agent Sandbox metadata to an observer session:
+
+```bash
+APOLYSIS_BPF_LSM_AVAILABLE=0 cargo run -p apolysis-cli -- observe \
+  --backend fixture \
+  --input tests/fixtures/raw-kernel-events.txt \
+  --session session-m6-k8s \
+  --policy tests/fixtures/policies/m5-block-policy.yaml \
+  --output .apolysis/kubernetes-timeline.jsonl \
+  --feedback-dir .sandbox \
+  --kubernetes-metadata tests/fixtures/kubernetes/agent-sandbox-gvisor-pod.yaml
+```
+
+M6 consumes captured pod metadata, not the live Kubernetes API. It emits Pod,
+namespace, service account, RuntimeClass, node, service-account-token, and
+Agent Sandbox identity records, then keeps the M5 policy-feedback contract on
+the same timeline.
+
 ## 📁 Repository Layout
 
 ```text
 crates/
   apolysis-core/    Shared schema and JSONL records.
   apolysis-feedback/ Agent-facing violation feedback files.
-  apolysis-observer/ Audit-only raw kernel event observer pipeline.
-  apolysis-policy/  YAML/JSON policy parser and M5 decision logic.
+  apolysis-kubernetes/ Kubernetes and Agent Sandbox metadata parser.
+  apolysis-observer/ Raw kernel event observer and policy evaluation pipeline.
+  apolysis-policy/  YAML/JSON policy parser and decision logic.
   apolysis-runtime/ Local runner and Docker runtime adapter.
   apolysis-store/   Append-only JSONL timeline writer.
   apolysis-cli/     Local `apolysis run` command wrapper.
@@ -202,6 +221,7 @@ ebpf/
   include/          Observer ring-buffer ABI shared with userspace.
   observer/         GPL-2.0-only eBPF observer source skeleton.
   prebuilt/         Future CO-RE object location.
+deploy/kubernetes/ RuntimeClass, NetworkPolicy, and Agent Sandbox examples.
 policies/
   local-dev.yaml    Default audit policy.
   docker-baseline.yaml Docker adapter baseline policy.
@@ -217,7 +237,7 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 | M3 | Docker adapter with safe defaults, optional OCI runtime, and container metadata | ✅ **Completed in this iteration** |
 | M4 | Audit-only observer pipeline, raw kernel event schema, eBPF ring-buffer ABI, exec/file/network canonicalization | ✅ **Completed in this iteration** |
 | M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | ✅ **Completed in this iteration** |
-| M6 | Kubernetes / Agent Sandbox metadata integration | 🟡 Planned |
+| M6 | Kubernetes / Agent Sandbox metadata integration | ✅ **Completed in this iteration** |
 | M7 | gVisor/Kata/Firecracker visibility validation | 🟡 Planned |
 
 The table above is the repository-local progress summary. Detailed internal

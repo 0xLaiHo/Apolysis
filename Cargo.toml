@@ -2,6 +2,7 @@
 members = [
     "crates/apolysis-core",
     "crates/apolysis-feedback",
+    "crates/apolysis-kubernetes",
     "crates/apolysis-policy",
     "crates/apolysis-store",
     "crates/apolysis-observer",

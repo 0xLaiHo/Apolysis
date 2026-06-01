@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Agent Sandbox APIs are still evolving. Treat this as a template for the
+# installed CRD version in your cluster, and keep the pod security fields.
+
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: apolysis-gvisor-template
+  namespace: agents
+spec:
+  template:
+    metadata:
+      labels:
+        apolysis.dev/agent: "true"
+        agent-sandbox.sigs.k8s.io/sandbox: apolysis-gvisor-template
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: agent-runner
+      runtimeClassName: gvisor
+      containers:
+        - name: agent
+          image: ghcr.io/example/agent:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use apolysis_core::{CanonicalEvent, EventSource, EventType, PolicyViolation, RawKernelEvent};
 use apolysis_feedback::FeedbackWriter;
+use apolysis_kubernetes::KubernetesMetadata;
 use apolysis_policy::{DecisionDowngrade, Policy, PolicyRuntimeCapabilities};
 use apolysis_store::JsonlStore;
 
@@ -24,6 +25,7 @@ pub struct FixtureObserveRequest {
     pub policy_path: PathBuf,
     pub session_id: String,
     pub feedback_dir: Option<PathBuf>,
+    pub kubernetes_metadata_path: Option<PathBuf>,
 }
 
 impl FixtureObserveRequest {
@@ -39,11 +41,17 @@ impl FixtureObserveRequest {
             policy_path: policy_path.into(),
             session_id: session_id.into(),
             feedback_dir: None,
+            kubernetes_metadata_path: None,
         }
     }
 
     pub fn with_feedback_dir(mut self, feedback_dir: Option<impl Into<PathBuf>>) -> Self {
         self.feedback_dir = feedback_dir.map(Into::into);
+        self
+    }
+
+    pub fn with_kubernetes_metadata_path(mut self, path: Option<impl Into<PathBuf>>) -> Self {
+        self.kubernetes_metadata_path = path.map(Into::into);
         self
     }
 }
@@ -169,6 +177,11 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
         policy.startup_downgrade(&capabilities),
         &mut store,
     )?;
+    write_kubernetes_metadata(
+        &request.session_id,
+        request.kubernetes_metadata_path.as_deref(),
+        &mut store,
+    )?;
 
     let input = fs::read_to_string(&request.input_path)
         .map_err(|error| format!("failed to read observer fixture: {error}"))?;
@@ -211,6 +224,27 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
         backend: ObserverBackend::FixtureRingBuffer,
         mode: ObserverMode::AuditOnly,
     })
+}
+
+fn write_kubernetes_metadata(
+    session_id: &str,
+    metadata_path: Option<&Path>,
+    store: &mut JsonlStore,
+) -> Result<(), String> {
+    let Some(metadata_path) = metadata_path else {
+        return Ok(());
+    };
+
+    let input = fs::read_to_string(metadata_path)
+        .map_err(|error| format!("failed to read kubernetes metadata: {error}"))?;
+    let metadata = KubernetesMetadata::parse(&input)?;
+    for event in metadata.to_timeline_events(session_id) {
+        store
+            .append(&event)
+            .map_err(|error| format!("failed to write kubernetes metadata: {error}"))?;
+    }
+
+    Ok(())
 }
 
 fn write_observer_metadata(

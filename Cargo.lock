@@ -22,11 +22,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "apolysis-kubernetes"
+version = "0.1.0"
+dependencies = [
+ "apolysis-core",
+]
+
+[[package]]
 name = "apolysis-observer"
 version = "0.1.0"
 dependencies = [
  "apolysis-core",
  "apolysis-feedback",
+ "apolysis-kubernetes",
  "apolysis-policy",
  "apolysis-store",
 ]
