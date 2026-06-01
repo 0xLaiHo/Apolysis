@@ -2,7 +2,7 @@
 
 //! Core domain types for Apolysis.
 //!
-//! This crate intentionally has no third-party dependencies in M1.  The event
+//! This crate intentionally has no third-party dependencies.  The event
 //! schema is the contract shared by the CLI, policy engine, store, and future
 //! eBPF observer.  Keeping it small makes early JSONL fixtures stable and easy
 //! to inspect during kernel/runtime experiments.
@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Anything that can be written as one JSONL record.
 ///
-/// The project will likely move to `serde` once the schema settles.  For M1 we
+/// The project will likely move to `serde` once the schema settles.  For now we
 /// keep serialization explicit so every emitted field is deliberate and visible.
 pub trait JsonLine {
     fn to_json_line(&self) -> String;
@@ -67,6 +67,10 @@ pub enum EventType {
     RuntimeMetadata,
     Exec,
     FileOpen,
+    FileCreate,
+    FileTruncate,
+    FileUnlink,
+    FileRename,
     NetworkConnect,
     CredentialRead,
     ProcessExit,
@@ -79,6 +83,10 @@ impl EventType {
             Self::RuntimeMetadata => "runtime_metadata",
             Self::Exec => "exec",
             Self::FileOpen => "file_open",
+            Self::FileCreate => "file_create",
+            Self::FileTruncate => "file_truncate",
+            Self::FileUnlink => "file_unlink",
+            Self::FileRename => "file_rename",
             Self::NetworkConnect => "network_connect",
             Self::CredentialRead => "credential_read",
             Self::ProcessExit => "process_exit",
@@ -185,6 +193,8 @@ pub struct CanonicalEvent {
     pub actor: String,
     pub resource: String,
     pub action: String,
+    pub container_id: Option<String>,
+    pub cgroup_id: Option<String>,
 }
 
 impl CanonicalEvent {
@@ -209,7 +219,24 @@ impl CanonicalEvent {
             actor: actor.into(),
             resource: resource.into(),
             action: action.into(),
+            container_id: None,
+            cgroup_id: None,
         }
+    }
+
+    pub fn with_timestamp(mut self, timestamp_unix_ms: u128) -> Self {
+        self.timestamp_unix_ms = timestamp_unix_ms;
+        self
+    }
+
+    pub fn with_runtime_identity(
+        mut self,
+        container_id: Option<String>,
+        cgroup_id: Option<String>,
+    ) -> Self {
+        self.container_id = container_id;
+        self.cgroup_id = cgroup_id;
+        self
     }
 
     pub fn to_json_line(&self) -> String {
@@ -219,8 +246,19 @@ impl CanonicalEvent {
 
 impl JsonLine for CanonicalEvent {
     fn to_json_line(&self) -> String {
+        let container_id = self
+            .container_id
+            .as_ref()
+            .map(|value| json_string(value))
+            .unwrap_or_else(|| "null".to_string());
+        let cgroup_id = self
+            .cgroup_id
+            .as_ref()
+            .map(|value| json_string(value))
+            .unwrap_or_else(|| "null".to_string());
+
         format!(
-            "{{\"record_type\":\"event\",\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{}}}",
+            "{{\"record_type\":\"event\",\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{}}}",
             self.timestamp_unix_ms,
             json_string(&self.session_id),
             json_string(self.event_source.as_str()),
@@ -229,7 +267,101 @@ impl JsonLine for CanonicalEvent {
             self.ppid,
             json_string(&self.actor),
             json_string(&self.resource),
-            json_string(&self.action)
+            json_string(&self.action),
+            container_id,
+            cgroup_id
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RawKernelEvent {
+    pub timestamp_unix_ms: u128,
+    pub session_id: String,
+    pub event_source: EventSource,
+    pub event_name: String,
+    pub pid: u32,
+    pub ppid: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub comm: String,
+    pub resource: String,
+    pub action: String,
+    pub container_id: Option<String>,
+    pub cgroup_id: Option<String>,
+    pub raw_payload: String,
+}
+
+impl RawKernelEvent {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        timestamp_unix_ms: u128,
+        session_id: impl Into<String>,
+        event_source: EventSource,
+        event_name: impl Into<String>,
+        pid: u32,
+        ppid: u32,
+        uid: u32,
+        gid: u32,
+        comm: impl Into<String>,
+        resource: impl Into<String>,
+        action: impl Into<String>,
+        container_id: Option<String>,
+        cgroup_id: Option<String>,
+        raw_payload: impl Into<String>,
+    ) -> Self {
+        Self {
+            timestamp_unix_ms,
+            session_id: session_id.into(),
+            event_source,
+            event_name: event_name.into(),
+            pid,
+            ppid,
+            uid,
+            gid,
+            comm: comm.into(),
+            resource: resource.into(),
+            action: action.into(),
+            container_id,
+            cgroup_id,
+            raw_payload: raw_payload.into(),
+        }
+    }
+
+    pub fn to_json_line(&self) -> String {
+        <Self as JsonLine>::to_json_line(self)
+    }
+}
+
+impl JsonLine for RawKernelEvent {
+    fn to_json_line(&self) -> String {
+        let container_id = self
+            .container_id
+            .as_ref()
+            .map(|value| json_string(value))
+            .unwrap_or_else(|| "null".to_string());
+        let cgroup_id = self
+            .cgroup_id
+            .as_ref()
+            .map(|value| json_string(value))
+            .unwrap_or_else(|| "null".to_string());
+
+        format!(
+            "{{\"record_type\":\"raw_kernel_event\",\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{},\"raw_payload\":{}}}",
+            self.timestamp_unix_ms,
+            json_string(&self.session_id),
+            json_string(self.event_source.as_str()),
+            json_string(&self.event_name),
+            self.pid,
+            self.ppid,
+            self.uid,
+            self.gid,
+            json_string(&self.comm),
+            json_string(&self.resource),
+            json_string(&self.action),
+            container_id,
+            cgroup_id,
+            json_string(&self.raw_payload)
         )
     }
 }

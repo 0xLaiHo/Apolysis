@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+apolysis-observer = { path = "../apolysis-observer" }
 apolysis-runtime = { path = "../apolysis-runtime" }
 
 [[bin]]

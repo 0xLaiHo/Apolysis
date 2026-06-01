@@ -1,0 +1,10 @@
+# Synthetic ring-buffer records for M4 observer tests.
+# Fields are pipe-delimited key=value pairs.
+timestamp=1780328000001|pid=4100|ppid=4000|uid=1000|gid=1000|comm=bash|event=exec|resource=/usr/bin/bash|action=execve|container_id=container-a|cgroup_id=42|payload=argv=bash -lc fixture
+timestamp=1780328000002|pid=4100|ppid=4000|uid=1000|gid=1000|comm=bash|event=openat|resource=tests/fixtures/child.py|action=read|container_id=container-a|cgroup_id=42|payload=flags=O_RDONLY
+timestamp=1780328000003|pid=4100|ppid=4000|uid=1000|gid=1000|comm=bash|event=openat2|resource=tests/fixtures/home/.ssh/id_rsa|action=read|container_id=container-a|cgroup_id=42|payload=flags=O_RDONLY
+timestamp=1780328000004|pid=4101|ppid=4100|uid=1000|gid=1000|comm=python3|event=connect|resource=1.1.1.1:443|action=connect|container_id=container-a|cgroup_id=42|payload=family=AF_INET
+timestamp=1780328000005|pid=4100|ppid=4000|uid=1000|gid=1000|comm=bash|event=creat|resource=tmp/output.txt|action=create|container_id=container-a|cgroup_id=42|payload=mode=0644
+timestamp=1780328000006|pid=4100|ppid=4000|uid=1000|gid=1000|comm=bash|event=truncate|resource=tmp/output.txt|action=truncate|container_id=container-a|cgroup_id=42|payload=size=0
+timestamp=1780328000007|pid=4100|ppid=4000|uid=1000|gid=1000|comm=bash|event=rename|resource=tmp/output.txt->tmp/final.txt|action=rename|container_id=container-a|cgroup_id=42|payload=old=tmp/output.txt,new=tmp/final.txt
+timestamp=1780328000008|pid=4100|ppid=4000|uid=1000|gid=1000|comm=bash|event=unlink|resource=tmp/final.txt|action=unlink|container_id=container-a|cgroup_id=42|payload=unlinkat

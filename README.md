@@ -39,10 +39,11 @@ When all three layers agree, the platform can trust the session with higher
 confidence. When they diverge, Apolysis treats OS/runtime evidence as the
 starting point for investigation and future enforcement.
 
-M3 implements the Docker adapter foundation for the third layer using Rust-only
-audit-mode components. It records local sessions, process-tree attribution,
-Docker runtime metadata, timeout notifications, and JSONL timelines. Kernel
-eBPF collection and BPF-LSM enforcement are planned but not enabled yet.
+M4 implements the audit-only observer foundation for the third layer. It records
+local sessions, process-tree attribution, Docker runtime metadata, fixture
+ring-buffer events, raw kernel-event records, canonical side-effect events, and
+JSONL timelines. The repository now includes the eBPF observer ABI and attach
+point skeleton; BPF-LSM enforcement is planned but not enabled yet.
 
 ## 🚀 Runtime Scenarios
 
@@ -70,12 +71,14 @@ eBPF collection and BPF-LSM enforcement are planned but not enabled yet.
 
 ## 🛠️ Build And Run
 
-Requirements for M3:
+Requirements for M4:
 
 - 🦀 Rust stable toolchain
 - 📦 Cargo
 - 🐧 Linux development shell for process-tree attribution through `/proc`
 - 🐳 Docker CLI/daemon for real Docker runs; tests use a local Docker stub
+- 🧬 eBPF development uses `clang`, `llvm-strip`, `bpftool`, BTF, and elevated
+  capabilities; normal tests use fixture ring-buffer records and do not need root
 
 🔨 Build:
 
@@ -148,15 +151,37 @@ The Docker adapter injects `APOLYSIS_SESSION_ID`, writes Apolysis labels, uses
 `--pids-limit`, `--cpus`, and `--memory`, and emits container image, selected
 OCI runtime, mounts, network mode, container id, and cgroup mapping metadata.
 
+🔎 Run the M4 audit-only observer pipeline with fixture ring-buffer records:
+
+```bash
+cargo run -p apolysis-cli -- observe \
+  --backend fixture \
+  --input tests/fixtures/raw-kernel-events.txt \
+  --session session-m4-demo \
+  --policy policies/local-dev.yaml \
+  --output .apolysis/observer-timeline.jsonl
+```
+
+The observer writes both `raw_kernel_event` records and analyzed canonical
+events. The M4 event set covers `exec`, `open/openat/openat2`, `creat`,
+`truncate`, `unlink`, `rename`, network `connect`, and credential path reads.
+The default runner plan enables process/system runners and keeps stdio plus
+SSL/HTTP uprobes disabled until later milestones.
+
 ## 📁 Repository Layout
 
 ```text
 crates/
   apolysis-core/    Shared schema and JSONL records.
+  apolysis-observer/ Audit-only raw kernel event observer pipeline.
   apolysis-policy/  M1 policy parser and audit-only decisions.
   apolysis-runtime/ Local runner and Docker runtime adapter.
   apolysis-store/   Append-only JSONL timeline writer.
   apolysis-cli/     Local `apolysis run` command wrapper.
+ebpf/
+  include/          Observer ring-buffer ABI shared with userspace.
+  observer/         GPL-2.0-only eBPF observer source skeleton.
+  prebuilt/         Future CO-RE object location.
 policies/
   local-dev.yaml    Default audit policy.
   docker-baseline.yaml Docker adapter baseline policy.
@@ -170,7 +195,7 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 | M1 | Rust workspace, core schema, policy parser, JSONL store, local CLI wrapper, README | ✅ **Completed in this iteration** |
 | M2 | Local process session model, process-tree attribution, timeout notify, richer fixtures | ✅ **Completed in this iteration** |
 | M3 | Docker adapter with safe defaults, optional OCI runtime, and container metadata | ✅ **Completed in this iteration** |
-| M4 | eBPF audit-only observer for exec/file/network events | 🟡 Planned |
+| M4 | Audit-only observer pipeline, raw kernel event schema, eBPF ring-buffer ABI, exec/file/network canonicalization | ✅ **Completed in this iteration** |
 | M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | 🟡 Planned |
 | M6 | Kubernetes / Agent Sandbox metadata integration | 🟡 Planned |
 | M7 | gVisor/Kata/Firecracker visibility validation | 🟡 Planned |

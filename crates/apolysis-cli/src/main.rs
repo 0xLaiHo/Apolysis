@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use apolysis_observer::{observe_fixture, FixtureObserveRequest};
 use apolysis_runtime::{run_docker, run_local, DockerRunRequest, LocalRunRequest};
 
 fn main() {
@@ -14,6 +15,14 @@ fn main() {
 }
 
 fn run(args: Vec<String>) -> Result<i32, String> {
+    match args.first().map(String::as_str) {
+        Some("run") => run_command(args),
+        Some("observe") => observe_command(args),
+        _ => Err(usage()),
+    }
+}
+
+fn run_command(args: Vec<String>) -> Result<i32, String> {
     let request = RunRequest::parse(args)?;
     match request.runtime {
         RuntimeSelection::Local => {
@@ -35,6 +44,21 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 .with_oci_runtime(oci_runtime),
             )?;
             Ok(result.exit_code)
+        }
+    }
+}
+
+fn observe_command(args: Vec<String>) -> Result<i32, String> {
+    let request = ObserveRequest::parse(args)?;
+    match request.backend {
+        ObserverBackendSelection::Fixture => {
+            observe_fixture(FixtureObserveRequest::new(
+                request.input_path,
+                request.output_path,
+                request.policy_path,
+                request.session_id,
+            ))?;
+            Ok(0)
         }
     }
 }
@@ -140,6 +164,78 @@ impl RunRequest {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct ObserveRequest {
+    backend: ObserverBackendSelection,
+    input_path: String,
+    output_path: String,
+    policy_path: String,
+    session_id: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ObserverBackendSelection {
+    Fixture,
+}
+
+impl ObserveRequest {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        if args.first().map(String::as_str) != Some("observe") {
+            return Err(usage());
+        }
+
+        let mut backend = None;
+        let mut input_path = None;
+        let mut output_path = None;
+        let mut policy_path = None;
+        let mut session_id = None;
+        let mut i = 1;
+
+        while i < args.len() {
+            match args[i].as_str() {
+                "--backend" => {
+                    i += 1;
+                    backend = args.get(i).cloned();
+                }
+                "--input" => {
+                    i += 1;
+                    input_path = args.get(i).cloned();
+                }
+                "--output" => {
+                    i += 1;
+                    output_path = args.get(i).cloned();
+                }
+                "--policy" => {
+                    i += 1;
+                    policy_path = args.get(i).cloned();
+                }
+                "--session" => {
+                    i += 1;
+                    session_id = args.get(i).cloned();
+                }
+                unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
+            }
+            i += 1;
+        }
+
+        let backend = match backend
+            .ok_or_else(|| format!("missing --backend\n{}", usage()))?
+            .as_str()
+        {
+            "fixture" => ObserverBackendSelection::Fixture,
+            unknown => return Err(format!("unknown observer backend '{unknown}'\n{}", usage())),
+        };
+
+        Ok(Self {
+            backend,
+            input_path: input_path.ok_or_else(|| format!("missing --input\n{}", usage()))?,
+            output_path: output_path.ok_or_else(|| format!("missing --output\n{}", usage()))?,
+            policy_path: policy_path.ok_or_else(|| format!("missing --policy\n{}", usage()))?,
+            session_id: session_id.ok_or_else(|| format!("missing --session\n{}", usage()))?,
+        })
+    }
+}
+
 fn usage() -> String {
-    "usage: apolysis run [--runtime local|docker] [--image <image>] [--docker-runtime <oci-runtime>] --policy <path> [--output <path>] -- <command> [args...]".to_string()
+    "usage: apolysis run [--runtime local|docker] [--image <image>] [--docker-runtime <oci-runtime>] --policy <path> [--output <path>] -- <command> [args...]\n       apolysis observe --backend fixture --input <path> --session <id> --policy <path> --output <path>".to_string()
 }

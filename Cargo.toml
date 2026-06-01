@@ -3,6 +3,7 @@ members = [
     "crates/apolysis-core",
     "crates/apolysis-policy",
     "crates/apolysis-store",
+    "crates/apolysis-observer",
     "crates/apolysis-runtime",
     "crates/apolysis-cli",
 ]

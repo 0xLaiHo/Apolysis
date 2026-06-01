@@ -2,7 +2,7 @@
 
 use apolysis_core::{
     CanonicalEvent, EnforcementBackend, EventSource, EventType, PolicyDecision, PolicyViolation,
-    RuntimeKind, SandboxSession,
+    RawKernelEvent, RuntimeKind, SandboxSession,
 };
 
 #[test]
@@ -36,6 +36,8 @@ fn canonical_event_json_line_escapes_strings_and_records_actor_resource_action()
     assert!(line.contains(r#""pid":42"#));
     assert!(line.contains(r#""resource":"process""#));
     assert!(line.contains(r#"bash -c \"echo hi\""#));
+    assert!(line.contains(r#""container_id":null"#));
+    assert!(line.contains(r#""cgroup_id":null"#));
 }
 
 #[test]
@@ -56,6 +58,55 @@ fn runtime_metadata_event_records_process_tree_source() {
     assert!(line.contains(r#""event_source":"process_tree""#));
     assert!(line.contains(r#""event_type":"runtime_metadata""#));
     assert!(line.contains(r#""action":"mode:process_tree""#));
+}
+
+#[test]
+fn canonical_event_json_line_records_runtime_identity_when_present() {
+    let event = CanonicalEvent::new(
+        "session-1",
+        EventSource::KernelTracepoint,
+        EventType::NetworkConnect,
+        42,
+        1,
+        "python3",
+        "1.1.1.1:443",
+        "connect",
+    )
+    .with_runtime_identity(Some("container-a".to_string()), Some("42".to_string()));
+
+    let line = event.to_json_line();
+
+    assert!(line.contains(r#""container_id":"container-a""#));
+    assert!(line.contains(r#""cgroup_id":"42""#));
+}
+
+#[test]
+fn raw_kernel_event_json_line_keeps_raw_payload_and_runtime_identity() {
+    let raw = RawKernelEvent::new(
+        123,
+        "session-1",
+        EventSource::KernelTracepoint,
+        "openat2",
+        42,
+        1,
+        1000,
+        1000,
+        "bash",
+        "/workspace/.env",
+        "read",
+        Some("container-a".to_string()),
+        Some("42".to_string()),
+        "flags=O_RDONLY",
+    );
+
+    let line = raw.to_json_line();
+
+    assert!(line.contains(r#""record_type":"raw_kernel_event""#));
+    assert!(line.contains(r#""event_name":"openat2""#));
+    assert!(line.contains(r#""uid":1000"#));
+    assert!(line.contains(r#""raw_payload":"flags=O_RDONLY""#));
+    assert!(line.contains(r#""container_id":"container-a""#));
+    assert!(line.contains(r#""cgroup_id":"42""#));
 }
 
 #[test]

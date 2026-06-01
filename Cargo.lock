@@ -6,12 +6,22 @@ version = 4
 name = "apolysis-cli"
 version = "0.1.0"
 dependencies = [
+ "apolysis-observer",
  "apolysis-runtime",
 ]
 
 [[package]]
 name = "apolysis-core"
 version = "0.1.0"
+
+[[package]]
+name = "apolysis-observer"
+version = "0.1.0"
+dependencies = [
+ "apolysis-core",
+ "apolysis-policy",
+ "apolysis-store",
+]
 
 [[package]]
 name = "apolysis-policy"
