@@ -1,9 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_core::{
-    CanonicalEvent, EnforcementBackend, EventSource, EventType, PolicyDecision, PolicyViolation,
-    RawKernelEvent, RuntimeKind, SandboxSession,
+    actions, actors, env, feedback, records, resources, runtimes, CanonicalEvent,
+    EnforcementBackend, EventSource, EventType, PolicyDecision, PolicyViolation, RawKernelEvent,
+    RuntimeKind, SandboxSession,
 };
+
+#[test]
+fn shared_schema_vocabulary_keeps_public_strings_stable() {
+    assert_eq!(records::SESSION, "session");
+    assert_eq!(records::EVENT, "event");
+    assert_eq!(records::RAW_KERNEL_EVENT, "raw_kernel_event");
+    assert_eq!(records::POLICY_VIOLATION, "policy_violation");
+    assert_eq!(actors::APOLYSIS, "apolysis");
+    assert_eq!(actors::DOCKER, "docker");
+    assert_eq!(runtimes::FIRECRACKER, "firecracker");
+    assert_eq!(resources::PROCESS, "process");
+    assert_eq!(actions::START, "start");
+    assert_eq!(actions::EXEC, "exec");
+    assert_eq!(env::SESSION_ID, "APOLYSIS_SESSION_ID");
+    assert_eq!(feedback::VIOLATION_TAG, "APOLYSIS_VIOLATION");
+}
 
 #[test]
 fn session_json_line_contains_stable_identity_fields() {

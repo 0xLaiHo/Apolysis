@@ -8,11 +8,13 @@
 //! metadata, and agent-facing feedback while keeping real blocking disabled
 //! until BPF-LSM support is proven at runtime.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use apolysis_core::{CanonicalEvent, EventSource, EventType, PolicyViolation, RawKernelEvent};
+use apolysis_core::{
+    actors, fields::PipeFields, resources, CanonicalEvent, EventSource, EventType, PolicyViolation,
+    RawKernelEvent,
+};
 use apolysis_feedback::FeedbackWriter;
 use apolysis_kubernetes::KubernetesMetadata;
 use apolysis_policy::{DecisionDowngrade, Policy, PolicyRuntimeCapabilities};
@@ -29,6 +31,7 @@ pub struct FixtureObserveRequest {
 }
 
 impl FixtureObserveRequest {
+    /// Create a fixture observer request with optional integrations disabled.
     pub fn new(
         input_path: impl Into<PathBuf>,
         output_path: impl Into<PathBuf>,
@@ -45,11 +48,13 @@ impl FixtureObserveRequest {
         }
     }
 
+    /// Attach an optional feedback directory for agent-facing violation files.
     pub fn with_feedback_dir(mut self, feedback_dir: Option<impl Into<PathBuf>>) -> Self {
         self.feedback_dir = feedback_dir.map(Into::into);
         self
     }
 
+    /// Attach optional Kubernetes metadata that should be mirrored into the timeline.
     pub fn with_kubernetes_metadata_path(mut self, path: Option<impl Into<PathBuf>>) -> Self {
         self.kubernetes_metadata_path = path.map(Into::into);
         self
@@ -71,6 +76,7 @@ pub enum ObserverBackend {
 }
 
 impl ObserverBackend {
+    /// Return the stable backend string emitted to timeline metadata.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::FixtureRingBuffer => "fixture_ring_buffer",
@@ -85,6 +91,7 @@ pub enum ObserverMode {
 }
 
 impl ObserverMode {
+    /// Return the stable observer mode string emitted to timeline metadata.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::AuditOnly => "audit-only",
@@ -101,6 +108,7 @@ pub struct ObserverRunnerPlan {
 }
 
 impl ObserverRunnerPlan {
+    /// Return the M4 default host observer runner plan.
     pub fn m4_default() -> Self {
         Self {
             process: true,
@@ -110,6 +118,7 @@ impl ObserverRunnerPlan {
         }
     }
 
+    /// Summarize enabled and disabled runners for timeline metadata.
     pub fn summary(&self) -> String {
         format!(
             "process:{},system:{},stdio:{},ssl-http-uprobe:{}",
@@ -129,6 +138,7 @@ pub struct AyaLoaderPlan {
 }
 
 impl AyaLoaderPlan {
+    /// Return the initial Aya loader plan and tracepoint attachment set.
     pub fn m4_default(object_path: impl Into<PathBuf>) -> Self {
         Self {
             object_path: object_path.into(),
@@ -155,6 +165,7 @@ pub struct TracepointAttach {
 }
 
 impl TracepointAttach {
+    /// Create one tracepoint attachment descriptor.
     pub fn new(category: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             category: category.into(),
@@ -163,6 +174,7 @@ impl TracepointAttach {
     }
 }
 
+/// Replay a raw observer fixture into raw, canonical, and policy timeline records.
 pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, String> {
     let policy = load_policy(&request.policy_path)?;
     let mut store = JsonlStore::create(&request.output_path)
@@ -255,14 +267,14 @@ fn write_observer_metadata(
 ) -> Result<(), String> {
     for (resource, action) in [
         (
-            "observer-mode",
+            resources::OBSERVER_MODE,
             ObserverMode::AuditOnly.as_str().to_string(),
         ),
         (
-            "observer-backend",
+            resources::OBSERVER_BACKEND,
             ObserverBackend::FixtureRingBuffer.as_str().to_string(),
         ),
-        ("observer-runners", runner_plan.summary()),
+        (resources::OBSERVER_RUNNERS, runner_plan.summary()),
     ] {
         let event = CanonicalEvent::new(
             session_id,
@@ -270,7 +282,7 @@ fn write_observer_metadata(
             EventType::RuntimeMetadata,
             std::process::id(),
             0,
-            "observer",
+            actors::OBSERVER,
             resource,
             action,
         );
@@ -286,8 +298,8 @@ fn write_observer_metadata(
             EventType::RuntimeMetadata,
             std::process::id(),
             0,
-            "policy",
-            "bpf-lsm",
+            actors::POLICY,
+            resources::BPF_LSM,
             format!(
                 "unavailable:downgrade:{}->{}",
                 downgrade.from.as_str(),
@@ -375,19 +387,20 @@ fn canonicalize(raw: &RawKernelEvent, policy: &Policy) -> CanonicalEvent {
 }
 
 fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEvent, String> {
-    let fields = parse_key_values(line)?;
-    let timestamp = parse_u128(&fields, "timestamp")?;
-    let pid = parse_u32(&fields, "pid")?;
-    let ppid = parse_u32(&fields, "ppid")?;
-    let uid = parse_u32(&fields, "uid")?;
-    let gid = parse_u32(&fields, "gid")?;
-    let comm = required(&fields, "comm")?;
-    let event_name = required(&fields, "event")?;
-    let resource = required(&fields, "resource")?;
-    let action = required(&fields, "action")?;
-    let container_id = fields.get("container_id").cloned();
-    let cgroup_id = fields.get("cgroup_id").cloned();
-    let raw_payload = fields.get("payload").cloned().unwrap_or_default();
+    let fields =
+        PipeFields::parse(line).map_err(|error| error.replace("pipe field", "raw event field"))?;
+    let timestamp = parse_raw_u128(&fields, "timestamp")?;
+    let pid = parse_raw_u32(&fields, "pid")?;
+    let ppid = parse_raw_u32(&fields, "ppid")?;
+    let uid = parse_raw_u32(&fields, "uid")?;
+    let gid = parse_raw_u32(&fields, "gid")?;
+    let comm = required_raw(&fields, "comm")?;
+    let event_name = required_raw(&fields, "event")?;
+    let resource = required_raw(&fields, "resource")?;
+    let action = required_raw(&fields, "action")?;
+    let container_id = fields.optional("container_id").map(ToString::to_string);
+    let cgroup_id = fields.optional("cgroup_id").map(ToString::to_string);
+    let raw_payload = fields.optional("payload").unwrap_or_default();
 
     Ok(RawKernelEvent::new(
         timestamp,
@@ -407,33 +420,20 @@ fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEven
     ))
 }
 
-fn parse_key_values(line: &str) -> Result<BTreeMap<String, String>, String> {
-    let mut fields = BTreeMap::new();
-    for part in line.split('|') {
-        let Some((key, value)) = part.split_once('=') else {
-            return Err(format!("invalid raw event field: {part}"));
-        };
-        fields.insert(key.trim().to_string(), value.trim().to_string());
-    }
-    Ok(fields)
-}
-
-fn required(fields: &BTreeMap<String, String>, key: &str) -> Result<String, String> {
+fn required_raw<'a>(fields: &'a PipeFields, key: &str) -> Result<&'a str, String> {
     fields
-        .get(key)
-        .filter(|value| !value.is_empty())
-        .cloned()
-        .ok_or_else(|| format!("missing raw event field: {key}"))
+        .required(key)
+        .map_err(|_| format!("missing raw event field: {key}"))
 }
 
-fn parse_u32(fields: &BTreeMap<String, String>, key: &str) -> Result<u32, String> {
-    required(fields, key)?
+fn parse_raw_u32(fields: &PipeFields, key: &str) -> Result<u32, String> {
+    required_raw(fields, key)?
         .parse()
         .map_err(|error| format!("invalid {key}: {error}"))
 }
 
-fn parse_u128(fields: &BTreeMap<String, String>, key: &str) -> Result<u128, String> {
-    required(fields, key)?
+fn parse_raw_u128(fields: &PipeFields, key: &str) -> Result<u128, String> {
+    required_raw(fields, key)?
         .parse()
         .map_err(|error| format!("invalid {key}: {error}"))
 }

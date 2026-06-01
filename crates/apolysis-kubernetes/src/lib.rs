@@ -7,7 +7,11 @@
 //! deterministic while defining the timeline records that a future in-cluster
 //! adapter or Agent Sandbox integration must emit.
 
-use apolysis_core::{CanonicalEvent, EventSource, EventType};
+use apolysis_core::{
+    actions, actors, resources,
+    scalars::{clean_scalar, parse_bool},
+    CanonicalEvent, EventSource, EventType,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KubernetesMetadata {
@@ -22,6 +26,7 @@ pub struct KubernetesMetadata {
 }
 
 impl KubernetesMetadata {
+    /// Parse a Kubernetes pod manifest or captured pod snapshot.
     pub fn parse(input: &str) -> Result<Self, String> {
         let mut parser = MetadataParser::default();
 
@@ -45,6 +50,7 @@ impl KubernetesMetadata {
         })
     }
 
+    /// Classify the runtime isolation profile implied by `runtimeClassName`.
     pub fn runtime_isolation_profile(&self) -> RuntimeIsolationProfile {
         self.runtime_class_name
             .as_deref()
@@ -52,65 +58,70 @@ impl KubernetesMetadata {
             .unwrap_or(RuntimeIsolationProfile::DefaultContainer)
     }
 
+    /// Convert Kubernetes metadata into canonical runtime metadata events.
     pub fn to_timeline_events(&self, session_id: &str) -> Vec<CanonicalEvent> {
         let mut records = vec![
             metadata_event(
                 session_id,
-                "kubernetes-pod",
-                format!("name:{}", self.pod_name),
+                resources::KUBERNETES_POD,
+                format!("{}{}", actions::NAME_PREFIX, self.pod_name),
             ),
             metadata_event(
                 session_id,
-                "kubernetes-namespace",
-                format!("namespace:{}", self.namespace),
+                resources::KUBERNETES_NAMESPACE,
+                format!("{}{}", actions::NAMESPACE_PREFIX, self.namespace),
             ),
             metadata_event(
                 session_id,
-                "kubernetes-runtime-profile",
-                format!("isolation:{}", self.runtime_isolation_profile().as_str()),
+                resources::KUBERNETES_RUNTIME_PROFILE,
+                format!(
+                    "{}{}",
+                    actions::ISOLATION_PREFIX,
+                    self.runtime_isolation_profile().as_str()
+                ),
             ),
         ];
 
         if let Some(value) = &self.pod_uid {
             records.push(metadata_event(
                 session_id,
-                "kubernetes-pod-uid",
-                format!("uid:{value}"),
+                resources::KUBERNETES_POD_UID,
+                format!("{}{value}", actions::UID_PREFIX),
             ));
         }
         if let Some(value) = &self.service_account {
             records.push(metadata_event(
                 session_id,
-                "kubernetes-service-account",
-                format!("serviceAccount:{value}"),
+                resources::KUBERNETES_SERVICE_ACCOUNT,
+                format!("{}{value}", actions::SERVICE_ACCOUNT_PREFIX),
             ));
         }
         if let Some(value) = &self.runtime_class_name {
             records.push(metadata_event(
                 session_id,
-                "kubernetes-runtime-class",
-                format!("runtimeClass:{value}"),
+                resources::KUBERNETES_RUNTIME_CLASS,
+                format!("{}{value}", actions::RUNTIME_CLASS_PREFIX),
             ));
         }
         if let Some(value) = &self.node_name {
             records.push(metadata_event(
                 session_id,
-                "kubernetes-node",
-                format!("node:{value}"),
+                resources::KUBERNETES_NODE,
+                format!("{}{value}", actions::NODE_PREFIX),
             ));
         }
         if let Some(value) = &self.sandbox_name {
             records.push(metadata_event(
                 session_id,
-                "agent-sandbox",
-                format!("sandbox:{value}"),
+                resources::AGENT_SANDBOX,
+                format!("{}{value}", actions::SANDBOX_PREFIX),
             ));
         }
         if let Some(value) = self.automount_service_account_token {
             records.push(metadata_event(
                 session_id,
-                "kubernetes-service-account-token",
-                format!("automount:{value}"),
+                resources::KUBERNETES_SERVICE_ACCOUNT_TOKEN,
+                format!("{}{value}", actions::AUTOMOUNT_PREFIX),
             ));
         }
 
@@ -127,6 +138,7 @@ pub enum RuntimeIsolationProfile {
 }
 
 impl RuntimeIsolationProfile {
+    /// Infer an isolation profile from a Kubernetes RuntimeClass value.
     pub fn from_runtime_class(runtime_class: &str) -> Self {
         let normalized = runtime_class.to_ascii_lowercase();
         if normalized.contains("gvisor") || normalized == "runsc" {
@@ -140,6 +152,7 @@ impl RuntimeIsolationProfile {
         }
     }
 
+    /// Return the stable profile string emitted to timelines.
     pub fn as_str(&self) -> &str {
         match self {
             Self::DefaultContainer => "default-container",
@@ -200,7 +213,10 @@ impl MetadataParser {
             ("spec", "", "runtimeClassName") => self.runtime_class_name = Some(value.to_string()),
             ("spec", "", "nodeName") => self.node_name = Some(value.to_string()),
             ("spec", "", "automountServiceAccountToken") => {
-                self.automount_service_account_token = Some(parse_bool(value)?);
+                self.automount_service_account_token = Some(
+                    parse_bool(value, "kubernetes")
+                        .map_err(|_| format!("invalid kubernetes boolean: {value}"))?,
+                );
             }
             _ => {}
         }
@@ -220,20 +236,8 @@ fn metadata_event(
         EventType::RuntimeMetadata,
         std::process::id(),
         0,
-        "kubernetes",
+        actors::KUBERNETES,
         resource,
         action,
     )
-}
-
-fn parse_bool(value: &str) -> Result<bool, String> {
-    match value {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        unknown => Err(format!("invalid kubernetes boolean: {unknown}")),
-    }
-}
-
-fn clean_scalar(value: &str) -> &str {
-    value.trim().trim_matches('"').trim_matches('\'')
 }

@@ -15,14 +15,26 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use apolysis_core::{
-    CanonicalEvent, EnforcementBackend, EventSource, EventType, PolicyDecision as CoreDecision,
-    PolicyViolation, RuntimeKind, SandboxSession,
+    actions, actors, env, resources, CanonicalEvent, EnforcementBackend, EventSource, EventType,
+    PolicyDecision as CoreDecision, PolicyViolation, RuntimeKind, SandboxSession,
 };
 use apolysis_policy::Policy;
 use apolysis_store::JsonlStore;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SIGKILL: i32 = 9;
+const DEFAULT_DOCKER_BIN: &str = "docker";
+const DEFAULT_DOCKER_NETWORK_MODE: &str = "none";
+const DEFAULT_DOCKER_CPUS: &str = "1";
+const DEFAULT_DOCKER_MEMORY: &str = "512m";
+const DEFAULT_DOCKER_TMPFS: &str = "/tmp:rw,noexec,nosuid,nodev,size=64m";
+const DEFAULT_OCI_RUNTIME: &str = "default";
+const DEFAULT_PROCESS_LIMIT: u64 = 256;
+const UNKNOWN_CONTAINER_ID: &str = "unknown";
+const RUNTIME_MAX_SECONDS_RULE: &str = "runtime.max_seconds";
+const LABEL_SESSION_ID: &str = "apolysis.session_id";
+const LABEL_RUNTIME: &str = "apolysis.runtime";
+const LABEL_POLICY_PATH: &str = "apolysis.policy_path";
 
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
@@ -45,6 +57,7 @@ pub struct DockerRunRequest {
 }
 
 impl DockerRunRequest {
+    /// Create a Docker runtime request without an explicit OCI runtime override.
     pub fn new(
         policy_path: impl Into<PathBuf>,
         output_path: impl Into<PathBuf>,
@@ -60,6 +73,7 @@ impl DockerRunRequest {
         }
     }
 
+    /// Attach an optional Docker OCI runtime such as `runsc`.
     pub fn with_oci_runtime(mut self, oci_runtime: Option<String>) -> Self {
         self.oci_runtime = oci_runtime;
         self
@@ -67,6 +81,7 @@ impl DockerRunRequest {
 }
 
 impl LocalRunRequest {
+    /// Create a local process-tree runtime request.
     pub fn new(
         policy_path: impl Into<PathBuf>,
         output_path: impl Into<PathBuf>,
@@ -96,6 +111,7 @@ pub enum AttributionMode {
 }
 
 impl AttributionMode {
+    /// Return the stable attribution mode string emitted to metadata.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ProcessTree => "process_tree",
@@ -104,6 +120,7 @@ impl AttributionMode {
     }
 }
 
+/// Run a command locally and attribute child processes through `/proc`.
 pub fn run_local(request: LocalRunRequest) -> Result<LocalRunResult, String> {
     if request.command.is_empty() {
         return Err("local run requires a command".to_string());
@@ -131,9 +148,9 @@ pub fn run_local(request: LocalRunRequest) -> Result<LocalRunResult, String> {
             EventType::SessionStarted,
             std::process::id(),
             0,
-            "apolysis",
-            "local-session",
-            "start",
+            actors::APOLYSIS,
+            resources::LOCAL_SESSION,
+            actions::START,
         ),
     )?;
     append_event(
@@ -144,15 +161,15 @@ pub fn run_local(request: LocalRunRequest) -> Result<LocalRunResult, String> {
             EventType::RuntimeMetadata,
             std::process::id(),
             0,
-            "process_tree",
-            "local-attribution",
-            "mode:process_tree",
+            actors::PROCESS_TREE,
+            resources::LOCAL_ATTRIBUTION,
+            format!("{}{}", actions::MODE_PREFIX, actors::PROCESS_TREE),
         ),
     )?;
 
     let mut child = Command::new(&request.command[0])
         .args(&request.command[1..])
-        .env("APOLYSIS_SESSION_ID", &session.id)
+        .env(env::SESSION_ID, &session.id)
         .spawn()
         .map_err(|error| format!("failed to start command: {error}"))?;
 
@@ -168,8 +185,8 @@ pub fn run_local(request: LocalRunRequest) -> Result<LocalRunResult, String> {
             root_pid,
             std::process::id(),
             &root_actor,
-            "process",
-            "exec",
+            resources::PROCESS,
+            actions::EXEC,
         ),
     )?;
 
@@ -215,8 +232,8 @@ pub fn run_local(request: LocalRunRequest) -> Result<LocalRunResult, String> {
                     root_pid,
                     std::process::id(),
                     &root_actor,
-                    "process",
-                    "killed:runtime.max_seconds",
+                    resources::PROCESS,
+                    format!("{}{}", actions::KILLED_PREFIX, RUNTIME_MAX_SECONDS_RULE),
                 ),
             )?;
             store
@@ -235,6 +252,7 @@ pub fn run_local(request: LocalRunRequest) -> Result<LocalRunResult, String> {
     }
 }
 
+/// Run a command through Docker using restrictive defaults and metadata labels.
 pub fn run_docker(request: DockerRunRequest) -> Result<LocalRunResult, String> {
     if request.command.is_empty() {
         return Err("docker run requires a command".to_string());
@@ -262,9 +280,9 @@ pub fn run_docker(request: DockerRunRequest) -> Result<LocalRunResult, String> {
             EventType::SessionStarted,
             std::process::id(),
             0,
-            "apolysis",
-            "docker-session",
-            "start",
+            actors::APOLYSIS,
+            resources::DOCKER_SESSION,
+            actions::START,
         ),
     )?;
 
@@ -282,7 +300,7 @@ pub fn run_docker(request: DockerRunRequest) -> Result<LocalRunResult, String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| UNKNOWN_CONTAINER_ID.to_string());
     append_event(
         &mut store,
         CanonicalEvent::new(
@@ -291,8 +309,8 @@ pub fn run_docker(request: DockerRunRequest) -> Result<LocalRunResult, String> {
             EventType::RuntimeMetadata,
             std::process::id(),
             0,
-            "docker",
-            "container-id",
+            actors::DOCKER,
+            resources::CONTAINER_ID,
             &container_id,
         ),
     )?;
@@ -304,9 +322,9 @@ pub fn run_docker(request: DockerRunRequest) -> Result<LocalRunResult, String> {
             EventType::RuntimeMetadata,
             std::process::id(),
             0,
-            "docker",
-            "cgroup-path",
-            format!("docker://{container_id}"),
+            actors::DOCKER,
+            resources::CGROUP_PATH,
+            format!("{}://{container_id}", actors::DOCKER),
         ),
     )?;
 
@@ -320,8 +338,8 @@ pub fn run_docker(request: DockerRunRequest) -> Result<LocalRunResult, String> {
             std::process::id(),
             0,
             format!("docker run {} {}", request.image, request.command.join(" ")),
-            "container",
-            format!("exit:{exit_code}"),
+            resources::CONTAINER,
+            format!("{}{exit_code}", actions::EXIT_PREFIX),
         ),
     )?;
     store
@@ -350,9 +368,9 @@ fn write_docker_plan_metadata(
             EventType::RuntimeMetadata,
             std::process::id(),
             0,
-            "docker",
-            "container-image",
-            format!("image:{}", plan.image),
+            actors::DOCKER,
+            resources::CONTAINER_IMAGE,
+            format!("{}{}", actions::IMAGE_PREFIX, plan.image),
         ),
     )?;
     append_event(
@@ -363,9 +381,9 @@ fn write_docker_plan_metadata(
             EventType::RuntimeMetadata,
             std::process::id(),
             0,
-            "docker",
-            "network-mode",
-            format!("network:{}", plan.network_mode),
+            actors::DOCKER,
+            resources::NETWORK_MODE,
+            format!("{}{}", actions::NETWORK_PREFIX, plan.network_mode),
         ),
     )?;
     append_event(
@@ -376,11 +394,12 @@ fn write_docker_plan_metadata(
             EventType::RuntimeMetadata,
             std::process::id(),
             0,
-            "docker",
-            "docker-runtime",
+            actors::DOCKER,
+            resources::DOCKER_RUNTIME,
             format!(
-                "oci-runtime:{}",
-                plan.oci_runtime.as_deref().unwrap_or("default")
+                "{}{}",
+                actions::OCI_RUNTIME_PREFIX,
+                plan.oci_runtime.as_deref().unwrap_or(DEFAULT_OCI_RUNTIME)
             ),
         ),
     )?;
@@ -392,8 +411,8 @@ fn write_docker_plan_metadata(
             EventType::RuntimeMetadata,
             std::process::id(),
             0,
-            "docker",
-            "mounts",
+            actors::DOCKER,
+            resources::MOUNTS,
             plan.mounts
                 .iter()
                 .map(DockerMount::summary)
@@ -409,10 +428,12 @@ fn write_docker_plan_metadata(
             EventType::RuntimeMetadata,
             std::process::id(),
             0,
-            "docker",
-            "container-labels",
+            actors::DOCKER,
+            resources::CONTAINER_LABELS,
             format!(
-                "apolysis.session_id={session_id},apolysis.runtime=docker,apolysis.policy_path={}",
+                "{LABEL_SESSION_ID}={session_id},{LABEL_RUNTIME}={},{}={}",
+                actors::DOCKER,
+                LABEL_POLICY_PATH,
                 plan.policy_path
             ),
         ),
@@ -420,7 +441,7 @@ fn write_docker_plan_metadata(
 }
 
 fn docker_bin() -> String {
-    std::env::var("APOLYSIS_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string())
+    std::env::var(env::DOCKER_BIN).unwrap_or_else(|_| DEFAULT_DOCKER_BIN.to_string())
 }
 
 struct DockerRunPlan {
@@ -441,8 +462,12 @@ impl DockerRunPlan {
         cidfile: PathBuf,
     ) -> Result<Self, String> {
         let mounts = docker_mounts(policy)?;
-        let network_mode = "none".to_string();
-        let pids_limit = policy.runtime.max_processes.unwrap_or(256).to_string();
+        let network_mode = DEFAULT_DOCKER_NETWORK_MODE.to_string();
+        let pids_limit = policy
+            .runtime
+            .max_processes
+            .unwrap_or(DEFAULT_PROCESS_LIMIT)
+            .to_string();
         let policy_path = request.policy_path.to_string_lossy().to_string();
         let container_name = format!("apolysis-{session_id}");
         let mut args = vec![
@@ -453,15 +478,15 @@ impl DockerRunPlan {
             "--name".to_string(),
             container_name,
             "--label".to_string(),
-            format!("apolysis.session_id={session_id}"),
+            format!("{LABEL_SESSION_ID}={session_id}"),
             "--label".to_string(),
-            "apolysis.runtime=docker".to_string(),
+            format!("{LABEL_RUNTIME}={}", actors::DOCKER),
             "--label".to_string(),
-            format!("apolysis.policy_path={policy_path}"),
+            format!("{LABEL_POLICY_PATH}={policy_path}"),
             "--env".to_string(),
-            format!("APOLYSIS_SESSION_ID={session_id}"),
+            format!("{}={session_id}", env::SESSION_ID),
             "--env".to_string(),
-            "APOLYSIS_RUNTIME=docker".to_string(),
+            format!("{}={}", env::RUNTIME, actors::DOCKER),
             "--read-only".to_string(),
             "--network".to_string(),
             network_mode.clone(),
@@ -472,11 +497,11 @@ impl DockerRunPlan {
             "--pids-limit".to_string(),
             pids_limit,
             "--cpus".to_string(),
-            "1".to_string(),
+            DEFAULT_DOCKER_CPUS.to_string(),
             "--memory".to_string(),
-            "512m".to_string(),
+            DEFAULT_DOCKER_MEMORY.to_string(),
             "--tmpfs".to_string(),
-            "/tmp:rw,noexec,nosuid,nodev,size=64m".to_string(),
+            DEFAULT_DOCKER_TMPFS.to_string(),
         ];
 
         if let Some(oci_runtime) = &request.oci_runtime {
@@ -604,7 +629,7 @@ fn append_timeout_violation(
 ) -> Result<(), String> {
     let violation = PolicyViolation::new(
         session_id,
-        "runtime.max_seconds",
+        RUNTIME_MAX_SECONDS_RULE,
         CoreDecision::Notify,
         "local process exceeded runtime.max_seconds",
         root_pid,
@@ -632,8 +657,8 @@ fn append_exit_event(
             root_pid,
             std::process::id(),
             actor,
-            "process",
-            format!("exit:{exit_code}"),
+            resources::PROCESS,
+            format!("{}{exit_code}", actions::EXIT_PREFIX),
         ),
     )
 }
@@ -670,8 +695,8 @@ fn sample_descendants(
                     process.pid,
                     process.ppid,
                     process.actor,
-                    "process",
-                    "exec",
+                    resources::PROCESS,
+                    actions::EXEC,
                 ),
             )?;
         }

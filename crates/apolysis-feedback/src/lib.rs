@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use apolysis_core::{json_string, PolicyViolation};
+use apolysis_core::{feedback, json_string, PolicyViolation};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeedbackWriter {
@@ -17,12 +17,14 @@ pub struct FeedbackWriter {
 }
 
 impl FeedbackWriter {
+    /// Create a writer rooted at an agent-visible feedback directory.
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
         }
     }
 
+    /// Persist the latest violation in both human and machine-readable forms.
     pub fn write_last_violation(&self, violation: &PolicyViolation) -> Result<(), String> {
         fs::create_dir_all(&self.directory)
             .map_err(|error| format!("failed to create feedback directory: {error}"))?;
@@ -30,14 +32,16 @@ impl FeedbackWriter {
             .map_err(|error| format!("failed to write violation feedback: {error}"))
     }
 
+    /// Return the concrete feedback file path used by this writer.
     pub fn path(&self) -> PathBuf {
-        self.directory.join("last-violation.txt")
+        last_violation_path(&self.directory)
     }
 }
 
+/// Render a violation feedback file for agent harness hooks.
 pub fn render_violation_feedback(violation: &PolicyViolation) -> String {
     format!(
-        "Apolysis policy violation\nsession_id: {}\nrule_id: {}\ndecision: {}\ntarget: {}\npid: {}\nbackend: {}\nreason: {}\nAPOLYSIS_VIOLATION {}\n",
+        "Apolysis policy violation\nsession_id: {}\nrule_id: {}\ndecision: {}\ntarget: {}\npid: {}\nbackend: {}\nreason: {}\n{} {}\n",
         violation.session_id,
         violation.rule_id,
         violation.decision.as_str(),
@@ -45,6 +49,7 @@ pub fn render_violation_feedback(violation: &PolicyViolation) -> String {
         violation.pid,
         violation.enforcement_backend.as_str(),
         violation.reason,
+        feedback::VIOLATION_TAG,
         render_machine_tag(violation)
     )
 }
@@ -62,6 +67,7 @@ fn render_machine_tag(violation: &PolicyViolation) -> String {
     )
 }
 
+/// Return the conventional feedback file path for a directory.
 pub fn last_violation_path(directory: impl AsRef<Path>) -> PathBuf {
-    directory.as_ref().join("last-violation.txt")
+    directory.as_ref().join(feedback::LAST_VIOLATION_FILE)
 }

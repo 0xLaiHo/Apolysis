@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use apolysis_core::{json_string, JsonLine};
+use apolysis_core::{fields::PipeFields, json_string, records, JsonLine};
 use apolysis_kubernetes::KubernetesMetadata;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,6 +22,7 @@ pub enum RuntimeVisibilityProfile {
 }
 
 impl RuntimeVisibilityProfile {
+    /// Parse a CLI scenario name into a visibility profile.
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "docker-default" => Ok(Self::DockerDefault),
@@ -33,6 +34,7 @@ impl RuntimeVisibilityProfile {
         }
     }
 
+    /// Return the stable scenario string emitted to assessments.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::DockerDefault => "docker-default",
@@ -52,6 +54,7 @@ pub enum HostVisibilityScope {
 }
 
 impl HostVisibilityScope {
+    /// Return the stable host visibility scope string emitted to assessments.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::GuestProcess => "guest_process",
@@ -70,6 +73,7 @@ pub struct VisibilityInput {
 }
 
 impl VisibilityInput {
+    /// Create a visibility input without Kubernetes metadata.
     pub fn new(
         session_id: impl Into<String>,
         runtime_profile: RuntimeVisibilityProfile,
@@ -83,6 +87,7 @@ impl VisibilityInput {
         }
     }
 
+    /// Attach optional Kubernetes metadata for pod/runtime correlation checks.
     pub fn with_kubernetes_metadata(mut self, metadata: Option<KubernetesMetadata>) -> Self {
         self.kubernetes_metadata = metadata;
         self
@@ -108,7 +113,8 @@ pub struct VisibilityAssessment {
 impl JsonLine for VisibilityAssessment {
     fn to_json_line(&self) -> String {
         format!(
-            "{{\"record_type\":\"visibility_assessment\",\"session_id\":{},\"runtime_profile\":{},\"host_visibility_scope\":{},\"host_semantics_collapsed\":{},\"guest_collector_required\":{},\"runtime_metadata_required\":{},\"host_event_subjects\":{},\"pod_name\":{},\"namespace\":{},\"runtime_class_name\":{},\"sandbox_name\":{},\"notes\":{}}}",
+            "{{\"record_type\":{},\"session_id\":{},\"runtime_profile\":{},\"host_visibility_scope\":{},\"host_semantics_collapsed\":{},\"guest_collector_required\":{},\"runtime_metadata_required\":{},\"host_event_subjects\":{},\"pod_name\":{},\"namespace\":{},\"runtime_class_name\":{},\"sandbox_name\":{},\"notes\":{}}}",
+            json_string(records::VISIBILITY_ASSESSMENT),
             json_string(&self.session_id),
             json_string(self.runtime_profile.as_str()),
             json_string(self.host_visibility_scope.as_str()),
@@ -125,6 +131,7 @@ impl JsonLine for VisibilityAssessment {
     }
 }
 
+/// Assess which agent semantics host-side eBPF can prove for a runtime profile.
 pub fn assess_visibility(input: VisibilityInput) -> Result<VisibilityAssessment, String> {
     let host_event_subjects = collect_host_subjects(&input.host_events)?;
     let metadata = input.kubernetes_metadata.as_ref();
@@ -202,20 +209,15 @@ fn collect_host_subjects(input: &str) -> Result<Vec<String>, String> {
             continue;
         }
 
-        let Some(value) = field_value(line, "comm") else {
-            return Err(format!("host visibility event missing comm field: {line}"));
-        };
+        let fields = PipeFields::parse(line)
+            .map_err(|error| format!("invalid host visibility event: {error}"))?;
+        let value = fields
+            .required("comm")
+            .map_err(|_| format!("host visibility event missing comm field: {line}"))?;
         subjects.insert(value.to_string());
     }
 
     Ok(subjects.into_iter().collect())
-}
-
-fn field_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-    line.split('|').find_map(|part| {
-        let (field, value) = part.split_once('=')?;
-        (field.trim() == key).then(|| value.trim())
-    })
 }
 
 fn json_string_array(values: &[String]) -> String {

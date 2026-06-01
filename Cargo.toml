@@ -18,3 +18,6 @@ license = "Apache-2.0"
 repository = "https://github.com/0xLaiHo/Apolysis"
 homepage = "https://github.com/0xLaiHo/Apolysis"
 readme = "README.md"
+
+[workspace.dependencies]
+tokio = { version = "1", default-features = false }

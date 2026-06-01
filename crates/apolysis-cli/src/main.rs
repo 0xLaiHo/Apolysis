@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod cli;
+
 use apolysis_observer::{observe_fixture, FixtureObserveRequest};
 use apolysis_runtime::{run_docker, run_local, DockerRunRequest, LocalRunRequest};
 use apolysis_visibility::{assess_visibility, RuntimeVisibilityProfile, VisibilityInput};
+use cli::{commands, options, values};
 
-fn main() {
-    let exit_code = match run(std::env::args().skip(1).collect()) {
+#[tokio::main]
+async fn main() {
+    let exit_code = match run(std::env::args().skip(1).collect()).await {
         Ok(exit_code) => exit_code,
         Err(error) => {
             eprintln!("apolysis: {error}");
@@ -15,11 +19,11 @@ fn main() {
     std::process::exit(exit_code);
 }
 
-fn run(args: Vec<String>) -> Result<i32, String> {
+async fn run(args: Vec<String>) -> Result<i32, String> {
     match args.first().map(String::as_str) {
-        Some("run") => run_command(args),
-        Some("observe") => observe_command(args),
-        Some("visibility") => visibility_command(args),
+        Some(commands::RUN) => run_command(args),
+        Some(commands::OBSERVE) => observe_command(args),
+        Some(commands::VISIBILITY) => visibility_command(args).await,
         _ => Err(usage()),
     }
 }
@@ -50,12 +54,14 @@ fn run_command(args: Vec<String>) -> Result<i32, String> {
     }
 }
 
-fn visibility_command(args: Vec<String>) -> Result<i32, String> {
+async fn visibility_command(args: Vec<String>) -> Result<i32, String> {
     let request = VisibilityRequest::parse(args)?;
-    let host_events = std::fs::read_to_string(&request.input_path)
+    let host_events = tokio::fs::read_to_string(&request.input_path)
+        .await
         .map_err(|error| format!("failed to read visibility input: {error}"))?;
     let kubernetes_metadata = if let Some(path) = request.kubernetes_metadata_path {
-        let input = std::fs::read_to_string(&path)
+        let input = tokio::fs::read_to_string(&path)
+            .await
             .map_err(|error| format!("failed to read kubernetes metadata: {error}"))?;
         Some(apolysis_kubernetes::KubernetesMetadata::parse(&input)?)
     } else {
@@ -65,13 +71,16 @@ fn visibility_command(args: Vec<String>) -> Result<i32, String> {
         VisibilityInput::new(request.session_id, request.runtime_profile, host_events)
             .with_kubernetes_metadata(kubernetes_metadata),
     )?;
-    let mut store = apolysis_store::JsonlStore::create(&request.output_path)
+    let mut store = apolysis_store::AsyncJsonlStore::create(&request.output_path)
+        .await
         .map_err(|error| format!("failed to create visibility output: {error}"))?;
     store
         .append(&assessment)
+        .await
         .map_err(|error| format!("failed to write visibility assessment: {error}"))?;
     store
         .flush()
+        .await
         .map_err(|error| format!("failed to flush visibility output: {error}"))?;
     Ok(0)
 }
@@ -114,44 +123,43 @@ enum RuntimeSelection {
 
 impl RunRequest {
     fn parse(args: Vec<String>) -> Result<Self, String> {
-        if args.first().map(String::as_str) != Some("run") {
+        if args.first().map(String::as_str) != Some(commands::RUN) {
             return Err(usage());
         }
 
-        let mut runtime = "local".to_string();
+        let mut runtime = values::LOCAL.to_string();
         let mut image = None;
         let mut docker_runtime = None;
         let mut policy_path = None;
-        let mut output_path = Some(".apolysis/timeline.jsonl".to_string());
+        let mut output_path = Some(cli::DEFAULT_TIMELINE_PATH.to_string());
         let mut command = Vec::new();
         let mut i = 1;
 
         while i < args.len() {
             match args[i].as_str() {
-                "--policy" => {
+                options::POLICY => {
                     i += 1;
                     policy_path = args.get(i).cloned();
                 }
-                "--runtime" => {
+                options::RUNTIME => {
                     i += 1;
-                    runtime = args
-                        .get(i)
-                        .cloned()
-                        .ok_or_else(|| format!("missing --runtime value\n{}", usage()))?;
+                    runtime = args.get(i).cloned().ok_or_else(|| {
+                        format!("missing {} value\n{}", options::RUNTIME, usage())
+                    })?;
                 }
-                "--image" => {
+                options::IMAGE => {
                     i += 1;
                     image = args.get(i).cloned();
                 }
-                "--docker-runtime" => {
+                options::DOCKER_RUNTIME => {
                     i += 1;
                     docker_runtime = args.get(i).cloned();
                 }
-                "--output" => {
+                options::OUTPUT => {
                     i += 1;
                     output_path = args.get(i).cloned();
                 }
-                "--" => {
+                options::COMMAND_SEPARATOR => {
                     command = args[(i + 1)..].to_vec();
                     break;
                 }
@@ -160,28 +168,42 @@ impl RunRequest {
             i += 1;
         }
 
-        let policy_path = policy_path.ok_or_else(|| format!("missing --policy\n{}", usage()))?;
+        let policy_path =
+            policy_path.ok_or_else(|| format!("missing {}\n{}", options::POLICY, usage()))?;
         let output_path =
-            output_path.ok_or_else(|| format!("missing --output value\n{}", usage()))?;
+            output_path.ok_or_else(|| format!("missing {} value\n{}", options::OUTPUT, usage()))?;
         if command.is_empty() {
-            return Err(format!("missing command after --\n{}", usage()));
+            return Err(format!(
+                "missing command after {}\n{}",
+                options::COMMAND_SEPARATOR,
+                usage()
+            ));
         }
 
         let runtime = match runtime.as_str() {
-            "local" => {
+            values::LOCAL => {
                 if image.is_some() {
-                    return Err(format!("--image requires --runtime docker\n{}", usage()));
+                    return Err(format!(
+                        "{} requires {} {}\n{}",
+                        options::IMAGE,
+                        options::RUNTIME,
+                        values::DOCKER,
+                        usage()
+                    ));
                 }
                 if docker_runtime.is_some() {
                     return Err(format!(
-                        "--docker-runtime requires --runtime docker\n{}",
+                        "{} requires {} {}\n{}",
+                        options::DOCKER_RUNTIME,
+                        options::RUNTIME,
+                        values::DOCKER,
                         usage()
                     ));
                 }
                 RuntimeSelection::Local
             }
-            "docker" => RuntimeSelection::Docker {
-                image: image.ok_or_else(|| format!("missing --image\n{}", usage()))?,
+            values::DOCKER => RuntimeSelection::Docker {
+                image: image.ok_or_else(|| format!("missing {}\n{}", options::IMAGE, usage()))?,
                 oci_runtime: docker_runtime,
             },
             unknown => return Err(format!("unknown runtime '{unknown}'\n{}", usage())),
@@ -223,7 +245,7 @@ enum ObserverBackendSelection {
 
 impl ObserveRequest {
     fn parse(args: Vec<String>) -> Result<Self, String> {
-        if args.first().map(String::as_str) != Some("observe") {
+        if args.first().map(String::as_str) != Some(commands::OBSERVE) {
             return Err(usage());
         }
 
@@ -238,31 +260,31 @@ impl ObserveRequest {
 
         while i < args.len() {
             match args[i].as_str() {
-                "--backend" => {
+                options::BACKEND => {
                     i += 1;
                     backend = args.get(i).cloned();
                 }
-                "--input" => {
+                options::INPUT => {
                     i += 1;
                     input_path = args.get(i).cloned();
                 }
-                "--output" => {
+                options::OUTPUT => {
                     i += 1;
                     output_path = args.get(i).cloned();
                 }
-                "--policy" => {
+                options::POLICY => {
                     i += 1;
                     policy_path = args.get(i).cloned();
                 }
-                "--session" => {
+                options::SESSION => {
                     i += 1;
                     session_id = args.get(i).cloned();
                 }
-                "--feedback-dir" => {
+                options::FEEDBACK_DIR => {
                     i += 1;
                     feedback_dir = args.get(i).cloned();
                 }
-                "--kubernetes-metadata" => {
+                options::KUBERNETES_METADATA => {
                     i += 1;
                     kubernetes_metadata_path = args.get(i).cloned();
                 }
@@ -272,19 +294,23 @@ impl ObserveRequest {
         }
 
         let backend = match backend
-            .ok_or_else(|| format!("missing --backend\n{}", usage()))?
+            .ok_or_else(|| format!("missing {}\n{}", options::BACKEND, usage()))?
             .as_str()
         {
-            "fixture" => ObserverBackendSelection::Fixture,
+            values::FIXTURE => ObserverBackendSelection::Fixture,
             unknown => return Err(format!("unknown observer backend '{unknown}'\n{}", usage())),
         };
 
         Ok(Self {
             backend,
-            input_path: input_path.ok_or_else(|| format!("missing --input\n{}", usage()))?,
-            output_path: output_path.ok_or_else(|| format!("missing --output\n{}", usage()))?,
-            policy_path: policy_path.ok_or_else(|| format!("missing --policy\n{}", usage()))?,
-            session_id: session_id.ok_or_else(|| format!("missing --session\n{}", usage()))?,
+            input_path: input_path
+                .ok_or_else(|| format!("missing {}\n{}", options::INPUT, usage()))?,
+            output_path: output_path
+                .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
+            policy_path: policy_path
+                .ok_or_else(|| format!("missing {}\n{}", options::POLICY, usage()))?,
+            session_id: session_id
+                .ok_or_else(|| format!("missing {}\n{}", options::SESSION, usage()))?,
             feedback_dir,
             kubernetes_metadata_path,
         })
@@ -293,7 +319,7 @@ impl ObserveRequest {
 
 impl VisibilityRequest {
     fn parse(args: Vec<String>) -> Result<Self, String> {
-        if args.first().map(String::as_str) != Some("visibility") {
+        if args.first().map(String::as_str) != Some(commands::VISIBILITY) {
             return Err(usage());
         }
 
@@ -306,23 +332,23 @@ impl VisibilityRequest {
 
         while i < args.len() {
             match args[i].as_str() {
-                "--scenario" => {
+                options::SCENARIO => {
                     i += 1;
                     scenario = args.get(i).cloned();
                 }
-                "--input" => {
+                options::INPUT => {
                     i += 1;
                     input_path = args.get(i).cloned();
                 }
-                "--output" => {
+                options::OUTPUT => {
                     i += 1;
                     output_path = args.get(i).cloned();
                 }
-                "--session" => {
+                options::SESSION => {
                     i += 1;
                     session_id = args.get(i).cloned();
                 }
-                "--kubernetes-metadata" => {
+                options::KUBERNETES_METADATA => {
                     i += 1;
                     kubernetes_metadata_path = args.get(i).cloned();
                 }
@@ -332,7 +358,7 @@ impl VisibilityRequest {
         }
 
         let runtime_profile = RuntimeVisibilityProfile::parse(
-            &scenario.ok_or_else(|| format!("missing --scenario\n{}", usage()))?,
+            &scenario.ok_or_else(|| format!("missing {}\n{}", options::SCENARIO, usage()))?,
         )?;
         let session_id = session_id.unwrap_or_else(|| {
             format!(
@@ -344,8 +370,10 @@ impl VisibilityRequest {
 
         Ok(Self {
             runtime_profile,
-            input_path: input_path.ok_or_else(|| format!("missing --input\n{}", usage()))?,
-            output_path: output_path.ok_or_else(|| format!("missing --output\n{}", usage()))?,
+            input_path: input_path
+                .ok_or_else(|| format!("missing {}\n{}", options::INPUT, usage()))?,
+            output_path: output_path
+                .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
             session_id,
             kubernetes_metadata_path,
         })
@@ -353,5 +381,5 @@ impl VisibilityRequest {
 }
 
 fn usage() -> String {
-    "usage: apolysis run [--runtime local|docker] [--image <image>] [--docker-runtime <oci-runtime>] --policy <path> [--output <path>] -- <command> [args...]\n       apolysis observe --backend fixture --input <path> --session <id> --policy <path> --output <path> [--feedback-dir <path>] [--kubernetes-metadata <path>]\n       apolysis visibility --scenario docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype --input <path> --output <path> [--session <id>] [--kubernetes-metadata <path>]".to_string()
+    cli::usage()
 }

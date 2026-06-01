@@ -10,7 +10,8 @@
 use std::fs;
 
 use apolysis_core::{
-    CanonicalEvent, EnforcementBackend, EventType, PolicyDecision as CorePolicyDecision,
+    env, scalars::clean_scalar, CanonicalEvent, EnforcementBackend, EventType,
+    PolicyDecision as CorePolicyDecision,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -75,6 +76,7 @@ pub enum DecisionKind {
 }
 
 impl DecisionKind {
+    /// Return the stable policy decision string used in policy files.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Allow => "allow",
@@ -96,10 +98,12 @@ pub enum PolicyDecision {
 }
 
 impl PolicyDecision {
+    /// Return whether this evaluation allows the event without operator action.
     pub fn is_allow(&self) -> bool {
         matches!(self, Self::Allow)
     }
 
+    /// Convert the policy crate decision into the shared timeline schema enum.
     pub fn core_decision(&self) -> CorePolicyDecision {
         match self {
             Self::Allow => CorePolicyDecision::Allow,
@@ -110,6 +114,7 @@ impl PolicyDecision {
         }
     }
 
+    /// Return the matched rule id when the decision is not `Allow`.
     pub fn rule_id(&self) -> Option<&str> {
         match self {
             Self::Allow => None,
@@ -120,6 +125,7 @@ impl PolicyDecision {
         }
     }
 
+    /// Return the human-readable reason when the decision is not `Allow`.
     pub fn reason(&self) -> Option<&str> {
         match self {
             Self::Allow => None,
@@ -137,8 +143,9 @@ pub struct PolicyRuntimeCapabilities {
 }
 
 impl PolicyRuntimeCapabilities {
+    /// Detect runtime enforcement capabilities from overrides or kernel state.
     pub fn detect() -> Self {
-        if let Ok(value) = std::env::var("APOLYSIS_BPF_LSM_AVAILABLE") {
+        if let Ok(value) = std::env::var(env::BPF_LSM_AVAILABLE) {
             return Self {
                 bpf_lsm_available: matches!(value.as_str(), "1" | "true" | "yes" | "on"),
             };
@@ -167,6 +174,7 @@ pub struct PolicyEvaluation {
 }
 
 impl PolicyEvaluation {
+    /// Build an allow evaluation using the audit-only backend.
     pub fn allow() -> Self {
         Self {
             decision: PolicyDecision::Allow,
@@ -177,6 +185,7 @@ impl PolicyEvaluation {
 }
 
 impl Policy {
+    /// Parse the repository's YAML-like or JSON policy subset.
     pub fn parse(input: &str) -> Result<Self, String> {
         if input.trim_start().starts_with('{') {
             return parse_json_policy(input);
@@ -235,6 +244,7 @@ impl Policy {
         Ok(policy)
     }
 
+    /// Return whether a path matches the credential deny list.
     pub fn denies_credential_path(&self, path: &str) -> bool {
         self.credentials
             .deny_read
@@ -242,6 +252,7 @@ impl Policy {
             .any(|pattern| path_matches(pattern, path))
     }
 
+    /// Evaluate a direct file read against credential rules.
     pub fn evaluate_file_read(&self, path: &str) -> PolicyDecision {
         if self.denies_credential_path(path) {
             return PolicyDecision::Notify {
@@ -253,6 +264,7 @@ impl Policy {
         PolicyDecision::Allow
     }
 
+    /// Report startup downgrade metadata when requested enforcement is unsafe.
     pub fn startup_downgrade(
         &self,
         capabilities: &PolicyRuntimeCapabilities,
@@ -272,6 +284,7 @@ impl Policy {
         None
     }
 
+    /// Evaluate one canonical event and select the effective enforcement backend.
     pub fn evaluate_event(
         &self,
         event: &CanonicalEvent,
@@ -694,8 +707,4 @@ fn endpoint_matches(pattern: &str, endpoint: &str) -> bool {
     };
 
     pattern_host == endpoint_host && pattern_port == "0"
-}
-
-fn clean_scalar(value: &str) -> &str {
-    value.trim().trim_matches('"').trim_matches('\'')
 }

@@ -9,11 +9,18 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod fields;
+pub mod scalars;
+pub mod vocabulary;
+
+pub use vocabulary::{actions, actors, env, feedback, records, resources, runtimes};
+
 /// Anything that can be written as one JSONL record.
 ///
 /// The project will likely move to `serde` once the schema settles.  For now we
 /// keep serialization explicit so every emitted field is deliberate and visible.
 pub trait JsonLine {
+    /// Render one complete JSON object without a trailing newline.
     fn to_json_line(&self) -> String;
 }
 
@@ -26,12 +33,13 @@ pub enum RuntimeKind {
 }
 
 impl RuntimeKind {
+    /// Return the stable schema string for this runtime.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Local => "local",
-            Self::Docker => "docker",
-            Self::Kubernetes => "kubernetes",
-            Self::Firecracker => "firecracker",
+            Self::Local => runtimes::LOCAL,
+            Self::Docker => runtimes::DOCKER,
+            Self::Kubernetes => runtimes::KUBERNETES,
+            Self::Firecracker => runtimes::FIRECRACKER,
         }
     }
 }
@@ -48,6 +56,7 @@ pub enum EventSource {
 }
 
 impl EventSource {
+    /// Return the stable schema string for this event source.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Manual => "manual",
@@ -77,6 +86,7 @@ pub enum EventType {
 }
 
 impl EventType {
+    /// Return the stable schema string for this event type.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::SessionStarted => "session_started",
@@ -104,6 +114,7 @@ pub enum PolicyDecision {
 }
 
 impl PolicyDecision {
+    /// Return the stable schema string for this policy decision.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Allow => "allow",
@@ -124,6 +135,7 @@ pub enum EnforcementBackend {
 }
 
 impl EnforcementBackend {
+    /// Return the stable schema string for this enforcement backend.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::AuditOnly => "audit_only",
@@ -144,6 +156,7 @@ pub struct SandboxSession {
 }
 
 impl SandboxSession {
+    /// Create a session record with the current wall-clock timestamp.
     pub fn new(
         id: impl Into<String>,
         runtime: RuntimeKind,
@@ -158,6 +171,7 @@ impl SandboxSession {
         }
     }
 
+    /// Render this session as a JSONL record.
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
     }
@@ -172,7 +186,8 @@ impl JsonLine for SandboxSession {
             .unwrap_or_else(|| "null".to_string());
 
         format!(
-            "{{\"record_type\":\"session\",\"id\":{},\"runtime\":{},\"root\":{},\"policy_path\":{},\"started_at_unix_ms\":{}}}",
+            "{{\"record_type\":{},\"id\":{},\"runtime\":{},\"root\":{},\"policy_path\":{},\"started_at_unix_ms\":{}}}",
+            json_string(records::SESSION),
             json_string(&self.id),
             json_string(self.runtime.as_str()),
             root,
@@ -198,6 +213,7 @@ pub struct CanonicalEvent {
 }
 
 impl CanonicalEvent {
+    /// Create a normalized event with the current wall-clock timestamp.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: impl Into<String>,
@@ -224,11 +240,13 @@ impl CanonicalEvent {
         }
     }
 
+    /// Override the event timestamp, primarily for replayed kernel fixtures.
     pub fn with_timestamp(mut self, timestamp_unix_ms: u128) -> Self {
         self.timestamp_unix_ms = timestamp_unix_ms;
         self
     }
 
+    /// Attach runtime/container identity after the semantic event is created.
     pub fn with_runtime_identity(
         mut self,
         container_id: Option<String>,
@@ -239,6 +257,7 @@ impl CanonicalEvent {
         self
     }
 
+    /// Render this event as a JSONL record.
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
     }
@@ -258,7 +277,8 @@ impl JsonLine for CanonicalEvent {
             .unwrap_or_else(|| "null".to_string());
 
         format!(
-            "{{\"record_type\":\"event\",\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{}}}",
+            json_string(records::EVENT),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
             json_string(self.event_source.as_str()),
@@ -293,6 +313,7 @@ pub struct RawKernelEvent {
 }
 
 impl RawKernelEvent {
+    /// Create a raw kernel event exactly as delivered by an observer backend.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         timestamp_unix_ms: u128,
@@ -328,6 +349,7 @@ impl RawKernelEvent {
         }
     }
 
+    /// Render this raw kernel event as a JSONL record.
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
     }
@@ -347,7 +369,8 @@ impl JsonLine for RawKernelEvent {
             .unwrap_or_else(|| "null".to_string());
 
         format!(
-            "{{\"record_type\":\"raw_kernel_event\",\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{},\"raw_payload\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{},\"raw_payload\":{}}}",
+            json_string(records::RAW_KERNEL_EVENT),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
             json_string(self.event_source.as_str()),
@@ -379,6 +402,7 @@ pub struct PolicyViolation {
 }
 
 impl PolicyViolation {
+    /// Create a policy violation record with the current wall-clock timestamp.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: impl Into<String>,
@@ -401,6 +425,7 @@ impl PolicyViolation {
         }
     }
 
+    /// Render this violation as a JSONL record.
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
     }
@@ -409,7 +434,8 @@ impl PolicyViolation {
 impl JsonLine for PolicyViolation {
     fn to_json_line(&self) -> String {
         format!(
-            "{{\"record_type\":\"policy_violation\",\"timestamp_unix_ms\":{},\"session_id\":{},\"rule_id\":{},\"decision\":{},\"reason\":{},\"pid\":{},\"target\":{},\"enforcement_backend\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"rule_id\":{},\"decision\":{},\"reason\":{},\"pid\":{},\"target\":{},\"enforcement_backend\":{}}}",
+            json_string(records::POLICY_VIOLATION),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
             json_string(&self.rule_id),
@@ -444,6 +470,7 @@ pub fn json_string(value: &str) -> String {
     out
 }
 
+/// Return the current Unix timestamp in milliseconds.
 pub fn now_unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
