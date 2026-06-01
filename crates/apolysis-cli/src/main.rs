@@ -2,6 +2,7 @@
 
 use apolysis_observer::{observe_fixture, FixtureObserveRequest};
 use apolysis_runtime::{run_docker, run_local, DockerRunRequest, LocalRunRequest};
+use apolysis_visibility::{assess_visibility, RuntimeVisibilityProfile, VisibilityInput};
 
 fn main() {
     let exit_code = match run(std::env::args().skip(1).collect()) {
@@ -18,6 +19,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
     match args.first().map(String::as_str) {
         Some("run") => run_command(args),
         Some("observe") => observe_command(args),
+        Some("visibility") => visibility_command(args),
         _ => Err(usage()),
     }
 }
@@ -46,6 +48,32 @@ fn run_command(args: Vec<String>) -> Result<i32, String> {
             Ok(result.exit_code)
         }
     }
+}
+
+fn visibility_command(args: Vec<String>) -> Result<i32, String> {
+    let request = VisibilityRequest::parse(args)?;
+    let host_events = std::fs::read_to_string(&request.input_path)
+        .map_err(|error| format!("failed to read visibility input: {error}"))?;
+    let kubernetes_metadata = if let Some(path) = request.kubernetes_metadata_path {
+        let input = std::fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read kubernetes metadata: {error}"))?;
+        Some(apolysis_kubernetes::KubernetesMetadata::parse(&input)?)
+    } else {
+        None
+    };
+    let assessment = assess_visibility(
+        VisibilityInput::new(request.session_id, request.runtime_profile, host_events)
+            .with_kubernetes_metadata(kubernetes_metadata),
+    )?;
+    let mut store = apolysis_store::JsonlStore::create(&request.output_path)
+        .map_err(|error| format!("failed to create visibility output: {error}"))?;
+    store
+        .append(&assessment)
+        .map_err(|error| format!("failed to write visibility assessment: {error}"))?;
+    store
+        .flush()
+        .map_err(|error| format!("failed to flush visibility output: {error}"))?;
+    Ok(0)
 }
 
 fn observe_command(args: Vec<String>) -> Result<i32, String> {
@@ -180,6 +208,15 @@ struct ObserveRequest {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+struct VisibilityRequest {
+    runtime_profile: RuntimeVisibilityProfile,
+    input_path: String,
+    output_path: String,
+    session_id: String,
+    kubernetes_metadata_path: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 enum ObserverBackendSelection {
     Fixture,
 }
@@ -254,6 +291,67 @@ impl ObserveRequest {
     }
 }
 
+impl VisibilityRequest {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        if args.first().map(String::as_str) != Some("visibility") {
+            return Err(usage());
+        }
+
+        let mut scenario = None;
+        let mut input_path = None;
+        let mut output_path = None;
+        let mut session_id = None;
+        let mut kubernetes_metadata_path = None;
+        let mut i = 1;
+
+        while i < args.len() {
+            match args[i].as_str() {
+                "--scenario" => {
+                    i += 1;
+                    scenario = args.get(i).cloned();
+                }
+                "--input" => {
+                    i += 1;
+                    input_path = args.get(i).cloned();
+                }
+                "--output" => {
+                    i += 1;
+                    output_path = args.get(i).cloned();
+                }
+                "--session" => {
+                    i += 1;
+                    session_id = args.get(i).cloned();
+                }
+                "--kubernetes-metadata" => {
+                    i += 1;
+                    kubernetes_metadata_path = args.get(i).cloned();
+                }
+                unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
+            }
+            i += 1;
+        }
+
+        let runtime_profile = RuntimeVisibilityProfile::parse(
+            &scenario.ok_or_else(|| format!("missing --scenario\n{}", usage()))?,
+        )?;
+        let session_id = session_id.unwrap_or_else(|| {
+            format!(
+                "visibility-{}-{}",
+                std::process::id(),
+                apolysis_core::now_unix_ms()
+            )
+        });
+
+        Ok(Self {
+            runtime_profile,
+            input_path: input_path.ok_or_else(|| format!("missing --input\n{}", usage()))?,
+            output_path: output_path.ok_or_else(|| format!("missing --output\n{}", usage()))?,
+            session_id,
+            kubernetes_metadata_path,
+        })
+    }
+}
+
 fn usage() -> String {
-    "usage: apolysis run [--runtime local|docker] [--image <image>] [--docker-runtime <oci-runtime>] --policy <path> [--output <path>] -- <command> [args...]\n       apolysis observe --backend fixture --input <path> --session <id> --policy <path> --output <path> [--feedback-dir <path>] [--kubernetes-metadata <path>]".to_string()
+    "usage: apolysis run [--runtime local|docker] [--image <image>] [--docker-runtime <oci-runtime>] --policy <path> [--output <path>] -- <command> [args...]\n       apolysis observe --backend fixture --input <path> --session <id> --policy <path> --output <path> [--feedback-dir <path>] [--kubernetes-metadata <path>]\n       apolysis visibility --scenario docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype --input <path> --output <path> [--session <id>] [--kubernetes-metadata <path>]".to_string()
 }

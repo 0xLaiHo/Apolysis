@@ -7,6 +7,7 @@ members = [
     "crates/apolysis-store",
     "crates/apolysis-observer",
     "crates/apolysis-runtime",
+    "crates/apolysis-visibility",
     "crates/apolysis-cli",
 ]
 resolver = "2"

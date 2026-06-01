@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+timestamp=1710000000100|pid=6100|ppid=1|comm=runsc-sandbox|event=exec|resource=/usr/bin/runsc|action=exec
+timestamp=1710000000101|pid=6101|ppid=6100|comm=sentry|event=openat|resource=/run/containerd/io.containerd.runtime.v2.task/k8s.io/sandbox/rootfs|action=open
+timestamp=1710000000102|pid=6102|ppid=6100|comm=gofer|event=connect|resource=10.0.2.15:443|action=connect

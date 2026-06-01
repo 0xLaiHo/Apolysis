@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+timestamp=1710000000200|pid=7100|ppid=1|comm=containerd-shim-kata-v2|event=exec|resource=/usr/bin/containerd-shim-kata-v2|action=exec
+timestamp=1710000000201|pid=7101|ppid=7100|comm=qemu-system-x86|event=openat|resource=/var/lib/kata-containers/shared/sandboxes/kata-session-9|action=open
+timestamp=1710000000202|pid=7101|ppid=7100|comm=qemu-system-x86|event=connect|resource=tap-kata-session-9|action=connect

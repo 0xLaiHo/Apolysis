@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+timestamp=1710000000150|pid=6200|ppid=1|comm=runsc-sandbox|event=exec|resource=/usr/bin/runsc|action=exec
+timestamp=1710000000151|pid=6201|ppid=6200|comm=sentry|event=openat|resource=/var/lib/kubelet/pods/pod-uid-123/volumes|action=open
+timestamp=1710000000152|pid=6202|ppid=6200|comm=gofer|event=connect|resource=10.96.0.10:443|action=connect

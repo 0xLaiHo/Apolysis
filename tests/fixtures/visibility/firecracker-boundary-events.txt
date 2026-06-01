@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+timestamp=1710000000300|pid=8100|ppid=1|comm=firecracker|event=exec|resource=/usr/bin/firecracker|action=exec
+timestamp=1710000000301|pid=8100|ppid=1|comm=firecracker|event=openat|resource=/srv/apolysis/rootfs.ext4|action=open
+timestamp=1710000000302|pid=8100|ppid=1|comm=firecracker|event=connect|resource=vsock:3|action=connect

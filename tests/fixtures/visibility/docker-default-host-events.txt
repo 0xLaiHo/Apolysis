@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+timestamp=1710000000000|pid=5100|ppid=5000|comm=python3|event=exec|resource=/usr/bin/python3|action=exec
+timestamp=1710000000001|pid=5100|ppid=5000|comm=python3|event=openat|resource=/work/tests/child.py|action=open
+timestamp=1710000000002|pid=5101|ppid=5100|comm=curl|event=connect|resource=1.1.1.1:443|action=connect

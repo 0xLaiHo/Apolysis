@@ -6,8 +6,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+apolysis-core = { path = "../apolysis-core" }
 apolysis-observer = { path = "../apolysis-observer" }
 apolysis-runtime = { path = "../apolysis-runtime" }
+apolysis-kubernetes = { path = "../apolysis-kubernetes" }
+apolysis-store = { path = "../apolysis-store" }
+apolysis-visibility = { path = "../apolysis-visibility" }
 
 [[bin]]
 name = "apolysis"

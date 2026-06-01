@@ -39,13 +39,13 @@ When all three layers agree, the platform can trust the session with higher
 confidence. When they diverge, Apolysis treats OS/runtime evidence as the
 starting point for investigation and future enforcement.
 
-M6 implements the first Kubernetes / Agent Sandbox metadata path for the third
-layer. It records local sessions, process-tree attribution, Docker runtime
+M7 implements the first strong-isolation visibility validation path for the
+third layer. It records local sessions, process-tree attribution, Docker runtime
 metadata, Kubernetes pod metadata, fixture ring-buffer events, raw kernel-event
 records, canonical side-effect events, policy violations, downgrade metadata,
-feedback files, and JSONL timelines. The repository now includes the eBPF
-observer ABI and attach point skeleton; BPF-LSM enforcement is modeled and
-capability-gated, but real kernel blocking is not enabled yet.
+feedback files, visibility assessments, and JSONL timelines. The repository now
+includes the eBPF observer ABI and attach point skeleton; BPF-LSM enforcement is
+modeled and capability-gated, but real kernel blocking is not enabled yet.
 
 ## 🚀 Runtime Scenarios
 
@@ -73,7 +73,7 @@ capability-gated, but real kernel blocking is not enabled yet.
 
 ## 🛠️ Build And Run
 
-Requirements for M6:
+Requirements for M7:
 
 - 🦀 Rust stable toolchain
 - 📦 Cargo
@@ -205,6 +205,22 @@ namespace, service account, RuntimeClass, node, service-account-token, and
 Agent Sandbox identity records, then keeps the M5 policy-feedback contract on
 the same timeline.
 
+🧪 Run the M7 strong-isolation visibility validator:
+
+```bash
+cargo run -p apolysis-cli -- visibility \
+  --scenario kubernetes-kata \
+  --input tests/fixtures/visibility/kubernetes-kata-host-events.txt \
+  --output .apolysis/visibility-kata.jsonl \
+  --kubernetes-metadata tests/fixtures/kubernetes/agent-sandbox-kata-pod.yaml
+```
+
+The validator compares host-side observer fixtures for Docker default,
+Docker+gVisor, Kubernetes+gVisor, Kubernetes+Kata, and Firecracker boundary
+scenarios. It records whether host semantics collapsed, whether runtime
+metadata is required, and whether a guest-side collector is required. See
+[docs/visibility-validation.md](docs/visibility-validation.md).
+
 ## 📁 Repository Layout
 
 ```text
@@ -216,7 +232,10 @@ crates/
   apolysis-policy/  YAML/JSON policy parser and decision logic.
   apolysis-runtime/ Local runner and Docker runtime adapter.
   apolysis-store/   Append-only JSONL timeline writer.
+  apolysis-visibility/ Strong-isolation visibility assessment model.
   apolysis-cli/     Local `apolysis run` command wrapper.
+docs/
+  visibility-validation.md Strong-isolation visibility findings.
 ebpf/
   include/          Observer ring-buffer ABI shared with userspace.
   observer/         GPL-2.0-only eBPF observer source skeleton.
@@ -238,7 +257,7 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 | M4 | Audit-only observer pipeline, raw kernel event schema, eBPF ring-buffer ABI, exec/file/network canonicalization | ✅ **Completed in this iteration** |
 | M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | ✅ **Completed in this iteration** |
 | M6 | Kubernetes / Agent Sandbox metadata integration | ✅ **Completed in this iteration** |
-| M7 | gVisor/Kata/Firecracker visibility validation | 🟡 Planned |
+| M7 | gVisor/Kata/Firecracker visibility validation | ✅ **Completed in this iteration** |
 
 The table above is the repository-local progress summary. Detailed internal
 development progress is tracked outside this repository in the surrounding
