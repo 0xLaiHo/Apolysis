@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/apolysis-core",
+    "crates/apolysis-policy",
+    "crates/apolysis-store",
+    "crates/apolysis-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/0xLaiHo/Apolysis"
+homepage = "https://github.com/0xLaiHo/Apolysis"
+readme = "README.md"

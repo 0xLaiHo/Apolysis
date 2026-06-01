@@ -1,0 +1,14 @@
+[package]
+name = "apolysis-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+apolysis-core = { path = "../apolysis-core" }
+apolysis-store = { path = "../apolysis-store" }
+
+[[bin]]
+name = "apolysis"
+path = "src/main.rs"
