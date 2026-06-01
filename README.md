@@ -39,10 +39,10 @@ When all three layers agree, the platform can trust the session with higher
 confidence. When they diverge, Apolysis treats OS/runtime evidence as the
 starting point for investigation and future enforcement.
 
-M2 implements the local runner foundation for the third layer using Rust-only
+M3 implements the Docker adapter foundation for the third layer using Rust-only
 audit-mode components. It records local sessions, process-tree attribution,
-runtime metadata, timeout notifications, and JSONL timelines. Kernel eBPF
-collection and BPF-LSM enforcement are planned but not enabled yet.
+Docker runtime metadata, timeout notifications, and JSONL timelines. Kernel
+eBPF collection and BPF-LSM enforcement are planned but not enabled yet.
 
 ## 🚀 Runtime Scenarios
 
@@ -63,18 +63,19 @@ collection and BPF-LSM enforcement are planned but not enabled yet.
 | Docker | Reproducible container execution | Docker is treated as a baseline adapter, not a strong security boundary. |
 | gVisor | User-space kernel isolation for containers | Apolysis will correlate runtime metadata with agent side effects and policy decisions. |
 | Kata Containers | VM-backed Kubernetes pod isolation | Apolysis will document host/guest visibility gaps and decide where guest collectors are needed. |
-| Firecracker | Low-overhead microVM primitive | Apolysis reserves a future adapter instead of building a microVM platform in M1. |
+| Firecracker | Low-overhead microVM primitive | Apolysis reserves a future adapter instead of building a microVM platform in the MVP. |
 | E2B / Daytona / Modal | Managed sandbox execution environments | Apolysis focuses on runtime evidence, policy decisions, and agent feedback across environments. |
 | Kubernetes Agent Sandbox | Cloud-native agent workload lifecycle | Apolysis can become an observation and policy layer for those workloads. |
 | AgentSight / ActPlane | eBPF observability / eBPF enforcement research | Apolysis adapts those ideas into a Rust project with runtime adapters, schemas, and staged enforcement. |
 
 ## 🛠️ Build And Run
 
-Requirements for M2:
+Requirements for M3:
 
 - 🦀 Rust stable toolchain
 - 📦 Cargo
 - 🐧 Linux development shell for process-tree attribution through `/proc`
+- 🐳 Docker CLI/daemon for real Docker runs; tests use a local Docker stub
 
 🔨 Build:
 
@@ -100,7 +101,7 @@ cargo clippy --all-targets --all-features
 cargo fmt --all
 ```
 
-▶️ Run the M2 local command wrapper:
+▶️ Run the local command wrapper:
 
 ```bash
 cargo run -p apolysis-cli -- run \
@@ -119,18 +120,47 @@ Expected M2 records include `session_started`, `runtime_metadata`, `exec`, and
 `process_exit`. A timeout emits a `policy_violation` with
 `runtime.max_seconds` and terminates the local process tree.
 
+🐳 Run through the M3 Docker adapter:
+
+```bash
+cargo run -p apolysis-cli -- run \
+  --runtime docker \
+  --image alpine:3.20 \
+  --policy policies/docker-baseline.yaml \
+  --output .apolysis/docker-timeline.jsonl \
+  -- echo hello
+```
+
+Use gVisor's `runsc` runtime when it is installed:
+
+```bash
+cargo run -p apolysis-cli -- run \
+  --runtime docker \
+  --docker-runtime runsc \
+  --image alpine:3.20 \
+  --policy policies/docker-baseline.yaml \
+  --output .apolysis/docker-runsc.jsonl \
+  -- echo hello
+```
+
+The Docker adapter injects `APOLYSIS_SESSION_ID`, writes Apolysis labels, uses
+`--read-only`, `--network none`, `--cap-drop ALL`, `no-new-privileges`,
+`--pids-limit`, `--cpus`, and `--memory`, and emits container image, selected
+OCI runtime, mounts, network mode, container id, and cgroup mapping metadata.
+
 ## 📁 Repository Layout
 
 ```text
 crates/
   apolysis-core/    Shared schema and JSONL records.
   apolysis-policy/  M1 policy parser and audit-only decisions.
-  apolysis-runtime/ M2 local runtime runner and process-tree attribution.
+  apolysis-runtime/ Local runner and Docker runtime adapter.
   apolysis-store/   Append-only JSONL timeline writer.
   apolysis-cli/     Local `apolysis run` command wrapper.
 policies/
   local-dev.yaml    Default audit policy.
-tests/fixtures/     Local command fixtures and expected timeline fragments.
+  docker-baseline.yaml Docker adapter baseline policy.
+tests/fixtures/     Local/Docker command fixtures and expected timeline fragments.
 ```
 
 ## 🗺️ Feature Plan And Progress
@@ -139,7 +169,7 @@ tests/fixtures/     Local command fixtures and expected timeline fragments.
 | --- | --- | --- |
 | M1 | Rust workspace, core schema, policy parser, JSONL store, local CLI wrapper, README | ✅ **Completed in this iteration** |
 | M2 | Local process session model, process-tree attribution, timeout notify, richer fixtures | ✅ **Completed in this iteration** |
-| M3 | Docker adapter with safe defaults and container metadata | 🟡 Planned |
+| M3 | Docker adapter with safe defaults, optional OCI runtime, and container metadata | ✅ **Completed in this iteration** |
 | M4 | eBPF audit-only observer for exec/file/network events | 🟡 Planned |
 | M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | 🟡 Planned |
 | M6 | Kubernetes / Agent Sandbox metadata integration | 🟡 Planned |

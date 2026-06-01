@@ -180,6 +180,167 @@ runtime:
     let _ = std::fs::remove_file(&policy);
 }
 
+#[test]
+fn docker_runtime_uses_safe_defaults_and_records_metadata() {
+    let output = temp_jsonl("apolysis-cli-docker");
+    let policy = temp_jsonl("apolysis-cli-docker-policy");
+    let docker_log = temp_jsonl("apolysis-cli-docker-args");
+    let cid = "apolysis-test-container-123";
+    let write_dir =
+        std::env::temp_dir().join(format!("apolysis-docker-write-{}", std::process::id()));
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(&policy);
+    let _ = std::fs::remove_file(&docker_log);
+    let _ = std::fs::create_dir_all(&write_dir);
+    std::fs::write(
+        &policy,
+        format!(
+            r#"version: 1
+
+workspace:
+  allow_read:
+    - tests/fixtures
+  allow_write:
+    - {}
+runtime:
+  max_seconds: 60
+  max_processes: 32
+"#,
+            write_dir.display()
+        ),
+    )
+    .expect("write docker policy");
+
+    let status = apolysis_command()
+        .env(
+            "APOLYSIS_DOCKER_BIN",
+            workspace_root().join("tests/fixtures/docker_stub.sh"),
+        )
+        .env("APOLYSIS_DOCKER_STUB_LOG", &docker_log)
+        .env("APOLYSIS_DOCKER_STUB_CID", cid)
+        .args([
+            "run",
+            "--runtime",
+            "docker",
+            "--image",
+            "alpine:3.20",
+            "--policy",
+            policy.to_str().expect("utf-8 policy path"),
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--",
+            "echo",
+            "hello",
+        ])
+        .status()
+        .expect("run apolysis docker CLI");
+
+    assert!(status.success());
+    let timeline = std::fs::read_to_string(&output).expect("read timeline");
+    let docker_args = std::fs::read_to_string(&docker_log).expect("read docker args");
+    let session_id = extract_json_values(&timeline, "session_id")
+        .into_iter()
+        .next()
+        .expect("timeline session id");
+
+    assert_expected_fragments(&timeline, "tests/fixtures/expected/docker-runtime.contains");
+    assert!(timeline.contains(cid));
+    assert!(timeline.contains("image:alpine:3.20"));
+    assert!(timeline.contains("network:none"));
+    assert!(timeline.contains(&format!("docker://{cid}")));
+    assert!(docker_args.contains("--read-only\n"));
+    assert!(docker_args.contains("--rm\n"));
+    assert!(docker_args.contains("--network\nnone\n"));
+    assert!(docker_args.contains("--cap-drop\nALL\n"));
+    assert!(docker_args.contains("--security-opt\nno-new-privileges\n"));
+    assert!(docker_args.contains("--pids-limit\n32\n"));
+    assert!(docker_args.contains("--cpus\n1\n"));
+    assert!(docker_args.contains("--memory\n512m\n"));
+    assert!(docker_args.contains("--tmpfs\n/tmp:rw,noexec,nosuid,nodev,size=64m\n"));
+    assert!(docker_args.contains(&format!("--label\napolysis.session_id={session_id}\n")));
+    assert!(docker_args.contains(&format!("--env\nAPOLYSIS_SESSION_ID={session_id}\n")));
+    assert!(docker_args.contains("type=bind"));
+    assert!(docker_args.contains("readonly"));
+    assert!(docker_args.contains("tests/fixtures"));
+    assert!(docker_args.contains("/workspace/write/"));
+    assert!(!docker_args.contains("--privileged"));
+    assert!(!docker_args.contains("--network\nhost\n"));
+
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(&policy);
+    let _ = std::fs::remove_file(&docker_log);
+    let _ = std::fs::remove_dir_all(&write_dir);
+}
+
+#[test]
+fn docker_runtime_can_select_an_oci_runtime_backend() {
+    let output = temp_jsonl("apolysis-cli-docker-runsc");
+    let docker_log = temp_jsonl("apolysis-cli-docker-runsc-args");
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(&docker_log);
+
+    let status = apolysis_command()
+        .env(
+            "APOLYSIS_DOCKER_BIN",
+            workspace_root().join("tests/fixtures/docker_stub.sh"),
+        )
+        .env("APOLYSIS_DOCKER_STUB_LOG", &docker_log)
+        .env("APOLYSIS_DOCKER_STUB_CID", "apolysis-runsc-container")
+        .args([
+            "run",
+            "--runtime",
+            "docker",
+            "--docker-runtime",
+            "runsc",
+            "--image",
+            "alpine:3.20",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--",
+            "echo",
+            "hello",
+        ])
+        .status()
+        .expect("run apolysis docker CLI");
+
+    assert!(status.success());
+    let timeline = std::fs::read_to_string(&output).expect("read timeline");
+    let docker_args = std::fs::read_to_string(&docker_log).expect("read docker args");
+    assert!(docker_args.contains("--runtime\nrunsc\n"));
+    assert!(timeline.contains(r#""resource":"docker-runtime""#));
+    assert!(timeline.contains("oci-runtime:runsc"));
+
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(&docker_log);
+}
+
+#[test]
+fn docker_runtime_requires_an_image() {
+    let output = temp_jsonl("apolysis-cli-docker-missing-image");
+    let output_result = apolysis_command()
+        .args([
+            "run",
+            "--runtime",
+            "docker",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--",
+            "echo",
+            "hello",
+        ])
+        .output()
+        .expect("run apolysis docker CLI");
+
+    assert_eq!(output_result.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output_result.stderr);
+    assert!(stderr.contains("missing --image"));
+    let _ = std::fs::remove_file(&output);
+}
+
 fn temp_jsonl(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}.jsonl", std::process::id()))
 }

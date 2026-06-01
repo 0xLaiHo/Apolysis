@@ -2,8 +2,7 @@ version: 1
 
 workspace:
   allow_read:
-    - ./crates
-    - ./tests
+    - ./tests/fixtures
     - ./policies
   allow_write:
     - ./.apolysis
@@ -17,7 +16,7 @@ credentials:
 
 network:
   allow_egress:
-    - 127.0.0.1:0
+    - none
 
 commands:
   deny:

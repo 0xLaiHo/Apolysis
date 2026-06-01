@@ -2,9 +2,10 @@
 
 //! Local runtime execution and process attribution for Apolysis.
 //!
-//! M2 still runs in audit mode: it does not claim to isolate untrusted code.
-//! This crate exists to make the local runner an explicit runtime adapter and
-//! to keep the CLI thin before Docker, Kubernetes, and eBPF backends are added.
+//! M3 still runs in audit mode: it records local and Docker runtime evidence,
+//! but does not claim to enforce kernel-level isolation. This crate keeps
+//! runtime adapters behind a thin CLI before Kubernetes and eBPF backends are
+//! added.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -34,6 +35,37 @@ pub struct LocalRunRequest {
     pub command: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DockerRunRequest {
+    pub policy_path: PathBuf,
+    pub output_path: PathBuf,
+    pub image: String,
+    pub oci_runtime: Option<String>,
+    pub command: Vec<String>,
+}
+
+impl DockerRunRequest {
+    pub fn new(
+        policy_path: impl Into<PathBuf>,
+        output_path: impl Into<PathBuf>,
+        image: impl Into<String>,
+        command: Vec<String>,
+    ) -> Self {
+        Self {
+            policy_path: policy_path.into(),
+            output_path: output_path.into(),
+            image: image.into(),
+            oci_runtime: None,
+            command,
+        }
+    }
+
+    pub fn with_oci_runtime(mut self, oci_runtime: Option<String>) -> Self {
+        self.oci_runtime = oci_runtime;
+        self
+    }
+}
+
 impl LocalRunRequest {
     pub fn new(
         policy_path: impl Into<PathBuf>,
@@ -60,12 +92,14 @@ pub struct LocalRunResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttributionMode {
     ProcessTree,
+    DockerCli,
 }
 
 impl AttributionMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ProcessTree => "process_tree",
+            Self::DockerCli => "docker_cli",
         }
     }
 }
@@ -198,6 +232,355 @@ pub fn run_local(request: LocalRunRequest) -> Result<LocalRunResult, String> {
         }
 
         thread::sleep(POLL_INTERVAL);
+    }
+}
+
+pub fn run_docker(request: DockerRunRequest) -> Result<LocalRunResult, String> {
+    if request.command.is_empty() {
+        return Err("docker run requires a command".to_string());
+    }
+
+    let policy = load_policy(&request.policy_path)?;
+    let session_id = format!(
+        "docker-{}-{}",
+        std::process::id(),
+        apolysis_core::now_unix_ms()
+    );
+    let session = SandboxSession::new(
+        &session_id,
+        RuntimeKind::Docker,
+        request.policy_path.to_string_lossy(),
+    );
+    let mut store = JsonlStore::create(&request.output_path)
+        .map_err(|error| format!("failed to create timeline: {error}"))?;
+
+    append_event(
+        &mut store,
+        CanonicalEvent::new(
+            &session.id,
+            EventSource::Manual,
+            EventType::SessionStarted,
+            std::process::id(),
+            0,
+            "apolysis",
+            "docker-session",
+            "start",
+        ),
+    )?;
+
+    let cidfile = request.output_path.with_extension("cid");
+    let _ = fs::remove_file(&cidfile);
+    let plan = DockerRunPlan::new(&session.id, &request, &policy, cidfile)?;
+    write_docker_plan_metadata(&session.id, &plan, &mut store)?;
+
+    let status = Command::new(docker_bin())
+        .args(&plan.args)
+        .status()
+        .map_err(|error| format!("failed to start docker: {error}"))?;
+
+    let container_id = fs::read_to_string(&plan.cidfile)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    append_event(
+        &mut store,
+        CanonicalEvent::new(
+            &session.id,
+            EventSource::RuntimeMetadata,
+            EventType::RuntimeMetadata,
+            std::process::id(),
+            0,
+            "docker",
+            "container-id",
+            &container_id,
+        ),
+    )?;
+    append_event(
+        &mut store,
+        CanonicalEvent::new(
+            &session.id,
+            EventSource::RuntimeMetadata,
+            EventType::RuntimeMetadata,
+            std::process::id(),
+            0,
+            "docker",
+            "cgroup-path",
+            format!("docker://{container_id}"),
+        ),
+    )?;
+
+    let exit_code = status.code().unwrap_or(1);
+    append_event(
+        &mut store,
+        CanonicalEvent::new(
+            &session.id,
+            EventSource::RuntimeMetadata,
+            EventType::ProcessExit,
+            std::process::id(),
+            0,
+            format!("docker run {} {}", request.image, request.command.join(" ")),
+            "container",
+            format!("exit:{exit_code}"),
+        ),
+    )?;
+    store
+        .flush()
+        .map_err(|error| format!("failed to flush timeline: {error}"))?;
+
+    Ok(LocalRunResult {
+        session_id: session.id,
+        exit_code,
+        attribution_mode: AttributionMode::DockerCli,
+        discovered_processes: 0,
+        timed_out: false,
+    })
+}
+
+fn write_docker_plan_metadata(
+    session_id: &str,
+    plan: &DockerRunPlan,
+    store: &mut JsonlStore,
+) -> Result<(), String> {
+    append_event(
+        store,
+        CanonicalEvent::new(
+            session_id,
+            EventSource::RuntimeMetadata,
+            EventType::RuntimeMetadata,
+            std::process::id(),
+            0,
+            "docker",
+            "container-image",
+            format!("image:{}", plan.image),
+        ),
+    )?;
+    append_event(
+        store,
+        CanonicalEvent::new(
+            session_id,
+            EventSource::RuntimeMetadata,
+            EventType::RuntimeMetadata,
+            std::process::id(),
+            0,
+            "docker",
+            "network-mode",
+            format!("network:{}", plan.network_mode),
+        ),
+    )?;
+    append_event(
+        store,
+        CanonicalEvent::new(
+            session_id,
+            EventSource::RuntimeMetadata,
+            EventType::RuntimeMetadata,
+            std::process::id(),
+            0,
+            "docker",
+            "docker-runtime",
+            format!(
+                "oci-runtime:{}",
+                plan.oci_runtime.as_deref().unwrap_or("default")
+            ),
+        ),
+    )?;
+    append_event(
+        store,
+        CanonicalEvent::new(
+            session_id,
+            EventSource::RuntimeMetadata,
+            EventType::RuntimeMetadata,
+            std::process::id(),
+            0,
+            "docker",
+            "mounts",
+            plan.mounts
+                .iter()
+                .map(DockerMount::summary)
+                .collect::<Vec<_>>()
+                .join(";"),
+        ),
+    )?;
+    append_event(
+        store,
+        CanonicalEvent::new(
+            session_id,
+            EventSource::RuntimeMetadata,
+            EventType::RuntimeMetadata,
+            std::process::id(),
+            0,
+            "docker",
+            "container-labels",
+            format!(
+                "apolysis.session_id={session_id},apolysis.runtime=docker,apolysis.policy_path={}",
+                plan.policy_path
+            ),
+        ),
+    )
+}
+
+fn docker_bin() -> String {
+    std::env::var("APOLYSIS_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string())
+}
+
+struct DockerRunPlan {
+    args: Vec<String>,
+    cidfile: PathBuf,
+    image: String,
+    oci_runtime: Option<String>,
+    mounts: Vec<DockerMount>,
+    network_mode: String,
+    policy_path: String,
+}
+
+impl DockerRunPlan {
+    fn new(
+        session_id: &str,
+        request: &DockerRunRequest,
+        policy: &Policy,
+        cidfile: PathBuf,
+    ) -> Result<Self, String> {
+        let mounts = docker_mounts(policy)?;
+        let network_mode = "none".to_string();
+        let pids_limit = policy.runtime.max_processes.unwrap_or(256).to_string();
+        let policy_path = request.policy_path.to_string_lossy().to_string();
+        let container_name = format!("apolysis-{session_id}");
+        let mut args = vec![
+            "run".to_string(),
+            "--rm".to_string(),
+            "--cidfile".to_string(),
+            cidfile.to_string_lossy().to_string(),
+            "--name".to_string(),
+            container_name,
+            "--label".to_string(),
+            format!("apolysis.session_id={session_id}"),
+            "--label".to_string(),
+            "apolysis.runtime=docker".to_string(),
+            "--label".to_string(),
+            format!("apolysis.policy_path={policy_path}"),
+            "--env".to_string(),
+            format!("APOLYSIS_SESSION_ID={session_id}"),
+            "--env".to_string(),
+            "APOLYSIS_RUNTIME=docker".to_string(),
+            "--read-only".to_string(),
+            "--network".to_string(),
+            network_mode.clone(),
+            "--cap-drop".to_string(),
+            "ALL".to_string(),
+            "--security-opt".to_string(),
+            "no-new-privileges".to_string(),
+            "--pids-limit".to_string(),
+            pids_limit,
+            "--cpus".to_string(),
+            "1".to_string(),
+            "--memory".to_string(),
+            "512m".to_string(),
+            "--tmpfs".to_string(),
+            "/tmp:rw,noexec,nosuid,nodev,size=64m".to_string(),
+        ];
+
+        if let Some(oci_runtime) = &request.oci_runtime {
+            args.push("--runtime".to_string());
+            args.push(oci_runtime.clone());
+        }
+
+        for mount in &mounts {
+            args.push("--mount".to_string());
+            args.push(mount.to_spec());
+        }
+
+        args.push(request.image.clone());
+        args.extend(request.command.clone());
+
+        Ok(Self {
+            args,
+            cidfile,
+            image: request.image.clone(),
+            oci_runtime: request.oci_runtime.clone(),
+            mounts,
+            network_mode,
+            policy_path,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DockerMount {
+    source: PathBuf,
+    target: String,
+    read_only: bool,
+}
+
+impl DockerMount {
+    fn to_spec(&self) -> String {
+        let mut spec = format!(
+            "type=bind,src={},dst={}",
+            self.source.to_string_lossy(),
+            self.target
+        );
+        if self.read_only {
+            spec.push_str(",readonly");
+        }
+        spec
+    }
+
+    fn summary(&self) -> String {
+        let mode = if self.read_only { "ro" } else { "rw" };
+        format!("{}->{}:{mode}", self.source.to_string_lossy(), self.target)
+    }
+}
+
+fn docker_mounts(policy: &Policy) -> Result<Vec<DockerMount>, String> {
+    let mut mounts = Vec::new();
+    for value in &policy.workspace.allow_read {
+        mounts.push(DockerMount {
+            source: absolute_path(value)?,
+            target: format!("/workspace/read/{}", mount_name(value)),
+            read_only: true,
+        });
+    }
+    for value in &policy.workspace.allow_write {
+        mounts.push(DockerMount {
+            source: absolute_path(value)?,
+            target: format!("/workspace/write/{}", mount_name(value)),
+            read_only: false,
+        });
+    }
+    Ok(mounts)
+}
+
+fn absolute_path(value: &str) -> Result<PathBuf, String> {
+    if value.contains(',') {
+        return Err(format!("docker mount path cannot contain comma: {value}"));
+    }
+
+    let path = PathBuf::from(value);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|error| format!("failed to resolve docker mount path: {error}"))?
+    };
+
+    Ok(fs::canonicalize(&absolute).unwrap_or(absolute))
+}
+
+fn mount_name(value: &str) -> String {
+    let trimmed = value.trim_matches('/');
+    let mut out = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let out = out.trim_matches('_').to_string();
+    if out.is_empty() {
+        "root".to_string()
+    } else {
+        out
     }
 }
 

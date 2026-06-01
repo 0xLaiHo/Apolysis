@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use apolysis_runtime::{run_local, LocalRunRequest};
+use apolysis_runtime::{run_docker, run_local, DockerRunRequest, LocalRunRequest};
 
 fn main() {
     let exit_code = match run(std::env::args().skip(1).collect()) {
@@ -15,19 +15,45 @@ fn main() {
 
 fn run(args: Vec<String>) -> Result<i32, String> {
     let request = RunRequest::parse(args)?;
-    let result = run_local(LocalRunRequest::new(
-        request.policy_path,
-        request.output_path,
-        request.command,
-    ))?;
-    Ok(result.exit_code)
+    match request.runtime {
+        RuntimeSelection::Local => {
+            let result = run_local(LocalRunRequest::new(
+                request.policy_path,
+                request.output_path,
+                request.command,
+            ))?;
+            Ok(result.exit_code)
+        }
+        RuntimeSelection::Docker { image, oci_runtime } => {
+            let result = run_docker(
+                DockerRunRequest::new(
+                    request.policy_path,
+                    request.output_path,
+                    image,
+                    request.command,
+                )
+                .with_oci_runtime(oci_runtime),
+            )?;
+            Ok(result.exit_code)
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 struct RunRequest {
+    runtime: RuntimeSelection,
     policy_path: String,
     output_path: String,
     command: Vec<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RuntimeSelection {
+    Local,
+    Docker {
+        image: String,
+        oci_runtime: Option<String>,
+    },
 }
 
 impl RunRequest {
@@ -36,6 +62,9 @@ impl RunRequest {
             return Err(usage());
         }
 
+        let mut runtime = "local".to_string();
+        let mut image = None;
+        let mut docker_runtime = None;
         let mut policy_path = None;
         let mut output_path = Some(".apolysis/timeline.jsonl".to_string());
         let mut command = Vec::new();
@@ -46,6 +75,21 @@ impl RunRequest {
                 "--policy" => {
                     i += 1;
                     policy_path = args.get(i).cloned();
+                }
+                "--runtime" => {
+                    i += 1;
+                    runtime = args
+                        .get(i)
+                        .cloned()
+                        .ok_or_else(|| format!("missing --runtime value\n{}", usage()))?;
+                }
+                "--image" => {
+                    i += 1;
+                    image = args.get(i).cloned();
+                }
+                "--docker-runtime" => {
+                    i += 1;
+                    docker_runtime = args.get(i).cloned();
                 }
                 "--output" => {
                     i += 1;
@@ -67,7 +111,28 @@ impl RunRequest {
             return Err(format!("missing command after --\n{}", usage()));
         }
 
+        let runtime = match runtime.as_str() {
+            "local" => {
+                if image.is_some() {
+                    return Err(format!("--image requires --runtime docker\n{}", usage()));
+                }
+                if docker_runtime.is_some() {
+                    return Err(format!(
+                        "--docker-runtime requires --runtime docker\n{}",
+                        usage()
+                    ));
+                }
+                RuntimeSelection::Local
+            }
+            "docker" => RuntimeSelection::Docker {
+                image: image.ok_or_else(|| format!("missing --image\n{}", usage()))?,
+                oci_runtime: docker_runtime,
+            },
+            unknown => return Err(format!("unknown runtime '{unknown}'\n{}", usage())),
+        };
+
         Ok(Self {
+            runtime,
             policy_path,
             output_path,
             command,
@@ -76,5 +141,5 @@ impl RunRequest {
 }
 
 fn usage() -> String {
-    "usage: apolysis run --policy <path> [--output <path>] -- <command> [args...]".to_string()
+    "usage: apolysis run [--runtime local|docker] [--image <image>] [--docker-runtime <oci-runtime>] --policy <path> [--output <path>] -- <command> [args...]".to_string()
 }
