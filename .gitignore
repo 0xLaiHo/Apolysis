@@ -4,3 +4,6 @@
 /tmp/
 *.jsonl
 *.log
+
+# Generated per-machine from kernel BTF; do not commit
+ebpf/**/vmlinux.h
