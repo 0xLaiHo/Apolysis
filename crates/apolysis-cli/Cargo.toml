@@ -6,8 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-apolysis-core = { path = "../apolysis-core" }
-apolysis-store = { path = "../apolysis-store" }
+apolysis-runtime = { path = "../apolysis-runtime" }
 
 [[bin]]
 name = "apolysis"

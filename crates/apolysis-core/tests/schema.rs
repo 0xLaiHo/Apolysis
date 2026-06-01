@@ -39,6 +39,26 @@ fn canonical_event_json_line_escapes_strings_and_records_actor_resource_action()
 }
 
 #[test]
+fn runtime_metadata_event_records_process_tree_source() {
+    let event = CanonicalEvent::new(
+        "session-1",
+        EventSource::ProcessTree,
+        EventType::RuntimeMetadata,
+        42,
+        1,
+        "process_tree",
+        "local-attribution",
+        "mode:process_tree",
+    );
+
+    let line = event.to_json_line();
+
+    assert!(line.contains(r#""event_source":"process_tree""#));
+    assert!(line.contains(r#""event_type":"runtime_metadata""#));
+    assert!(line.contains(r#""action":"mode:process_tree""#));
+}
+
+#[test]
 fn policy_violation_json_line_records_decision_and_backend() {
     let violation = PolicyViolation::new(
         "session-1",

@@ -1,78 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::process::Command;
-
-use apolysis_core::{CanonicalEvent, EventSource, EventType, RuntimeKind, SandboxSession};
-use apolysis_store::JsonlStore;
+use apolysis_runtime::{run_local, LocalRunRequest};
 
 fn main() {
-    if let Err(error) = run(std::env::args().skip(1).collect()) {
-        eprintln!("apolysis: {error}");
-        std::process::exit(2);
-    }
+    let exit_code = match run(std::env::args().skip(1).collect()) {
+        Ok(exit_code) => exit_code,
+        Err(error) => {
+            eprintln!("apolysis: {error}");
+            2
+        }
+    };
+    std::process::exit(exit_code);
 }
 
-fn run(args: Vec<String>) -> Result<(), String> {
+fn run(args: Vec<String>) -> Result<i32, String> {
     let request = RunRequest::parse(args)?;
-    let session_id = format!(
-        "local-{}-{}",
-        std::process::id(),
-        apolysis_core::now_unix_ms()
-    );
-    let session = SandboxSession::new(&session_id, RuntimeKind::Local, &request.policy_path);
-    let actor = request.command.join(" ");
-    let mut store = JsonlStore::create(&request.output_path)
-        .map_err(|error| format!("failed to create timeline: {error}"))?;
-
-    // M1 writes manual local-run events.  The future eBPF observer will replace
-    // these synthetic records with kernel-derived process/file/network events.
-    store
-        .append(&CanonicalEvent::new(
-            &session.id,
-            EventSource::Manual,
-            EventType::SessionStarted,
-            std::process::id(),
-            0,
-            "apolysis",
-            "local-session",
-            "start",
-        ))
-        .map_err(|error| format!("failed to write session event: {error}"))?;
-    store
-        .append(&CanonicalEvent::new(
-            &session.id,
-            EventSource::Manual,
-            EventType::Exec,
-            std::process::id(),
-            0,
-            &actor,
-            "process",
-            "exec",
-        ))
-        .map_err(|error| format!("failed to write exec event: {error}"))?;
-
-    let status = Command::new(&request.command[0])
-        .args(&request.command[1..])
-        .status()
-        .map_err(|error| format!("failed to start command: {error}"))?;
-
-    store
-        .append(&CanonicalEvent::new(
-            &session.id,
-            EventSource::Manual,
-            EventType::ProcessExit,
-            std::process::id(),
-            0,
-            &actor,
-            "process",
-            format!("exit:{}", status.code().unwrap_or(-1)),
-        ))
-        .map_err(|error| format!("failed to write exit event: {error}"))?;
-    store
-        .flush()
-        .map_err(|error| format!("failed to flush timeline: {error}"))?;
-
-    std::process::exit(status.code().unwrap_or(1));
+    let result = run_local(LocalRunRequest::new(
+        request.policy_path,
+        request.output_path,
+        request.command,
+    ))?;
+    Ok(result.exit_code)
 }
 
 #[derive(Debug, Eq, PartialEq)]

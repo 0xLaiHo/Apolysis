@@ -39,6 +39,7 @@ impl RuntimeKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EventSource {
     Manual,
+    ProcessTree,
     KernelTracepoint,
     BpfLsm,
     Uprobe,
@@ -50,6 +51,7 @@ impl EventSource {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Manual => "manual",
+            Self::ProcessTree => "process_tree",
             Self::KernelTracepoint => "kernel_tracepoint",
             Self::BpfLsm => "bpf_lsm",
             Self::Uprobe => "uprobe",
@@ -62,6 +64,7 @@ impl EventSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EventType {
     SessionStarted,
+    RuntimeMetadata,
     Exec,
     FileOpen,
     NetworkConnect,
@@ -73,6 +76,7 @@ impl EventType {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::SessionStarted => "session_started",
+            Self::RuntimeMetadata => "runtime_metadata",
             Self::Exec => "exec",
             Self::FileOpen => "file_open",
             Self::NetworkConnect => "network_connect",

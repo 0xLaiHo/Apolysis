@@ -1,0 +1,5 @@
+"record_type":"policy_violation"
+"rule_id":"runtime.max_seconds"
+"decision":"notify"
+"enforcement_backend":"signal_kill"
+"action":"killed:runtime.max_seconds"

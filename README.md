@@ -39,9 +39,10 @@ When all three layers agree, the platform can trust the session with higher
 confidence. When they diverge, Apolysis treats OS/runtime evidence as the
 starting point for investigation and future enforcement.
 
-M1 implements the first code foundation for the third layer using Rust-only
-audit-mode components. Kernel eBPF collection and BPF-LSM enforcement are
-planned but not enabled in this milestone.
+M2 implements the local runner foundation for the third layer using Rust-only
+audit-mode components. It records local sessions, process-tree attribution,
+runtime metadata, timeout notifications, and JSONL timelines. Kernel eBPF
+collection and BPF-LSM enforcement are planned but not enabled yet.
 
 ## 🚀 Runtime Scenarios
 
@@ -69,11 +70,11 @@ planned but not enabled in this milestone.
 
 ## 🛠️ Build And Run
 
-Requirements for M1:
+Requirements for M2:
 
 - 🦀 Rust stable toolchain
 - 📦 Cargo
-- 💻 Linux/macOS development shell for the current Rust-only foundation
+- 🐧 Linux development shell for process-tree attribution through `/proc`
 
 🔨 Build:
 
@@ -99,7 +100,7 @@ cargo clippy --all-targets --all-features
 cargo fmt --all
 ```
 
-▶️ Run the M1 local command wrapper:
+▶️ Run the M2 local command wrapper:
 
 ```bash
 cargo run -p apolysis-cli -- run \
@@ -114,7 +115,9 @@ cargo run -p apolysis-cli -- run \
 cat .apolysis/timeline.jsonl
 ```
 
-Expected M1 records include `session_started`, `exec`, and `process_exit`.
+Expected M2 records include `session_started`, `runtime_metadata`, `exec`, and
+`process_exit`. A timeout emits a `policy_violation` with
+`runtime.max_seconds` and terminates the local process tree.
 
 ## 📁 Repository Layout
 
@@ -122,11 +125,12 @@ Expected M1 records include `session_started`, `exec`, and `process_exit`.
 crates/
   apolysis-core/    Shared schema and JSONL records.
   apolysis-policy/  M1 policy parser and audit-only decisions.
+  apolysis-runtime/ M2 local runtime runner and process-tree attribution.
   apolysis-store/   Append-only JSONL timeline writer.
   apolysis-cli/     Local `apolysis run` command wrapper.
 policies/
-  local-dev.yaml    Default M1 audit policy.
-tests/fixtures/     Reusable local command fixtures for future M2/M4 work.
+  local-dev.yaml    Default audit policy.
+tests/fixtures/     Local command fixtures and expected timeline fragments.
 ```
 
 ## 🗺️ Feature Plan And Progress
@@ -134,7 +138,7 @@ tests/fixtures/     Reusable local command fixtures for future M2/M4 work.
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | M1 | Rust workspace, core schema, policy parser, JSONL store, local CLI wrapper, README | ✅ **Completed in this iteration** |
-| M2 | Local process session model, cgroup/process-tree attribution, richer fixtures | 🟡 Planned |
+| M2 | Local process session model, process-tree attribution, timeout notify, richer fixtures | ✅ **Completed in this iteration** |
 | M3 | Docker adapter with safe defaults and container metadata | 🟡 Planned |
 | M4 | eBPF audit-only observer for exec/file/network events | 🟡 Planned |
 | M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | 🟡 Planned |

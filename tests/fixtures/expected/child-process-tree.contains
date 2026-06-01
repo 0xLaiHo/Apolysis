@@ -1,0 +1,7 @@
+"event_source":"process_tree"
+"event_type":"runtime_metadata"
+"action":"mode:process_tree"
+bash -c python3 tests/fixtures/child.py
+python3 tests/fixtures/child.py
+"event_type":"process_exit"
+"action":"exit:0"
