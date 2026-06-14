@@ -10,8 +10,8 @@ fn adds_removes_and_deduplicates_cgroups() {
     assert_eq!(scopes.insert(42), Ok(true));
     assert_eq!(scopes.len(), 2);
     assert!(scopes.contains(41));
-    assert_eq!(scopes.remove(41), true);
-    assert_eq!(scopes.remove(41), false);
+    assert!(scopes.remove(41));
+    assert!(!scopes.remove(41));
     assert_eq!(scopes.iter().copied().collect::<Vec<_>>(), vec![42]);
 }
 

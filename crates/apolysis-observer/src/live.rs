@@ -356,11 +356,7 @@ pub fn enable_multi_cgroup_scope(ebpf: &mut Ebpf) -> Result<(), String> {
 }
 
 /// Add or remove one cgroup id from the daemon observer scope map.
-pub fn update_tracked_cgroup(
-    ebpf: &mut Ebpf,
-    cgroup_id: u64,
-    present: bool,
-) -> Result<(), String> {
+pub fn update_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64, present: bool) -> Result<(), String> {
     if cgroup_id == 0 {
         return Err("cgroup id must be non-zero".to_string());
     }

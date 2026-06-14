@@ -191,7 +191,9 @@ cargo run -p apolysis-cli -- visibility \
 
 ```text
 crates/
+  apolysis-accountability/ F2 intent、session、finding、queue 与 health contract。
   apolysis-core/    共享 schema 与 JSONL 记录。
+  apolysis-daemon/  节点本地 `apolysisd` Unix socket 服务。
   apolysis-feedback/ 面向 agent 的 violation feedback 文件。
   apolysis-kubernetes/ Kubernetes 与 Agent Sandbox metadata parser。
   apolysis-observer/ raw kernel event observer 与 policy evaluation pipeline。
@@ -233,7 +235,7 @@ tests/fixtures/     本地/Docker 命令测试夹具和预期 timeline 片段。
 | --- | --- | --- |
 | F0 | PoC baseline：M1-M7 schema、adapter、fixture observer、feedback、Kubernetes metadata、强隔离 visibility modeling | ✅ **Completed** |
 | F1 | Independent Observability MVP：live audit-only eBPF observer、CO-RE/Aya loader、process/file/network/credential timeline、loss accounting、redaction | ✅ **已完成** |
-| F2 | Accountability Beta：cross-layer comparison、Docker/containerd/Kubernetes metadata correlation、`Notify`/`Review` findings、feedback hook、metrics、本地 timeline integrity | 🚧 **Planned** |
+| F2 | Accountability Beta：`apolysisd`、cross-layer comparison、Docker/containerd/Kubernetes metadata correlation、`Notify`/`Review` findings、feedback、metrics、本地 timeline integrity | 🚧 **进行中：node-agent foundation 已实现** |
 | F3 | Limited Guardrails：真实描述 `Notify`/`Review`/`Kill`，只在能证明 pre-op prevention 的窄场景 prototype BPF-LSM/seccomp `Block` | 🚧 **Planned** |
 | F4 | Runtime Adapter Depth：Docker/containerd baseline、gVisor metadata adapter、Kubernetes Agent Sandbox metadata、Kata boundary-only mode、Firecracker research prototype | 🚧 **Planned** |
 | F5 | Production Hardening：DaemonSet privilege budget、multi-tenant storage、mTLS/RBAC、signed artifacts、SBOM、operator、大规模 chaos/performance testing | ⏳ **Deferred** |

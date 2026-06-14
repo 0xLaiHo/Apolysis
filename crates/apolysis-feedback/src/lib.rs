@@ -89,9 +89,7 @@ pub fn last_violation_path(directory: impl AsRef<Path>) -> PathBuf {
 
 /// Return the conventional machine-readable feedback path for a directory.
 pub fn last_violation_json_path(directory: impl AsRef<Path>) -> PathBuf {
-    directory
-        .as_ref()
-        .join(feedback::LAST_VIOLATION_JSON_FILE)
+    directory.as_ref().join(feedback::LAST_VIOLATION_JSON_FILE)
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {

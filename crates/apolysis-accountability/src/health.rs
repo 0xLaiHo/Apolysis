@@ -55,6 +55,10 @@ impl HealthSnapshot {
         self.storage = state;
     }
 
+    pub fn storage(&self) -> ComponentState {
+        self.storage
+    }
+
     pub fn set_adapter(&mut self, adapter: AdapterKind, state: ComponentState) {
         self.adapters.insert(adapter, state);
     }

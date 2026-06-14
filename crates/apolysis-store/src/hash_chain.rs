@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub const ZERO_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+pub const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChainRecord {
@@ -54,7 +53,10 @@ impl std::fmt::Display for StoreError {
             Self::Io(error) => write!(formatter, "hash-chain I/O failure: {error}"),
             Self::InvalidPayload(error) => write!(formatter, "invalid JSON payload: {error}"),
             Self::Integrity { sequence, detail } => {
-                write!(formatter, "hash-chain integrity failure at {sequence:?}: {detail}")
+                write!(
+                    formatter,
+                    "hash-chain integrity failure at {sequence:?}: {detail}"
+                )
             }
         }
     }
@@ -83,6 +85,7 @@ impl HashChainStore {
             let file = OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(false)
                 .open(&path)
                 .map_err(io_error)?;
             file.set_len(validation.valid_len as u64)
@@ -147,7 +150,8 @@ impl HashChainStore {
     }
 
     pub fn flush(&mut self) -> Result<(), StoreError> {
-        self.writer.flush().map_err(io_error)
+        self.writer.flush().map_err(io_error)?;
+        self.writer.get_ref().sync_data().map_err(io_error)
     }
 
     pub fn path(&self) -> &Path {

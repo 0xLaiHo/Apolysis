@@ -149,16 +149,13 @@ impl std::fmt::Display for IntentError {
 
 impl std::error::Error for IntentError {}
 
-pub fn decode_intent_frame(
-    frame: &[u8],
-    now_unix_ms: u64,
-) -> Result<IntentRequest, IntentError> {
+pub fn decode_intent_frame(frame: &[u8], now_unix_ms: u64) -> Result<IntentRequest, IntentError> {
     if frame.len() > MAX_INTENT_FRAME_BYTES {
         return Err(IntentError::FrameTooLarge(frame.len()));
     }
 
-    let request: IntentRequest =
-        serde_json::from_slice(frame).map_err(|error| IntentError::InvalidJson(error.to_string()))?;
+    let request: IntentRequest = serde_json::from_slice(frame)
+        .map_err(|error| IntentError::InvalidJson(error.to_string()))?;
     request.validate(now_unix_ms)?;
     Ok(request)
 }

@@ -62,8 +62,7 @@ async fn register_renew_query_and_close_update_session_state() {
         } if operation == "register" && session_id == "session-f2"
     ));
 
-    let renew =
-        br#"{"type":"renew","session_id":"session-f2","expires_at_unix_ms":4102444801000}"#;
+    let renew = br#"{"type":"renew","session_id":"session-f2","expires_at_unix_ms":4102444801000}"#;
     assert!(matches!(
         request(&server.config.socket_path, renew).await,
         DaemonResponse::Ack { operation, .. } if operation == "renew"
@@ -225,6 +224,52 @@ async fn restart_restores_active_session_and_continues_hash_chain() {
     cleanup(&config);
 }
 
+#[tokio::test]
+async fn failed_persistence_does_not_publish_session_state() {
+    let config = config("storage-failure", 16);
+    let blocked_timeline = config
+        .state_dir
+        .join("sessions/session-storage-failure/timeline.jsonl");
+    std::fs::create_dir_all(&blocked_timeline).unwrap();
+    let server = TestServer::start_config(config.clone()).await;
+    let register = br#"{
+        "type":"register",
+        "intent":{
+            "schema_version":1,
+            "session_id":"session-storage-failure",
+            "expires_at_unix_ms":4102444800000,
+            "declared_actions":["test"],
+            "allowed_resources":[],
+            "policy_ref":"policy.yaml",
+            "workload_selectors":[]
+        }
+    }"#;
+
+    assert!(matches!(
+        request(&config.socket_path, register).await,
+        DaemonResponse::Error { code, .. } if code == "state_error"
+    ));
+    assert!(matches!(
+        request(
+            &config.socket_path,
+            br#"{"type":"query","session_id":"session-storage-failure"}"#,
+        )
+        .await,
+        DaemonResponse::Session { session: None, .. }
+    ));
+    let DaemonResponse::Health { health, .. } =
+        request(&config.socket_path, br#"{"type":"health"}"#).await
+    else {
+        panic!("expected health response");
+    };
+    assert_eq!(
+        health.storage(),
+        apolysis_accountability::ComponentState::Unavailable
+    );
+
+    server.stop().await;
+}
+
 struct TestServer {
     config: DaemonConfig,
     shutdown: oneshot::Sender<()>,
@@ -297,10 +342,8 @@ async fn read_response(stream: &mut UnixStream) -> DaemonResponse {
 
 fn config(name: &str, max_connections: usize) -> DaemonConfig {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "apolysisd-test-{name}-{}-{id}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("apolysisd-test-{name}-{}-{id}", std::process::id()));
     DaemonConfig {
         socket_path: root.join("run/apolysisd.sock"),
         state_dir: root.join("state"),

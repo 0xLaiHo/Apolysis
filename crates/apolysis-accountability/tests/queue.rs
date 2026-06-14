@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use apolysis_accountability::{
-    BoundedPriorityQueue, PushOutcome, QueuePriority, QueueStats,
-};
+use apolysis_accountability::{BoundedPriorityQueue, PushOutcome, QueuePriority, QueueStats};
 
 #[test]
 fn preserves_fifo_order_within_each_priority() {

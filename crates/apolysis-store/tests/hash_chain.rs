@@ -70,10 +70,7 @@ fn truncated_tail_is_quarantined_and_valid_prefix_is_preserved() {
         .unwrap();
 
     let recovery = HashChainStore::create_or_recover(&path).expect("recover tail");
-    let quarantine = recovery
-        .quarantined_path
-        .clone()
-        .expect("quarantine path");
+    let quarantine = recovery.quarantined_path.clone().expect("quarantine path");
     assert_eq!(recovery.next_sequence, 2);
     assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
     assert_eq!(
@@ -120,8 +117,8 @@ fn corruption_before_a_later_record_fails_closed() {
     }
     corrupt_record_hash(&path, 1);
 
-    let error = HashChainStore::create_or_recover(&path)
-        .expect_err("middle corruption must fail closed");
+    let error =
+        HashChainStore::create_or_recover(&path).expect_err("middle corruption must fail closed");
     assert!(matches!(
         error,
         StoreError::Integrity {

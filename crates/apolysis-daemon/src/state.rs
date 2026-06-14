@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apolysis_accountability::{
@@ -19,6 +20,7 @@ pub struct DaemonState {
     health: RwLock<HealthSnapshot>,
     stores: Mutex<BTreeMap<String, HashChainStore>>,
     sessions_dir: PathBuf,
+    storage_writable: AtomicBool,
 }
 
 impl DaemonState {
@@ -32,8 +34,8 @@ impl DaemonState {
         for entry in std::fs::read_dir(&sessions_dir)
             .map_err(|error| format!("failed to scan daemon session state: {error}"))?
         {
-            let entry =
-                entry.map_err(|error| format!("failed to inspect daemon session state: {error}"))?;
+            let entry = entry
+                .map_err(|error| format!("failed to inspect daemon session state: {error}"))?;
             if !entry
                 .file_type()
                 .map_err(|error| format!("failed to inspect session state type: {error}"))?
@@ -63,6 +65,7 @@ impl DaemonState {
             health: RwLock::new(health),
             stores: Mutex::new(stores),
             sessions_dir,
+            storage_writable: AtomicBool::new(true),
         })
     }
 
@@ -71,10 +74,9 @@ impl DaemonState {
         intent: SessionIntent,
         now_unix_ms: u64,
     ) -> Result<RegisterOutcome, String> {
-        let outcome = self
-            .registry
-            .write()
-            .await
+        let mut registry = self.registry.write().await;
+        let mut candidate = registry.clone();
+        let outcome = candidate
             .register(intent.clone(), now_unix_ms)
             .map_err(registry_error)?;
         self.persist(
@@ -82,6 +84,7 @@ impl DaemonState {
             json!({"record_type":"intent_registered","intent":intent}),
         )
         .await?;
+        *registry = candidate;
         Ok(outcome)
     }
 
@@ -91,9 +94,9 @@ impl DaemonState {
         expires_at_unix_ms: u64,
         now_unix_ms: u64,
     ) -> Result<(), String> {
-        self.registry
-            .write()
-            .await
+        let mut registry = self.registry.write().await;
+        let mut candidate = registry.clone();
+        candidate
             .renew(session_id, expires_at_unix_ms, now_unix_ms)
             .map_err(registry_error)?;
         self.persist(
@@ -104,20 +107,22 @@ impl DaemonState {
                 "expires_at_unix_ms":expires_at_unix_ms
             }),
         )
-        .await
+        .await?;
+        *registry = candidate;
+        Ok(())
     }
 
     pub async fn close(&self, session_id: &str) -> Result<(), String> {
-        self.registry
-            .write()
-            .await
-            .close(session_id)
-            .map_err(registry_error)?;
+        let mut registry = self.registry.write().await;
+        let mut candidate = registry.clone();
+        candidate.close(session_id).map_err(registry_error)?;
         self.persist(
             session_id,
             json!({"record_type":"session_closed","session_id":session_id}),
         )
-        .await
+        .await?;
+        *registry = candidate;
+        Ok(())
     }
 
     pub async fn query(&self, session_id: &str) -> Option<SessionState> {
@@ -129,12 +134,26 @@ impl DaemonState {
     }
 
     async fn persist(&self, session_id: &str, payload: Value) -> Result<(), String> {
+        if !self.storage_writable.load(Ordering::Acquire) {
+            return Err(
+                "session storage is unavailable; restart after repairing storage".to_string(),
+            );
+        }
+        let result = self.persist_inner(session_id, payload).await;
+        if result.is_err() {
+            self.storage_writable.store(false, Ordering::Release);
+            self.health
+                .write()
+                .await
+                .set_storage(ComponentState::Unavailable);
+        }
+        result
+    }
+
+    async fn persist_inner(&self, session_id: &str, payload: Value) -> Result<(), String> {
         let mut stores = self.stores.lock().await;
         if !stores.contains_key(session_id) {
-            let timeline = self
-                .sessions_dir
-                .join(session_id)
-                .join("timeline.jsonl");
+            let timeline = self.sessions_dir.join(session_id).join("timeline.jsonl");
             let recovery = HashChainStore::create_or_recover(timeline)
                 .map_err(|error| format!("failed to recover session timeline: {error}"))?;
             stores.insert(session_id.to_string(), recovery.store);
@@ -164,11 +183,7 @@ fn replay_active_intent(
     let mut intent: Option<SessionIntent> = None;
     let mut closed = false;
     for record in records {
-        match record
-            .payload
-            .get("record_type")
-            .and_then(Value::as_str)
-        {
+        match record.payload.get("record_type").and_then(Value::as_str) {
             Some("intent_registered") => {
                 let value = record
                     .payload

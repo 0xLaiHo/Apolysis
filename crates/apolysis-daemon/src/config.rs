@@ -44,8 +44,7 @@ impl DaemonConfig {
                 "--max-pending" => config.max_pending = parse_usize(option, value)?,
                 "--max-connections" => config.max_connections = parse_usize(option, value)?,
                 "--request-timeout-ms" => {
-                    config.request_timeout =
-                        Duration::from_millis(parse_u64(option, value)?)
+                    config.request_timeout = Duration::from_millis(parse_u64(option, value)?)
                 }
                 unknown => return Err(format!("unknown argument: {unknown}")),
             }

@@ -19,12 +19,12 @@ fn registers_replaces_renews_and_closes_sessions() {
         registry.register(intent("session-a", NOW_MS + 2_000), NOW_MS),
         Ok(RegisterOutcome::Replaced)
     );
+    assert_eq!(registry.renew("session-a", NOW_MS + 3_000, NOW_MS), Ok(()));
     assert_eq!(
-        registry.renew("session-a", NOW_MS + 3_000, NOW_MS),
-        Ok(())
-    );
-    assert_eq!(
-        registry.get("session-a").expect("registered").expires_at_unix_ms,
+        registry
+            .get("session-a")
+            .expect("registered")
+            .expires_at_unix_ms,
         NOW_MS + 3_000
     );
 

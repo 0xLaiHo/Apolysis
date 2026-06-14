@@ -244,7 +244,9 @@ metadata is required, and whether a guest-side collector is required.
 
 ```text
 crates/
+  apolysis-accountability/ F2 intent, session, finding, queue, and health contracts.
   apolysis-core/    Shared schema and JSONL records.
+  apolysis-daemon/  Node-local `apolysisd` Unix socket service.
   apolysis-feedback/ Agent-facing violation feedback files.
   apolysis-kubernetes/ Kubernetes and Agent Sandbox metadata parser.
   apolysis-observer/ Raw kernel event observer and policy evaluation pipeline.
@@ -287,7 +289,7 @@ Focused roadmap:
 | --- | --- | --- |
 | F0 | PoC baseline: M1-M7 schema, adapters, fixture observer, feedback, Kubernetes metadata, strong-isolation visibility modeling | ✅ **Completed** |
 | F1 | Independent Observability MVP: live audit-only eBPF observer, CO-RE/Aya loader, process/file/network/credential timeline, loss accounting, redaction | ✅ **Completed** |
-| F2 | Accountability Beta: cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback hook, metrics, local timeline integrity | 🚧 **Planned** |
+| F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | 🚧 **In progress: node-agent foundation implemented** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | 🚧 **Planned** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | 🚧 **Planned** |
 | F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM, operator, large-scale chaos and performance testing | ⏳ **Deferred** |

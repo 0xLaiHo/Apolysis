@@ -84,6 +84,7 @@ impl std::fmt::Display for RegistryError {
 
 impl std::error::Error for RegistryError {}
 
+#[derive(Clone)]
 pub struct SessionRegistry {
     max_sessions: usize,
     max_pending: usize,
@@ -175,8 +176,7 @@ impl SessionRegistry {
             .sessions
             .iter()
             .filter(|(_, state)| {
-                state.status == SessionStatus::Active
-                    && state.expires_at_unix_ms <= now_unix_ms
+                state.status == SessionStatus::Active && state.expires_at_unix_ms <= now_unix_ms
             })
             .map(|(session_id, _)| session_id.clone())
             .collect();
@@ -275,11 +275,7 @@ impl SessionRegistry {
         Ok(())
     }
 
-    fn deactivate(
-        &mut self,
-        session_id: &str,
-        status: SessionStatus,
-    ) -> Result<(), RegistryError> {
+    fn deactivate(&mut self, session_id: &str, status: SessionStatus) -> Result<(), RegistryError> {
         let cgroup_ids = {
             let state = self
                 .sessions

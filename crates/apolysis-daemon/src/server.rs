@@ -98,17 +98,13 @@ pub async fn serve(
 
     drop(listener);
     while let Some(result) = handlers.join_next().await {
-        result
-            .map_err(|error| format!("daemon connection task failed: {error}"))??;
+        result.map_err(|error| format!("daemon connection task failed: {error}"))??;
     }
     remove_socket_if_socket(&config.socket_path)?;
     Ok(())
 }
 
-async fn handle_connection(
-    mut stream: UnixStream,
-    state: Arc<DaemonState>,
-) -> Result<(), String> {
+async fn handle_connection(mut stream: UnixStream, state: Arc<DaemonState>) -> Result<(), String> {
     let length = stream
         .read_u32()
         .await
@@ -137,11 +133,7 @@ async fn handle_connection(
     write_response(&mut stream, &response).await
 }
 
-async fn dispatch(
-    request: IntentRequest,
-    state: &DaemonState,
-    now_unix_ms: u64,
-) -> DaemonResponse {
+async fn dispatch(request: IntentRequest, state: &DaemonState, now_unix_ms: u64) -> DaemonResponse {
     match request {
         IntentRequest::Register { intent } => {
             let session_id = intent.session_id.clone();
@@ -180,10 +172,7 @@ async fn dispatch(
     }
 }
 
-async fn write_response(
-    stream: &mut UnixStream,
-    response: &DaemonResponse,
-) -> Result<(), String> {
+async fn write_response(stream: &mut UnixStream, response: &DaemonResponse) -> Result<(), String> {
     let bytes = serde_json::to_vec(response)
         .map_err(|error| format!("failed to serialize daemon response: {error}"))?;
     let length =
