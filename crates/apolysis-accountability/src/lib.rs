@@ -2,9 +2,14 @@
 
 //! Accountability contracts shared by the node daemon and runtime adapters.
 
+mod finding;
 mod intent;
 mod session;
 
+pub use finding::{
+    AccountabilityAnalyzer, AccountabilityFinding, EffectKind, EvidenceBoundary, FindingDecision,
+    FindingKind, ObservedEffect, RuntimeIdentity, FINDING_SCHEMA_V1,
+};
 pub use intent::{
     decode_intent_frame, ActionClass, IntentError, IntentRequest, ResourceKind, ResourceSelector,
     RuntimeSelector, SessionIntent, WorkloadSelector, INTENT_SCHEMA_V1, MAX_INTENT_FRAME_BYTES,
