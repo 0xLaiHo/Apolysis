@@ -1,0 +1,28 @@
+[package]
+name = "apolysis-daemon"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+apolysis-accountability = { path = "../apolysis-accountability" }
+apolysis-core = { path = "../apolysis-core" }
+apolysis-feedback = { path = "../apolysis-feedback" }
+apolysis-observer = { path = "../apolysis-observer" }
+apolysis-store = { path = "../apolysis-store" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+
+[[bin]]
+name = "apolysisd"
+path = "src/main.rs"
