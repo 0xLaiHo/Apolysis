@@ -338,6 +338,48 @@ fn configure_scope(ebpf: &mut Ebpf, scope: &LiveScope) -> Result<(), String> {
     Ok(())
 }
 
+/// Configure the observer to accept events from a dynamically managed cgroup set.
+pub fn enable_multi_cgroup_scope(ebpf: &mut Ebpf) -> Result<(), String> {
+    let config = ScopeConfig {
+        cgroup_id: 0,
+        root_pid: 0,
+        mode: 3,
+    };
+    let config_map = ebpf
+        .map_mut("APOLYSIS_CONFIG")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_CONFIG".to_string())?;
+    let mut config_array = Array::<_, ScopeConfig>::try_from(config_map)
+        .map_err(|error| format!("invalid APOLYSIS_CONFIG map: {error}"))?;
+    config_array
+        .set(0, config, 0)
+        .map_err(|error| format!("failed to configure multi-cgroup observer scope: {error}"))
+}
+
+/// Add or remove one cgroup id from the daemon observer scope map.
+pub fn update_tracked_cgroup(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+    present: bool,
+) -> Result<(), String> {
+    if cgroup_id == 0 {
+        return Err("cgroup id must be non-zero".to_string());
+    }
+    let tracked_map = ebpf
+        .map_mut("APOLYSIS_TRACKED_CGROUPS")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_CGROUPS".to_string())?;
+    let mut tracked = HashMap::<_, u64, u8>::try_from(tracked_map)
+        .map_err(|error| format!("invalid APOLYSIS_TRACKED_CGROUPS map: {error}"))?;
+    if present {
+        tracked
+            .insert(cgroup_id, 1, 0)
+            .map_err(|error| format!("failed to add cgroup observer scope: {error}"))
+    } else {
+        tracked
+            .remove(&cgroup_id)
+            .map_err(|error| format!("failed to remove cgroup observer scope: {error}"))
+    }
+}
+
 fn attach_tracepoints(ebpf: &mut Ebpf, plan: &AyaLoaderPlan) -> Result<(), String> {
     for attach in &plan.tracepoints {
         let program_name = attach.program_name();

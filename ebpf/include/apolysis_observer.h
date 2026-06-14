@@ -29,6 +29,7 @@ enum apolysis_event_flags {
 enum apolysis_scope_mode {
     APOLYSIS_SCOPE_CGROUP = 1,
     APOLYSIS_SCOPE_PID_TREE = 2,
+    APOLYSIS_SCOPE_MULTI_CGROUP = 3,
 };
 
 struct apolysis_scope_config {

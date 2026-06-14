@@ -12,9 +12,14 @@ pub mod abi;
 pub mod capabilities;
 mod live;
 mod redaction;
+mod scope;
 
-pub use live::{observe_live, raw_event_from_record, LiveObserveRequest, LiveScope};
+pub use live::{
+    enable_multi_cgroup_scope, observe_live, raw_event_from_record, update_tracked_cgroup,
+    LiveObserveRequest, LiveScope,
+};
 pub use redaction::{RedactedValue, Redactor};
+pub use scope::{ScopeSet, ScopeSetError, MAX_TRACKED_CGROUPS};
 
 use std::fs;
 use std::path::{Path, PathBuf};

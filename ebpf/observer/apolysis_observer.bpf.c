@@ -32,6 +32,13 @@ struct {
 } APOLYSIS_TRACKED_PIDS SEC(".maps");
 
 struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, unsigned long long);
+    __type(value, unsigned char);
+} APOLYSIS_TRACKED_CGROUPS SEC(".maps");
+
+struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
     __type(key, unsigned int);
@@ -76,6 +83,7 @@ static __always_inline bool pid_is_tracked(unsigned int pid)
 static __always_inline bool current_is_in_scope(void)
 {
     struct apolysis_scope_config *config = scope_config();
+    unsigned long long cgroup_id;
     unsigned int pid;
 
     if (!config)
@@ -83,6 +91,11 @@ static __always_inline bool current_is_in_scope(void)
 
     if (config->mode == APOLYSIS_SCOPE_CGROUP)
         return config->cgroup_id == bpf_get_current_cgroup_id();
+
+    if (config->mode == APOLYSIS_SCOPE_MULTI_CGROUP) {
+        cgroup_id = bpf_get_current_cgroup_id();
+        return bpf_map_lookup_elem(&APOLYSIS_TRACKED_CGROUPS, &cgroup_id) != 0;
+    }
 
     if (config->mode != APOLYSIS_SCOPE_PID_TREE)
         return false;
@@ -193,8 +206,7 @@ int apolysis_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
         child_pid = ctx->child_pid;
         if (bpf_map_update_elem(&APOLYSIS_TRACKED_PIDS, &child_pid, &tracked, BPF_NOEXIST))
             count_map_pressure();
-    } else if (config->mode != APOLYSIS_SCOPE_CGROUP ||
-               config->cgroup_id != bpf_get_current_cgroup_id()) {
+    } else if (!current_is_in_scope()) {
         return 0;
     }
 
