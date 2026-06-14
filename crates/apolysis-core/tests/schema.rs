@@ -2,8 +2,8 @@
 
 use apolysis_core::{
     actions, actors, env, feedback, records, resources, runtimes, CanonicalEvent,
-    EnforcementBackend, EventSource, EventType, PolicyDecision, PolicyViolation, RawKernelEvent,
-    RuntimeKind, SandboxSession,
+    EnforcementBackend, EventSource, EventType, ObserverDiagnostic, ObserverDiagnosticKind,
+    PolicyDecision, PolicyViolation, RawKernelEvent, RuntimeKind, SandboxSession,
 };
 
 #[test]
@@ -12,6 +12,7 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
     assert_eq!(records::EVENT, "event");
     assert_eq!(records::RAW_KERNEL_EVENT, "raw_kernel_event");
     assert_eq!(records::POLICY_VIOLATION, "policy_violation");
+    assert_eq!(records::OBSERVER_DIAGNOSTIC, "observer_diagnostic");
     assert_eq!(actors::APOLYSIS, "apolysis");
     assert_eq!(actors::DOCKER, "docker");
     assert_eq!(runtimes::FIRECRACKER, "firecracker");
@@ -20,6 +21,23 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
     assert_eq!(actions::EXEC, "exec");
     assert_eq!(env::SESSION_ID, "APOLYSIS_SESSION_ID");
     assert_eq!(feedback::VIOLATION_TAG, "APOLYSIS_VIOLATION");
+}
+
+#[test]
+fn observer_diagnostic_json_line_records_typed_loss_evidence() {
+    let diagnostic = ObserverDiagnostic::new(
+        "session-1",
+        ObserverDiagnosticKind::RingBufferReserveFailure,
+        7,
+        "kernel counter",
+    );
+
+    let line = diagnostic.to_json_line();
+
+    assert!(line.contains(r#""record_type":"observer_diagnostic""#));
+    assert!(line.contains(r#""kind":"ring_buffer_reserve_failure""#));
+    assert!(line.contains(r#""count":7"#));
+    assert!(line.contains(r#""detail":"kernel counter""#));
 }
 
 #[test]

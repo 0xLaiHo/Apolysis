@@ -17,6 +17,8 @@ pub mod records {
     pub const RAW_KERNEL_EVENT: &str = "raw_kernel_event";
     /// A policy decision that should be visible to operators or agent hooks.
     pub const POLICY_VIOLATION: &str = "policy_violation";
+    /// Observer loss, truncation, lifecycle, or summary evidence.
+    pub const OBSERVER_DIAGNOSTIC: &str = "observer_diagnostic";
     /// A runtime visibility assessment for strong-isolation backends.
     pub const VISIBILITY_ASSESSMENT: &str = "visibility_assessment";
 }
@@ -81,6 +83,8 @@ pub mod resources {
     pub const OBSERVER_BACKEND: &str = "observer-backend";
     /// Observer runner plan metadata.
     pub const OBSERVER_RUNNERS: &str = "observer-runners";
+    /// Live observer session scope metadata.
+    pub const OBSERVER_SCOPE: &str = "observer-scope";
     /// BPF-LSM capability metadata.
     pub const BPF_LSM: &str = "bpf-lsm";
     /// Kubernetes pod name metadata.

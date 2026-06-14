@@ -25,6 +25,8 @@ pub(crate) mod values {
     pub(crate) const DOCKER: &str = apolysis_core::runtimes::DOCKER;
     /// Fixture-backed observer input.
     pub(crate) const FIXTURE: &str = "fixture";
+    /// Live Aya ring-buffer observer.
+    pub(crate) const LIVE: &str = "live";
 }
 
 /// Shared CLI option names.
@@ -51,6 +53,16 @@ pub(crate) mod options {
     pub(crate) const FEEDBACK_DIR: &str = "--feedback-dir";
     /// Kubernetes metadata fixture or snapshot path.
     pub(crate) const KUBERNETES_METADATA: &str = "--kubernetes-metadata";
+    /// CO-RE eBPF object path for the live observer.
+    pub(crate) const BPF_OBJECT: &str = "--bpf-object";
+    /// Cgroup v2 id used for kernel-side live event filtering.
+    pub(crate) const SCOPE_CGROUP: &str = "--scope-cgroup";
+    /// Root pid used for process-tree live event filtering.
+    pub(crate) const SCOPE_PID: &str = "--scope-pid";
+    /// Optional deterministic observer runtime.
+    pub(crate) const DURATION_SECONDS: &str = "--duration-seconds";
+    /// Workspace root whose file paths may be persisted without tokenization.
+    pub(crate) const WORKSPACE_ROOT: &str = "--workspace-root";
     /// Visibility validation scenario selector.
     pub(crate) const SCENARIO: &str = "--scenario";
 }
@@ -61,7 +73,7 @@ pub(crate) const DEFAULT_TIMELINE_PATH: &str = ".apolysis/timeline.jsonl";
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
     format!(
-        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]",
+        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>) [{workspace_root} <path>] [{duration_seconds} <n>] [{feedback_dir} <path>]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]",
         run = commands::RUN,
         observe = commands::OBSERVE,
         visibility = commands::VISIBILITY,
@@ -75,10 +87,16 @@ pub(crate) fn usage() -> String {
         separator = options::COMMAND_SEPARATOR,
         backend = options::BACKEND,
         fixture = values::FIXTURE,
+        live = values::LIVE,
         input = options::INPUT,
         session = options::SESSION,
         feedback_dir = options::FEEDBACK_DIR,
         kubernetes_metadata = options::KUBERNETES_METADATA,
+        bpf_object = options::BPF_OBJECT,
+        scope_cgroup = options::SCOPE_CGROUP,
+        scope_pid = options::SCOPE_PID,
+        duration_seconds = options::DURATION_SECONDS,
+        workspace_root = options::WORKSPACE_ROOT,
         scenario = options::SCENARIO,
     )
 }

@@ -2,7 +2,11 @@
 
 mod cli;
 
-use apolysis_observer::{observe_fixture, FixtureObserveRequest};
+use std::time::Duration;
+
+use apolysis_observer::{
+    observe_fixture, observe_live, FixtureObserveRequest, LiveObserveRequest, LiveScope,
+};
 use apolysis_runtime::{run_docker, run_local, DockerRunRequest, LocalRunRequest};
 use apolysis_visibility::{assess_visibility, RuntimeVisibilityProfile, VisibilityInput};
 use cli::{commands, options, values};
@@ -22,7 +26,7 @@ async fn main() {
 async fn run(args: Vec<String>) -> Result<i32, String> {
     match args.first().map(String::as_str) {
         Some(commands::RUN) => run_command(args),
-        Some(commands::OBSERVE) => observe_command(args),
+        Some(commands::OBSERVE) => observe_command(args).await,
         Some(commands::VISIBILITY) => visibility_command(args).await,
         _ => Err(usage()),
     }
@@ -85,13 +89,15 @@ async fn visibility_command(args: Vec<String>) -> Result<i32, String> {
     Ok(0)
 }
 
-fn observe_command(args: Vec<String>) -> Result<i32, String> {
+async fn observe_command(args: Vec<String>) -> Result<i32, String> {
     let request = ObserveRequest::parse(args)?;
     match request.backend {
         ObserverBackendSelection::Fixture => {
             observe_fixture(
                 FixtureObserveRequest::new(
-                    request.input_path,
+                    request
+                        .input_path
+                        .expect("fixture request validation requires input"),
                     request.output_path,
                     request.policy_path,
                     request.session_id,
@@ -99,6 +105,29 @@ fn observe_command(args: Vec<String>) -> Result<i32, String> {
                 .with_feedback_dir(request.feedback_dir)
                 .with_kubernetes_metadata_path(request.kubernetes_metadata_path),
             )?;
+            Ok(0)
+        }
+        ObserverBackendSelection::Live => {
+            observe_live(LiveObserveRequest {
+                object_path: request
+                    .bpf_object_path
+                    .expect("live request validation requires a BPF object")
+                    .into(),
+                output_path: request.output_path.into(),
+                policy_path: request.policy_path.into(),
+                session_id: request.session_id,
+                feedback_dir: request.feedback_dir.map(Into::into),
+                scope: request
+                    .live_scope
+                    .expect("live request validation requires a scope"),
+                duration: request.duration_seconds.map(Duration::from_secs),
+                workspace_root: request.workspace_root.map(Into::into).unwrap_or(
+                    std::env::current_dir().map_err(|error| {
+                        format!("failed to resolve current workspace root: {error}")
+                    })?,
+                ),
+            })
+            .await?;
             Ok(0)
         }
     }
@@ -221,12 +250,16 @@ impl RunRequest {
 #[derive(Debug, Eq, PartialEq)]
 struct ObserveRequest {
     backend: ObserverBackendSelection,
-    input_path: String,
+    input_path: Option<String>,
     output_path: String,
     policy_path: String,
     session_id: String,
     feedback_dir: Option<String>,
     kubernetes_metadata_path: Option<String>,
+    bpf_object_path: Option<String>,
+    live_scope: Option<LiveScope>,
+    duration_seconds: Option<u64>,
+    workspace_root: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -241,6 +274,7 @@ struct VisibilityRequest {
 #[derive(Debug, Eq, PartialEq)]
 enum ObserverBackendSelection {
     Fixture,
+    Live,
 }
 
 impl ObserveRequest {
@@ -256,6 +290,11 @@ impl ObserveRequest {
         let mut session_id = None;
         let mut feedback_dir = None;
         let mut kubernetes_metadata_path = None;
+        let mut bpf_object_path = None;
+        let mut scope_cgroup = None;
+        let mut scope_pid = None;
+        let mut duration_seconds = None;
+        let mut workspace_root = None;
         let mut i = 1;
 
         while i < args.len() {
@@ -288,6 +327,26 @@ impl ObserveRequest {
                     i += 1;
                     kubernetes_metadata_path = args.get(i).cloned();
                 }
+                options::BPF_OBJECT => {
+                    i += 1;
+                    bpf_object_path = args.get(i).cloned();
+                }
+                options::SCOPE_CGROUP => {
+                    i += 1;
+                    scope_cgroup = parse_option::<u64>(&args, i, options::SCOPE_CGROUP)?;
+                }
+                options::SCOPE_PID => {
+                    i += 1;
+                    scope_pid = parse_option::<u32>(&args, i, options::SCOPE_PID)?;
+                }
+                options::DURATION_SECONDS => {
+                    i += 1;
+                    duration_seconds = parse_option::<u64>(&args, i, options::DURATION_SECONDS)?;
+                }
+                options::WORKSPACE_ROOT => {
+                    i += 1;
+                    workspace_root = args.get(i).cloned();
+                }
                 unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
             }
             i += 1;
@@ -298,13 +357,60 @@ impl ObserveRequest {
             .as_str()
         {
             values::FIXTURE => ObserverBackendSelection::Fixture,
+            values::LIVE => ObserverBackendSelection::Live,
             unknown => return Err(format!("unknown observer backend '{unknown}'\n{}", usage())),
         };
 
+        let live_scope = match (scope_cgroup, scope_pid) {
+            (Some(id), None) => Some(LiveScope::Cgroup(id)),
+            (None, Some(pid)) => Some(LiveScope::ProcessTree(pid)),
+            (None, None) if backend == ObserverBackendSelection::Live => {
+                return Err(
+                    "live observer requires exactly one of --scope-cgroup or --scope-pid"
+                        .to_string(),
+                );
+            }
+            (Some(_), Some(_)) => {
+                return Err(
+                    "live observer requires exactly one of --scope-cgroup or --scope-pid"
+                        .to_string(),
+                );
+            }
+            (None, None) => None,
+        };
+
+        match backend {
+            ObserverBackendSelection::Fixture => {
+                if bpf_object_path.is_some()
+                    || live_scope.is_some()
+                    || duration_seconds.is_some()
+                    || workspace_root.is_some()
+                {
+                    return Err("live observer options require --backend live".to_string());
+                }
+                if input_path.is_none() {
+                    return Err(format!("missing {}\n{}", options::INPUT, usage()));
+                }
+            }
+            ObserverBackendSelection::Live => {
+                if input_path.is_some() {
+                    return Err("--input is only valid with --backend fixture".to_string());
+                }
+                if kubernetes_metadata_path.is_some() {
+                    return Err(
+                        "--kubernetes-metadata is not supported by --backend live in F1"
+                            .to_string(),
+                    );
+                }
+                if bpf_object_path.is_none() {
+                    return Err(format!("missing {}\n{}", options::BPF_OBJECT, usage()));
+                }
+            }
+        }
+
         Ok(Self {
             backend,
-            input_path: input_path
-                .ok_or_else(|| format!("missing {}\n{}", options::INPUT, usage()))?,
+            input_path,
             output_path: output_path
                 .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
             policy_path: policy_path
@@ -313,8 +419,26 @@ impl ObserveRequest {
                 .ok_or_else(|| format!("missing {}\n{}", options::SESSION, usage()))?,
             feedback_dir,
             kubernetes_metadata_path,
+            bpf_object_path,
+            live_scope,
+            duration_seconds,
+            workspace_root,
         })
     }
+}
+
+fn parse_option<T>(args: &[String], index: usize, option: &str) -> Result<Option<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let value = args
+        .get(index)
+        .ok_or_else(|| format!("missing {option} value\n{}", usage()))?;
+    value
+        .parse()
+        .map(Some)
+        .map_err(|error| format!("invalid {option} value '{value}': {error}"))
 }
 
 impl VisibilityRequest {

@@ -8,6 +8,14 @@
 //! metadata, and agent-facing feedback while keeping real blocking disabled
 //! until BPF-LSM support is proven at runtime.
 
+pub mod abi;
+pub mod capabilities;
+mod live;
+mod redaction;
+
+pub use live::{observe_live, raw_event_from_record, LiveObserveRequest, LiveScope};
+pub use redaction::{RedactedValue, Redactor};
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -156,6 +164,14 @@ impl AyaLoaderPlan {
             ],
         }
     }
+
+    /// Return the F1 live observer attachment set.
+    pub fn f1_default(object_path: impl Into<PathBuf>) -> Self {
+        let mut plan = Self::m4_default(object_path);
+        plan.tracepoints
+            .insert(1, TracepointAttach::new("sched", "sched_process_fork"));
+        plan
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,6 +188,10 @@ impl TracepointAttach {
             name: name.into(),
         }
     }
+
+    pub fn program_name(&self) -> String {
+        format!("apolysis_{}", self.name)
+    }
 }
 
 /// Replay a raw observer fixture into raw, canonical, and policy timeline records.
@@ -186,6 +206,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
     write_observer_metadata(
         &request.session_id,
         &runner_plan,
+        ObserverBackend::FixtureRingBuffer,
         policy.startup_downgrade(&capabilities),
         &mut store,
     )?;
@@ -221,6 +242,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
             &policy,
             &capabilities,
             feedback.as_ref(),
+            None,
             &mut store,
         )?;
         canonical_count += 1;
@@ -262,6 +284,7 @@ fn write_kubernetes_metadata(
 fn write_observer_metadata(
     session_id: &str,
     runner_plan: &ObserverRunnerPlan,
+    backend: ObserverBackend,
     startup_downgrade: Option<DecisionDowngrade>,
     store: &mut JsonlStore,
 ) -> Result<(), String> {
@@ -270,10 +293,7 @@ fn write_observer_metadata(
             resources::OBSERVER_MODE,
             ObserverMode::AuditOnly.as_str().to_string(),
         ),
-        (
-            resources::OBSERVER_BACKEND,
-            ObserverBackend::FixtureRingBuffer.as_str().to_string(),
-        ),
+        (resources::OBSERVER_BACKEND, backend.as_str().to_string()),
         (resources::OBSERVER_RUNNERS, runner_plan.summary()),
     ] {
         let event = CanonicalEvent::new(
@@ -319,6 +339,7 @@ fn append_policy_evaluation(
     policy: &Policy,
     capabilities: &PolicyRuntimeCapabilities,
     feedback: Option<&FeedbackWriter>,
+    persisted_target: Option<&str>,
     store: &mut JsonlStore,
 ) -> Result<(), String> {
     let evaluation = policy.evaluate_event(canonical, capabilities);
@@ -340,7 +361,7 @@ fn append_policy_evaluation(
         evaluation.decision.core_decision(),
         reason,
         canonical.pid,
-        &canonical.resource,
+        persisted_target.unwrap_or(&canonical.resource),
         evaluation.enforcement_backend,
     );
     store
@@ -369,6 +390,7 @@ fn canonicalize(raw: &RawKernelEvent, policy: &Policy) -> CanonicalEvent {
         "unlink" | "unlinkat" => EventType::FileUnlink,
         "rename" | "renameat" | "renameat2" => EventType::FileRename,
         "connect" => EventType::NetworkConnect,
+        "sched_process_exit" | "process_exit" => EventType::ProcessExit,
         _ => EventType::RuntimeMetadata,
     };
 
@@ -458,12 +480,26 @@ mod tests {
 
     #[test]
     fn m4_default_aya_loader_plan_names_tracepoints_and_ring_buffer() {
-        let plan = AyaLoaderPlan::m4_default("ebpf/prebuilt/apolysis-observer.bpf.o");
+        let plan = AyaLoaderPlan::f1_default("target/ebpf/apolysis_observer.bpf.o");
 
         assert_eq!(plan.ring_buffer_map, "APOLYSIS_EVENTS");
+        assert_eq!(plan.tracepoints.len(), 10);
+        assert_eq!(
+            plan.tracepoints
+                .iter()
+                .filter(|attach| attach.name == "sched_process_exit")
+                .count(),
+            1
+        );
         assert!(plan
             .tracepoints
             .contains(&TracepointAttach::new("sched", "sched_process_exec")));
+        assert!(plan
+            .tracepoints
+            .contains(&TracepointAttach::new("sched", "sched_process_fork")));
+        assert!(plan
+            .tracepoints
+            .contains(&TracepointAttach::new("sched", "sched_process_exit")));
         assert!(plan
             .tracepoints
             .contains(&TracepointAttach::new("syscalls", "sys_enter_connect")));
@@ -477,5 +513,30 @@ mod tests {
             plan.summary(),
             "process:enabled,system:enabled,stdio:disabled,ssl-http-uprobe:disabled"
         );
+    }
+
+    #[test]
+    fn live_process_exit_maps_to_the_canonical_process_exit_type() {
+        let policy = Policy::default();
+        let raw = RawKernelEvent::new(
+            1,
+            "session-live",
+            EventSource::KernelTracepoint,
+            "sched_process_exit",
+            42,
+            1,
+            1000,
+            1000,
+            "python3",
+            "",
+            "exit",
+            None,
+            Some("77".to_string()),
+            "",
+        );
+
+        let canonical = canonicalize(&raw, &policy);
+
+        assert_eq!(canonical.event_type, EventType::ProcessExit);
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::process::Command;
+use std::time::Duration;
 
 #[test]
 fn observe_fixture_ring_buffer_writes_raw_and_canonical_timeline() {
@@ -197,10 +198,200 @@ fn observe_fixture_preserves_policy_feedback_with_kubernetes_metadata() {
     let _ = std::fs::remove_dir_all(&feedback_dir);
 }
 
+#[test]
+fn observe_live_requires_exactly_one_session_scope() {
+    let output = temp_jsonl("apolysis-observe-live-scope");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-f1-live",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/apolysis_observer.bpf.o",
+            "--duration-seconds",
+            "1",
+        ])
+        .output()
+        .expect("run apolysis observe live");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("live observer requires exactly one of --scope-cgroup or --scope-pid"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn observe_live_rejects_fixture_input() {
+    let output = temp_jsonl("apolysis-observe-live-input");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--input",
+            "tests/fixtures/raw-kernel-events.txt",
+            "--session",
+            "session-f1-live",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/apolysis_observer.bpf.o",
+            "--scope-cgroup",
+            "42",
+            "--duration-seconds",
+            "1",
+        ])
+        .output()
+        .expect("run apolysis observe live");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("--input is only valid with --backend fixture"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn observe_live_validates_the_bpf_object_before_loading() {
+    let output = temp_jsonl("apolysis-observe-live-object");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-f1-live",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/does-not-exist.bpf.o",
+            "--scope-pid",
+            &std::process::id().to_string(),
+            "--duration-seconds",
+            "1",
+        ])
+        .output()
+        .expect("run apolysis observe live");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("BPF object does not exist"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+#[ignore = "requires Linux BTF, tracepoints, cgroup v2, CAP_BPF, and CAP_PERFMON"]
+fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
+    use std::io::Write as _;
+    use std::net::TcpListener;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let output = temp_jsonl("apolysis-observe-live-smoke");
+    let fixture_dir = temp_dir("apolysis-live-fixture");
+    let credential_path = fixture_dir.join(".env");
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_dir_all(&fixture_dir);
+    std::fs::create_dir_all(&fixture_dir).expect("create live fixture directory");
+    std::fs::File::create(&credential_path)
+        .and_then(|mut file| file.write_all(b"APOLYSIS_TEST_SECRET=do-not-persist\n"))
+        .expect("write credential fixture");
+
+    let cgroup_path = current_cgroup_path();
+    let cgroup_id = std::fs::metadata(&cgroup_path)
+        .expect("stat current cgroup")
+        .ino()
+        .to_string();
+
+    let mut observer = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-f1-live-smoke",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/apolysis_observer.bpf.o",
+            "--scope-cgroup",
+            &cgroup_id,
+            "--workspace-root",
+            workspace_root().to_str().expect("utf-8 workspace root"),
+            "--duration-seconds",
+            "3",
+        ])
+        .spawn()
+        .expect("spawn live observer");
+
+    std::thread::sleep(Duration::from_millis(800));
+
+    let status = Command::new("cat")
+        .arg(&credential_path)
+        .status()
+        .expect("read credential fixture");
+    assert!(status.success());
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+    let port = listener.local_addr().expect("listener address").port();
+    let accept = std::thread::spawn(move || listener.accept().expect("accept local connection"));
+    let status = Command::new("python3")
+        .args(["tests/fixtures/connect.py", "127.0.0.1", &port.to_string()])
+        .current_dir(workspace_root())
+        .status()
+        .expect("run network fixture");
+    assert!(status.success());
+    drop(accept.join().expect("join listener").0);
+
+    let status = observer.wait().expect("wait for live observer");
+    assert!(status.success());
+
+    let timeline = std::fs::read_to_string(&output).expect("read live timeline");
+    assert!(timeline.contains(r#""action":"aya_ring_buffer""#));
+    assert!(timeline.contains(r#""resource":"observer-scope""#));
+    assert!(timeline.contains(r#""record_type":"raw_kernel_event""#));
+    assert!(timeline.contains(r#""event_type":"exec""#));
+    assert!(timeline.contains(r#""event_type":"credential_read""#));
+    assert!(timeline.contains(r#""event_type":"network_connect""#));
+    assert!(timeline.contains(r#""record_type":"policy_violation""#));
+    assert!(timeline.contains(r#""kind":"summary""#));
+    assert!(!timeline.contains(credential_path.to_str().expect("utf-8 credential path")));
+    assert!(!timeline.contains("APOLYSIS_TEST_SECRET"));
+    assert!(!timeline.contains("127.0.0.1"));
+
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_dir_all(&fixture_dir);
+}
+
 fn apolysis_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_apolysis"));
     command.current_dir(workspace_root());
     command
+}
+
+fn current_cgroup_path() -> std::path::PathBuf {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").expect("read process cgroup");
+    let relative = cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .expect("cgroup v2 entry");
+    std::path::Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'))
 }
 
 fn workspace_root() -> std::path::PathBuf {

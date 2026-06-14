@@ -390,6 +390,75 @@ impl JsonLine for RawKernelEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObserverDiagnosticKind {
+    RingBufferReserveFailure,
+    MapPressure,
+    DecodeFailure,
+    Truncation,
+    AttachFailure,
+    VerifierFailure,
+    Summary,
+}
+
+impl ObserverDiagnosticKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RingBufferReserveFailure => "ring_buffer_reserve_failure",
+            Self::MapPressure => "map_pressure",
+            Self::DecodeFailure => "decode_failure",
+            Self::Truncation => "truncation",
+            Self::AttachFailure => "attach_failure",
+            Self::VerifierFailure => "verifier_failure",
+            Self::Summary => "summary",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObserverDiagnostic {
+    pub timestamp_unix_ms: u128,
+    pub session_id: String,
+    pub kind: ObserverDiagnosticKind,
+    pub count: u64,
+    pub detail: String,
+}
+
+impl ObserverDiagnostic {
+    pub fn new(
+        session_id: impl Into<String>,
+        kind: ObserverDiagnosticKind,
+        count: u64,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            timestamp_unix_ms: now_unix_ms(),
+            session_id: session_id.into(),
+            kind,
+            count,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn to_json_line(&self) -> String {
+        <Self as JsonLine>::to_json_line(self)
+    }
+}
+
+impl JsonLine for ObserverDiagnostic {
+    fn to_json_line(&self) -> String {
+        format!(
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"kind\":{},\"count\":{},\"detail\":{}}}",
+            json_string(records::OBSERVER_DIAGNOSTIC),
+            self.timestamp_unix_ms,
+            json_string(&self.session_id),
+            json_string(self.kind.as_str()),
+            self.count,
+            json_string(&self.detail)
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyViolation {
     pub timestamp_unix_ms: u128,
     pub session_id: String,

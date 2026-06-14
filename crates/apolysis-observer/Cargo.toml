@@ -11,6 +11,10 @@ apolysis-feedback = { path = "../apolysis-feedback" }
 apolysis-kubernetes = { path = "../apolysis-kubernetes" }
 apolysis-policy = { path = "../apolysis-policy" }
 apolysis-store = { path = "../apolysis-store" }
+aya.workspace = true
+libc.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "time"] }
 
 [lib]
 path = "src/lib.rs"

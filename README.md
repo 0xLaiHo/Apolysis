@@ -39,13 +39,15 @@ When all three layers agree, the platform can trust the session with higher
 confidence. When they diverge, Apolysis treats OS/runtime evidence as the
 starting point for investigation and future enforcement.
 
-M7 implements the first strong-isolation visibility validation path for the
-third layer. It records local sessions, process-tree attribution, Docker runtime
-metadata, Kubernetes pod metadata, fixture ring-buffer events, raw kernel-event
-records, canonical side-effect events, policy violations, downgrade metadata,
-feedback files, visibility assessments, and JSONL timelines. The repository now
-includes the eBPF observer ABI and attach point skeleton; BPF-LSM enforcement is
-modeled and capability-gated, but real kernel blocking is not enabled yet.
+F0 (M1-M7) completes the first PoC baseline for the third layer. It records
+local sessions, process-tree attribution, Docker runtime metadata, Kubernetes
+pod metadata, fixture ring-buffer events, raw kernel-event records, canonical
+side-effect events, policy violations, downgrade metadata, feedback files,
+visibility assessments, and JSONL timelines. F1 now implements a scoped, live,
+audit-only eBPF observer with a CO-RE build, Aya loader, process/file/network
+events, loss diagnostics, and persistence-time redaction. Its privileged
+live-host validation is complete. BPF-LSM enforcement remains modeled and
+capability-gated; real kernel blocking is not enabled.
 
 ## 🚀 Runtime Scenarios
 
@@ -73,7 +75,7 @@ modeled and capability-gated, but real kernel blocking is not enabled yet.
 
 ## 🛠️ Build And Run
 
-Requirements for M7:
+Requirements for the current F0 baseline and F1 implementation:
 
 - 🦀 Rust stable toolchain
 - 📦 Cargo
@@ -82,22 +84,22 @@ Requirements for M7:
 - 🧬 eBPF development uses `clang`, `llvm-strip`, `bpftool`, BTF, and elevated
   capabilities; normal tests use fixture ring-buffer records and do not need root
 
-🔨 Build:
+🔨 Build Rust and the CO-RE object:
 
 ```bash
-cargo build
+make build
 ```
 
 ✅ Run tests:
 
 ```bash
-cargo test
+make test
 ```
 
 🧹 Run Clippy:
 
 ```bash
-cargo clippy --all-targets --all-features
+make lint
 ```
 
 🎨 Format:
@@ -170,6 +172,24 @@ events. The M4 event set covers `exec`, `open/openat/openat2`, `creat`,
 The default runner plan enables process/system runners and keeps stdio plus
 SSL/HTTP uprobes disabled until later milestones.
 
+🧬 Run the F1 live audit-only observer on a capable Linux host:
+
+```bash
+make build-ebpf
+make build
+sudo -E ./target/debug/apolysis observe \
+  --backend live \
+  --session session-f1-live \
+  --policy policies/local-dev.yaml \
+  --output .apolysis/live-timeline.jsonl \
+  --bpf-object target/ebpf/apolysis_observer.bpf.o \
+  --scope-pid <root-pid> \
+  --workspace-root "$PWD"
+```
+
+Use `make test-live` for the capability-aware smoke test. The live backend is
+audit-only and does not perform pre-operation blocking.
+
 🛡️ Run the M5 policy-feedback path:
 
 ```bash
@@ -218,8 +238,7 @@ cargo run -p apolysis-cli -- visibility \
 The validator compares host-side observer fixtures for Docker default,
 Docker+gVisor, Kubernetes+gVisor, Kubernetes+Kata, and Firecracker boundary
 scenarios. It records whether host semantics collapsed, whether runtime
-metadata is required, and whether a guest-side collector is required. See
-[docs/visibility-validation.md](docs/visibility-validation.md).
+metadata is required, and whether a guest-side collector is required.
 
 ## 📁 Repository Layout
 
@@ -234,12 +253,10 @@ crates/
   apolysis-store/   Append-only JSONL timeline writer.
   apolysis-visibility/ Strong-isolation visibility assessment model.
   apolysis-cli/     Local `apolysis run` command wrapper.
-docs/
-  visibility-validation.md Strong-isolation visibility findings.
 ebpf/
   include/          Observer ring-buffer ABI shared with userspace.
-  observer/         GPL-2.0-only eBPF observer source skeleton.
-  prebuilt/         Future CO-RE object location.
+  observer/         GPL-2.0-only F1 eBPF observer source.
+target/ebpf/        Generated CO-RE build output.
 deploy/kubernetes/ RuntimeClass, NetworkPolicy, and Agent Sandbox examples.
 policies/
   local-dev.yaml    Default audit policy.
@@ -249,23 +266,31 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 
 ## 🗺️ Feature Plan And Progress
 
+Current status: Apolysis is a PoC / audit-only prototype. F0 (M1-M7) is
+complete. F1 Independent Observability MVP is complete.
+
+Implementation milestones:
+
 | Milestone | Scope | Status |
 | --- | --- | --- |
-| M1 | Rust workspace, core schema, policy parser, JSONL store, local CLI wrapper, README | ✅ **Completed in this iteration** |
-| M2 | Local process session model, process-tree attribution, timeout notify, richer fixtures | ✅ **Completed in this iteration** |
-| M3 | Docker adapter with safe defaults, optional OCI runtime, and container metadata | ✅ **Completed in this iteration** |
-| M4 | Audit-only observer pipeline, raw kernel event schema, eBPF ring-buffer ABI, exec/file/network canonicalization | ✅ **Completed in this iteration** |
-| M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | ✅ **Completed in this iteration** |
-| M6 | Kubernetes / Agent Sandbox metadata integration | ✅ **Completed in this iteration** |
-| M7 | gVisor/Kata/Firecracker visibility validation | ✅ **Completed in this iteration** |
-| M8 | Real eBPF observability pipeline: Aya loader, CO-RE compile pipeline, tracepoint lifecycle, event deduplication, ring-buffer overflow handling | 🚧 **Planned** |
-| M9 | Real policy enforcement: BPF-LSM hooks, seccomp-bpf fallback, ptrace-based `Kill`, immutable downgrade audit records | 🚧 **Planned** |
-| M10| Storage layer upgrade: `TimelineSink` trait, Kafka/gRPC streaming, hash-chain integrity, HSM/KMS signing, WORM archive integration | 🚧 **Planned** |
-| M11| Kubernetes production integration: DaemonSet, Sidecar, Mutating Webhook, `kube-rs` API client, CRI integration | 🚧 **Planned** |
-| M12| Policy engine v2: OPA/Rego integration, hot reload, policy versioning and lineage, rule priority and conflict resolution | 🚧 **Planned** |
-| M13| Observability and operations: Prometheus metrics, Grafana dashboards, PagerDuty/OpsGenie alerting, Kubernetes Operator, Helm Chart, GitOps sync | 🚧 **Planned** |
-| M14| Large-scale production hardening: multi-tenant RBAC, namespace isolation, policy federation, per-session quotas, mTLS, chaos testing, eBPF CI tests, performance benchmarks, Falco /Tetragonintegration | 🚧 **Planned** |
+| M1 | Rust workspace, core schema, policy parser, JSONL store, local CLI wrapper, README | ✅ **Completed** |
+| M2 | Local process session model, process-tree attribution, timeout notify, richer fixtures | ✅ **Completed** |
+| M3 | Docker adapter with safe defaults, optional OCI runtime, and container metadata | ✅ **Completed** |
+| M4 | Audit-only observer pipeline, raw kernel event schema, eBPF ring-buffer ABI, exec/file/network canonicalization | ✅ **Completed** |
+| M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | ✅ **Completed** |
+| M6 | Kubernetes / Agent Sandbox metadata integration | ✅ **Completed** |
+| M7 | gVisor/Kata/Firecracker host-visibility validation and guest collector decision model | ✅ **Completed** |
 
+Focused roadmap:
+
+| Phase | Scope | Status |
+| --- | --- | --- |
+| F0 | PoC baseline: M1-M7 schema, adapters, fixture observer, feedback, Kubernetes metadata, strong-isolation visibility modeling | ✅ **Completed** |
+| F1 | Independent Observability MVP: live audit-only eBPF observer, CO-RE/Aya loader, process/file/network/credential timeline, loss accounting, redaction | ✅ **Completed** |
+| F2 | Accountability Beta: cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback hook, metrics, local timeline integrity | 🚧 **Planned** |
+| F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | 🚧 **Planned** |
+| F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | 🚧 **Planned** |
+| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM, operator, large-scale chaos and performance testing | ⏳ **Deferred** |
 
 ## 📜 License
 

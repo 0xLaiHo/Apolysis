@@ -16,6 +16,30 @@ enum apolysis_kernel_event_kind {
     APOLYSIS_EVENT_UNLINK = 5,
     APOLYSIS_EVENT_RENAME = 6,
     APOLYSIS_EVENT_CONNECT = 7,
+    APOLYSIS_EVENT_EXIT = 8,
+    APOLYSIS_EVENT_FORK = 9,
+};
+
+enum apolysis_event_flags {
+    APOLYSIS_FLAG_RESOURCE_TRUNCATED = 1 << 0,
+    APOLYSIS_FLAG_PAYLOAD_TRUNCATED = 1 << 1,
+    APOLYSIS_FLAG_PAYLOAD_SOCKADDR = 1 << 2,
+};
+
+enum apolysis_scope_mode {
+    APOLYSIS_SCOPE_CGROUP = 1,
+    APOLYSIS_SCOPE_PID_TREE = 2,
+};
+
+struct apolysis_scope_config {
+    unsigned long long cgroup_id;
+    unsigned int root_pid;
+    unsigned int mode;
+};
+
+struct apolysis_observer_counters {
+    unsigned long long reserve_failures;
+    unsigned long long map_pressure;
 };
 
 /*
@@ -31,6 +55,7 @@ struct apolysis_kernel_event {
     unsigned int uid;
     unsigned int gid;
     unsigned int event_kind;
+    unsigned int flags;
     char comm[APOLYSIS_COMM_LEN];
     char resource[APOLYSIS_RESOURCE_LEN];
     char action[APOLYSIS_ACTION_LEN];
