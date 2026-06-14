@@ -1,0 +1,27 @@
+[Unit]
+Description=Apolysis node accountability agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=apolysis
+UMask=0007
+RuntimeDirectory=apolysis
+RuntimeDirectoryMode=0750
+StateDirectory=apolysis
+StateDirectoryMode=0750
+ExecStart=/usr/local/bin/apolysisd
+Restart=on-failure
+RestartSec=2s
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/apolysis /var/lib/apolysis
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

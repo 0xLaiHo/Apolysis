@@ -156,6 +156,23 @@ fn rejects_invalid_renew_and_query_session_ids() {
 }
 
 #[test]
+fn rejects_session_ids_that_are_unsafe_for_state_paths() {
+    for session_id in ["../escape", "nested/session", "session\nbreak"] {
+        let frame = format!(r#"{{"type":"query","session_id":{session_id:?}}}"#);
+        assert_eq!(
+            decode_intent_frame(frame.as_bytes(), NOW_MS),
+            Err(IntentError::InvalidSessionId)
+        );
+    }
+    let oversized = "a".repeat(129);
+    let frame = format!(r#"{{"type":"query","session_id":"{oversized}"}}"#);
+    assert_eq!(
+        decode_intent_frame(frame.as_bytes(), NOW_MS),
+        Err(IntentError::InvalidSessionId)
+    );
+}
+
+#[test]
 fn rejects_frames_larger_than_64_kib_before_json_parsing() {
     let frame = vec![b'x'; MAX_INTENT_FRAME_BYTES + 1];
     assert_eq!(

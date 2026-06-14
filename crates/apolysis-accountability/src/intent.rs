@@ -124,6 +124,7 @@ pub enum IntentError {
     InvalidJson(String),
     UnsupportedSchemaVersion(u32),
     EmptySessionId,
+    InvalidSessionId,
     EmptyPolicyRef,
     Expired,
 }
@@ -137,6 +138,9 @@ impl std::fmt::Display for IntentError {
                 write!(formatter, "unsupported intent schema version: {version}")
             }
             Self::EmptySessionId => formatter.write_str("session id must not be empty"),
+            Self::InvalidSessionId => formatter.write_str(
+                "session id must be 1-128 ASCII letters, digits, dots, underscores, or hyphens",
+            ),
             Self::EmptyPolicyRef => formatter.write_str("policy reference must not be empty"),
             Self::Expired => formatter.write_str("intent is expired"),
         }
@@ -162,6 +166,13 @@ pub fn decode_intent_frame(
 fn validate_session_id(session_id: &str) -> Result<(), IntentError> {
     if session_id.trim().is_empty() {
         return Err(IntentError::EmptySessionId);
+    }
+    if session_id.len() > 128
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(IntentError::InvalidSessionId);
     }
     Ok(())
 }
