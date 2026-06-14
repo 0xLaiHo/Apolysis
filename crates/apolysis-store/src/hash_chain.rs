@@ -35,6 +35,7 @@ pub struct Recovery {
     pub next_sequence: u64,
     pub previous_hash: String,
     pub quarantined_path: Option<PathBuf>,
+    pub records: Vec<ChainRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,6 +99,7 @@ impl HashChainStore {
             .map_err(io_error)?;
         let next_sequence = validation.sequence.saturating_add(1);
         let previous_hash = validation.previous_hash.clone();
+        let records = validation.records;
         Ok(Recovery {
             store: Self {
                 writer: BufWriter::new(file),
@@ -108,6 +110,7 @@ impl HashChainStore {
             next_sequence,
             previous_hash,
             quarantined_path,
+            records,
         })
     }
 
@@ -156,12 +159,14 @@ struct Validation {
     sequence: u64,
     previous_hash: String,
     valid_len: usize,
+    records: Vec<ChainRecord>,
 }
 
 fn validate_existing(bytes: &[u8]) -> Result<Validation, StoreError> {
     let mut sequence = 0_u64;
     let mut previous_hash = ZERO_HASH.to_string();
     let mut valid_len = 0_usize;
+    let mut records = Vec::new();
     let newline_positions: Vec<usize> = bytes
         .iter()
         .enumerate()
@@ -180,7 +185,8 @@ fn validate_existing(bytes: &[u8]) -> Result<Validation, StoreError> {
         match result {
             Ok(record) => {
                 sequence = record.sequence;
-                previous_hash = record.record_hash;
+                previous_hash = record.record_hash.clone();
+                records.push(record);
                 valid_len = newline + 1;
                 start = newline + 1;
             }
@@ -196,6 +202,7 @@ fn validate_existing(bytes: &[u8]) -> Result<Validation, StoreError> {
                     sequence,
                     previous_hash,
                     valid_len: start,
+                    records,
                 });
             }
         }
@@ -205,6 +212,7 @@ fn validate_existing(bytes: &[u8]) -> Result<Validation, StoreError> {
         sequence,
         previous_hash,
         valid_len,
+        records,
     })
 }
 

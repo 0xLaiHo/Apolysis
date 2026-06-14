@@ -175,6 +175,56 @@ async fn clean_shutdown_removes_the_socket_file() {
     assert!(!socket.exists());
 }
 
+#[tokio::test]
+async fn restart_restores_active_session_and_continues_hash_chain() {
+    let server = TestServer::start("restart").await;
+    let config = server.config.clone();
+    let register = br#"{
+        "type":"register",
+        "intent":{
+            "schema_version":1,
+            "session_id":"session-restart",
+            "expires_at_unix_ms":4102444800000,
+            "declared_actions":["test"],
+            "allowed_resources":[],
+            "policy_ref":"policy.yaml",
+            "workload_selectors":[]
+        }
+    }"#;
+    assert!(matches!(
+        request(&config.socket_path, register).await,
+        DaemonResponse::Ack { .. }
+    ));
+    server.stop_preserving().await;
+
+    let restarted = TestServer::start_config(config.clone()).await;
+    let query = br#"{"type":"query","session_id":"session-restart"}"#;
+    assert!(matches!(
+        request(&config.socket_path, query).await,
+        DaemonResponse::Session {
+            session: Some(_),
+            ..
+        }
+    ));
+    let renew =
+        br#"{"type":"renew","session_id":"session-restart","expires_at_unix_ms":4102444801000}"#;
+    assert!(matches!(
+        request(&config.socket_path, renew).await,
+        DaemonResponse::Ack { .. }
+    ));
+    restarted.stop_preserving().await;
+
+    let timeline = std::fs::read_to_string(
+        config
+            .state_dir
+            .join("sessions/session-restart/timeline.jsonl"),
+    )
+    .expect("session timeline");
+    assert_eq!(timeline.lines().count(), 2);
+    assert!(timeline.lines().nth(1).unwrap().contains(r#""sequence":2"#));
+    cleanup(&config);
+}
+
 struct TestServer {
     config: DaemonConfig,
     shutdown: oneshot::Sender<()>,
@@ -188,6 +238,10 @@ impl TestServer {
 
     async fn start_with_connections(name: &str, max_connections: usize) -> Self {
         let config = config(name, max_connections);
+        Self::start_config(config).await
+    }
+
+    async fn start_config(config: DaemonConfig) -> Self {
         let (shutdown, receiver) = oneshot::channel();
         let task = tokio::spawn(serve(config.clone(), receiver));
         for _ in 0..100 {
@@ -204,9 +258,14 @@ impl TestServer {
     }
 
     async fn stop(self) {
+        let config = self.config.clone();
+        self.stop_preserving().await;
+        cleanup(&config);
+    }
+
+    async fn stop_preserving(self) {
         let _ = self.shutdown.send(());
         self.task.await.unwrap().expect("clean server shutdown");
-        cleanup(&self.config);
     }
 }
 

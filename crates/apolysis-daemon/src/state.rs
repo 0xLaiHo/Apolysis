@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use apolysis_accountability::{
     ComponentState, HealthSnapshot, QueueStats, RegisterOutcome, RegistryError, SessionIntent,
@@ -25,16 +26,42 @@ impl DaemonState {
         let sessions_dir = config.state_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir)
             .map_err(|error| format!("failed to create daemon state directory: {error}"))?;
+        let mut registry = SessionRegistry::new(config.max_sessions, config.max_pending);
+        let mut stores = BTreeMap::new();
+        let now_unix_ms = current_unix_ms()?;
+        for entry in std::fs::read_dir(&sessions_dir)
+            .map_err(|error| format!("failed to scan daemon session state: {error}"))?
+        {
+            let entry =
+                entry.map_err(|error| format!("failed to inspect daemon session state: {error}"))?;
+            if !entry
+                .file_type()
+                .map_err(|error| format!("failed to inspect session state type: {error}"))?
+                .is_dir()
+            {
+                continue;
+            }
+            let session_id = entry.file_name().to_string_lossy().to_string();
+            let timeline = entry.path().join("timeline.jsonl");
+            if !timeline.is_file() {
+                continue;
+            }
+            let recovery = HashChainStore::create_or_recover(&timeline)
+                .map_err(|error| format!("failed to recover session {session_id}: {error}"))?;
+            if let Some(intent) = replay_active_intent(&recovery.records, now_unix_ms)? {
+                registry
+                    .register(intent, now_unix_ms)
+                    .map_err(|error| format!("failed to restore session {session_id}: {error}"))?;
+            }
+            stores.insert(session_id, recovery.store);
+        }
         let mut health = HealthSnapshot::new(QueueStats::new(0));
         health.set_storage(ComponentState::Ready);
         health.set_ebpf(ComponentState::Unavailable);
         Ok(Self {
-            registry: RwLock::new(SessionRegistry::new(
-                config.max_sessions,
-                config.max_pending,
-            )),
+            registry: RwLock::new(registry),
             health: RwLock::new(health),
-            stores: Mutex::new(BTreeMap::new()),
+            stores: Mutex::new(stores),
             sessions_dir,
         })
     }
@@ -128,4 +155,54 @@ impl DaemonState {
 
 fn registry_error(error: RegistryError) -> String {
     error.to_string()
+}
+
+fn replay_active_intent(
+    records: &[apolysis_store::ChainRecord],
+    now_unix_ms: u64,
+) -> Result<Option<SessionIntent>, String> {
+    let mut intent: Option<SessionIntent> = None;
+    let mut closed = false;
+    for record in records {
+        match record
+            .payload
+            .get("record_type")
+            .and_then(Value::as_str)
+        {
+            Some("intent_registered") => {
+                let value = record
+                    .payload
+                    .get("intent")
+                    .cloned()
+                    .ok_or_else(|| "intent_registered record is missing intent".to_string())?;
+                intent = Some(
+                    serde_json::from_value(value)
+                        .map_err(|error| format!("failed to replay registered intent: {error}"))?,
+                );
+                closed = false;
+            }
+            Some("intent_renewed") => {
+                if let (Some(intent), Some(expiry)) = (
+                    intent.as_mut(),
+                    record
+                        .payload
+                        .get("expires_at_unix_ms")
+                        .and_then(Value::as_u64),
+                ) {
+                    intent.expires_at_unix_ms = expiry;
+                }
+            }
+            Some("session_closed") => closed = true,
+            _ => {}
+        }
+    }
+    Ok(intent.filter(|intent| !closed && intent.expires_at_unix_ms > now_unix_ms))
+}
+
+fn current_unix_ms() -> Result<u64, String> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| "current Unix timestamp exceeds u64".to_string())
 }
