@@ -13,6 +13,10 @@ use apolysis_core::JsonLine;
 use tokio::fs as async_fs;
 use tokio::io::{AsyncWriteExt, BufWriter as AsyncBufWriter};
 
+mod hash_chain;
+
+pub use hash_chain::{ChainRecord, HashChainStore, Recovery, StoreError, ZERO_HASH};
+
 pub struct JsonlStore {
     writer: BufWriter<File>,
 }
