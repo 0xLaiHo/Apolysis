@@ -163,4 +163,6 @@ pub mod feedback {
     pub const VIOLATION_TAG: &str = "APOLYSIS_VIOLATION";
     /// Default file name that stores the latest violation.
     pub const LAST_VIOLATION_FILE: &str = "last-violation.txt";
+    /// Machine-readable file name that stores the latest violation.
+    pub const LAST_VIOLATION_JSON_FILE: &str = "last-violation.json";
 }

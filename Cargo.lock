@@ -53,6 +53,7 @@ name = "apolysis-feedback"
 version = "0.1.0"
 dependencies = [
  "apolysis-core",
+ "serde_json",
 ]
 
 [[package]]
