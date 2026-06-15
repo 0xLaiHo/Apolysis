@@ -16,7 +16,8 @@ mod scope;
 
 pub use live::{
     enable_multi_cgroup_scope, observe_live, raw_event_from_record, update_tracked_cgroup,
-    LiveObserveRequest, LiveScope,
+    DaemonKernelEvent, DaemonObserver, DaemonObserverBatch, DaemonObserverConfig,
+    DaemonObserverCounters, LiveObserveRequest, LiveScope, ObserverBatchDecoder,
 };
 pub use redaction::{RedactedValue, Redactor};
 pub use scope::{ScopeSet, ScopeSetError, MAX_TRACKED_CGROUPS};

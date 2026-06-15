@@ -63,6 +63,101 @@ impl LiveObserveRequest {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaemonObserverConfig {
+    pub object_path: PathBuf,
+}
+
+impl DaemonObserverConfig {
+    pub fn new(object_path: impl Into<PathBuf>) -> Self {
+        Self {
+            object_path: object_path.into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.object_path.is_file() {
+            return Err(format!(
+                "BPF object does not exist: {}",
+                self.object_path.display()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaemonKernelEvent {
+    pub timestamp_unix_ms: u128,
+    pub record: KernelEventRecord,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DaemonObserverBatch {
+    pub events: Vec<DaemonKernelEvent>,
+    pub decode_failures: u64,
+    pub truncations: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DaemonObserverCounters {
+    pub reserve_failures: u64,
+    pub map_pressure: u64,
+}
+
+pub struct DaemonObserver {
+    ebpf: Ebpf,
+    ring: AsyncFd<RingBuf<MapData>>,
+    decoder: ObserverBatchDecoder,
+}
+
+impl DaemonObserver {
+    pub fn load(config: DaemonObserverConfig) -> Result<Self, String> {
+        config.validate()?;
+        let loader_plan = AyaLoaderPlan::f1_default(&config.object_path);
+        validate_live_prerequisites(&LiveScope::Cgroup(1), &loader_plan)
+            .map_err(|error| format!("daemon observer prerequisite failed: {error}"))?;
+        let mut ebpf = EbpfLoader::new()
+            .load_file(&loader_plan.object_path)
+            .map_err(|error| format!("BPF load or verifier failure: {error:#}"))?;
+        enable_multi_cgroup_scope(&mut ebpf)?;
+        attach_tracepoints(&mut ebpf, &loader_plan)?;
+        let ring_map = ebpf
+            .take_map(&loader_plan.ring_buffer_map)
+            .ok_or_else(|| format!("missing BPF map: {}", loader_plan.ring_buffer_map))?;
+        let ring_buffer = RingBuf::try_from(ring_map)
+            .map_err(|error| format!("failed to open observer ring buffer: {error}"))?;
+        let ring = AsyncFd::new(ring_buffer)
+            .map_err(|error| format!("failed to poll observer ring buffer: {error}"))?;
+        Ok(Self {
+            ebpf,
+            ring,
+            decoder: ObserverBatchDecoder::capture()?,
+        })
+    }
+
+    pub fn track_cgroup(&mut self, cgroup_id: u64) -> Result<(), String> {
+        update_tracked_cgroup(&mut self.ebpf, cgroup_id, true)
+    }
+
+    pub fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<(), String> {
+        update_tracked_cgroup(&mut self.ebpf, cgroup_id, false)
+    }
+
+    pub async fn read_batch(&mut self) -> Result<DaemonObserverBatch, String> {
+        let records = read_ring_batch(&mut self.ring).await?;
+        Ok(self.decoder.decode(records))
+    }
+
+    pub fn counters(&mut self) -> Result<DaemonObserverCounters, String> {
+        let counters = read_observer_counters(&mut self.ebpf)?;
+        Ok(DaemonObserverCounters {
+            reserve_failures: counters.reserve_failures,
+            map_pressure: counters.map_pressure,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 struct ScopeConfig {
@@ -151,7 +246,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         .map_err(|error| format!("failed to open observer ring buffer: {error}"))?;
     let mut async_ring = AsyncFd::new(ring_buffer)
         .map_err(|error| format!("failed to poll observer ring buffer: {error}"))?;
-    let calibration = ClockCalibration::capture()?;
+    let calibration = ObserverBatchDecoder::capture()?;
     let deadline = request
         .duration
         .map(|duration| tokio::time::Instant::now() + duration);
@@ -488,12 +583,19 @@ fn append_marker(payload: &mut String, marker: &str) {
     payload.push_str(marker);
 }
 
-struct ClockCalibration {
+pub struct ObserverBatchDecoder {
     monotonic_ns: u64,
     unix_ms: u128,
 }
 
-impl ClockCalibration {
+impl ObserverBatchDecoder {
+    pub fn new(monotonic_ns: u64, unix_ms: u128) -> Self {
+        Self {
+            monotonic_ns,
+            unix_ms,
+        }
+    }
+
     fn capture() -> Result<Self, String> {
         let unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -503,6 +605,24 @@ impl ClockCalibration {
             monotonic_ns: monotonic_now_ns()?,
             unix_ms,
         })
+    }
+
+    pub fn decode(&self, records: Vec<Vec<u8>>) -> DaemonObserverBatch {
+        let mut batch = DaemonObserverBatch::default();
+        for bytes in records {
+            let Ok(record) = KernelEventRecord::decode(&bytes) else {
+                batch.decode_failures += 1;
+                continue;
+            };
+            if record.flags & (FLAG_RESOURCE_TRUNCATED | FLAG_PAYLOAD_TRUNCATED) != 0 {
+                batch.truncations += 1;
+            }
+            batch.events.push(DaemonKernelEvent {
+                timestamp_unix_ms: self.to_unix_ms(record.timestamp_ns),
+                record,
+            });
+        }
+        batch
     }
 
     fn to_unix_ms(&self, timestamp_ns: u64) -> u128 {
