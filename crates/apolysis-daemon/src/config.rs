@@ -7,10 +7,14 @@ use std::time::Duration;
 pub struct DaemonConfig {
     pub socket_path: PathBuf,
     pub state_dir: PathBuf,
+    pub bpf_object: Option<PathBuf>,
     pub max_sessions: usize,
     pub max_pending: usize,
     pub max_connections: usize,
+    pub queue_capacity: usize,
+    pub scope_command_capacity: usize,
     pub request_timeout: Duration,
+    pub shutdown_drain_timeout: Duration,
 }
 
 impl Default for DaemonConfig {
@@ -18,10 +22,14 @@ impl Default for DaemonConfig {
         Self {
             socket_path: PathBuf::from("/run/apolysis/apolysisd.sock"),
             state_dir: PathBuf::from("/var/lib/apolysis"),
+            bpf_object: None,
             max_sessions: 4_096,
             max_pending: 4_096,
             max_connections: 128,
+            queue_capacity: 16_384,
+            scope_command_capacity: 1_024,
             request_timeout: Duration::from_secs(5),
+            shutdown_drain_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -40,11 +48,19 @@ impl DaemonConfig {
             match option.as_str() {
                 "--socket" => config.socket_path = value.into(),
                 "--state-dir" => config.state_dir = value.into(),
+                "--bpf-object" => config.bpf_object = Some(value.into()),
                 "--max-sessions" => config.max_sessions = parse_usize(option, value)?,
                 "--max-pending" => config.max_pending = parse_usize(option, value)?,
                 "--max-connections" => config.max_connections = parse_usize(option, value)?,
+                "--queue-capacity" => config.queue_capacity = parse_usize(option, value)?,
+                "--scope-command-capacity" => {
+                    config.scope_command_capacity = parse_usize(option, value)?
+                }
                 "--request-timeout-ms" => {
                     config.request_timeout = Duration::from_millis(parse_u64(option, value)?)
+                }
+                "--shutdown-drain-ms" => {
+                    config.shutdown_drain_timeout = Duration::from_millis(parse_u64(option, value)?)
                 }
                 unknown => return Err(format!("unknown argument: {unknown}")),
             }
@@ -53,8 +69,17 @@ impl DaemonConfig {
         if config.max_connections == 0 {
             return Err("--max-connections must be greater than zero".to_string());
         }
+        if config.queue_capacity == 0 {
+            return Err("--queue-capacity must be greater than zero".to_string());
+        }
+        if config.scope_command_capacity == 0 {
+            return Err("--scope-command-capacity must be greater than zero".to_string());
+        }
         if config.request_timeout.is_zero() {
             return Err("--request-timeout-ms must be greater than zero".to_string());
+        }
+        if config.shutdown_drain_timeout.is_zero() {
+            return Err("--shutdown-drain-ms must be greater than zero".to_string());
         }
         Ok(config)
     }

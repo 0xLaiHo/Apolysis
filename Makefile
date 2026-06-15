@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live test-f2-foundation
+.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime
 
 build: build-ebpf
 	cargo build --workspace
@@ -21,3 +21,6 @@ test-live: build-ebpf
 
 test-f2-foundation:
 	./scripts/test-f2-foundation.sh
+
+test-f2-runtime: build-ebpf
+	./scripts/test-f2-runtime.sh

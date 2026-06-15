@@ -19,7 +19,7 @@ pub use live::{
     DaemonKernelEvent, DaemonObserver, DaemonObserverBatch, DaemonObserverConfig,
     DaemonObserverCounters, LiveObserveRequest, LiveScope, ObserverBatchDecoder,
 };
-pub use redaction::{RedactedValue, Redactor};
+pub use redaction::{redact_raw_event_for_persistence, RedactedValue, Redactor};
 pub use scope::{ScopeSet, ScopeSetError, MAX_TRACKED_CGROUPS};
 
 use std::fs;

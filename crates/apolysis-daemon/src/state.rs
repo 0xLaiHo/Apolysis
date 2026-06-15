@@ -7,13 +7,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use apolysis_accountability::{
     AssociationOutcome, ComponentState, HealthSnapshot, QueueStats, RegisterOutcome, RegistryError,
-    SessionIntent, SessionRegistry, SessionState,
+    ResourceKind, SessionIntent, SessionRegistry, SessionState,
 };
+use apolysis_policy::Policy;
 use apolysis_store::HashChainStore;
 use serde_json::{json, Value};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
 
-use crate::{DaemonConfig, ScopeController};
+use crate::{DaemonConfig, DaemonRecord, EventPipeline, ScopeController, WriterSummary};
 
 pub struct DaemonState {
     registry: RwLock<SessionRegistry>,
@@ -22,6 +23,8 @@ pub struct DaemonState {
     sessions_dir: PathBuf,
     storage_writable: AtomicBool,
     scope: Option<ScopeController>,
+    pipeline: EventPipeline,
+    redaction_policies: RwLock<BTreeMap<String, Option<Policy>>>,
 }
 
 impl DaemonState {
@@ -38,6 +41,7 @@ impl DaemonState {
             .map_err(|error| format!("failed to create daemon state directory: {error}"))?;
         let mut registry = SessionRegistry::new(config.max_sessions, config.max_pending);
         let mut stores = BTreeMap::new();
+        let mut redaction_policies = BTreeMap::new();
         let now_unix_ms = current_unix_ms()?;
         for entry in std::fs::read_dir(&sessions_dir)
             .map_err(|error| format!("failed to scan daemon session state: {error}"))?
@@ -58,14 +62,26 @@ impl DaemonState {
             }
             let recovery = HashChainStore::create_or_recover(&timeline)
                 .map_err(|error| format!("failed to recover session {session_id}: {error}"))?;
-            if let Some(intent) = replay_active_intent(&recovery.records, now_unix_ms)? {
+            if let Some(recovered) = replay_active_session(&recovery.records, now_unix_ms)? {
+                let redaction_policy = load_redaction_policy(&recovered.intent.policy_ref);
                 registry
-                    .register(intent, now_unix_ms)
+                    .register(recovered.intent, now_unix_ms)
                     .map_err(|error| format!("failed to restore session {session_id}: {error}"))?;
+                for cgroup_id in recovered.cgroup_ids {
+                    registry
+                        .discover_cgroup(&session_id, cgroup_id)
+                        .map_err(|error| {
+                            format!(
+                                "failed to restore cgroup {cgroup_id} for session {session_id}: {error}"
+                            )
+                        })?;
+                }
+                redaction_policies.insert(session_id.clone(), redaction_policy);
             }
             stores.insert(session_id, recovery.store);
         }
-        let mut health = HealthSnapshot::new(QueueStats::new(0));
+        let pipeline = EventPipeline::new(config.queue_capacity);
+        let mut health = HealthSnapshot::new(QueueStats::new(config.queue_capacity));
         health.set_storage(ComponentState::Ready);
         health.set_ebpf(ComponentState::Unavailable);
         Ok(Self {
@@ -75,6 +91,8 @@ impl DaemonState {
             sessions_dir,
             storage_writable: AtomicBool::new(true),
             scope,
+            pipeline,
+            redaction_policies: RwLock::new(redaction_policies),
         })
     }
 
@@ -83,6 +101,8 @@ impl DaemonState {
         intent: SessionIntent,
         now_unix_ms: u64,
     ) -> Result<RegisterOutcome, String> {
+        let redaction_policy = load_redaction_policy(&intent.policy_ref);
+        let session_id = intent.session_id.clone();
         let mut registry = self.registry.write().await;
         let mut candidate = registry.clone();
         let outcome = candidate
@@ -94,6 +114,10 @@ impl DaemonState {
         )
         .await?;
         *registry = candidate;
+        self.redaction_policies
+            .write()
+            .await
+            .insert(session_id, redaction_policy);
         Ok(outcome)
     }
 
@@ -169,6 +193,36 @@ impl DaemonState {
             .map(str::to_string)
     }
 
+    pub async fn tracked_cgroups(&self) -> Vec<u64> {
+        self.registry.read().await.tracked_cgroups()
+    }
+
+    pub async fn workspace_root_for_session(&self, session_id: &str) -> PathBuf {
+        self.registry
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|state| {
+                state
+                    .intent
+                    .allowed_resources
+                    .iter()
+                    .find(|selector| selector.kind == ResourceKind::Workspace)
+            })
+            .map(|selector| PathBuf::from(&selector.value))
+            .unwrap_or_else(|| PathBuf::from("/__apolysis_no_workspace__"))
+    }
+
+    pub async fn credential_path_requires_redaction(&self, session_id: &str, path: &str) -> bool {
+        self.redaction_policies
+            .read()
+            .await
+            .get(session_id)
+            .and_then(Option::as_ref)
+            .map(|policy| policy.denies_credential_path(path))
+            .unwrap_or(true)
+    }
+
     pub async fn discover_cgroup(
         &self,
         session_id: &str,
@@ -220,7 +274,36 @@ impl DaemonState {
     }
 
     pub async fn health(&self) -> HealthSnapshot {
-        self.health.read().await.clone()
+        let mut health = self.health.read().await.clone();
+        if let Ok(stats) = self.pipeline.stats() {
+            health.queue = stats;
+        }
+        health
+    }
+
+    pub fn pipeline(&self) -> EventPipeline {
+        self.pipeline.clone()
+    }
+
+    pub async fn set_ebpf(&self, state: ComponentState) {
+        self.health.write().await.set_ebpf(state);
+    }
+
+    pub async fn run_writer(
+        self: std::sync::Arc<Self>,
+        shutdown: oneshot::Receiver<()>,
+    ) -> Result<WriterSummary, String> {
+        let pipeline = self.pipeline();
+        pipeline
+            .run_writer(shutdown, move |record| {
+                let state = std::sync::Arc::clone(&self);
+                async move { state.persist_record(record).await }
+            })
+            .await
+    }
+
+    pub(crate) async fn persist_record(&self, record: DaemonRecord) -> Result<(), String> {
+        self.persist(&record.session_id, record.payload).await
     }
 
     async fn persist(&self, session_id: &str, payload: Value) -> Result<(), String> {
@@ -266,15 +349,24 @@ fn registry_error(error: RegistryError) -> String {
     error.to_string()
 }
 
-fn replay_active_intent(
+struct RecoveredSession {
+    intent: SessionIntent,
+    cgroup_ids: Vec<u64>,
+}
+
+fn replay_active_session(
     records: &[apolysis_store::ChainRecord],
     now_unix_ms: u64,
-) -> Result<Option<SessionIntent>, String> {
+) -> Result<Option<RecoveredSession>, String> {
     let mut intent: Option<SessionIntent> = None;
+    let mut cgroup_ids = Vec::new();
     let mut closed = false;
     for record in records {
         match record.payload.get("record_type").and_then(Value::as_str) {
             Some("intent_registered") => {
+                if closed {
+                    cgroup_ids.clear();
+                }
                 let value = record
                     .payload
                     .get("intent")
@@ -297,11 +389,24 @@ fn replay_active_intent(
                     intent.expires_at_unix_ms = expiry;
                 }
             }
-            Some("session_closed") => closed = true,
+            Some("cgroup_discovered") => {
+                if let Some(cgroup_id) = record.payload.get("cgroup_id").and_then(Value::as_u64) {
+                    if !cgroup_ids.contains(&cgroup_id) {
+                        cgroup_ids.push(cgroup_id);
+                    }
+                }
+            }
+            Some("session_closed") => {
+                closed = true;
+                cgroup_ids.clear();
+            }
             _ => {}
         }
     }
-    Ok(intent.filter(|intent| !closed && intent.expires_at_unix_ms > now_unix_ms))
+    cgroup_ids.sort_unstable();
+    Ok(intent
+        .filter(|intent| !closed && intent.expires_at_unix_ms > now_unix_ms)
+        .map(|intent| RecoveredSession { intent, cgroup_ids }))
 }
 
 fn current_unix_ms() -> Result<u64, String> {
@@ -310,4 +415,10 @@ fn current_unix_ms() -> Result<u64, String> {
         .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
         .as_millis();
     u64::try_from(millis).map_err(|_| "current Unix timestamp exceeds u64".to_string())
+}
+
+fn load_redaction_policy(path: &str) -> Option<Policy> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|input| Policy::parse(&input).ok())
 }

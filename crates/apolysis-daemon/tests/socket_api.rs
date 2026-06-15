@@ -2,7 +2,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apolysis_daemon::{serve, DaemonConfig, DaemonResponse, DAEMON_SCHEMA_V1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -20,7 +20,7 @@ async fn health_request_reports_liveness_and_secure_socket_mode() {
         schema_version,
         liveness,
         readiness,
-        ..
+        health,
     } = response
     else {
         panic!("expected health response");
@@ -28,6 +28,11 @@ async fn health_request_reports_liveness_and_secure_socket_mode() {
     assert_eq!(schema_version, DAEMON_SCHEMA_V1);
     assert!(liveness);
     assert!(!readiness, "eBPF is not loaded by the foundation server");
+    assert_eq!(health.queue.capacity, server.config.queue_capacity);
+    assert_eq!(
+        health.ebpf(),
+        apolysis_accountability::ComponentState::Unavailable
+    );
     let mode = std::fs::metadata(&server.config.socket_path)
         .unwrap()
         .permissions()
@@ -175,6 +180,35 @@ async fn clean_shutdown_removes_the_socket_file() {
 }
 
 #[tokio::test]
+async fn client_disconnect_does_not_prevent_clean_shutdown() {
+    let server = TestServer::start("disconnect").await;
+    let stream = UnixStream::connect(&server.config.socket_path)
+        .await
+        .expect("connect client");
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn state_initialization_failure_removes_the_bound_socket() {
+    let config = config("state-init-failure", 2);
+    std::fs::create_dir_all(&config.state_dir).unwrap();
+    std::fs::write(config.state_dir.join("sessions"), "not a directory").unwrap();
+    let socket = config.socket_path.clone();
+    let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    let error = serve(config.clone(), shutdown_rx)
+        .await
+        .expect_err("invalid state directory must fail startup");
+
+    assert!(error.contains("state directory"), "{error}");
+    assert!(!socket.exists(), "failed startup must remove bound socket");
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn restart_restores_active_session_and_continues_hash_chain() {
     let server = TestServer::start("restart").await;
     let config = server.config.clone();
@@ -297,6 +331,10 @@ impl TestServer {
                     task,
                 };
             }
+            if task.is_finished() {
+                let result = task.await.expect("daemon task join");
+                panic!("daemon failed before creating socket: {result:?}");
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("daemon socket was not created");
@@ -342,8 +380,14 @@ async fn read_response(stream: &mut UnixStream) -> DaemonResponse {
 
 fn config(name: &str, max_connections: usize) -> DaemonConfig {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let root =
-        std::env::temp_dir().join(format!("apolysisd-test-{name}-{}-{id}", std::process::id()));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "apolysisd-test-{name}-{}-{id}-{nonce}",
+        std::process::id()
+    ));
     DaemonConfig {
         socket_path: root.join("run/apolysisd.sock"),
         state_dir: root.join("state"),
@@ -351,6 +395,7 @@ fn config(name: &str, max_connections: usize) -> DaemonConfig {
         max_pending: 32,
         max_connections,
         request_timeout: Duration::from_millis(100),
+        ..DaemonConfig::default()
     }
 }
 

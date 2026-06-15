@@ -51,6 +51,10 @@ impl HealthSnapshot {
         self.ebpf = state;
     }
 
+    pub fn ebpf(&self) -> ComponentState {
+        self.ebpf
+    }
+
     pub fn set_storage(&mut self, state: ComponentState) {
         self.storage = state;
     }

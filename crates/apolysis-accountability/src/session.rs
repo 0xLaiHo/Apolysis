@@ -234,6 +234,10 @@ impl SessionRegistry {
         self.cgroup_index.get(&cgroup_id).map(String::as_str)
     }
 
+    pub fn tracked_cgroups(&self) -> Vec<u64> {
+        self.cgroup_index.keys().copied().collect()
+    }
+
     pub fn is_scope_admitted(&self, session_id: &str) -> bool {
         self.sessions
             .get(session_id)

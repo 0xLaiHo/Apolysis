@@ -10,6 +10,7 @@ apolysis-accountability = { path = "../apolysis-accountability" }
 apolysis-core = { path = "../apolysis-core" }
 apolysis-feedback = { path = "../apolysis-feedback" }
 apolysis-observer = { path = "../apolysis-observer" }
+apolysis-policy = { path = "../apolysis-policy" }
 apolysis-store = { path = "../apolysis-store" }
 serde.workspace = true
 serde_json.workspace = true

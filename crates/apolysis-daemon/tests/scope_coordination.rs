@@ -87,6 +87,30 @@ async fn closing_a_session_removes_its_observer_scope() {
     cleanup(&config);
 }
 
+#[tokio::test]
+async fn restart_restores_persisted_cgroup_ownership() {
+    let config = config("restart-scope");
+    let state = DaemonState::new(&config).expect("daemon state");
+    state
+        .register(intent("restart-session"), now_ms())
+        .await
+        .expect("register intent");
+    state
+        .discover_cgroup("restart-session", 71)
+        .await
+        .expect("discover cgroup");
+    drop(state);
+
+    let restarted = DaemonState::new(&config).expect("restarted daemon state");
+
+    assert_eq!(
+        restarted.session_for_cgroup(71).await.as_deref(),
+        Some("restart-session")
+    );
+    assert_eq!(restarted.tracked_cgroups().await, vec![71]);
+    cleanup(&config);
+}
+
 fn spawn_scope_worker(
     mut receiver: tokio::sync::mpsc::Receiver<ScopeRequest>,
     operations: Arc<Mutex<Vec<ScopeOperation>>>,
@@ -127,6 +151,7 @@ fn config(name: &str) -> DaemonConfig {
         max_pending: 32,
         max_connections: 16,
         request_timeout: Duration::from_millis(100),
+        ..DaemonConfig::default()
     }
 }
 

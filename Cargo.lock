@@ -42,6 +42,7 @@ dependencies = [
  "apolysis-core",
  "apolysis-feedback",
  "apolysis-observer",
+ "apolysis-policy",
  "apolysis-store",
  "serde",
  "serde_json",

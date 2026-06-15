@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use apolysis_core::EventType;
+use apolysis_core::{EventType, RawKernelEvent};
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -79,6 +79,44 @@ impl Redactor {
         }
         token
     }
+}
+
+pub fn redact_raw_event_for_persistence(
+    raw: &RawKernelEvent,
+    redactor: &Redactor,
+    credential_read: bool,
+) -> RawKernelEvent {
+    let mut persisted = raw.clone();
+    let event_type = match raw.event_name.as_str() {
+        "open" | "openat" | "openat2" if credential_read => EventType::CredentialRead,
+        "open" | "openat" | "openat2" => EventType::FileOpen,
+        "creat" => EventType::FileCreate,
+        "truncate" | "ftruncate" => EventType::FileTruncate,
+        "unlink" | "unlinkat" => EventType::FileUnlink,
+        "rename" | "renameat" | "renameat2" => EventType::FileRename,
+        "connect" => EventType::NetworkConnect,
+        _ => return persisted,
+    };
+    let resource = redactor.redact_resource(event_type.clone(), &raw.resource);
+    persisted.resource = resource.value;
+    if resource.redacted {
+        append_marker(&mut persisted.raw_payload, "redacted:resource");
+    }
+    if event_type == EventType::FileRename && !raw.raw_payload.is_empty() {
+        let payload = redactor.redact_resource(EventType::FileRename, &raw.raw_payload);
+        persisted.raw_payload = payload.value;
+        if payload.redacted {
+            append_marker(&mut persisted.raw_payload, "redacted:payload");
+        }
+    }
+    persisted
+}
+
+fn append_marker(payload: &mut String, marker: &str) {
+    if !payload.is_empty() {
+        payload.push(',');
+    }
+    payload.push_str(marker);
 }
 
 fn socket_port(resource: &str) -> Option<&str> {

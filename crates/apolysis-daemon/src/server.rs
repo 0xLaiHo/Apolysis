@@ -8,13 +8,14 @@ use apolysis_accountability::{
     decode_intent_frame, HealthSnapshot, IntentError, IntentRequest, SessionState,
     MAX_INTENT_FRAME_BYTES,
 };
+use apolysis_observer::{DaemonObserver, DaemonObserverConfig};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{oneshot, Semaphore};
 use tokio::task::JoinSet;
 
-use crate::{DaemonConfig, DaemonState};
+use crate::{run_observer_runtime, scope_channel, DaemonConfig, DaemonState};
 
 pub const DAEMON_SCHEMA_V1: u32 = 1;
 
@@ -52,16 +53,71 @@ pub async fn serve(
         .map_err(|error| format!("failed to bind daemon socket: {error}"))?;
     std::fs::set_permissions(&config.socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|error| format!("failed to set daemon socket permissions: {error}"))?;
-    let state = Arc::new(DaemonState::new(&config)?);
+    let observer_setup = config.bpf_object.as_ref().and_then(|object_path| {
+        match DaemonObserver::load(DaemonObserverConfig::new(object_path)) {
+            Ok(observer) => {
+                let (scope, receiver) = scope_channel(config.scope_command_capacity);
+                Some((observer, scope, receiver))
+            }
+            Err(error) => {
+                eprintln!("apolysisd: observer unavailable: {error}");
+                None
+            }
+        }
+    });
+    let scope = observer_setup.as_ref().map(|(_, scope, _)| scope.clone());
+    let state = match DaemonState::new_with_scope(&config, scope) {
+        Ok(state) => Arc::new(state),
+        Err(error) => {
+            drop(listener);
+            remove_socket_if_socket(&config.socket_path)?;
+            return Err(error);
+        }
+    };
+    let (writer_shutdown, writer_shutdown_receiver) = oneshot::channel();
+    let mut writer_task = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_shutdown_receiver).await })
+    };
+    let (observer_shutdown, mut observer_task) =
+        if let Some((observer, _, receiver)) = observer_setup {
+            let (sender, shutdown_receiver) = oneshot::channel();
+            let initial_cgroups = state.tracked_cgroups().await;
+            let state = Arc::clone(&state);
+            let task = tokio::spawn(async move {
+                run_observer_runtime(
+                    observer,
+                    initial_cgroups,
+                    receiver,
+                    state,
+                    shutdown_receiver,
+                )
+                .await
+            });
+            (Some(sender), Some(task))
+        } else {
+            (None, None)
+        };
     let permits = Arc::new(Semaphore::new(config.max_connections));
     let mut handlers = JoinSet::new();
+    let mut accept_error = None;
 
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
+            result = handlers.join_next(), if !handlers.is_empty() => {
+                if let Some(result) = result {
+                    log_connection_result(result);
+                }
+            }
             accepted = listener.accept() => {
-                let (mut stream, _) =
-                    accepted.map_err(|error| format!("failed to accept daemon connection: {error}"))?;
+                let (mut stream, _) = match accepted {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        accept_error = Some(format!("failed to accept daemon connection: {error}"));
+                        break;
+                    }
+                };
                 match Arc::clone(&permits).try_acquire_owned() {
                     Ok(permit) => {
                         let state = Arc::clone(&state);
@@ -80,16 +136,17 @@ pub async fn serve(
                         });
                     }
                     Err(_) => {
-                        handlers.spawn(async move {
+                        let _ = tokio::time::timeout(
+                            config.request_timeout,
                             write_response(
                                 &mut stream,
                                 &error_response(
                                     "server_busy",
                                     "daemon connection limit reached",
                                 ),
-                            )
-                            .await
-                        });
+                            ),
+                        )
+                        .await;
                     }
                 }
             }
@@ -98,10 +155,50 @@ pub async fn serve(
 
     drop(listener);
     while let Some(result) = handlers.join_next().await {
-        result.map_err(|error| format!("daemon connection task failed: {error}"))??;
+        log_connection_result(result);
+    }
+
+    if let Some(observer_shutdown) = observer_shutdown {
+        let _ = observer_shutdown.send(());
+    }
+    if let Some(task) = observer_task.as_mut() {
+        match tokio::time::timeout(config.shutdown_drain_timeout, &mut *task).await {
+            Ok(Ok(Ok(_))) => {}
+            Ok(Ok(Err(error))) => {
+                eprintln!("apolysisd: observer stopped with error: {error}");
+            }
+            Ok(Err(error)) => {
+                eprintln!("apolysisd: observer task failed: {error}");
+            }
+            Err(_) => {
+                task.abort();
+                eprintln!("apolysisd: observer shutdown deadline exceeded");
+            }
+        }
+    }
+
+    let _ = writer_shutdown.send(());
+    match tokio::time::timeout(config.shutdown_drain_timeout, &mut writer_task).await {
+        Ok(Ok(Ok(_))) => {}
+        Ok(Ok(Err(error))) => {
+            remove_socket_if_socket(&config.socket_path)?;
+            return Err(format!("daemon writer stopped with error: {error}"));
+        }
+        Ok(Err(error)) => {
+            remove_socket_if_socket(&config.socket_path)?;
+            return Err(format!("daemon writer task failed: {error}"));
+        }
+        Err(_) => {
+            writer_task.abort();
+            remove_socket_if_socket(&config.socket_path)?;
+            return Err("daemon writer shutdown deadline exceeded".to_string());
+        }
     }
     remove_socket_if_socket(&config.socket_path)?;
-    Ok(())
+    match accept_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<DaemonState>) -> Result<(), String> {
@@ -200,6 +297,14 @@ fn error_response(code: &str, message: impl Into<String>) -> DaemonResponse {
         schema_version: DAEMON_SCHEMA_V1,
         code: code.to_string(),
         message: message.into(),
+    }
+}
+
+fn log_connection_result(result: Result<Result<(), String>, tokio::task::JoinError>) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("apolysisd: connection failed: {error}"),
+        Err(error) => eprintln!("apolysisd: connection task failed: {error}"),
     }
 }
 
