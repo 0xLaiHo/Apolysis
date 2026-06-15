@@ -113,6 +113,31 @@ fn tracks_marked_workloads_without_intent_in_a_bounded_pending_set() {
 }
 
 #[test]
+fn resolves_cgroup_ownership_for_active_and_pending_workloads() {
+    let mut registry = SessionRegistry::new(4, 4);
+    registry
+        .discover_cgroup("pending-session", 41)
+        .expect("pending cgroup");
+    assert_eq!(
+        registry.session_for_cgroup(41),
+        Some("pending-session"),
+        "pending workloads need attribution for missing_intent findings"
+    );
+
+    registry
+        .register(intent("active-session", NOW_MS + 10_000), NOW_MS)
+        .expect("register active session");
+    registry
+        .associate_cgroup("active-session", 42)
+        .expect("associate active cgroup");
+    assert_eq!(registry.session_for_cgroup(42), Some("active-session"));
+
+    registry.close("active-session").expect("close session");
+    assert_eq!(registry.session_for_cgroup(42), None);
+    assert_eq!(registry.session_for_cgroup(41), Some("pending-session"));
+}
+
+#[test]
 fn rejects_association_for_expired_or_unknown_sessions() {
     let mut registry = SessionRegistry::new(2, 2);
     registry

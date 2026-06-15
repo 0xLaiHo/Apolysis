@@ -6,14 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apolysis_accountability::{
-    ComponentState, HealthSnapshot, QueueStats, RegisterOutcome, RegistryError, SessionIntent,
-    SessionRegistry, SessionState,
+    AssociationOutcome, ComponentState, HealthSnapshot, QueueStats, RegisterOutcome, RegistryError,
+    SessionIntent, SessionRegistry, SessionState,
 };
 use apolysis_store::HashChainStore;
 use serde_json::{json, Value};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::DaemonConfig;
+use crate::{DaemonConfig, ScopeController};
 
 pub struct DaemonState {
     registry: RwLock<SessionRegistry>,
@@ -21,10 +21,18 @@ pub struct DaemonState {
     stores: Mutex<BTreeMap<String, HashChainStore>>,
     sessions_dir: PathBuf,
     storage_writable: AtomicBool,
+    scope: Option<ScopeController>,
 }
 
 impl DaemonState {
     pub fn new(config: &DaemonConfig) -> Result<Self, String> {
+        Self::new_with_scope(config, None)
+    }
+
+    pub fn new_with_scope(
+        config: &DaemonConfig,
+        scope: Option<ScopeController>,
+    ) -> Result<Self, String> {
         let sessions_dir = config.state_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir)
             .map_err(|error| format!("failed to create daemon state directory: {error}"))?;
@@ -66,6 +74,7 @@ impl DaemonState {
             stores: Mutex::new(stores),
             sessions_dir,
             storage_writable: AtomicBool::new(true),
+            scope,
         })
     }
 
@@ -115,18 +124,99 @@ impl DaemonState {
     pub async fn close(&self, session_id: &str) -> Result<(), String> {
         let mut registry = self.registry.write().await;
         let mut candidate = registry.clone();
-        candidate.close(session_id).map_err(registry_error)?;
-        self.persist(
-            session_id,
-            json!({"record_type":"session_closed","session_id":session_id}),
-        )
-        .await?;
+        let closed = candidate.close(session_id).map_err(registry_error)?;
+        let mut removed = Vec::new();
+        if let Some(scope) = &self.scope {
+            for cgroup_id in &closed.cgroup_ids {
+                if let Err(error) = scope.untrack(*cgroup_id).await {
+                    for removed_id in removed {
+                        let _ = scope.track(removed_id).await;
+                    }
+                    return Err(error);
+                }
+                removed.push(*cgroup_id);
+            }
+        }
+        if let Err(error) = self
+            .persist(
+                session_id,
+                json!({"record_type":"session_closed","session_id":session_id}),
+            )
+            .await
+        {
+            if let Some(scope) = &self.scope {
+                for cgroup_id in removed {
+                    if let Err(rollback) = scope.track(cgroup_id).await {
+                        return Err(format!("{error}; scope rollback failed: {rollback}"));
+                    }
+                }
+            }
+            return Err(error);
+        }
         *registry = candidate;
         Ok(())
     }
 
     pub async fn query(&self, session_id: &str) -> Option<SessionState> {
         self.registry.read().await.get(session_id).cloned()
+    }
+
+    pub async fn session_for_cgroup(&self, cgroup_id: u64) -> Option<String> {
+        self.registry
+            .read()
+            .await
+            .session_for_cgroup(cgroup_id)
+            .map(str::to_string)
+    }
+
+    pub async fn discover_cgroup(
+        &self,
+        session_id: &str,
+        cgroup_id: u64,
+    ) -> Result<AssociationOutcome, String> {
+        let mut registry = self.registry.write().await;
+        if registry.session_for_cgroup(cgroup_id) == Some(session_id) {
+            return Ok(if registry.get(session_id).is_some() {
+                AssociationOutcome::Attached
+            } else {
+                AssociationOutcome::MissingIntent
+            });
+        }
+
+        let mut candidate = registry.clone();
+        let outcome = candidate
+            .discover_cgroup(session_id, cgroup_id)
+            .map_err(registry_error)?;
+        if let Some(scope) = &self.scope {
+            scope.track(cgroup_id).await?;
+        }
+
+        let outcome_name = match outcome {
+            AssociationOutcome::Attached => "attached",
+            AssociationOutcome::MissingIntent => "missing_intent",
+        };
+        if let Err(error) = self
+            .persist(
+                session_id,
+                json!({
+                    "record_type":"cgroup_discovered",
+                    "session_id":session_id,
+                    "cgroup_id":cgroup_id,
+                    "outcome":outcome_name
+                }),
+            )
+            .await
+        {
+            if let Some(scope) = &self.scope {
+                if let Err(rollback) = scope.untrack(cgroup_id).await {
+                    return Err(format!("{error}; scope rollback failed: {rollback}"));
+                }
+            }
+            return Err(error);
+        }
+
+        *registry = candidate;
+        Ok(outcome)
     }
 
     pub async fn health(&self) -> HealthSnapshot {

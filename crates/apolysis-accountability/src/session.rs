@@ -230,6 +230,10 @@ impl SessionRegistry {
         self.sessions.get(session_id)
     }
 
+    pub fn session_for_cgroup(&self, cgroup_id: u64) -> Option<&str> {
+        self.cgroup_index.get(&cgroup_id).map(String::as_str)
+    }
+
     pub fn is_scope_admitted(&self, session_id: &str) -> bool {
         self.sessions
             .get(session_id)
