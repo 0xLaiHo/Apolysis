@@ -10,6 +10,7 @@ members = [
     "crates/apolysis-observer",
     "crates/apolysis-runtime",
     "crates/apolysis-visibility",
+    "crates/apolysis-validation",
     "crates/apolysis-cli",
 ]
 resolver = "2"
