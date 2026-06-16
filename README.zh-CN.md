@@ -215,7 +215,8 @@ tests/fixtures/     本地/Docker 命令测试夹具和预期 timeline 片段。
 
 ## 🗺️ 功能规划与进度
 
-当前状态：Apolysis 是 PoC / audit-only 原型。F0（M1-M7）和 F1 Independent Observability MVP 已完成。
+当前状态：Apolysis 是 PoC / audit-only 原型。F0（M1-M7）和 F1
+Independent Observability MVP 已完成。F2 Accountability Beta 正在进行中。
 
 实现里程碑：
 
@@ -235,7 +236,7 @@ tests/fixtures/     本地/Docker 命令测试夹具和预期 timeline 片段。
 | --- | --- | --- |
 | F0 | PoC baseline：M1-M7 schema、adapter、fixture observer、feedback、Kubernetes metadata、强隔离 visibility modeling | ✅ **Completed** |
 | F1 | Independent Observability MVP：live audit-only eBPF observer、CO-RE/Aya loader、process/file/network/credential timeline、loss accounting、redaction | ✅ **已完成** |
-| F2 | Accountability Beta：`apolysisd`、cross-layer comparison、Docker/containerd/Kubernetes metadata correlation、`Notify`/`Review` findings、feedback、metrics、本地 timeline integrity | 🚧 **进行中：foundation、daemon runtime core 与 validation harness 已实现** |
+| F2 | Accountability Beta：`apolysisd`、cross-layer comparison、Docker/containerd/Kubernetes metadata correlation、`Notify`/`Review` findings、feedback、metrics、本地 timeline integrity | 🚧 **进行中：foundation、daemon runtime core、validation harness、runtime registration 与 live runtime matrix 已实现** |
 | F3 | Limited Guardrails：真实描述 `Notify`/`Review`/`Kill`，只在能证明 pre-op prevention 的窄场景 prototype BPF-LSM/seccomp `Block` | 🚧 **Planned** |
 | F4 | Runtime Adapter Depth：Docker/containerd baseline、gVisor metadata adapter、Kubernetes Agent Sandbox metadata、Kata boundary-only mode、Firecracker research prototype | 🚧 **Planned** |
 | F5 | Production Hardening：DaemonSet privilege budget、multi-tenant storage、mTLS/RBAC、signed artifacts、SBOM、operator、大规模 chaos/performance testing | ⏳ **Deferred** |

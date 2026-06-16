@@ -15,7 +15,9 @@ fn default_backup_sources_cover_runtime_configuration_without_duplicates() {
         vec![
             "docker_daemon",
             "containerd_config",
-            "k3s_containerd_template",
+            "k3s_generated_containerd_config",
+            "k3s_containerd_v3_template",
+            "k3s_runtime_dropin",
             "docker_http_proxy_dropin",
             "k3s_http_proxy_dropin"
         ]
@@ -30,7 +32,17 @@ fn default_backup_sources_cover_runtime_configuration_without_duplicates() {
     );
     assert_eq!(
         sources[2].path,
-        std::path::Path::new("/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl")
+        std::path::Path::new("/var/lib/rancher/k3s/agent/etc/containerd/config.toml")
+    );
+    assert_eq!(
+        sources[3].path,
+        std::path::Path::new("/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl")
+    );
+    assert_eq!(
+        sources[4].path,
+        std::path::Path::new(
+            "/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/99-apolysis-runtimes.toml"
+        )
     );
 }
 

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use toml_edit::{value as toml_value, DocumentMut, Item, Table};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackupCaptureRequest {
@@ -38,6 +41,52 @@ pub struct RestorePlanRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoreExecutionRequest {
+    pub backup_root: PathBuf,
+    pub manifest: BackupManifest,
+    pub services: Vec<ServiceState>,
+    pub plan: RestorePlan,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RestoreExecutionReport {
+    pub actions_applied: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeRegistrationPlanRequest {
+    pub docker_daemon_path: PathBuf,
+    pub docker_daemon_json: String,
+    pub containerd_config_path: PathBuf,
+    pub containerd_config_toml: Option<String>,
+    pub k3s_runtime_dropin_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeRegistrationPlan {
+    pub file_writes: Vec<RuntimeConfigFileWrite>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeConfigFileWrite {
+    pub id: String,
+    pub path: PathBuf,
+    pub contents: String,
+    pub mode: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeRegistrationReport {
+    pub files_written: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostRuntimeRegistrationReport {
+    pub validation: HostValidationReport,
+    pub registration: RuntimeRegistrationReport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidationReportRequest<'a> {
     pub output_dir: PathBuf,
     pub backup_sources: Vec<BackupSource>,
@@ -59,10 +108,71 @@ pub struct ServiceSpec {
     pub runtime_sockets: Vec<PathBuf>,
 }
 
+pub trait ServiceController {
+    fn restore_unit_file_state(
+        &mut self,
+        service_name: &str,
+        unit_file_state: &str,
+    ) -> Result<(), String>;
+
+    fn restore_active_state(
+        &mut self,
+        service_name: &str,
+        active_state: &str,
+    ) -> Result<(), String>;
+}
+
+pub struct SystemctlServiceController;
+
+impl ServiceController for SystemctlServiceController {
+    fn restore_unit_file_state(
+        &mut self,
+        service_name: &str,
+        unit_file_state: &str,
+    ) -> Result<(), String> {
+        match unit_file_state {
+            "enabled" => systemctl_action("enable", service_name),
+            "disabled" => systemctl_action("disable", service_name),
+            "masked" => systemctl_action("mask", service_name),
+            "static" | "generated" | "indirect" | "alias" | "linked" | "linked-runtime"
+            | "transient" => Ok(()),
+            state => Err(format!(
+                "unsupported unit file state for {service_name}: {state}"
+            )),
+        }
+    }
+
+    fn restore_active_state(
+        &mut self,
+        service_name: &str,
+        active_state: &str,
+    ) -> Result<(), String> {
+        match active_state {
+            "active" | "reloading" => systemctl_action("restart", service_name),
+            "activating" => systemctl_action("start", service_name),
+            "inactive" | "deactivating" => systemctl_action("stop", service_name),
+            "failed" => {
+                systemctl_action("stop", service_name)?;
+                systemctl_action("reset-failed", service_name)
+            }
+            state => Err(format!(
+                "unsupported active state for {service_name}: {state}"
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidateHostArgs {
-    pub dry_run: bool,
+    pub mode: ValidateHostMode,
     pub output_dir: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidateHostMode {
+    DryRun,
+    ApplyRuntimeRegistration,
+    Restore,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -183,8 +293,16 @@ pub fn default_host_backup_sources() -> Vec<BackupSource> {
         BackupSource::new("docker_daemon", "/etc/docker/daemon.json"),
         BackupSource::new("containerd_config", "/etc/containerd/config.toml"),
         BackupSource::new(
-            "k3s_containerd_template",
-            "/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl",
+            "k3s_generated_containerd_config",
+            "/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
+        ),
+        BackupSource::new(
+            "k3s_containerd_v3_template",
+            "/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl",
+        ),
+        BackupSource::new(
+            "k3s_runtime_dropin",
+            "/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/99-apolysis-runtimes.toml",
         ),
         BackupSource::new(
             "docker_http_proxy_dropin",
@@ -218,12 +336,16 @@ pub fn parse_validate_host_args(
     args: impl IntoIterator<Item = String>,
 ) -> Result<ValidateHostArgs, String> {
     let args = args.into_iter().collect::<Vec<_>>();
-    let mut dry_run = false;
+    let mut mode = None;
     let mut output_dir = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--dry-run" => dry_run = true,
+            "--dry-run" => set_validate_mode(&mut mode, ValidateHostMode::DryRun)?,
+            "--apply-runtime-registration" => {
+                set_validate_mode(&mut mode, ValidateHostMode::ApplyRuntimeRegistration)?
+            }
+            "--restore" => set_validate_mode(&mut mode, ValidateHostMode::Restore)?,
             "--output" => {
                 index += 1;
                 output_dir = args.get(index).map(PathBuf::from);
@@ -237,19 +359,177 @@ pub fn parse_validate_host_args(
         }
         index += 1;
     }
-    if !dry_run {
-        return Err(format!("{} requires --dry-run", validate_host_usage()));
-    }
+    let mode = mode.ok_or_else(|| format!("missing mode\n{}", validate_host_usage()))?;
     let output_dir =
         output_dir.ok_or_else(|| format!("missing --output\n{}", validate_host_usage()))?;
-    Ok(ValidateHostArgs {
-        dry_run,
-        output_dir,
+    Ok(ValidateHostArgs { mode, output_dir })
+}
+
+fn set_validate_mode(
+    mode: &mut Option<ValidateHostMode>,
+    next_mode: ValidateHostMode,
+) -> Result<(), String> {
+    if mode.is_some() {
+        return Err(format!(
+            "expected exactly one mode\n{}",
+            validate_host_usage()
+        ));
+    }
+    *mode = Some(next_mode);
+    Ok(())
+}
+
+pub fn render_docker_runtime_config(input: &str) -> Result<String, String> {
+    let mut document = if input.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(input)
+            .map_err(|error| format!("failed to parse Docker daemon JSON: {error}"))?
+    };
+    let root = document
+        .as_object_mut()
+        .ok_or_else(|| "Docker daemon config must be a JSON object".to_string())?;
+    let runtimes = root
+        .entry("runtimes")
+        .or_insert_with(|| serde_json::json!({}));
+    let runtimes = runtimes
+        .as_object_mut()
+        .ok_or_else(|| "Docker daemon runtimes must be a JSON object".to_string())?;
+    runtimes.insert(
+        "runsc".to_string(),
+        serde_json::json!({
+            "path": "/usr/local/bin/runsc"
+        }),
+    );
+    serde_json::to_string_pretty(&document)
+        .map(|json| format!("{json}\n"))
+        .map_err(|error| format!("failed to serialize Docker daemon JSON: {error}"))
+}
+
+pub fn render_containerd_runtime_config(input: &str) -> Result<String, String> {
+    let mut document = parse_containerd_config(input)?;
+    document["version"] = toml_value(3);
+    upsert_containerd_runtime(&mut document, "runc", "io.containerd.runc.v2");
+    document["plugins"]["io.containerd.cri.v1.runtime"]["containerd"]["runtimes"]["runc"]
+        ["options"]["SystemdCgroup"] = toml_value(false);
+    upsert_containerd_runtime(&mut document, "runsc", "io.containerd.runsc.v1");
+    upsert_containerd_runtime(&mut document, "kata", "io.containerd.kata.v2");
+    Ok(ensure_trailing_newline(document.to_string()))
+}
+
+pub fn render_k3s_runtime_dropin_config() -> String {
+    let mut document = DocumentMut::new();
+    upsert_containerd_runtime(&mut document, "runsc", "io.containerd.runsc.v1");
+    upsert_containerd_runtime(&mut document, "kata", "io.containerd.kata.v2");
+    ensure_trailing_newline(document.to_string())
+}
+
+pub fn plan_runtime_registration(
+    request: RuntimeRegistrationPlanRequest,
+) -> Result<RuntimeRegistrationPlan, String> {
+    require_absolute_path(&request.docker_daemon_path)?;
+    require_absolute_path(&request.containerd_config_path)?;
+    require_absolute_path(&request.k3s_runtime_dropin_path)?;
+
+    Ok(RuntimeRegistrationPlan {
+        file_writes: vec![
+            RuntimeConfigFileWrite {
+                id: "docker_daemon".to_string(),
+                path: request.docker_daemon_path,
+                contents: render_docker_runtime_config(&request.docker_daemon_json)?,
+                mode: 0o644,
+            },
+            RuntimeConfigFileWrite {
+                id: "containerd_config".to_string(),
+                path: request.containerd_config_path,
+                contents: render_containerd_runtime_config(
+                    request.containerd_config_toml.as_deref().unwrap_or(""),
+                )?,
+                mode: 0o644,
+            },
+            RuntimeConfigFileWrite {
+                id: "k3s_runtime_dropin".to_string(),
+                path: request.k3s_runtime_dropin_path,
+                contents: render_k3s_runtime_dropin_config(),
+                mode: 0o644,
+            },
+        ],
     })
 }
 
+pub fn apply_runtime_registration_plan(
+    plan: &RuntimeRegistrationPlan,
+) -> Result<RuntimeRegistrationReport, String> {
+    let mut paths = BTreeSet::new();
+    for write in &plan.file_writes {
+        require_absolute_path(&write.path)?;
+        if !paths.insert(write.path.clone()) {
+            return Err(format!(
+                "runtime registration contains duplicate path: {}",
+                write.path.display()
+            ));
+        }
+    }
+
+    let mut files_written = 0;
+    for write in &plan.file_writes {
+        write_config_file(&write.path, write.contents.as_bytes(), write.mode)?;
+        files_written += 1;
+    }
+    Ok(RuntimeRegistrationReport { files_written })
+}
+
+pub fn collect_and_apply_host_runtime_registration(
+    output_dir: PathBuf,
+) -> Result<HostRuntimeRegistrationReport, String> {
+    let validation = collect_host_validation_report(output_dir.clone())?;
+    let docker_daemon_path = PathBuf::from("/etc/docker/daemon.json");
+    let containerd_config_path = PathBuf::from("/etc/containerd/config.toml");
+    let k3s_runtime_dropin_path = PathBuf::from(
+        "/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/99-apolysis-runtimes.toml",
+    );
+    let plan = plan_runtime_registration(RuntimeRegistrationPlanRequest {
+        docker_daemon_path: docker_daemon_path.clone(),
+        docker_daemon_json: read_optional_string(&docker_daemon_path)?
+            .unwrap_or_else(|| "{}".to_string()),
+        containerd_config_path: containerd_config_path.clone(),
+        containerd_config_toml: read_optional_string(&containerd_config_path)?,
+        k3s_runtime_dropin_path,
+    })?;
+    write_json(&output_dir.join("runtime-registration-plan.json"), &plan)?;
+    let registration = apply_runtime_registration_plan(&plan)?;
+    write_json(
+        &output_dir.join("runtime-registration-report.json"),
+        &registration,
+    )?;
+    Ok(HostRuntimeRegistrationReport {
+        validation,
+        registration,
+    })
+}
+
+pub fn restore_validation_from_output<C: ServiceController>(
+    output_dir: &Path,
+    service_controller: &mut C,
+) -> Result<RestoreExecutionReport, String> {
+    let manifest = read_json::<BackupManifest>(&output_dir.join("backup-manifest.json"))?;
+    let services = read_json::<Vec<ServiceState>>(&output_dir.join("service-state.json"))?;
+    let plan = read_json::<RestorePlan>(&output_dir.join("restore-plan.json"))?;
+    let report = execute_restore_plan(
+        RestoreExecutionRequest {
+            backup_root: output_dir.to_path_buf(),
+            manifest,
+            services,
+            plan,
+        },
+        service_controller,
+    )?;
+    write_json(&output_dir.join("restore-execution-report.json"), &report)?;
+    Ok(report)
+}
+
 pub fn validate_host_usage() -> &'static str {
-    "usage: apolysis-validate-host --dry-run --output <dir>"
+    "usage: apolysis-validate-host (--dry-run | --apply-runtime-registration | --restore) --output <dir>"
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -441,6 +721,49 @@ pub fn plan_restore(request: RestorePlanRequest) -> Result<RestorePlan, String> 
         schema_version: 1,
         actions,
     })
+}
+
+pub fn execute_restore_plan<C: ServiceController>(
+    request: RestoreExecutionRequest,
+    service_controller: &mut C,
+) -> Result<RestoreExecutionReport, String> {
+    verify_restore_execution_inputs(&request)?;
+    let mut actions_applied = 0;
+
+    for action in request.plan.actions {
+        match action {
+            RestoreAction::RestoreRegularFile {
+                from_backup,
+                to_path,
+                uid,
+                gid,
+                mode,
+                ..
+            } => {
+                restore_regular_file(&request.backup_root, &from_backup, &to_path, uid, gid, mode)?;
+            }
+            RestoreAction::RestoreSymlink {
+                target,
+                link_path,
+                uid,
+                gid,
+                ..
+            } => restore_symlink(&target, &link_path, uid, gid)?,
+            RestoreAction::EnsureMissing { path, .. }
+            | RestoreAction::RemoveValidationPath { path } => remove_path_if_present(&path)?,
+            RestoreAction::RestoreServiceState {
+                service_name,
+                active_state,
+                unit_file_state,
+            } => {
+                service_controller.restore_unit_file_state(&service_name, &unit_file_state)?;
+                service_controller.restore_active_state(&service_name, &active_state)?;
+            }
+        }
+        actions_applied += 1;
+    }
+
+    Ok(RestoreExecutionReport { actions_applied })
 }
 
 pub fn build_validation_report(
@@ -652,6 +975,42 @@ fn split_paths(value: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+fn parse_containerd_config(input: &str) -> Result<DocumentMut, String> {
+    if input.trim().is_empty() {
+        Ok(DocumentMut::new())
+    } else {
+        input
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("failed to parse containerd TOML: {error}"))
+    }
+}
+
+fn upsert_containerd_runtime(document: &mut DocumentMut, runtime_name: &str, runtime_type: &str) {
+    ensure_toml_table(&mut document["plugins"]);
+    ensure_toml_table(&mut document["plugins"]["io.containerd.cri.v1.runtime"]);
+    ensure_toml_table(&mut document["plugins"]["io.containerd.cri.v1.runtime"]["containerd"]);
+    ensure_toml_table(
+        &mut document["plugins"]["io.containerd.cri.v1.runtime"]["containerd"]["runtimes"],
+    );
+    let runtime = &mut document["plugins"]["io.containerd.cri.v1.runtime"]["containerd"]
+        ["runtimes"][runtime_name];
+    ensure_toml_table(runtime);
+    runtime["runtime_type"] = toml_value(runtime_type);
+}
+
+fn ensure_toml_table(item: &mut Item) {
+    if !item.is_table() {
+        *item = Item::Table(Table::new());
+    }
+}
+
+fn ensure_trailing_newline(mut output: String) -> String {
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output
+}
+
 fn parse_json(input: &str, name: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(input).map_err(|error| format!("failed to parse {name} JSON: {error}"))
 }
@@ -671,11 +1030,330 @@ fn verify_backup_copy(
     Ok(())
 }
 
+fn verify_restore_execution_inputs(request: &RestoreExecutionRequest) -> Result<(), String> {
+    if request.plan.schema_version != 1 {
+        return Err(format!(
+            "unsupported restore plan schema version {}",
+            request.plan.schema_version
+        ));
+    }
+    if request.manifest.schema_version != 1 {
+        return Err(format!(
+            "unsupported backup manifest schema version {}",
+            request.manifest.schema_version
+        ));
+    }
+    let entries = request
+        .manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let services = request
+        .services
+        .iter()
+        .map(|service| (service.service_name.as_str(), service))
+        .collect::<BTreeMap<_, _>>();
+
+    for action in &request.plan.actions {
+        match action {
+            RestoreAction::RestoreRegularFile {
+                id,
+                from_backup,
+                to_path,
+                ..
+            } => {
+                require_absolute_path(to_path)?;
+                let entry = entries.get(id.as_str()).ok_or_else(|| {
+                    format!("restore action references unknown backup entry {id}")
+                })?;
+                if entry.kind != BackupEntryKind::RegularFile {
+                    return Err(format!("restore action {id} does not match manifest kind"));
+                }
+                if entry.original_path != *to_path {
+                    return Err(format!(
+                        "restore action {id} target does not match manifest"
+                    ));
+                }
+                let manifest_backup = entry.backup_relative_path.as_ref().ok_or_else(|| {
+                    format!("regular file backup entry {id} is missing backup path")
+                })?;
+                if manifest_backup != from_backup {
+                    return Err(format!(
+                        "restore action {id} backup path does not match manifest"
+                    ));
+                }
+                verify_backup_copy(&request.backup_root, entry, from_backup)?;
+            }
+            RestoreAction::RestoreSymlink {
+                id,
+                target,
+                link_path,
+                ..
+            } => {
+                require_absolute_path(link_path)?;
+                let entry = entries.get(id.as_str()).ok_or_else(|| {
+                    format!("restore action references unknown backup entry {id}")
+                })?;
+                if entry.kind != BackupEntryKind::Symlink {
+                    return Err(format!("restore action {id} does not match manifest kind"));
+                }
+                if entry.original_path != *link_path {
+                    return Err(format!(
+                        "restore action {id} link path does not match manifest"
+                    ));
+                }
+                if entry.symlink_target.as_ref() != Some(target) {
+                    return Err(format!(
+                        "restore action {id} target does not match manifest"
+                    ));
+                }
+            }
+            RestoreAction::EnsureMissing { id, path } => {
+                require_absolute_path(path)?;
+                let entry = entries.get(id.as_str()).ok_or_else(|| {
+                    format!("restore action references unknown backup entry {id}")
+                })?;
+                if entry.kind != BackupEntryKind::Missing {
+                    return Err(format!("restore action {id} does not match manifest kind"));
+                }
+                if entry.original_path != *path {
+                    return Err(format!("restore action {id} path does not match manifest"));
+                }
+            }
+            RestoreAction::RemoveValidationPath { path } => require_absolute_path(path)?,
+            RestoreAction::RestoreServiceState {
+                service_name,
+                active_state,
+                unit_file_state,
+            } => {
+                let service = services.get(service_name.as_str()).ok_or_else(|| {
+                    format!("restore action references uncaptured service {service_name}")
+                })?;
+                if service.active_state != *active_state {
+                    return Err(format!(
+                        "restore action for {service_name} active state does not match capture"
+                    ));
+                }
+                if service.unit_file_state != *unit_file_state {
+                    return Err(format!(
+                        "restore action for {service_name} unit file state does not match capture"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn restore_regular_file(
+    backup_root: &Path,
+    from_backup: &Path,
+    to_path: &Path,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    mode: Option<u32>,
+) -> Result<(), String> {
+    require_absolute_path(to_path)?;
+    let parent = to_path
+        .parent()
+        .ok_or_else(|| format!("restore target has no parent: {}", to_path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    if let Ok(metadata) = std::fs::symlink_metadata(to_path) {
+        if metadata.file_type().is_dir() {
+            return Err(format!(
+                "refusing to replace directory with restored file: {}",
+                to_path.display()
+            ));
+        }
+    }
+
+    let temp_path = restore_temp_path(parent, to_path)?;
+    let backup_path = backup_root.join(from_backup);
+    std::fs::copy(&backup_path, &temp_path).map_err(|error| {
+        format!(
+            "failed to copy backup {} to {}: {error}",
+            backup_path.display(),
+            temp_path.display()
+        )
+    })?;
+    if let Some(mode) = mode {
+        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("failed to set mode on {}: {error}", temp_path.display()))?;
+    }
+    std::fs::rename(&temp_path, to_path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!(
+            "failed to move restored file {} to {}: {error}",
+            temp_path.display(),
+            to_path.display()
+        )
+    })?;
+    if let Some(mode) = mode {
+        std::fs::set_permissions(to_path, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("failed to set mode on {}: {error}", to_path.display()))?;
+    }
+    set_owner_if_needed(to_path, uid, gid, true)
+}
+
+fn write_config_file(path: &Path, contents: &[u8], mode: u32) -> Result<(), String> {
+    require_absolute_path(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("config target has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_dir() {
+            return Err(format!(
+                "refusing to replace directory with config file: {}",
+                path.display()
+            ));
+        }
+    }
+
+    let temp_path = restore_temp_path(parent, path)?;
+    std::fs::write(&temp_path, contents)
+        .map_err(|error| format!("failed to write {}: {error}", temp_path.display()))?;
+    std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode))
+        .map_err(|error| format!("failed to set mode on {}: {error}", temp_path.display()))?;
+    std::fs::rename(&temp_path, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!(
+            "failed to move config file {} to {}: {error}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .map_err(|error| format!("failed to set mode on {}: {error}", path.display()))
+}
+
+fn restore_symlink(
+    target: &Path,
+    link_path: &Path,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> Result<(), String> {
+    require_absolute_path(link_path)?;
+    let parent = link_path
+        .parent()
+        .ok_or_else(|| format!("restore link has no parent: {}", link_path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    remove_path_if_present(link_path)?;
+    std::os::unix::fs::symlink(target, link_path).map_err(|error| {
+        format!(
+            "failed to restore symlink {} -> {}: {error}",
+            link_path.display(),
+            target.display()
+        )
+    })?;
+    set_owner_if_needed(link_path, uid, gid, false)
+}
+
+fn remove_path_if_present(path: &Path) -> Result<(), String> {
+    require_absolute_path(path)?;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("failed to inspect {}: {error}", path.display())),
+    };
+    if metadata.file_type().is_dir() {
+        std::fs::remove_dir_all(path)
+            .map_err(|error| format!("failed to remove directory {}: {error}", path.display()))
+    } else {
+        std::fs::remove_file(path)
+            .map_err(|error| format!("failed to remove file {}: {error}", path.display()))
+    }
+}
+
+fn require_absolute_path(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err(format!(
+            "restore path must be an absolute non-root path: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn restore_temp_path(parent: &Path, to_path: &Path) -> Result<PathBuf, String> {
+    let file_name = to_path
+        .file_name()
+        .ok_or_else(|| format!("restore target has no file name: {}", to_path.display()))?;
+    Ok(parent.join(format!(
+        ".{}.apolysis-restore.{}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    )))
+}
+
+fn set_owner_if_needed(
+    path: &Path,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    follow_symlink: bool,
+) -> Result<(), String> {
+    let Some(uid) = uid else {
+        return Ok(());
+    };
+    let Some(gid) = gid else {
+        return Ok(());
+    };
+    let metadata = if follow_symlink {
+        std::fs::metadata(path)
+    } else {
+        std::fs::symlink_metadata(path)
+    }
+    .map_err(|error| {
+        format!(
+            "failed to inspect restored owner {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.uid() == uid && metadata.gid() == gid {
+        return Ok(());
+    }
+    let path_c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("restore path contains a NUL byte: {}", path.display()))?;
+    let result = if follow_symlink {
+        unsafe { libc::chown(path_c.as_ptr(), uid as libc::uid_t, gid as libc::gid_t) }
+    } else {
+        unsafe { libc::lchown(path_c.as_ptr(), uid as libc::uid_t, gid as libc::gid_t) }
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to restore owner on {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
 fn write_json(path: &std::path::Path, value: &impl Serialize) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| format!("failed to serialize {}: {error}", path.display()))?;
     std::fs::write(path, bytes)
         .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+}
+
+fn read_optional_string(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("failed to read {}: {error}", path.display())),
+    }
 }
 
 fn default_managed_service_inputs() -> Vec<ManagedServiceInputs> {
@@ -694,7 +1372,9 @@ fn default_managed_service_inputs() -> Vec<ManagedServiceInputs> {
         ManagedServiceInputs {
             service_name: "k3s.service".to_string(),
             entry_ids: vec![
-                "k3s_containerd_template".to_string(),
+                "k3s_generated_containerd_config".to_string(),
+                "k3s_containerd_v3_template".to_string(),
+                "k3s_runtime_dropin".to_string(),
                 "k3s_http_proxy_dropin".to_string(),
             ],
         },
@@ -722,6 +1402,10 @@ fn systemctl_show(service_name: &str) -> Result<String, String> {
             "--no-page",
         ],
     )
+}
+
+fn systemctl_action(action: &str, service_name: &str) -> Result<(), String> {
+    command_output("systemctl", &[action, service_name]).map(|_| ())
 }
 
 fn kubectl_json(args: &[&str]) -> Result<String, String> {
