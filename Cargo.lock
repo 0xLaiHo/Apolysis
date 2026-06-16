@@ -53,6 +53,7 @@ dependencies = [
 name = "apolysis-feedback"
 version = "0.1.0"
 dependencies = [
+ "apolysis-accountability",
  "apolysis-core",
  "serde_json",
 ]

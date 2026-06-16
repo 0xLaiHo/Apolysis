@@ -4,14 +4,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use apolysis_accountability::{ComponentState, PushOutcome, QueuePriority};
+use apolysis_accountability::{
+    ComponentState, EffectKind, EvidenceBoundary, ObservedEffect, PushOutcome, QueuePriority,
+    RuntimeIdentity,
+};
+use apolysis_core::RawKernelEvent;
 use apolysis_observer::{
     raw_event_from_record, redact_raw_event_for_persistence, DaemonObserver, DaemonObserverBatch,
     DaemonObserverCounters, Redactor,
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{DaemonRecord, DaemonState, EventPipeline, ScopeOperation, ScopeRequest};
+use crate::{DaemonRecord, DaemonState, EventPipeline, ScopeOperation, ScopeRequest, SubmitError};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ObserverIngestSummary {
@@ -173,18 +177,87 @@ pub async fn ingest_observer_batch(
             "cgroup_id": persisted.cgroup_id,
             "raw_payload": persisted.raw_payload,
         });
-        match pipeline.submit(DaemonRecord::new(
-            session_id,
-            QueuePriority::Ordinary,
-            payload,
-        )) {
-            Ok(PushOutcome::Accepted | PushOutcome::AcceptedAfterShedding { .. }) => {
-                summary.submitted = summary.submitted.saturating_add(1);
-            }
-            Ok(PushOutcome::Dropped { .. }) | Err(_) => {
-                summary.dropped = summary.dropped.saturating_add(1);
+        record_submission(
+            &mut summary,
+            pipeline.submit(DaemonRecord::new(
+                session_id.clone(),
+                QueuePriority::Ordinary,
+                payload,
+            )),
+        );
+        if let Some(effect) = observed_effect_from_raw_event(&persisted, credential_read) {
+            match state.accountability_finding_payloads(&effect).await {
+                Ok(payloads) => {
+                    for payload in payloads {
+                        record_submission(
+                            &mut summary,
+                            pipeline.submit(DaemonRecord::new(
+                                session_id.clone(),
+                                QueuePriority::Finding,
+                                payload,
+                            )),
+                        );
+                    }
+                }
+                Err(_) => {
+                    summary.decode_failures = summary.decode_failures.saturating_add(1);
+                }
             }
         }
     }
     summary
+}
+
+fn record_submission(
+    summary: &mut ObserverIngestSummary,
+    result: Result<PushOutcome, SubmitError>,
+) {
+    match result {
+        Ok(PushOutcome::Accepted | PushOutcome::AcceptedAfterShedding { .. }) => {
+            summary.submitted = summary.submitted.saturating_add(1);
+        }
+        Ok(PushOutcome::Dropped { .. }) | Err(_) => {
+            summary.dropped = summary.dropped.saturating_add(1);
+        }
+    }
+}
+
+fn observed_effect_from_raw_event(
+    raw: &RawKernelEvent,
+    credential_read: bool,
+) -> Option<ObservedEffect> {
+    let kind = match raw.event_name.as_str() {
+        "exec" | "execve" | "sched_process_exec" => EffectKind::Exec,
+        "open" | "openat" | "openat2" if credential_read => EffectKind::CredentialRead,
+        "open" | "openat" | "openat2" => EffectKind::FileRead,
+        "creat" | "truncate" | "ftruncate" | "unlink" | "unlinkat" | "rename" | "renameat"
+        | "renameat2" => EffectKind::FileWrite,
+        "connect" => EffectKind::NetworkConnect,
+        _ => return None,
+    };
+    let actor = if raw.action.trim().is_empty() {
+        raw.comm.clone()
+    } else {
+        raw.action.clone()
+    };
+    Some(ObservedEffect {
+        session_id: raw.session_id.clone(),
+        evidence_ref: format!(
+            "raw_kernel_event:{}:{}:{}",
+            raw.timestamp_unix_ms, raw.pid, raw.event_name
+        ),
+        kind,
+        actor,
+        resource: raw.resource.clone(),
+        runtime: RuntimeIdentity {
+            runtime: "kernel_tracepoint".to_string(),
+            container_id: raw.container_id.clone(),
+            pod_uid: None,
+            cgroup_id: raw
+                .cgroup_id
+                .as_deref()
+                .and_then(|value| value.parse::<u64>().ok()),
+        },
+        evidence_boundary: EvidenceBoundary::HostBoundary,
+    })
 }

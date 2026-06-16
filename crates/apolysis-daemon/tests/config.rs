@@ -11,6 +11,14 @@ fn parses_bounded_runtime_configuration() {
         [
             "--bpf-object",
             "/opt/apolysis/apolysis_observer.bpf.o",
+            "--feedback-dir",
+            "/run/apolysis/feedback",
+            "--docker-socket",
+            "/var/run/docker.sock",
+            "--proc-root",
+            "/host/proc",
+            "--cgroup-root",
+            "/host/sys/fs/cgroup",
             "--queue-capacity",
             "8192",
             "--scope-command-capacity",
@@ -27,6 +35,16 @@ fn parses_bounded_runtime_configuration() {
         config.bpf_object,
         Some(PathBuf::from("/opt/apolysis/apolysis_observer.bpf.o"))
     );
+    assert_eq!(
+        config.feedback_dir,
+        Some(PathBuf::from("/run/apolysis/feedback"))
+    );
+    assert_eq!(
+        config.docker_socket,
+        Some(PathBuf::from("/var/run/docker.sock"))
+    );
+    assert_eq!(config.proc_root, PathBuf::from("/host/proc"));
+    assert_eq!(config.cgroup_root, PathBuf::from("/host/sys/fs/cgroup"));
     assert_eq!(config.queue_capacity, 8192);
     assert_eq!(config.scope_command_capacity, 256);
     assert_eq!(config.shutdown_drain_timeout, Duration::from_secs(3));

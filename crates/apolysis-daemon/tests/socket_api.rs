@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apolysis_daemon::{serve, DaemonConfig, DaemonResponse, DAEMON_SCHEMA_V1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -189,6 +189,69 @@ async fn client_disconnect_does_not_prevent_clean_shutdown() {
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     server.stop().await;
+}
+
+#[tokio::test]
+async fn startup_docker_adapter_ingests_marked_running_container() {
+    let mut config = config("docker-adapter-startup", 16);
+    let root = config
+        .socket_path
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let docker_socket = root.join("run/docker.sock");
+    let proc_root = root.join("proc");
+    let cgroup_root = root.join("sys/fs/cgroup");
+    let cgroup = cgroup_root.join("system.slice/docker-container-abc.scope");
+    std::fs::create_dir_all(&cgroup).expect("create fake cgroup");
+    std::fs::create_dir_all(proc_root.join("1234")).expect("create fake proc pid");
+    std::fs::write(
+        proc_root.join("1234/cgroup"),
+        "0::/system.slice/docker-container-abc.scope\n",
+    )
+    .expect("write fake proc cgroup");
+    config.docker_socket = Some(docker_socket.clone());
+    config.proc_root = proc_root;
+    config.cgroup_root = cgroup_root;
+
+    let docker = fake_docker_engine(
+        &docker_socket,
+        vec![
+            (
+                "GET /containers/json HTTP/1.1\r\n",
+                r#"[{"Id":"container-abc","Labels":{"apolysis.session_id":"session-docker"}}]"#,
+            ),
+            (
+                "GET /containers/container-abc/json HTTP/1.1\r\n",
+                r#"{
+                    "Id":"container-abc",
+                    "State":{"Pid":1234},
+                    "Config":{
+                        "Image":"alpine:3.20",
+                        "Labels":{"apolysis.session_id":"session-docker"}
+                    },
+                    "HostConfig":{"Runtime":"runsc"}
+                }"#,
+            ),
+        ],
+    );
+
+    let server = TestServer::start_config(config.clone()).await;
+    let timeline_path = config
+        .state_dir
+        .join("sessions/session-docker/timeline.jsonl");
+    let timeline = wait_for_file_contains(&timeline_path, "runtime_workload_discovered").await;
+    assert!(timeline.contains(r#""adapter":"docker""#));
+    assert!(timeline.contains(r#""workload_id":"container-abc""#));
+    assert!(timeline.contains(&format!(
+        r#""cgroup_id":{}"#,
+        std::fs::metadata(&cgroup).unwrap().ino()
+    )));
+
+    server.stop().await;
+    docker.await.expect("fake docker engine");
 }
 
 #[tokio::test]
@@ -376,6 +439,65 @@ async fn read_response(stream: &mut UnixStream) -> DaemonResponse {
         .await
         .expect("response body");
     serde_json::from_slice(&response).expect("valid response")
+}
+
+fn fake_docker_engine(
+    socket_path: &std::path::Path,
+    responses: Vec<(&'static str, &'static str)>,
+) -> tokio::task::JoinHandle<()> {
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent).expect("create docker socket directory");
+    }
+    let listener = UnixListener::bind(socket_path).expect("bind fake docker socket");
+    tokio::spawn(async move {
+        for (expected_prefix, body) in responses {
+            let (mut stream, _) = listener.accept().await.expect("accept docker client");
+            let request = read_http_request(&mut stream).await;
+            assert!(
+                request.starts_with(expected_prefix),
+                "unexpected Docker request: {request:?}"
+            );
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write Docker response");
+        }
+    })
+}
+
+async fn read_http_request(stream: &mut UnixStream) -> String {
+    let mut request = Vec::new();
+    loop {
+        let mut byte = [0_u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .await
+            .expect("read HTTP request");
+        request.push(byte[0]);
+        if request.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8(request).expect("UTF-8 request")
+}
+
+async fn wait_for_file_contains(path: &std::path::Path, needle: &str) -> String {
+    for _ in 0..100 {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            if contents.contains(needle) {
+                return contents;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{} did not contain {needle}", path.display());
 }
 
 fn config(name: &str, max_connections: usize) -> DaemonConfig {

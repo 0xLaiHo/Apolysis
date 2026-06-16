@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use apolysis_accountability::AccountabilityFinding;
 use apolysis_core::{feedback, json_string, PolicyViolation};
 
 static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(1);
@@ -42,6 +43,23 @@ impl FeedbackWriter {
         )
     }
 
+    /// Persist the latest accountability finding in both human and machine-readable forms.
+    pub fn write_last_accountability_finding(
+        &self,
+        finding: &AccountabilityFinding,
+    ) -> Result<(), String> {
+        fs::create_dir_all(&self.directory)
+            .map_err(|error| format!("failed to create feedback directory: {error}"))?;
+        atomic_write(
+            &self.accountability_path(),
+            render_accountability_finding_feedback(finding)?.as_bytes(),
+        )?;
+        atomic_write(
+            &self.accountability_json_path(),
+            format!("{}\n", render_accountability_finding_json(finding)?).as_bytes(),
+        )
+    }
+
     /// Return the concrete feedback file path used by this writer.
     pub fn path(&self) -> PathBuf {
         last_violation_path(&self.directory)
@@ -50,6 +68,16 @@ impl FeedbackWriter {
     /// Return the machine-readable feedback file path used by this writer.
     pub fn json_path(&self) -> PathBuf {
         last_violation_json_path(&self.directory)
+    }
+
+    /// Return the concrete accountability feedback file path used by this writer.
+    pub fn accountability_path(&self) -> PathBuf {
+        last_accountability_finding_path(&self.directory)
+    }
+
+    /// Return the concrete machine-readable accountability feedback file path.
+    pub fn accountability_json_path(&self) -> PathBuf {
+        last_accountability_finding_json_path(&self.directory)
     }
 }
 
@@ -82,6 +110,30 @@ fn render_machine_tag(violation: &PolicyViolation) -> String {
     )
 }
 
+/// Render an accountability finding feedback file for agent harness hooks.
+pub fn render_accountability_finding_feedback(
+    finding: &AccountabilityFinding,
+) -> Result<String, String> {
+    let value = serde_json::to_value(finding)
+        .map_err(|error| format!("failed to serialize accountability finding: {error}"))?;
+    let kind = required_json_str(&value, "kind")?;
+    let decision = required_json_str(&value, "decision")?;
+    Ok(format!(
+        "Apolysis accountability finding\nsession_id: {}\nkind: {}\ndecision: {}\nevidence_ref: {}\nruntime: {}\nreason: {}\n",
+        finding.session_id,
+        kind,
+        decision,
+        finding.evidence_ref,
+        finding.runtime.runtime,
+        finding.reason
+    ))
+}
+
+fn render_accountability_finding_json(finding: &AccountabilityFinding) -> Result<String, String> {
+    serde_json::to_string(finding)
+        .map_err(|error| format!("failed to serialize accountability finding: {error}"))
+}
+
 /// Return the conventional feedback file path for a directory.
 pub fn last_violation_path(directory: impl AsRef<Path>) -> PathBuf {
     directory.as_ref().join(feedback::LAST_VIOLATION_FILE)
@@ -90,6 +142,27 @@ pub fn last_violation_path(directory: impl AsRef<Path>) -> PathBuf {
 /// Return the conventional machine-readable feedback path for a directory.
 pub fn last_violation_json_path(directory: impl AsRef<Path>) -> PathBuf {
     directory.as_ref().join(feedback::LAST_VIOLATION_JSON_FILE)
+}
+
+/// Return the conventional accountability feedback file path for a directory.
+pub fn last_accountability_finding_path(directory: impl AsRef<Path>) -> PathBuf {
+    directory
+        .as_ref()
+        .join(feedback::LAST_ACCOUNTABILITY_FINDING_FILE)
+}
+
+/// Return the conventional machine-readable accountability feedback path.
+pub fn last_accountability_finding_json_path(directory: impl AsRef<Path>) -> PathBuf {
+    directory
+        .as_ref()
+        .join(feedback::LAST_ACCOUNTABILITY_FINDING_JSON_FILE)
+}
+
+fn required_json_str<'a>(value: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("accountability finding missing string field {key}"))
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {

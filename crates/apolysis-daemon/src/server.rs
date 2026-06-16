@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apolysis_accountability::{
-    decode_intent_frame, HealthSnapshot, IntentError, IntentRequest, SessionState,
-    MAX_INTENT_FRAME_BYTES,
+    decode_intent_frame, AdapterKind, ComponentState, HealthSnapshot, IntentError, IntentRequest,
+    SessionState, MAX_INTENT_FRAME_BYTES,
 };
 use apolysis_observer::{DaemonObserver, DaemonObserverConfig};
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,10 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{oneshot, Semaphore};
 use tokio::task::JoinSet;
 
-use crate::{run_observer_runtime, scope_channel, DaemonConfig, DaemonState};
+use crate::{
+    run_observer_runtime, run_runtime_adapter, scope_channel, DaemonConfig, DaemonState,
+    DockerEngineClient, DockerEngineRuntimeAdapter, RuntimeAdapterSummary,
+};
 
 pub const DAEMON_SCHEMA_V1: u32 = 1;
 
@@ -79,6 +82,8 @@ pub async fn serve(
         let state = Arc::clone(&state);
         tokio::spawn(async move { state.run_writer(writer_shutdown_receiver).await })
     };
+    let (runtime_adapter_shutdowns, runtime_adapter_tasks) =
+        start_runtime_adapters(&config, Arc::clone(&state));
     let (observer_shutdown, mut observer_task) =
         if let Some((observer, _, receiver)) = observer_setup {
             let (sender, shutdown_receiver) = oneshot::channel();
@@ -176,6 +181,21 @@ pub async fn serve(
             }
         }
     }
+    for shutdown in runtime_adapter_shutdowns {
+        let _ = shutdown.send(());
+    }
+    for mut task in runtime_adapter_tasks {
+        match tokio::time::timeout(config.shutdown_drain_timeout, &mut task).await {
+            Ok(Ok(_summary)) => {}
+            Ok(Err(error)) => {
+                eprintln!("apolysisd: runtime adapter task failed: {error}");
+            }
+            Err(_) => {
+                task.abort();
+                eprintln!("apolysisd: runtime adapter shutdown deadline exceeded");
+            }
+        }
+    }
 
     let _ = writer_shutdown.send(());
     match tokio::time::timeout(config.shutdown_drain_timeout, &mut writer_task).await {
@@ -199,6 +219,54 @@ pub async fn serve(
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+fn start_runtime_adapters(
+    config: &DaemonConfig,
+    state: Arc<DaemonState>,
+) -> (
+    Vec<oneshot::Sender<()>>,
+    Vec<tokio::task::JoinHandle<RuntimeAdapterSummary>>,
+) {
+    let mut shutdowns = Vec::new();
+    let mut tasks = Vec::new();
+
+    if let Some(socket_path) = config.docker_socket.clone() {
+        let (shutdown, receiver) = oneshot::channel();
+        shutdowns.push(shutdown);
+        let proc_root = config.proc_root.clone();
+        let cgroup_root = config.cgroup_root.clone();
+        let state = Arc::clone(&state);
+        tasks.push(tokio::spawn(async move {
+            let client = DockerEngineClient::new(socket_path);
+            match client.list_marked_running_container_ids().await {
+                Ok(container_ids) => {
+                    let adapter = DockerEngineRuntimeAdapter::new(
+                        client,
+                        proc_root,
+                        cgroup_root,
+                        container_ids,
+                    );
+                    run_runtime_adapter(adapter, state, receiver).await
+                }
+                Err(error) => {
+                    eprintln!("apolysisd: Docker adapter unavailable: {error}");
+                    state
+                        .set_adapter(AdapterKind::Docker, ComponentState::Degraded)
+                        .await;
+                    RuntimeAdapterSummary {
+                        adapter: AdapterKind::Docker,
+                        discovered: 0,
+                        missing_intent: 0,
+                        backend_errors: 1,
+                        ingest_errors: 0,
+                    }
+                }
+            }
+        }));
+    }
+
+    (shutdowns, tasks)
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<DaemonState>) -> Result<(), String> {

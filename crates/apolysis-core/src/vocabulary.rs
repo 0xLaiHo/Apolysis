@@ -165,4 +165,8 @@ pub mod feedback {
     pub const LAST_VIOLATION_FILE: &str = "last-violation.txt";
     /// Machine-readable file name that stores the latest violation.
     pub const LAST_VIOLATION_JSON_FILE: &str = "last-violation.json";
+    /// Default file name that stores the latest accountability finding.
+    pub const LAST_ACCOUNTABILITY_FINDING_FILE: &str = "last-accountability-finding.txt";
+    /// Machine-readable file name that stores the latest accountability finding.
+    pub const LAST_ACCOUNTABILITY_FINDING_JSON_FILE: &str = "last-accountability-finding.json";
 }

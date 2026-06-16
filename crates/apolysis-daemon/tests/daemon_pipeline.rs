@@ -104,7 +104,7 @@ async fn observer_batch_submits_only_records_with_session_ownership() {
     )
     .await;
 
-    assert_eq!(summary.submitted, 4);
+    assert_eq!(summary.submitted, 10);
     assert_eq!(summary.unscoped, 1);
     assert_eq!(summary.decode_failures, 2);
     assert_eq!(summary.truncations, 1);
@@ -124,6 +124,104 @@ async fn observer_batch_submits_only_records_with_session_ownership() {
     assert!(!timeline.contains("/host/private/credential"));
     assert!(timeline.contains("/workspace/src/main.rs"));
     assert!(!timeline.contains("/workspace/.env"));
+
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn observer_batch_appends_accountability_findings_for_registered_intent() {
+    let config = config();
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(
+            intent("accountability-session", "policy.yaml"),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("register intent");
+    state
+        .discover_cgroup("accountability-session", 77)
+        .await
+        .expect("discover cgroup");
+    let pipeline = state.pipeline();
+    let (shutdown, receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(receiver).await })
+    };
+
+    let summary = ingest_observer_batch(
+        &state,
+        &pipeline,
+        DaemonObserverBatch {
+            events: vec![kernel_network_event(77, "1.1.1.1:443")],
+            decode_failures: 0,
+            truncations: 0,
+        },
+    )
+    .await;
+
+    assert_eq!(summary.submitted, 3);
+    shutdown.send(()).unwrap();
+    writer.await.unwrap().expect("writer drain");
+
+    let timeline = std::fs::read_to_string(
+        config
+            .state_dir
+            .join("sessions/accountability-session/timeline.jsonl"),
+    )
+    .expect("session timeline");
+    assert!(timeline.contains(r#""record_type":"raw_kernel_event""#));
+    assert!(timeline.contains(r#""record_type":"accountability_finding""#));
+    assert!(timeline.contains(r#""kind":"undeclared_action""#));
+    assert!(timeline.contains(r#""kind":"unknown_egress""#));
+    assert!(timeline.contains(r#""decision":"review""#));
+
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn observer_batch_updates_accountability_feedback_output() {
+    let mut config = config();
+    let feedback_dir = config.state_dir.parent().unwrap().join("feedback");
+    config.feedback_dir = Some(feedback_dir.clone());
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("feedback-session", "policy.yaml"), 1_700_000_000_000)
+        .await
+        .expect("register intent");
+    state
+        .discover_cgroup("feedback-session", 77)
+        .await
+        .expect("discover cgroup");
+    let pipeline = state.pipeline();
+    let (shutdown, receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(receiver).await })
+    };
+
+    ingest_observer_batch(
+        &state,
+        &pipeline,
+        DaemonObserverBatch {
+            events: vec![kernel_network_event(77, "1.1.1.1:443")],
+            decode_failures: 0,
+            truncations: 0,
+        },
+    )
+    .await;
+    shutdown.send(()).unwrap();
+    writer.await.unwrap().expect("writer drain");
+
+    let json = std::fs::read_to_string(feedback_dir.join("last-accountability-finding.json"))
+        .expect("accountability feedback JSON");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid feedback JSON");
+    assert_eq!(value["session_id"], "feedback-session");
+    assert!(matches!(
+        value["kind"].as_str(),
+        Some("undeclared_action" | "unknown_egress")
+    ));
 
     cleanup(&config);
 }
@@ -148,6 +246,14 @@ fn kernel_event(cgroup_id: u64) -> DaemonKernelEvent {
             payload: [0; PAYLOAD_LEN],
         },
     }
+}
+
+fn kernel_network_event(cgroup_id: u64, endpoint: &str) -> DaemonKernelEvent {
+    let mut event = kernel_event(cgroup_id);
+    event.record.event_kind = KernelEventKind::Connect as u32;
+    event.record.action[..7].copy_from_slice(b"connect");
+    event.record.resource[..endpoint.len()].copy_from_slice(endpoint.as_bytes());
+    event
 }
 
 fn kernel_file_event(cgroup_id: u64, path: &str) -> DaemonKernelEvent {

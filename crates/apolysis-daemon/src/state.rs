@@ -6,15 +6,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apolysis_accountability::{
-    AssociationOutcome, ComponentState, HealthSnapshot, QueueStats, RegisterOutcome, RegistryError,
-    ResourceKind, SessionIntent, SessionRegistry, SessionState,
+    AccountabilityAnalyzer, AdapterKind, AssociationOutcome, ComponentState, EffectKind,
+    EvidenceBoundary, HealthSnapshot, ObservedEffect, QueueStats, RegisterOutcome, RegistryError,
+    ResourceKind, RuntimeIdentity, SessionIntent, SessionRegistry, SessionState,
 };
+use apolysis_feedback::FeedbackWriter;
 use apolysis_policy::Policy;
 use apolysis_store::HashChainStore;
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
 
-use crate::{DaemonConfig, DaemonRecord, EventPipeline, ScopeController, WriterSummary};
+use crate::{
+    DaemonConfig, DaemonRecord, EventPipeline, RuntimeWorkload, ScopeController, WriterSummary,
+};
 
 pub struct DaemonState {
     registry: RwLock<SessionRegistry>,
@@ -25,6 +29,7 @@ pub struct DaemonState {
     scope: Option<ScopeController>,
     pipeline: EventPipeline,
     redaction_policies: RwLock<BTreeMap<String, Option<Policy>>>,
+    feedback: Option<FeedbackWriter>,
 }
 
 impl DaemonState {
@@ -93,6 +98,7 @@ impl DaemonState {
             scope,
             pipeline,
             redaction_policies: RwLock::new(redaction_policies),
+            feedback: config.feedback_dir.clone().map(FeedbackWriter::new),
         })
     }
 
@@ -289,6 +295,63 @@ impl DaemonState {
         self.health.write().await.set_ebpf(state);
     }
 
+    pub async fn set_adapter(&self, adapter: AdapterKind, state: ComponentState) {
+        self.health.write().await.set_adapter(adapter, state);
+    }
+
+    pub async fn ingest_runtime_workload(
+        &self,
+        workload: RuntimeWorkload,
+    ) -> Result<AssociationOutcome, String> {
+        let outcome = self
+            .discover_cgroup(&workload.session_id, workload.cgroup_id)
+            .await?;
+        let outcome_name = match outcome {
+            AssociationOutcome::Attached => "attached",
+            AssociationOutcome::MissingIntent => "missing_intent",
+        };
+        self.persist(
+            &workload.session_id,
+            json!({
+                "record_type":"runtime_workload_discovered",
+                "adapter":workload.adapter,
+                "session_id":workload.session_id,
+                "workload_id":workload.workload_id,
+                "cgroup_id":workload.cgroup_id,
+                "image":workload.image,
+                "runtime_handler":workload.runtime_handler,
+                "outcome":outcome_name
+            }),
+        )
+        .await?;
+        if outcome == AssociationOutcome::MissingIntent {
+            self.persist_missing_intent_finding(&workload).await?;
+        }
+        self.set_adapter(workload.adapter, ComponentState::Ready)
+            .await;
+        Ok(outcome)
+    }
+
+    pub async fn accountability_finding_payloads(
+        &self,
+        effect: &ObservedEffect,
+    ) -> Result<Vec<Value>, String> {
+        let intent = {
+            let registry = self.registry.read().await;
+            registry
+                .get(&effect.session_id)
+                .map(|state| state.intent.clone())
+        };
+        let mut payloads = Vec::new();
+        for finding in AccountabilityAnalyzer::evaluate(intent.as_ref(), effect) {
+            if let Some(feedback) = &self.feedback {
+                feedback.write_last_accountability_finding(&finding)?;
+            }
+            payloads.push(finding_payload(finding)?);
+        }
+        Ok(payloads)
+    }
+
     pub async fn run_writer(
         self: std::sync::Arc<Self>,
         shutdown: oneshot::Receiver<()>,
@@ -323,6 +386,30 @@ impl DaemonState {
         result
     }
 
+    async fn persist_missing_intent_finding(
+        &self,
+        workload: &RuntimeWorkload,
+    ) -> Result<(), String> {
+        let effect = ObservedEffect {
+            session_id: workload.session_id.clone(),
+            evidence_ref: format!("runtime_workload:{}", workload.workload_id),
+            kind: EffectKind::Exec,
+            actor: workload.workload_id.clone(),
+            resource: workload.workload_id.clone(),
+            runtime: RuntimeIdentity {
+                runtime: adapter_name(workload.adapter).to_string(),
+                container_id: container_identity(workload),
+                pod_uid: None,
+                cgroup_id: Some(workload.cgroup_id),
+            },
+            evidence_boundary: EvidenceBoundary::HostBoundary,
+        };
+        for payload in self.accountability_finding_payloads(&effect).await? {
+            self.persist(&workload.session_id, payload).await?;
+        }
+        Ok(())
+    }
+
     async fn persist_inner(&self, session_id: &str, payload: Value) -> Result<(), String> {
         let mut stores = self.stores.lock().await;
         if !stores.contains_key(session_id) {
@@ -347,6 +434,39 @@ impl DaemonState {
 
 fn registry_error(error: RegistryError) -> String {
     error.to_string()
+}
+
+fn finding_payload(
+    finding: apolysis_accountability::AccountabilityFinding,
+) -> Result<Value, String> {
+    let mut payload = serde_json::to_value(finding)
+        .map_err(|error| format!("failed to serialize accountability finding: {error}"))?;
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "accountability finding did not serialize as an object".to_string())?;
+    object.insert(
+        "record_type".to_string(),
+        Value::String("accountability_finding".to_string()),
+    );
+    Ok(payload)
+}
+
+fn adapter_name(adapter: AdapterKind) -> &'static str {
+    match adapter {
+        AdapterKind::Docker => "docker",
+        AdapterKind::Containerd => "containerd",
+        AdapterKind::K3sContainerd => "k3s_containerd",
+        AdapterKind::Kubernetes => "kubernetes",
+    }
+}
+
+fn container_identity(workload: &RuntimeWorkload) -> Option<String> {
+    match workload.adapter {
+        AdapterKind::Docker | AdapterKind::Containerd | AdapterKind::K3sContainerd => {
+            Some(workload.workload_id.clone())
+        }
+        AdapterKind::Kubernetes => None,
+    }
 }
 
 struct RecoveredSession {
