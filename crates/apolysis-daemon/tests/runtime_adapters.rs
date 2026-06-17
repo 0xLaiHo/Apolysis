@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::pin::Pin;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,7 +29,7 @@ use apolysis_daemon::{
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -377,67 +378,14 @@ async fn docker_engine_runtime_adapter_inspects_container_and_resolves_cgroup() 
 #[ignore = "requires Docker Engine socket access and the ability to run containers"]
 async fn live_docker_engine_adapter_discovers_labelled_container() {
     require_command("docker");
-    let image_status = Command::new("docker")
-        .args(["image", "inspect", "alpine:3.20"])
-        .output()
-        .expect("inspect alpine image");
-    if !image_status.status.success() {
-        let pull_output = Command::new("docker")
-            .args(["pull", "alpine:3.20"])
-            .output()
-            .expect("pull alpine image");
-        assert!(
-            pull_output.status.success(),
-            "docker pull alpine:3.20 failed: {}",
-            String::from_utf8_lossy(&pull_output.stderr)
-        );
-    }
+    ensure_docker_alpine_image();
     for runtime in live_docker_runtimes() {
         let session_id = format!(
             "live-docker-{}-{}",
             std::process::id(),
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         );
-        let mut args = vec![
-            "run".to_string(),
-            "-d".to_string(),
-            "--rm".to_string(),
-            "--label".to_string(),
-            format!("apolysis.session_id={session_id}"),
-            "--cpus".to_string(),
-            "0.5".to_string(),
-            "--memory".to_string(),
-            "64m".to_string(),
-            "--pids-limit".to_string(),
-            "64".to_string(),
-            "--read-only".to_string(),
-            "--network".to_string(),
-            "none".to_string(),
-            "--cap-drop".to_string(),
-            "ALL".to_string(),
-            "--security-opt".to_string(),
-            "no-new-privileges".to_string(),
-        ];
-        if let Some(runtime) = runtime {
-            args.push("--runtime".to_string());
-            args.push(runtime.to_string());
-        }
-        args.extend([
-            "alpine:3.20".to_string(),
-            "sh".to_string(),
-            "-c".to_string(),
-            "sleep 30".to_string(),
-        ]);
-        let output = Command::new("docker")
-            .args(args.iter().map(String::as_str))
-            .output()
-            .expect("start labelled container");
-        assert!(
-            output.status.success(),
-            "docker run failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let container_id = start_labelled_docker_container(runtime, &session_id, "sleep 30");
         let cleanup = DockerContainerCleanup {
             container_id: container_id.clone(),
         };
@@ -477,6 +425,67 @@ async fn live_docker_engine_adapter_discovers_labelled_container() {
 
         drop(cleanup);
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker Engine socket access and the ability to run containers"]
+async fn live_docker_engine_adapter_recovers_after_socket_disconnect() {
+    require_command("docker");
+    ensure_docker_alpine_image();
+    let session_id = format!(
+        "live-docker-recovery-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let container_id = start_labelled_docker_container(None, &session_id, "sleep 30");
+    let container_cleanup = DockerContainerCleanup {
+        container_id: container_id.clone(),
+    };
+    let config = config("live-docker-socket-recovery");
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent(&session_id), 1_700_000_000_000)
+        .await
+        .expect("register intent");
+    let proxy_socket = config.state_dir.join("docker-proxy.sock");
+    let proxy = start_docker_socket_proxy_with_initial_disconnect(
+        &proxy_socket,
+        std::path::Path::new("/var/run/docker.sock"),
+    );
+    let adapter = DockerEnginePollingRuntimeAdapter::new(
+        DockerEngineClient::new(&proxy_socket),
+        "/proc",
+        "/sys/fs/cgroup",
+        Duration::from_millis(100),
+        1024,
+    );
+    let (shutdown, receiver) = oneshot::channel();
+    let runner = tokio::spawn(run_runtime_adapter_with_policy(
+        adapter,
+        Arc::clone(&state),
+        receiver,
+        AdapterBackoffPolicy {
+            initial_delay_ms: 10,
+            max_delay_ms: 10,
+            jitter_ms: 0,
+        },
+    ));
+
+    wait_for_session_cgroup(&state, &session_id, Duration::from_secs(15)).await;
+    shutdown.send(()).expect("stop Docker adapter");
+    let summary = runner.await.expect("Docker adapter task");
+
+    assert_eq!(summary.backend_errors, 1);
+    assert_eq!(summary.backend_recoveries, 1);
+    assert_eq!(summary.discovered, 1);
+    assert_eq!(
+        state.health().await.adapter(AdapterKind::Docker),
+        ComponentState::Ready
+    );
+
+    proxy.abort();
+    drop(container_cleanup);
+    cleanup(&config);
 }
 
 #[tokio::test]
@@ -1152,6 +1161,120 @@ impl Drop for DockerContainerCleanup {
             .args(["rm", "-f", &self.container_id])
             .output();
     }
+}
+
+fn ensure_docker_alpine_image() {
+    let image_status = Command::new("docker")
+        .args(["image", "inspect", "alpine:3.20"])
+        .output()
+        .expect("inspect alpine image");
+    if !image_status.status.success() {
+        let pull_output = Command::new("docker")
+            .args(["pull", "alpine:3.20"])
+            .output()
+            .expect("pull alpine image");
+        assert!(
+            pull_output.status.success(),
+            "docker pull alpine:3.20 failed: {}",
+            String::from_utf8_lossy(&pull_output.stderr)
+        );
+    }
+}
+
+fn start_labelled_docker_container(
+    runtime: Option<&str>,
+    session_id: &str,
+    command: &str,
+) -> String {
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--rm".to_string(),
+        "--label".to_string(),
+        format!("apolysis.session_id={session_id}"),
+        "--cpus".to_string(),
+        "0.5".to_string(),
+        "--memory".to_string(),
+        "64m".to_string(),
+        "--pids-limit".to_string(),
+        "64".to_string(),
+        "--read-only".to_string(),
+        "--network".to_string(),
+        "none".to_string(),
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
+    ];
+    if let Some(runtime) = runtime {
+        args.push("--runtime".to_string());
+        args.push(runtime.to_string());
+    }
+    args.extend([
+        "alpine:3.20".to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        command.to_string(),
+    ]);
+    let output = Command::new("docker")
+        .args(args.iter().map(String::as_str))
+        .output()
+        .expect("start labelled container");
+    assert!(
+        output.status.success(),
+        "docker run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn start_docker_socket_proxy_with_initial_disconnect(
+    proxy_socket: &Path,
+    upstream_socket: &Path,
+) -> tokio::task::JoinHandle<()> {
+    if let Some(parent) = proxy_socket.parent() {
+        std::fs::create_dir_all(parent).expect("create Docker proxy socket directory");
+    }
+    let _ = std::fs::remove_file(proxy_socket);
+    let listener = UnixListener::bind(proxy_socket).expect("bind Docker proxy socket");
+    let upstream_socket = upstream_socket.to_path_buf();
+    let disconnect_next = Arc::new(AtomicBool::new(true));
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut client, _)) = listener.accept().await else {
+                break;
+            };
+            let upstream_socket = upstream_socket.clone();
+            let disconnect_next = Arc::clone(&disconnect_next);
+            tokio::spawn(async move {
+                if disconnect_next.swap(false, Ordering::AcqRel) {
+                    return;
+                }
+                let Ok(mut upstream) = UnixStream::connect(upstream_socket).await else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            });
+        }
+    })
+}
+
+async fn wait_for_session_cgroup(state: &Arc<DaemonState>, session_id: &str, timeout: Duration) {
+    tokio::time::timeout(timeout, async {
+        loop {
+            if state
+                .query(session_id)
+                .await
+                .map(|session| !session.cgroup_ids.is_empty())
+                .unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("session {session_id} did not attach a cgroup"));
 }
 
 struct CriWorkloadCleanup {

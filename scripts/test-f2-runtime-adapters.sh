@@ -40,6 +40,7 @@ cargo test -p apolysis-feedback
 
 if [[ "${APOLYSIS_REQUIRE_DOCKER_ADAPTER:-0}" == "1" ]]; then
     run_live_adapter_test live_docker_engine_adapter_discovers_labelled_container
+    run_live_adapter_test live_docker_engine_adapter_recovers_after_socket_disconnect
 else
     echo "apolysis-f2: Docker live adapter validation skipped; set APOLYSIS_REQUIRE_DOCKER_ADAPTER=1 to run it"
 fi
