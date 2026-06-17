@@ -52,6 +52,12 @@ pub struct ContainerdTaskSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CriContainerCandidate {
+    pub container_id: String,
+    pub inherited_labels: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KubernetesPodSnapshot {
     pub namespace: String,
     pub pod_name: String,
@@ -364,6 +370,73 @@ pub fn crictl_marked_container_ids_from_ps(value: Value) -> Result<Vec<String>, 
         ids.push(id);
     }
     Ok(ids)
+}
+
+pub fn crictl_marked_container_candidates_from_ps_and_pods(
+    ps_value: Value,
+    pods_value: Value,
+) -> Result<Vec<CriContainerCandidate>, String> {
+    let mut marked_pod_labels = BTreeMap::new();
+    let pods = pods_value
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "crictl pods JSON must contain items array".to_string())?;
+    for pod in pods {
+        if string_field(pod, &["state"]).as_deref() != Some("SANDBOX_READY") {
+            continue;
+        }
+        let labels = string_map_field(pod, &["labels"], "CRI pod sandbox labels")?;
+        let marked = labels
+            .get(APOLYSIS_SESSION_LABEL)
+            .map(String::as_str)
+            .map(str::trim)
+            .map(|session_id| !session_id.is_empty())
+            .unwrap_or(false);
+        if !marked {
+            continue;
+        }
+        let id = string_field(pod, &["id"])
+            .ok_or_else(|| "marked CRI pod sandbox id must be non-empty".to_string())?;
+        marked_pod_labels.insert(id, labels);
+    }
+
+    let containers = ps_value
+        .get("containers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "crictl ps JSON must contain containers array".to_string())?;
+    let mut candidates = Vec::new();
+    for container in containers {
+        if string_field(container, &["state"]).as_deref() != Some("CONTAINER_RUNNING") {
+            continue;
+        }
+        let labels = string_map_field(container, &["labels"], "CRI container labels")?;
+        let id = string_field(container, &["id"])
+            .ok_or_else(|| "marked CRI container id must be non-empty".to_string())?;
+        let directly_marked = labels
+            .get(APOLYSIS_SESSION_LABEL)
+            .map(String::as_str)
+            .map(str::trim)
+            .map(|session_id| !session_id.is_empty())
+            .unwrap_or(false);
+        if directly_marked {
+            candidates.push(CriContainerCandidate {
+                container_id: id,
+                inherited_labels: BTreeMap::new(),
+            });
+            continue;
+        }
+        let Some(pod_sandbox_id) = string_field(container, &["podSandboxId"]) else {
+            continue;
+        };
+        let Some(labels) = marked_pod_labels.get(&pod_sandbox_id) else {
+            continue;
+        };
+        candidates.push(CriContainerCandidate {
+            container_id: id,
+            inherited_labels: labels.clone(),
+        });
+    }
+    Ok(candidates)
 }
 
 pub fn containerd_task_snapshot_from_cri_inspect(
@@ -796,6 +869,25 @@ impl CriRuntimeClient {
         crictl_marked_container_ids_from_ps(self.crictl_json(&["ps", "-o", "json"]).await?)
     }
 
+    pub async fn list_marked_running_container_candidates(
+        &self,
+        include_pod_sandbox_labels: bool,
+    ) -> Result<Vec<CriContainerCandidate>, String> {
+        let ps = self.crictl_json(&["ps", "-o", "json"]).await?;
+        if !include_pod_sandbox_labels {
+            return crictl_marked_container_ids_from_ps(ps).map(|ids| {
+                ids.into_iter()
+                    .map(|container_id| CriContainerCandidate {
+                        container_id,
+                        inherited_labels: BTreeMap::new(),
+                    })
+                    .collect()
+            });
+        }
+        let pods = self.crictl_json(&["pods", "-o", "json"]).await?;
+        crictl_marked_container_candidates_from_ps_and_pods(ps, pods)
+    }
+
     pub async fn inspect_container(&self, container_id: &str) -> Result<Value, String> {
         let container_id = container_id.trim();
         if container_id.is_empty()
@@ -846,7 +938,7 @@ pub struct ContainerdCriRuntimeAdapter {
     client: CriRuntimeClient,
     proc_root: PathBuf,
     cgroup_root: PathBuf,
-    pending_container_ids: VecDeque<String>,
+    pending_containers: VecDeque<CriContainerCandidate>,
     seen_container_ids: BTreeSet<String>,
     seen_capacity: usize,
     scan_interval: Duration,
@@ -872,7 +964,7 @@ impl ContainerdCriRuntimeAdapter {
             client,
             proc_root: proc_root.into(),
             cgroup_root: cgroup_root.into(),
-            pending_container_ids: VecDeque::new(),
+            pending_containers: VecDeque::new(),
             seen_container_ids: BTreeSet::new(),
             seen_capacity,
             scan_interval,
@@ -881,30 +973,38 @@ impl ContainerdCriRuntimeAdapter {
 
     async fn next_cri_workload(&mut self) -> Result<Option<RuntimeWorkload>, String> {
         loop {
-            while let Some(container_id) = self.pending_container_ids.pop_front() {
-                let inspect = self.client.inspect_container(&container_id).await?;
+            while let Some(candidate) = self.pending_containers.pop_front() {
+                let inspect = self
+                    .client
+                    .inspect_container(&candidate.container_id)
+                    .await?;
                 let pid = containerd_pid_from_cri_inspect(&inspect)?;
                 let cgroup_id = cgroup_id_from_pid(pid, &self.proc_root, &self.cgroup_root)?;
-                let snapshot =
+                let mut snapshot =
                     containerd_task_snapshot_from_cri_inspect(self.adapter, &inspect, cgroup_id)?;
+                for (key, value) in candidate.inherited_labels {
+                    snapshot.labels.entry(key).or_insert(value);
+                }
                 if let Some(workload) = containerd_workload_from_snapshot(snapshot)? {
                     return Ok(Some(workload));
                 }
             }
-            self.pending_container_ids = self
+            self.pending_containers = self
                 .client
-                .list_marked_running_container_ids()
+                .list_marked_running_container_candidates(
+                    self.adapter == AdapterKind::K3sContainerd,
+                )
                 .await?
                 .into_iter()
-                .filter(|container_id| {
+                .filter(|candidate| {
                     remember_seen(
                         &mut self.seen_container_ids,
                         self.seen_capacity,
-                        container_id,
+                        &candidate.container_id,
                     )
                 })
                 .collect();
-            if self.pending_container_ids.is_empty() {
+            if self.pending_containers.is_empty() {
                 tokio::time::sleep(self.scan_interval).await;
             }
         }
