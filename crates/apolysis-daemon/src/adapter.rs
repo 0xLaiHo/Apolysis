@@ -13,6 +13,7 @@ use apolysis_accountability::{AdapterKind, AssociationOutcome, ComponentState};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::process::Command as TokioCommand;
 use tokio::sync::oneshot;
 
 use crate::DaemonState;
@@ -792,7 +793,7 @@ impl CriRuntimeClient {
     }
 
     pub async fn list_marked_running_container_ids(&self) -> Result<Vec<String>, String> {
-        crictl_marked_container_ids_from_ps(self.crictl_json(&["ps", "-o", "json"])?)
+        crictl_marked_container_ids_from_ps(self.crictl_json(&["ps", "-o", "json"]).await?)
     }
 
     pub async fn inspect_container(&self, container_id: &str) -> Result<Value, String> {
@@ -805,11 +806,12 @@ impl CriRuntimeClient {
             return Err("CRI container id must be non-empty and path-safe".to_string());
         }
         self.crictl_json(&["inspect", "-o", "json", container_id])
+            .await
     }
 
-    fn crictl_json(&self, command_args: &[&str]) -> Result<Value, String> {
+    async fn crictl_json(&self, command_args: &[&str]) -> Result<Value, String> {
         let timeout = format!("{}s", self.timeout.as_secs().max(1));
-        let mut command = Command::new(&self.crictl_path);
+        let mut command = TokioCommand::new(&self.crictl_path);
         command
             .arg("--config")
             .arg("/dev/null")
@@ -821,7 +823,7 @@ impl CriRuntimeClient {
             command.arg("--image-endpoint").arg(image_endpoint);
         }
         command.args(command_args);
-        let output = command.output().map_err(|error| {
+        let output = command.output().await.map_err(|error| {
             format!(
                 "failed to run {}: {error}",
                 self.crictl_path.as_path().display()

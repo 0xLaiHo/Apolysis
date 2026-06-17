@@ -448,7 +448,7 @@ async fn live_docker_engine_adapter_recovers_after_socket_disconnect() {
         .await
         .expect("register intent");
     let proxy_socket = config.state_dir.join("docker-proxy.sock");
-    let proxy = start_docker_socket_proxy_with_initial_disconnect(
+    let proxy = start_unix_socket_proxy_with_initial_disconnect(
         &proxy_socket,
         std::path::Path::new("/var/run/docker.sock"),
     );
@@ -497,6 +497,86 @@ async fn live_containerd_cri_adapter_discovers_labelled_containers() {
         Some("unix:///run/containerd/containerd.sock"),
     )
     .await;
+}
+
+#[tokio::test]
+#[ignore = "requires root access to standalone containerd CRI socket and local Alpine image"]
+async fn live_containerd_cri_adapter_recovers_after_socket_disconnect() {
+    require_command("crictl");
+    let runtime_socket = "/run/containerd/containerd.sock";
+    let image_endpoint = Some("unix:///run/containerd/containerd.sock");
+    let session_id = format!(
+        "live-cri-recovery-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let workload_cleanup = create_cri_workload(runtime_socket, image_endpoint, "runc", &session_id);
+    let config = config("live-containerd-cri-socket-recovery");
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent(&session_id), 1_700_000_000_000)
+        .await
+        .expect("register intent");
+    let proxy_socket = config.state_dir.join("containerd-cri-proxy.sock");
+    let proxy = start_unix_socket_proxy_with_initial_disconnect(
+        &proxy_socket,
+        std::path::Path::new(runtime_socket),
+    );
+    let adapter = ContainerdCriRuntimeAdapter::new(
+        AdapterKind::Containerd,
+        CriRuntimeClient::new(&proxy_socket)
+            .with_image_endpoint(image_endpoint.map(ToOwned::to_owned)),
+        "/proc",
+        "/sys/fs/cgroup",
+        Duration::from_millis(100),
+        1024,
+    )
+    .expect("CRI adapter");
+    let (shutdown, receiver) = oneshot::channel();
+    let runner = tokio::spawn(run_runtime_adapter_with_policy(
+        adapter,
+        Arc::clone(&state),
+        receiver,
+        AdapterBackoffPolicy {
+            initial_delay_ms: 10,
+            max_delay_ms: 10,
+            jitter_ms: 0,
+        },
+    ));
+
+    let attach_result = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if state
+                .query(&session_id)
+                .await
+                .map(|session| !session.cgroup_ids.is_empty())
+                .unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    if attach_result.is_err() {
+        shutdown.send(()).expect("stop CRI adapter after timeout");
+        let summary = runner.await.expect("CRI adapter task after timeout");
+        panic!("session {session_id} did not attach a cgroup; summary={summary:?}");
+    }
+    shutdown.send(()).expect("stop CRI adapter");
+    let summary = runner.await.expect("CRI adapter task");
+
+    assert_eq!(summary.backend_errors, 1);
+    assert_eq!(summary.backend_recoveries, 1);
+    assert_eq!(summary.discovered, 1);
+    assert_eq!(
+        state.health().await.adapter(AdapterKind::Containerd),
+        ComponentState::Ready
+    );
+
+    proxy.abort();
+    drop(workload_cleanup);
+    cleanup(&config);
 }
 
 #[tokio::test]
@@ -1228,15 +1308,15 @@ fn start_labelled_docker_container(
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn start_docker_socket_proxy_with_initial_disconnect(
+fn start_unix_socket_proxy_with_initial_disconnect(
     proxy_socket: &Path,
     upstream_socket: &Path,
 ) -> tokio::task::JoinHandle<()> {
     if let Some(parent) = proxy_socket.parent() {
-        std::fs::create_dir_all(parent).expect("create Docker proxy socket directory");
+        std::fs::create_dir_all(parent).expect("create proxy socket directory");
     }
     let _ = std::fs::remove_file(proxy_socket);
-    let listener = UnixListener::bind(proxy_socket).expect("bind Docker proxy socket");
+    let listener = UnixListener::bind(proxy_socket).expect("bind proxy socket");
     let upstream_socket = upstream_socket.to_path_buf();
     let disconnect_next = Arc::new(AtomicBool::new(true));
     tokio::spawn(async move {
@@ -1250,7 +1330,7 @@ fn start_docker_socket_proxy_with_initial_disconnect(
                 if disconnect_next.swap(false, Ordering::AcqRel) {
                     return;
                 }
-                let Ok(mut upstream) = UnixStream::connect(upstream_socket).await else {
+                let Ok(mut upstream) = UnixStream::connect(&upstream_socket).await else {
                     return;
                 };
                 let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;

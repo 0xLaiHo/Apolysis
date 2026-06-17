@@ -47,6 +47,7 @@ fi
 
 if [[ "${APOLYSIS_REQUIRE_CONTAINERD_ADAPTER:-0}" == "1" ]]; then
     run_live_adapter_test live_containerd_cri_adapter_discovers_labelled_containers
+    run_live_adapter_test live_containerd_cri_adapter_recovers_after_socket_disconnect
 else
     echo "apolysis-f2: standalone containerd live adapter validation skipped; set APOLYSIS_REQUIRE_CONTAINERD_ADAPTER=1 to run it"
 fi
