@@ -51,6 +51,35 @@ fn expires_sessions_without_discarding_diagnostic_state() {
 }
 
 #[test]
+fn degrades_sessions_without_discarding_diagnostic_state() {
+    let mut registry = SessionRegistry::new(2, 2);
+    registry
+        .register(intent("session-a", NOW_MS + 10_000), NOW_MS)
+        .expect("register");
+    registry
+        .associate_cgroup("session-a", 41)
+        .expect("associate cgroup");
+
+    let degraded = registry.degrade("session-a").expect("degrade session");
+
+    assert_eq!(degraded.status, SessionStatus::Degraded);
+    assert_eq!(degraded.cgroup_ids, vec![41]);
+    assert_eq!(
+        registry
+            .get("session-a")
+            .expect("degraded state retained")
+            .status,
+        SessionStatus::Degraded
+    );
+    assert!(!registry.is_scope_admitted("session-a"));
+    assert_eq!(registry.session_for_cgroup(41), None);
+    assert_eq!(
+        registry.associate_cgroup("session-a", 42),
+        Err(RegistryError::SessionNotActive("session-a".to_string()))
+    );
+}
+
+#[test]
 fn enforces_session_capacity_without_rejecting_replacement() {
     let mut registry = SessionRegistry::new(1, 1);
     registry

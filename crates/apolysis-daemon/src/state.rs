@@ -17,13 +17,15 @@ use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
 
 use crate::{
-    DaemonConfig, DaemonRecord, EventPipeline, RuntimeWorkload, ScopeController, WriterSummary,
+    DaemonConfig, DaemonRecord, EventPipeline, RecordWriteOutcome, RuntimeWorkload,
+    ScopeController, WriterSummary,
 };
 
 pub struct DaemonState {
     registry: RwLock<SessionRegistry>,
     health: RwLock<HealthSnapshot>,
     stores: Mutex<BTreeMap<String, HashChainStore>>,
+    paused_sessions: RwLock<BTreeMap<String, String>>,
     sessions_dir: PathBuf,
     storage_writable: AtomicBool,
     scope: Option<ScopeController>,
@@ -93,6 +95,7 @@ impl DaemonState {
             registry: RwLock::new(registry),
             health: RwLock::new(health),
             stores: Mutex::new(stores),
+            paused_sessions: RwLock::new(BTreeMap::new()),
             sessions_dir,
             storage_writable: AtomicBool::new(true),
             scope,
@@ -365,8 +368,30 @@ impl DaemonState {
             .await
     }
 
-    pub(crate) async fn persist_record(&self, record: DaemonRecord) -> Result<(), String> {
-        self.persist(&record.session_id, record.payload).await
+    pub(crate) async fn persist_record(
+        &self,
+        record: DaemonRecord,
+    ) -> Result<RecordWriteOutcome, String> {
+        if !self.storage_writable.load(Ordering::Acquire) {
+            return Err(
+                "session storage is unavailable; restart after repairing storage".to_string(),
+            );
+        }
+        if self
+            .paused_sessions
+            .read()
+            .await
+            .contains_key(&record.session_id)
+        {
+            return Ok(RecordWriteOutcome::Failed);
+        }
+        match self.persist_inner(&record.session_id, record.payload).await {
+            Ok(()) => Ok(RecordWriteOutcome::Written),
+            Err(error) => {
+                self.mark_session_degraded(&record.session_id, &error).await;
+                Ok(RecordWriteOutcome::Failed)
+            }
+        }
     }
 
     async fn persist(&self, session_id: &str, payload: Value) -> Result<(), String> {
@@ -408,6 +433,29 @@ impl DaemonState {
             self.persist(&workload.session_id, payload).await?;
         }
         Ok(())
+    }
+
+    async fn mark_session_degraded(&self, session_id: &str, reason: &str) {
+        self.paused_sessions
+            .write()
+            .await
+            .insert(session_id.to_string(), reason.to_string());
+        let cgroup_ids = {
+            let mut registry = self.registry.write().await;
+            registry
+                .degrade(session_id)
+                .map(|state| state.cgroup_ids)
+                .unwrap_or_default()
+        };
+        if let Some(scope) = &self.scope {
+            for cgroup_id in cgroup_ids {
+                let _ = scope.untrack(cgroup_id).await;
+            }
+        }
+        self.health
+            .write()
+            .await
+            .set_storage(ComponentState::Degraded);
     }
 
     async fn persist_inner(&self, session_id: &str, payload: Value) -> Result<(), String> {

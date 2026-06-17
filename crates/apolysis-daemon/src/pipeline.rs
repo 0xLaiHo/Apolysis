@@ -45,7 +45,14 @@ impl std::error::Error for SubmitError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriterSummary {
     pub written: u64,
+    pub failed: u64,
     pub final_stats: QueueStats,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordWriteOutcome {
+    Written,
+    Failed,
 }
 
 struct PipelineInner {
@@ -105,7 +112,7 @@ impl EventPipeline {
     ) -> Result<WriterSummary, String>
     where
         S: FnMut(DaemonRecord) -> F,
-        F: Future<Output = Result<(), String>>,
+        F: Future<Output = Result<RecordWriteOutcome, String>>,
     {
         if self
             .inner
@@ -118,19 +125,28 @@ impl EventPipeline {
 
         let mut stopping = false;
         let mut written = 0_u64;
+        let mut failed = 0_u64;
         loop {
             if let Some(record) = self.pop()? {
-                if let Err(error) = sink(record).await {
-                    self.inner.accepting.store(false, Ordering::Release);
-                    return Err(error);
+                match sink(record).await {
+                    Ok(RecordWriteOutcome::Written) => {
+                        written = written.saturating_add(1);
+                    }
+                    Ok(RecordWriteOutcome::Failed) => {
+                        failed = failed.saturating_add(1);
+                    }
+                    Err(error) => {
+                        self.inner.accepting.store(false, Ordering::Release);
+                        return Err(error);
+                    }
                 }
-                written = written.saturating_add(1);
                 continue;
             }
             if stopping {
                 let final_stats = self.stats().map_err(|error| error.to_string())?;
                 return Ok(WriterSummary {
                     written,
+                    failed,
                     final_stats,
                 });
             }

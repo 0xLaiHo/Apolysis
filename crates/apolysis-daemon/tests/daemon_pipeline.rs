@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use apolysis_accountability::{
-    ActionClass, QueuePriority, ResourceKind, ResourceSelector, SessionIntent,
+    ActionClass, ComponentState, QueuePriority, ResourceKind, ResourceSelector, SessionIntent,
 };
 use apolysis_daemon::{ingest_observer_batch, DaemonConfig, DaemonRecord, DaemonState};
 use apolysis_observer::abi::{
@@ -54,6 +54,51 @@ async fn daemon_writer_drains_observer_records_into_the_hash_chain() {
     .expect("session timeline");
     assert!(timeline.contains(r#""record_type":"observed_kernel_event""#));
     assert!(timeline.contains(r#""cgroup_id":77"#));
+
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn timeline_write_failure_degrades_storage_and_writer_continues_other_sessions() {
+    let config = config();
+    let blocked_timeline = config.state_dir.join("sessions/bad-session/timeline.jsonl");
+    std::fs::create_dir_all(&blocked_timeline).expect("block bad timeline path");
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    let pipeline = state.pipeline();
+    let (shutdown, receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(receiver).await })
+    };
+
+    pipeline
+        .submit(DaemonRecord::new(
+            "bad-session",
+            QueuePriority::Ordinary,
+            json!({"record_type":"observed_kernel_event","session_id":"bad-session"}),
+        ))
+        .expect("bad record accepted");
+    pipeline
+        .submit(DaemonRecord::new(
+            "healthy-session",
+            QueuePriority::Ordinary,
+            json!({"record_type":"observed_kernel_event","session_id":"healthy-session"}),
+        ))
+        .expect("healthy record accepted");
+
+    shutdown.send(()).unwrap();
+    let summary = writer.await.unwrap().expect("writer drain");
+
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.written, 1);
+    assert_eq!(state.health().await.storage(), ComponentState::Degraded);
+    let healthy_timeline = std::fs::read_to_string(
+        config
+            .state_dir
+            .join("sessions/healthy-session/timeline.jsonl"),
+    )
+    .expect("healthy session timeline");
+    assert!(healthy_timeline.contains(r#""session_id":"healthy-session""#));
 
     cleanup(&config);
 }

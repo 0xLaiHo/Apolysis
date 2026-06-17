@@ -10,6 +10,7 @@ use crate::{IntentError, SessionIntent};
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     Active,
+    Degraded,
     Expired,
     Closed,
 }
@@ -165,6 +166,14 @@ impl SessionRegistry {
 
     pub fn close(&mut self, session_id: &str) -> Result<SessionState, RegistryError> {
         self.deactivate(session_id, SessionStatus::Closed)?;
+        self.sessions
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| RegistryError::SessionNotFound(session_id.to_string()))
+    }
+
+    pub fn degrade(&mut self, session_id: &str) -> Result<SessionState, RegistryError> {
+        self.deactivate(session_id, SessionStatus::Degraded)?;
         self.sessions
             .get(session_id)
             .cloned()

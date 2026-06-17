@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use apolysis_accountability::{PushOutcome, QueuePriority};
-use apolysis_daemon::{DaemonRecord, EventPipeline, SubmitError};
+use apolysis_daemon::{DaemonRecord, EventPipeline, RecordWriteOutcome, SubmitError};
 use serde_json::json;
 use tokio::sync::oneshot;
 
@@ -34,7 +34,7 @@ async fn protected_records_shed_ordinary_events_and_write_first() {
             let sink = Arc::clone(&sink);
             async move {
                 sink.lock().unwrap().push(record.session_id);
-                Ok(())
+                Ok(RecordWriteOutcome::Written)
             }
         })
         .await
@@ -63,7 +63,7 @@ async fn shutdown_stops_admission_and_drains_accepted_records() {
                     let sink = Arc::clone(&sink);
                     async move {
                         sink.lock().unwrap().push(record.session_id);
-                        Ok(())
+                        Ok(RecordWriteOutcome::Written)
                     }
                 })
                 .await
@@ -79,6 +79,39 @@ async fn shutdown_stops_admission_and_drains_accepted_records() {
         pipeline.submit(record("late", QueuePriority::Finding)),
         Err(SubmitError::Closed)
     );
+}
+
+#[tokio::test]
+async fn writer_counts_handled_record_failures_and_continues() {
+    let pipeline = EventPipeline::new(4);
+    pipeline
+        .submit(record("bad-session", QueuePriority::Ordinary))
+        .expect("accepted bad session");
+    pipeline
+        .submit(record("healthy-session", QueuePriority::Ordinary))
+        .expect("accepted healthy session");
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&written);
+    let (shutdown, receiver) = oneshot::channel();
+    shutdown.send(()).unwrap();
+    let summary = pipeline
+        .run_writer(receiver, move |record| {
+            let sink = Arc::clone(&sink);
+            async move {
+                if record.session_id == "bad-session" {
+                    Ok(RecordWriteOutcome::Failed)
+                } else {
+                    sink.lock().unwrap().push(record.session_id);
+                    Ok(RecordWriteOutcome::Written)
+                }
+            }
+        })
+        .await
+        .expect("writer drain");
+
+    assert_eq!(summary.written, 1);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(*written.lock().unwrap(), vec!["healthy-session"]);
 }
 
 fn record(session_id: &str, priority: QueuePriority) -> DaemonRecord {

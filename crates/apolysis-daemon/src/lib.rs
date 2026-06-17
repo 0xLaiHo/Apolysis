@@ -24,7 +24,7 @@ pub use adapter::{
 };
 pub use config::DaemonConfig;
 pub use metrics::render_prometheus_metrics;
-pub use pipeline::{DaemonRecord, EventPipeline, SubmitError, WriterSummary};
+pub use pipeline::{DaemonRecord, EventPipeline, RecordWriteOutcome, SubmitError, WriterSummary};
 pub use runtime::{
     ingest_observer_batch, run_observer_runtime, ObserverIngestSummary, ObserverRuntimeBackend,
     ObserverRuntimeSummary,
