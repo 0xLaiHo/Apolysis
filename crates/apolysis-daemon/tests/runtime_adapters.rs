@@ -20,7 +20,7 @@ use apolysis_daemon::{
     crictl_marked_container_ids_from_ps, docker_container_pid_from_engine_inspect,
     docker_snapshot_from_engine_inspect, docker_workload_from_snapshot,
     kubernetes_marked_pod_snapshots_from_api_list, kubernetes_pod_snapshot_from_api_object,
-    kubernetes_workload_from_pod_snapshot, run_runtime_adapter, AdapterBackoffPolicy,
+    kubernetes_workload_from_pod_snapshot, run_runtime_adapter_with_policy, AdapterBackoffPolicy,
     ContainerdCriRuntimeAdapter, ContainerdTaskSnapshot, CriRuntimeClient, DaemonConfig,
     DaemonState, DockerContainerSnapshot, DockerEngineClient, DockerEnginePollingRuntimeAdapter,
     DockerEngineRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
@@ -980,24 +980,39 @@ async fn runtime_adapter_continues_after_transient_backend_error() {
         .await
         .expect("register intent");
     let (_shutdown, receiver) = oneshot::channel();
-    let backend = FakeRuntimeAdapter::new(vec![
-        Err("docker event stream disconnected".to_string()),
-        Ok(Some(RuntimeWorkload {
-            adapter: AdapterKind::Docker,
-            session_id: "session-docker".to_string(),
-            workload_id: "container-after-reconnect".to_string(),
-            cgroup_id: 99,
-            image: Some("alpine:3.20".to_string()),
-            runtime_handler: Some("runc".to_string()),
-        })),
-        Ok(None),
-    ]);
+    let backend = FakeRuntimeAdapter::new(
+        AdapterKind::Docker,
+        vec![
+            Err("docker event stream disconnected".to_string()),
+            Err("docker event stream still disconnected".to_string()),
+            Ok(Some(RuntimeWorkload {
+                adapter: AdapterKind::Docker,
+                session_id: "session-docker".to_string(),
+                workload_id: "container-after-reconnect".to_string(),
+                cgroup_id: 99,
+                image: Some("alpine:3.20".to_string()),
+                runtime_handler: Some("runc".to_string()),
+            })),
+            Ok(None),
+        ],
+    );
 
-    let summary = run_runtime_adapter(backend, Arc::clone(&state), receiver).await;
+    let summary = run_runtime_adapter_with_policy(
+        backend,
+        Arc::clone(&state),
+        receiver,
+        AdapterBackoffPolicy {
+            initial_delay_ms: 1,
+            max_delay_ms: 1,
+            jitter_ms: 0,
+        },
+    )
+    .await;
 
     assert_eq!(summary.adapter, AdapterKind::Docker);
     assert_eq!(summary.discovered, 1);
-    assert_eq!(summary.backend_errors, 1);
+    assert_eq!(summary.backend_errors, 2);
+    assert_eq!(summary.backend_recoveries, 1);
     assert_eq!(summary.ingest_errors, 0);
     assert_eq!(
         state.health().await.adapter(AdapterKind::Docker),
@@ -1011,13 +1026,105 @@ async fn runtime_adapter_continues_after_transient_backend_error() {
     cleanup(&config);
 }
 
+#[tokio::test]
+async fn one_runtime_adapter_recovery_does_not_stop_another_adapter() {
+    let config = config("adapter-isolation");
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("session-docker"), 1_700_000_000_000)
+        .await
+        .expect("register docker intent");
+    state
+        .register(intent("session-kubernetes"), 1_700_000_000_000)
+        .await
+        .expect("register kubernetes intent");
+    let (_docker_shutdown, docker_receiver) = oneshot::channel();
+    let (_kubernetes_shutdown, kubernetes_receiver) = oneshot::channel();
+    let policy = AdapterBackoffPolicy {
+        initial_delay_ms: 1,
+        max_delay_ms: 1,
+        jitter_ms: 0,
+    };
+    let docker_backend = FakeRuntimeAdapter::new(
+        AdapterKind::Docker,
+        vec![
+            Err("docker socket disconnected".to_string()),
+            Ok(Some(RuntimeWorkload {
+                adapter: AdapterKind::Docker,
+                session_id: "session-docker".to_string(),
+                workload_id: "docker-after-reconnect".to_string(),
+                cgroup_id: 101,
+                image: Some("alpine:3.20".to_string()),
+                runtime_handler: Some("runc".to_string()),
+            })),
+            Ok(None),
+        ],
+    );
+    let kubernetes_backend = FakeRuntimeAdapter::new(
+        AdapterKind::Kubernetes,
+        vec![
+            Ok(Some(RuntimeWorkload {
+                adapter: AdapterKind::Kubernetes,
+                session_id: "session-kubernetes".to_string(),
+                workload_id: "pod-after-docker-failure".to_string(),
+                cgroup_id: 202,
+                image: None,
+                runtime_handler: Some("runc".to_string()),
+            })),
+            Ok(None),
+        ],
+    );
+    let docker = tokio::spawn(run_runtime_adapter_with_policy(
+        docker_backend,
+        Arc::clone(&state),
+        docker_receiver,
+        policy,
+    ));
+    let kubernetes = tokio::spawn(run_runtime_adapter_with_policy(
+        kubernetes_backend,
+        Arc::clone(&state),
+        kubernetes_receiver,
+        policy,
+    ));
+
+    let docker_summary = docker.await.expect("docker adapter task");
+    let kubernetes_summary = kubernetes.await.expect("kubernetes adapter task");
+
+    assert_eq!(docker_summary.backend_errors, 1);
+    assert_eq!(docker_summary.backend_recoveries, 1);
+    assert_eq!(docker_summary.discovered, 1);
+    assert_eq!(kubernetes_summary.backend_errors, 0);
+    assert_eq!(kubernetes_summary.backend_recoveries, 0);
+    assert_eq!(kubernetes_summary.discovered, 1);
+    assert_eq!(
+        state.health().await.adapter(AdapterKind::Docker),
+        ComponentState::Ready
+    );
+    assert_eq!(
+        state.health().await.adapter(AdapterKind::Kubernetes),
+        ComponentState::Ready
+    );
+    assert_eq!(
+        state.session_for_cgroup(101).await.as_deref(),
+        Some("session-docker")
+    );
+    assert_eq!(
+        state.session_for_cgroup(202).await.as_deref(),
+        Some("session-kubernetes")
+    );
+
+    cleanup(&config);
+}
+
 struct FakeRuntimeAdapter {
+    adapter: AdapterKind,
     responses: VecDeque<Result<Option<RuntimeWorkload>, String>>,
 }
 
 impl FakeRuntimeAdapter {
-    fn new(responses: Vec<Result<Option<RuntimeWorkload>, String>>) -> Self {
+    fn new(adapter: AdapterKind, responses: Vec<Result<Option<RuntimeWorkload>, String>>) -> Self {
         Self {
+            adapter,
             responses: responses.into(),
         }
     }
@@ -1025,7 +1132,7 @@ impl FakeRuntimeAdapter {
 
 impl RuntimeAdapterBackend for FakeRuntimeAdapter {
     fn kind(&self) -> AdapterKind {
-        AdapterKind::Docker
+        self.adapter
     }
 
     fn next_workload(

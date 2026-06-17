@@ -345,6 +345,7 @@ async fn degraded_summary(
         discovered: 0,
         missing_intent: 0,
         backend_errors: 1,
+        backend_recoveries: 0,
         ingest_errors: 0,
     }
 }

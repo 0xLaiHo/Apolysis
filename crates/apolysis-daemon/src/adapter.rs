@@ -287,6 +287,7 @@ pub struct RuntimeAdapterSummary {
     pub discovered: u64,
     pub missing_intent: u64,
     pub backend_errors: u64,
+    pub backend_recoveries: u64,
     pub ingest_errors: u64,
 }
 
@@ -703,6 +704,7 @@ pub async fn run_runtime_adapter_with_policy<B: RuntimeAdapterBackend>(
         discovered: 0,
         missing_intent: 0,
         backend_errors: 0,
+        backend_recoveries: 0,
         ingest_errors: 0,
     };
     let mut consecutive_backend_errors = 0_u64;
@@ -713,14 +715,23 @@ pub async fn run_runtime_adapter_with_policy<B: RuntimeAdapterBackend>(
             workload = backend.next_workload() => {
                 match workload {
                     Ok(Some(workload)) => {
+                        let recovered_backend = consecutive_backend_errors > 0;
                         consecutive_backend_errors = 0;
                         match state.ingest_runtime_workload(workload).await {
                             Ok(AssociationOutcome::Attached) => {
                                 summary.discovered = summary.discovered.saturating_add(1);
+                                if recovered_backend {
+                                    summary.backend_recoveries =
+                                        summary.backend_recoveries.saturating_add(1);
+                                }
                             }
                             Ok(AssociationOutcome::MissingIntent) => {
                                 summary.discovered = summary.discovered.saturating_add(1);
                                 summary.missing_intent = summary.missing_intent.saturating_add(1);
+                                if recovered_backend {
+                                    summary.backend_recoveries =
+                                        summary.backend_recoveries.saturating_add(1);
+                                }
                             }
                             Err(_) => {
                                 summary.ingest_errors = summary.ingest_errors.saturating_add(1);
