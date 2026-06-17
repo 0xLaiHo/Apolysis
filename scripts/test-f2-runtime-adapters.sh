@@ -8,7 +8,8 @@ cd "$repo_root"
 
 run_live_adapter_test() {
     local test_name="$1"
-    if [[ "$test_name" == "live_docker_engine_adapter_recovers_after_systemd_restart" ]]; then
+    if [[ "$test_name" == "live_docker_engine_adapter_recovers_after_systemd_restart" ||
+        "$test_name" == "live_containerd_cri_adapter_recovers_after_systemd_restart" ]]; then
         if ! cargo test -p apolysis-daemon --test runtime_adapters \
             "$test_name" \
             -- --ignored --exact --list | grep -Fqx "$test_name: test"; then
@@ -68,6 +69,7 @@ else
 fi
 
 if [[ "${APOLYSIS_REQUIRE_CONTAINERD_ADAPTER:-0}" == "1" ]]; then
+    run_live_adapter_test live_containerd_cri_adapter_recovers_after_systemd_restart
     run_live_adapter_test live_containerd_cri_adapter_discovers_labelled_containers
     run_live_adapter_test live_containerd_cri_adapter_recovers_after_socket_disconnect
 else

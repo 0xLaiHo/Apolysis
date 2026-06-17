@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::future::Future;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Command;
@@ -533,7 +533,7 @@ async fn live_docker_engine_adapter_recovers_after_systemd_restart() {
     ));
 
     wait_for_session_cgroup_count(&state, &session_id, 1, Duration::from_secs(20)).await;
-    let docker_systemd = DockerSystemdRestoreGuard::capture();
+    let docker_systemd = SystemdUnitRestoreGuard::capture(["docker.socket", "docker.service"]);
     stop_docker_systemd_units();
     assert!(
         wait_for_docker_engine_unavailable(Duration::from_secs(30)),
@@ -590,6 +590,125 @@ async fn live_containerd_cri_adapter_discovers_labelled_containers() {
 }
 
 #[tokio::test]
+#[ignore = "requires standalone containerd CRI socket, systemd access, Docker helper access, and permission to restart containerd"]
+async fn live_containerd_cri_adapter_recovers_after_systemd_restart() {
+    require_command("docker");
+    require_command("crictl");
+    require_command("systemctl");
+    require_command("systemd-run");
+    ensure_docker_alpine_image();
+    let runtime_socket = "/run/containerd/containerd.sock";
+    let image_endpoint = Some("unix:///run/containerd/containerd.sock");
+    let crictl = create_host_chroot_crictl_wrapper("containerd-systemd-restart");
+    wait_for_systemd_service_active("containerd.service", Duration::from_secs(60));
+    wait_for_cri_runtime(
+        crictl.path(),
+        runtime_socket,
+        image_endpoint,
+        Duration::from_secs(60),
+    );
+    let session_id = format!(
+        "live-containerd-systemd-restart-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let first_workload = create_cri_workload_with_crictl(
+        crictl.path(),
+        runtime_socket,
+        image_endpoint,
+        "runc",
+        &session_id,
+    );
+    let config = config("live-containerd-systemd-restart");
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent(&session_id), 1_700_000_000_000)
+        .await
+        .expect("register intent");
+    let adapter = ContainerdCriRuntimeAdapter::new(
+        AdapterKind::Containerd,
+        CriRuntimeClient::new(runtime_socket)
+            .with_crictl_path(crictl.path())
+            .with_image_endpoint(image_endpoint.map(ToOwned::to_owned)),
+        "/proc",
+        "/sys/fs/cgroup",
+        Duration::from_millis(100),
+        1024,
+    )
+    .expect("containerd CRI adapter");
+    let (shutdown, receiver) = oneshot::channel();
+    let runner = tokio::spawn(run_runtime_adapter_with_policy(
+        adapter,
+        Arc::clone(&state),
+        receiver,
+        AdapterBackoffPolicy {
+            initial_delay_ms: 20,
+            max_delay_ms: 20,
+            jitter_ms: 0,
+        },
+    ));
+
+    wait_for_session_cgroup_count(&state, &session_id, 1, Duration::from_secs(30)).await;
+    let containerd_systemd = SystemdUnitRestoreGuard::capture(["containerd.service"]);
+    stop_systemd_unit("containerd.service");
+    assert!(
+        wait_for_cri_runtime_unavailable(
+            crictl.path(),
+            runtime_socket,
+            image_endpoint,
+            Duration::from_secs(30),
+        ),
+        "standalone containerd CRI stayed responsive after systemd stop"
+    );
+    let adapter_degraded = adapter_reaches_state(
+        &state,
+        AdapterKind::Containerd,
+        ComponentState::Degraded,
+        Duration::from_secs(30),
+    )
+    .await;
+    start_systemd_unit("containerd.service");
+    wait_for_systemd_service_active("containerd.service", Duration::from_secs(90));
+    assert!(
+        adapter_degraded,
+        "containerd adapter did not report degraded health during containerd stop"
+    );
+    wait_for_cri_runtime(
+        crictl.path(),
+        runtime_socket,
+        image_endpoint,
+        Duration::from_secs(90),
+    );
+    let second_workload = create_cri_workload_with_crictl(
+        crictl.path(),
+        runtime_socket,
+        image_endpoint,
+        "runc",
+        &session_id,
+    );
+    wait_for_session_cgroup_count(&state, &session_id, 2, Duration::from_secs(30)).await;
+
+    shutdown.send(()).expect("stop containerd adapter");
+    let summary = runner.await.expect("containerd adapter task");
+
+    assert_eq!(summary.discovered, 2);
+    assert!(
+        summary.backend_errors > 0,
+        "containerd restart should produce at least one backend error: {summary:?}"
+    );
+    assert_eq!(summary.backend_recoveries, 1);
+    assert_eq!(
+        state.health().await.adapter(AdapterKind::Containerd),
+        ComponentState::Ready
+    );
+
+    drop(second_workload);
+    drop(first_workload);
+    cleanup(&config);
+    drop(containerd_systemd);
+}
+
+#[tokio::test]
 #[ignore = "requires root access to standalone containerd CRI socket and local Alpine image"]
 async fn live_containerd_cri_adapter_recovers_after_socket_disconnect() {
     require_command("crictl");
@@ -600,7 +719,13 @@ async fn live_containerd_cri_adapter_recovers_after_socket_disconnect() {
         std::process::id(),
         NEXT_ID.fetch_add(1, Ordering::Relaxed)
     );
-    let workload_cleanup = create_cri_workload(runtime_socket, image_endpoint, "runc", &session_id);
+    let workload_cleanup = create_cri_workload_with_crictl(
+        "crictl",
+        runtime_socket,
+        image_endpoint,
+        "runc",
+        &session_id,
+    );
     let config = config("live-containerd-cri-socket-recovery");
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
     state
@@ -1727,6 +1852,7 @@ async fn adapter_reaches_state(
 }
 
 struct CriWorkloadCleanup {
+    crictl_path: std::path::PathBuf,
     endpoint: String,
     image_endpoint: Option<String>,
     container_id: String,
@@ -1735,22 +1861,26 @@ struct CriWorkloadCleanup {
 
 impl Drop for CriWorkloadCleanup {
     fn drop(&mut self) {
-        let _ = run_crictl(
+        let _ = run_crictl_with_command(
+            &self.crictl_path,
             &self.endpoint,
             self.image_endpoint.as_deref(),
             &["stop", &self.container_id],
         );
-        let _ = run_crictl(
+        let _ = run_crictl_with_command(
+            &self.crictl_path,
             &self.endpoint,
             self.image_endpoint.as_deref(),
             &["rm", &self.container_id],
         );
-        let _ = run_crictl(
+        let _ = run_crictl_with_command(
+            &self.crictl_path,
             &self.endpoint,
             self.image_endpoint.as_deref(),
             &["stopp", &self.pod_id],
         );
-        let _ = run_crictl(
+        let _ = run_crictl_with_command(
+            &self.crictl_path,
             &self.endpoint,
             self.image_endpoint.as_deref(),
             &["rmp", &self.pod_id],
@@ -1787,6 +1917,22 @@ impl Drop for KubernetesNamespaceCleanup {
                 ])
                 .output();
         }
+    }
+}
+
+struct TempScript {
+    path: std::path::PathBuf,
+}
+
+impl TempScript {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempScript {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -1973,6 +2119,16 @@ fn create_cri_workload(
     runtime: &str,
     session_id: &str,
 ) -> CriWorkloadCleanup {
+    create_cri_workload_with_crictl("crictl", socket_path, image_endpoint, runtime, session_id)
+}
+
+fn create_cri_workload_with_crictl(
+    crictl_path: impl AsRef<std::path::Path>,
+    socket_path: &str,
+    image_endpoint: Option<&str>,
+    runtime: &str,
+    session_id: &str,
+) -> CriWorkloadCleanup {
     let endpoint = format!("unix://{socket_path}");
     let root = std::env::temp_dir().join(format!(
         "apolysis-cri-live-{}-{}",
@@ -2046,7 +2202,8 @@ fn create_cri_workload(
         .expect("serialize CRI container config"),
     )
     .expect("write CRI container config");
-    let pod = run_crictl(
+    let pod = run_crictl_with_command(
+        crictl_path.as_ref(),
         &endpoint,
         image_endpoint,
         &[
@@ -2057,7 +2214,8 @@ fn create_cri_workload(
         ],
     )
     .unwrap_or_else(|error| panic!("run CRI pod with runtime {runtime}: {error}"));
-    let container = run_crictl(
+    let container = run_crictl_with_command(
+        crictl_path.as_ref(),
         &endpoint,
         image_endpoint,
         &[
@@ -2069,12 +2227,18 @@ fn create_cri_workload(
         ],
     )
     .unwrap_or_else(|error| panic!("create CRI container with runtime {runtime}: {error}"));
-    run_crictl(&endpoint, image_endpoint, &["start", &container])
-        .unwrap_or_else(|error| panic!("start CRI container with runtime {runtime}: {error}"));
-    wait_for_cri_container_observable(&endpoint, image_endpoint, &container);
+    run_crictl_with_command(
+        crictl_path.as_ref(),
+        &endpoint,
+        image_endpoint,
+        &["start", &container],
+    )
+    .unwrap_or_else(|error| panic!("start CRI container with runtime {runtime}: {error}"));
+    wait_for_cri_container_observable(crictl_path.as_ref(), &endpoint, image_endpoint, &container);
     let _ = std::fs::remove_dir_all(&root);
 
     CriWorkloadCleanup {
+        crictl_path: crictl_path.as_ref().to_path_buf(),
         endpoint,
         image_endpoint: image_endpoint.map(ToOwned::to_owned),
         container_id: container,
@@ -2082,12 +2246,13 @@ fn create_cri_workload(
     }
 }
 
-fn run_crictl(
+fn run_crictl_with_command(
+    crictl_path: &std::path::Path,
     endpoint: &str,
     image_endpoint: Option<&str>,
     command_args: &[&str],
 ) -> Result<String, String> {
-    let mut command = Command::new("crictl");
+    let mut command = Command::new(crictl_path);
     command
         .arg("--config")
         .arg("/dev/null")
@@ -2109,12 +2274,14 @@ fn run_crictl(
 }
 
 fn wait_for_cri_container_observable(
+    crictl_path: &std::path::Path,
     endpoint: &str,
     image_endpoint: Option<&str>,
     container_id: &str,
 ) {
     for _ in 0..100 {
-        if let Ok(output) = run_crictl(
+        if let Ok(output) = run_crictl_with_command(
+            crictl_path,
             endpoint,
             image_endpoint,
             &["inspect", "-o", "json", container_id],
@@ -2139,13 +2306,67 @@ fn wait_for_cri_container_observable(
     panic!("CRI container {container_id} did not become observable through /proc");
 }
 
-struct DockerSystemdRestoreGuard {
+fn create_host_chroot_crictl_wrapper(name: &str) -> TempScript {
+    let path = std::env::temp_dir().join(format!(
+        "apolysis-{name}-crictl-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(
+        &path,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+exec docker run --rm --privileged --pid=host --cgroupns=host --network=host -v /:/host alpine:3.20 chroot /host /usr/local/bin/crictl "$@"
+"#,
+    )
+    .expect("write crictl wrapper");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("crictl wrapper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).expect("chmod crictl wrapper");
+    TempScript { path }
+}
+
+fn wait_for_cri_runtime(
+    crictl_path: &std::path::Path,
+    runtime_socket: &str,
+    image_endpoint: Option<&str>,
+    timeout: Duration,
+) {
+    let endpoint = format!("unix://{runtime_socket}");
+    for _ in 0..timeout.as_secs().max(1) {
+        if run_crictl_with_command(crictl_path, &endpoint, image_endpoint, &["info"]).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    panic!("CRI runtime {runtime_socket} did not become responsive");
+}
+
+fn wait_for_cri_runtime_unavailable(
+    crictl_path: &std::path::Path,
+    runtime_socket: &str,
+    image_endpoint: Option<&str>,
+    timeout: Duration,
+) -> bool {
+    let endpoint = format!("unix://{runtime_socket}");
+    for _ in 0..timeout.as_secs().max(1) {
+        if run_crictl_with_command(crictl_path, &endpoint, image_endpoint, &["info"]).is_err() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    false
+}
+
+struct SystemdUnitRestoreGuard {
     units: Vec<(&'static str, bool)>,
 }
 
-impl DockerSystemdRestoreGuard {
-    fn capture() -> Self {
-        let units = ["docker.socket", "docker.service"]
+impl SystemdUnitRestoreGuard {
+    fn capture<const N: usize>(units: [&'static str; N]) -> Self {
+        let units = units
             .into_iter()
             .filter(|unit| systemd_unit_exists(unit))
             .map(|unit| (unit, systemd_unit_active(unit)))
@@ -2154,7 +2375,7 @@ impl DockerSystemdRestoreGuard {
     }
 }
 
-impl Drop for DockerSystemdRestoreGuard {
+impl Drop for SystemdUnitRestoreGuard {
     fn drop(&mut self) {
         for (unit, was_active) in &self.units {
             let action = if *was_active { "start" } else { "stop" };
