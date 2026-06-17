@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -322,6 +323,72 @@ async fn restart_restores_active_session_and_continues_hash_chain() {
 }
 
 #[tokio::test]
+async fn restart_quarantines_corrupt_tail_and_keeps_valid_session_recoverable() {
+    let server = TestServer::start("restart-corrupt-tail").await;
+    let config = server.config.clone();
+    let register = br#"{
+        "type":"register",
+        "intent":{
+            "schema_version":1,
+            "session_id":"session-corrupt-tail",
+            "expires_at_unix_ms":4102444800000,
+            "declared_actions":["test"],
+            "allowed_resources":[],
+            "policy_ref":"policy.yaml",
+            "workload_selectors":[]
+        }
+    }"#;
+    assert!(matches!(
+        request(&config.socket_path, register).await,
+        DaemonResponse::Ack { .. }
+    ));
+    server.stop_preserving().await;
+
+    let timeline_path = config
+        .state_dir
+        .join("sessions/session-corrupt-tail/timeline.jsonl");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&timeline_path)
+        .expect("open timeline for corrupt tail")
+        .write_all(br#"{"schema_version":1"#)
+        .expect("write corrupt tail");
+
+    let restarted = TestServer::start_config(config.clone()).await;
+    let query = br#"{"type":"query","session_id":"session-corrupt-tail"}"#;
+    assert!(matches!(
+        request(&config.socket_path, query).await,
+        DaemonResponse::Session {
+            session: Some(_),
+            ..
+        }
+    ));
+    let DaemonResponse::Health { health, .. } =
+        request(&config.socket_path, br#"{"type":"health"}"#).await
+    else {
+        panic!("expected health response");
+    };
+    assert_eq!(
+        health.storage(),
+        apolysis_accountability::ComponentState::Degraded
+    );
+    restarted.stop_preserving().await;
+
+    let timeline = std::fs::read_to_string(&timeline_path).expect("session timeline");
+    assert!(timeline.contains(r#""record_type":"intent_registered""#));
+    assert!(timeline.contains(r#""record_type":"integrity_finding""#));
+    assert!(timeline.contains(r#""reason":"hash_chain_tail_quarantined""#));
+
+    let quarantine = quarantine_files(timeline_path.parent().unwrap());
+    assert_eq!(quarantine.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&quarantine[0]).expect("quarantine contents"),
+        r#"{"schema_version":1"#
+    );
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn failed_persistence_does_not_publish_session_state() {
     let config = config("storage-failure", 16);
     let blocked_timeline = config
@@ -525,4 +592,18 @@ fn cleanup(config: &DaemonConfig) {
     if let Some(root) = config.socket_path.parent().and_then(|path| path.parent()) {
         let _ = std::fs::remove_dir_all(root);
     }
+}
+
+fn quarantine_files(session_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<_> = std::fs::read_dir(session_dir)
+        .expect("read session dir")
+        .map(|entry| entry.expect("session dir entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("timeline.jsonl.quarantine-"))
+        })
+        .collect();
+    paths.sort();
+    paths
 }

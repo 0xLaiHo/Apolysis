@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -50,6 +50,7 @@ impl DaemonState {
         let mut stores = BTreeMap::new();
         let mut redaction_policies = BTreeMap::new();
         let now_unix_ms = current_unix_ms()?;
+        let mut recovered_integrity_issue = false;
         for entry in std::fs::read_dir(&sessions_dir)
             .map_err(|error| format!("failed to scan daemon session state: {error}"))?
         {
@@ -67,8 +68,18 @@ impl DaemonState {
             if !timeline.is_file() {
                 continue;
             }
-            let recovery = HashChainStore::create_or_recover(&timeline)
+            let mut recovery = HashChainStore::create_or_recover(&timeline)
                 .map_err(|error| format!("failed to recover session {session_id}: {error}"))?;
+            if let Some(quarantine_path) = recovery.quarantined_path.as_deref() {
+                append_integrity_finding(
+                    &mut recovery.store,
+                    &session_id,
+                    &timeline,
+                    quarantine_path,
+                    recovery.records.len(),
+                )?;
+                recovered_integrity_issue = true;
+            }
             if let Some(recovered) = replay_active_session(&recovery.records, now_unix_ms)? {
                 let redaction_policy = load_redaction_policy(&recovered.intent.policy_ref);
                 registry
@@ -89,7 +100,11 @@ impl DaemonState {
         }
         let pipeline = EventPipeline::new(config.queue_capacity);
         let mut health = HealthSnapshot::new(QueueStats::new(config.queue_capacity));
-        health.set_storage(ComponentState::Ready);
+        health.set_storage(if recovered_integrity_issue {
+            ComponentState::Degraded
+        } else {
+            ComponentState::Ready
+        });
         health.set_ebpf(ComponentState::Unavailable);
         Ok(Self {
             registry: RwLock::new(registry),
@@ -482,6 +497,31 @@ impl DaemonState {
 
 fn registry_error(error: RegistryError) -> String {
     error.to_string()
+}
+
+fn append_integrity_finding(
+    store: &mut HashChainStore,
+    session_id: &str,
+    timeline_path: &Path,
+    quarantine_path: &Path,
+    valid_records: usize,
+) -> Result<(), String> {
+    let payload = json!({
+        "record_type":"integrity_finding",
+        "session_id":session_id,
+        "reason":"hash_chain_tail_quarantined",
+        "timeline_path":timeline_path.to_string_lossy(),
+        "quarantine_path":quarantine_path.to_string_lossy(),
+        "valid_records":valid_records
+    });
+    let payload = serde_json::to_string(&payload)
+        .map_err(|error| format!("failed to serialize integrity finding: {error}"))?;
+    store
+        .append_json(1, &payload)
+        .map_err(|error| format!("failed to append integrity finding: {error}"))?;
+    store
+        .flush()
+        .map_err(|error| format!("failed to flush integrity finding: {error}"))
 }
 
 fn finding_payload(
