@@ -5,15 +5,15 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary="$repo_root/target/debug/apolysis-validate-host"
-output_dir="${APOLYSIS_RUNTIME_REGISTRATION_OUTPUT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/apolysis-f2-runtime-registration.XXXXXX")}"
+output_dir="${APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/apolysis-f2-runtime-adapter-matrix.XXXXXX")}"
 applied=0
 
-if [[ "${APOLYSIS_CONFIRM_RUNTIME_REGISTRATION:-0}" != "1" ]]; then
+if [[ "${APOLYSIS_CONFIRM_RUNTIME_ADAPTER_MATRIX:-0}" != "1" ]]; then
     cat >&2 <<'EOF'
-apolysis-f2: runtime registration test is disabled by default because it writes
-Docker, standalone containerd, and k3s runtime configuration and restarts those
-services. Set APOLYSIS_CONFIRM_RUNTIME_REGISTRATION=1 to run it on a validation
-host after backing up any workload you cannot restart.
+apolysis-f2: runtime adapter matrix test is disabled by default because it
+temporarily writes Docker, standalone containerd, and k3s runtime configuration
+and restarts those services. Set APOLYSIS_CONFIRM_RUNTIME_ADAPTER_MATRIX=1 on a
+validation host to run the full Docker/containerd/k3s/Kubernetes adapter matrix.
 EOF
     exit 0
 fi
@@ -56,7 +56,7 @@ start_host_unit() {
 }
 
 restart_runtime_services() {
-    local unit="apolysis-runtime-registration-restart-$$"
+    local unit="apolysis-runtime-adapter-matrix-restart-$$"
     if ! start_host_unit "$unit" /bin/bash -lc \
         "systemctl restart containerd.service docker.service k3s.service"; then
         echo "apolysis-f2: restart runner was interrupted, likely by Docker restart; waiting for host services"
@@ -71,7 +71,7 @@ restore_runtime_registration() {
     if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
         "$binary" --restore --output "$output_dir"
     else
-        local unit="apolysis-runtime-registration-restore-$$"
+        local unit="apolysis-runtime-adapter-matrix-restore-$$"
         start_host_unit "$unit" "$binary" --restore --output "$output_dir"
         local i
         for i in $(seq 1 120); do
@@ -94,7 +94,7 @@ trap cleanup EXIT
 
 cd "$repo_root"
 
-for command in docker jq crictl systemctl; do
+for command in docker jq crictl systemctl kubectl; do
     command -v "$command" >/dev/null || {
         echo "apolysis-f2: missing required command: $command" >&2
         exit 2
@@ -123,6 +123,13 @@ docker info --format '{{json .Runtimes}}' | jq -e 'has("runsc")'
 host_bash 'crictl --config /dev/null --runtime-endpoint unix:///run/containerd/containerd.sock --image-endpoint unix:///run/containerd/containerd.sock info | jq -e '\''.config.containerd.runtimes | has("runc") and has("runsc") and has("kata")'\'''
 host_bash 'crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock info | jq -e '\''.config.containerd.runtimes | has("runc") and has("runsc") and has("kata")'\'''
 
+APOLYSIS_REQUIRE_FULL_RUNTIME_ADAPTERS=1 \
+APOLYSIS_REQUIRE_DOCKER_ADAPTER=1 \
+APOLYSIS_REQUIRE_CONTAINERD_ADAPTER=1 \
+APOLYSIS_REQUIRE_K3S_CONTAINERD_ADAPTER=1 \
+APOLYSIS_REQUIRE_KUBERNETES_ADAPTER=1 \
+    ./scripts/test-f2-runtime-adapters.sh
+
 restore_runtime_registration
 
 docker info --format '{{json .Runtimes}}' | jq -e 'has("runsc") | not'
@@ -131,4 +138,4 @@ host_bash 'test ! -e /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/
 host_bash 'crictl --config /dev/null --runtime-endpoint unix:///run/containerd/containerd.sock --image-endpoint unix:///run/containerd/containerd.sock info | jq -e '\''(.config.containerd.runtimes // {}) as $r | (($r | has("runsc") | not) and ($r | has("kata") | not))'\'''
 host_bash 'crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock info | jq -e '\''(.config.containerd.runtimes // {}) as $r | (($r | has("runsc") | not) and ($r | has("kata") | not))'\'''
 
-echo "apolysis-f2: runtime registration apply/restore passed; artifacts kept at $output_dir"
+echo "apolysis-f2: runtime adapter matrix passed; artifacts kept at $output_dir"

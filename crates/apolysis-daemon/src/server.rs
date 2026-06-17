@@ -16,8 +16,10 @@ use tokio::sync::{oneshot, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::{
-    run_observer_runtime, run_runtime_adapter, scope_channel, DaemonConfig, DaemonState,
-    DockerEngineClient, DockerEngineRuntimeAdapter, RuntimeAdapterSummary,
+    run_observer_runtime, run_runtime_adapter, scope_channel, ContainerdCriRuntimeAdapter,
+    CriRuntimeClient, DaemonConfig, DaemonState, DockerEngineClient,
+    DockerEnginePollingRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
+    RuntimeAdapterSummary,
 };
 
 pub const DAEMON_SCHEMA_V1: u32 = 1;
@@ -236,37 +238,115 @@ fn start_runtime_adapters(
         shutdowns.push(shutdown);
         let proc_root = config.proc_root.clone();
         let cgroup_root = config.cgroup_root.clone();
+        let scan_interval = config.runtime_adapter_scan_interval;
+        let seen_capacity = config.runtime_adapter_seen_capacity;
         let state = Arc::clone(&state);
         tasks.push(tokio::spawn(async move {
             let client = DockerEngineClient::new(socket_path);
-            match client.list_marked_running_container_ids().await {
-                Ok(container_ids) => {
-                    let adapter = DockerEngineRuntimeAdapter::new(
-                        client,
-                        proc_root,
-                        cgroup_root,
-                        container_ids,
-                    );
-                    run_runtime_adapter(adapter, state, receiver).await
-                }
-                Err(error) => {
-                    eprintln!("apolysisd: Docker adapter unavailable: {error}");
-                    state
-                        .set_adapter(AdapterKind::Docker, ComponentState::Degraded)
-                        .await;
-                    RuntimeAdapterSummary {
-                        adapter: AdapterKind::Docker,
-                        discovered: 0,
-                        missing_intent: 0,
-                        backend_errors: 1,
-                        ingest_errors: 0,
-                    }
-                }
+            let adapter = DockerEnginePollingRuntimeAdapter::new(
+                client,
+                proc_root,
+                cgroup_root,
+                scan_interval,
+                seen_capacity,
+            );
+            run_runtime_adapter(adapter, state, receiver).await
+        }));
+    }
+
+    if let Some(socket_path) = config.containerd_socket.clone() {
+        let (shutdown, receiver) = oneshot::channel();
+        shutdowns.push(shutdown);
+        let proc_root = config.proc_root.clone();
+        let cgroup_root = config.cgroup_root.clone();
+        let scan_interval = config.runtime_adapter_scan_interval;
+        let seen_capacity = config.runtime_adapter_seen_capacity;
+        let state = Arc::clone(&state);
+        tasks.push(tokio::spawn(async move {
+            let client = CriRuntimeClient::new(socket_path);
+            match ContainerdCriRuntimeAdapter::new(
+                AdapterKind::Containerd,
+                client,
+                proc_root,
+                cgroup_root,
+                scan_interval,
+                seen_capacity,
+            ) {
+                Ok(adapter) => run_runtime_adapter(adapter, state, receiver).await,
+                Err(error) => degraded_summary(state, AdapterKind::Containerd, error).await,
             }
         }));
     }
 
+    if let Some(socket_path) = config.k3s_containerd_socket.clone() {
+        let (shutdown, receiver) = oneshot::channel();
+        shutdowns.push(shutdown);
+        let proc_root = config.proc_root.clone();
+        let cgroup_root = config.cgroup_root.clone();
+        let scan_interval = config.runtime_adapter_scan_interval;
+        let seen_capacity = config.runtime_adapter_seen_capacity;
+        let state = Arc::clone(&state);
+        tasks.push(tokio::spawn(async move {
+            let client = CriRuntimeClient::new(socket_path).with_image_endpoint(None);
+            match ContainerdCriRuntimeAdapter::new(
+                AdapterKind::K3sContainerd,
+                client,
+                proc_root,
+                cgroup_root,
+                scan_interval,
+                seen_capacity,
+            ) {
+                Ok(adapter) => run_runtime_adapter(adapter, state, receiver).await,
+                Err(error) => degraded_summary(state, AdapterKind::K3sContainerd, error).await,
+            }
+        }));
+    }
+
+    if let Some(kubectl_path) = config.kubernetes_kubectl.clone() {
+        let (shutdown, receiver) = oneshot::channel();
+        shutdowns.push(shutdown);
+        let proc_root = config.proc_root.clone();
+        let cgroup_root = config.cgroup_root.clone();
+        let scan_interval = config.runtime_adapter_scan_interval;
+        let seen_capacity = config.runtime_adapter_seen_capacity;
+        let cri_socket = config
+            .kubernetes_cri_socket
+            .clone()
+            .or_else(|| config.k3s_containerd_socket.clone())
+            .unwrap_or_else(|| "/run/k3s/containerd/containerd.sock".into());
+        let state = Arc::clone(&state);
+        tasks.push(tokio::spawn(async move {
+            let kubernetes = KubernetesCliClient::new(kubectl_path);
+            let cri = CriRuntimeClient::new(cri_socket).with_image_endpoint(None);
+            let adapter = KubernetesCliRuntimeAdapter::new(
+                kubernetes,
+                cri,
+                proc_root,
+                cgroup_root,
+                scan_interval,
+                seen_capacity,
+            );
+            run_runtime_adapter(adapter, state, receiver).await
+        }));
+    }
+
     (shutdowns, tasks)
+}
+
+async fn degraded_summary(
+    state: Arc<DaemonState>,
+    adapter: AdapterKind,
+    error: String,
+) -> RuntimeAdapterSummary {
+    eprintln!("apolysisd: runtime adapter unavailable: {error}");
+    state.set_adapter(adapter, ComponentState::Degraded).await;
+    RuntimeAdapterSummary {
+        adapter,
+        discovered: 0,
+        missing_intent: 0,
+        backend_errors: 1,
+        ingest_errors: 0,
+    }
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<DaemonState>) -> Result<(), String> {

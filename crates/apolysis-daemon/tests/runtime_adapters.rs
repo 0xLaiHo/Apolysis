@@ -8,19 +8,23 @@ use std::pin::Pin;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use apolysis_accountability::{
     ActionClass, AdapterKind, AssociationOutcome, ComponentState, ResourceKind, ResourceSelector,
     SessionIntent,
 };
 use apolysis_daemon::{
-    cgroup_id_from_proc_cgroup, containerd_task_snapshot_from_metadata,
-    containerd_workload_from_snapshot, docker_container_pid_from_engine_inspect,
+    adapter_backoff_delay, cgroup_id_from_proc_cgroup, containerd_task_snapshot_from_cri_inspect,
+    containerd_task_snapshot_from_metadata, containerd_workload_from_snapshot,
+    crictl_marked_container_ids_from_ps, docker_container_pid_from_engine_inspect,
     docker_snapshot_from_engine_inspect, docker_workload_from_snapshot,
-    kubernetes_pod_snapshot_from_api_object, kubernetes_workload_from_pod_snapshot,
-    run_runtime_adapter, ContainerdTaskSnapshot, DaemonConfig, DaemonState,
-    DockerContainerSnapshot, DockerEngineClient, DockerEngineRuntimeAdapter, KubernetesPodSnapshot,
-    RuntimeAdapterBackend, RuntimeWorkload, APOLYSIS_SESSION_ANNOTATION,
+    kubernetes_marked_pod_snapshots_from_api_list, kubernetes_pod_snapshot_from_api_object,
+    kubernetes_workload_from_pod_snapshot, run_runtime_adapter, AdapterBackoffPolicy,
+    ContainerdCriRuntimeAdapter, ContainerdTaskSnapshot, CriRuntimeClient, DaemonConfig,
+    DaemonState, DockerContainerSnapshot, DockerEngineClient, DockerEnginePollingRuntimeAdapter,
+    DockerEngineRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
+    KubernetesPodSnapshot, RuntimeAdapterBackend, RuntimeWorkload, APOLYSIS_SESSION_ANNOTATION,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -372,11 +376,6 @@ async fn docker_engine_runtime_adapter_inspects_container_and_resolves_cgroup() 
 #[tokio::test]
 #[ignore = "requires Docker Engine socket access and the ability to run containers"]
 async fn live_docker_engine_adapter_discovers_labelled_container() {
-    let session_id = format!(
-        "live-docker-{}-{}",
-        std::process::id(),
-        NEXT_ID.fetch_add(1, Ordering::Relaxed)
-    );
     require_command("docker");
     let image_status = Command::new("docker")
         .args(["image", "inspect", "alpine:3.20"])
@@ -393,58 +392,196 @@ async fn live_docker_engine_adapter_discovers_labelled_container() {
             String::from_utf8_lossy(&pull_output.stderr)
         );
     }
-    let output = Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--rm",
-            "--label",
-            &format!("apolysis.session_id={session_id}"),
-            "alpine:3.20",
-            "sh",
-            "-c",
-            "sleep 30",
-        ])
-        .output()
-        .expect("start labelled container");
-    assert!(
-        output.status.success(),
-        "docker run failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let cleanup = DockerContainerCleanup {
-        container_id: container_id.clone(),
-    };
+    for runtime in live_docker_runtimes() {
+        let session_id = format!(
+            "live-docker-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut args = vec![
+            "run".to_string(),
+            "-d".to_string(),
+            "--rm".to_string(),
+            "--label".to_string(),
+            format!("apolysis.session_id={session_id}"),
+            "--cpus".to_string(),
+            "0.5".to_string(),
+            "--memory".to_string(),
+            "64m".to_string(),
+            "--pids-limit".to_string(),
+            "64".to_string(),
+            "--read-only".to_string(),
+            "--network".to_string(),
+            "none".to_string(),
+            "--cap-drop".to_string(),
+            "ALL".to_string(),
+            "--security-opt".to_string(),
+            "no-new-privileges".to_string(),
+        ];
+        if let Some(runtime) = runtime {
+            args.push("--runtime".to_string());
+            args.push(runtime.to_string());
+        }
+        args.extend([
+            "alpine:3.20".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            "sleep 30".to_string(),
+        ]);
+        let output = Command::new("docker")
+            .args(args.iter().map(String::as_str))
+            .output()
+            .expect("start labelled container");
+        assert!(
+            output.status.success(),
+            "docker run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let cleanup = DockerContainerCleanup {
+            container_id: container_id.clone(),
+        };
 
-    let client = DockerEngineClient::new("/var/run/docker.sock");
-    let marked_ids = client
-        .list_marked_running_container_ids()
+        let client = DockerEngineClient::new("/var/run/docker.sock");
+        let marked_ids = client
+            .list_marked_running_container_ids()
+            .await
+            .expect("list marked containers");
+        assert!(
+            marked_ids.iter().any(|id| id.starts_with(&container_id)),
+            "marked containers did not include {container_id}: {marked_ids:?}"
+        );
+        let mut adapter = DockerEnginePollingRuntimeAdapter::new(
+            client,
+            "/proc",
+            "/sys/fs/cgroup",
+            Duration::from_millis(100),
+            1024,
+        );
+        let workload = tokio::time::timeout(
+            Duration::from_secs(15),
+            next_workload_for_session(&mut adapter, &session_id),
+        )
         .await
-        .expect("list marked containers");
-    assert!(
-        marked_ids.iter().any(|id| id.starts_with(&container_id)),
-        "marked containers did not include {container_id}: {marked_ids:?}"
-    );
-    let mut adapter = DockerEngineRuntimeAdapter::new(
-        client,
-        "/proc",
-        "/sys/fs/cgroup",
-        vec![container_id.clone()],
-    );
-    let workload = adapter
-        .next_workload()
+        .expect("Docker polling adapter timeout")
+        .expect("target labelled Docker workload");
+
+        assert_eq!(workload.adapter, AdapterKind::Docker);
+        assert_eq!(workload.session_id, session_id);
+        assert_eq!(workload.workload_id, container_id);
+        assert!(workload.cgroup_id > 0);
+        assert_eq!(workload.image.as_deref(), Some("alpine:3.20"));
+        if let Some(runtime) = runtime {
+            assert_eq!(workload.runtime_handler.as_deref(), Some(runtime));
+        }
+
+        drop(cleanup);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires root access to standalone containerd CRI socket and local Alpine image"]
+async fn live_containerd_cri_adapter_discovers_labelled_containers() {
+    live_cri_adapter_matrix(
+        AdapterKind::Containerd,
+        "/run/containerd/containerd.sock",
+        Some("unix:///run/containerd/containerd.sock"),
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires root access to k3s containerd CRI socket and local Alpine image"]
+async fn live_k3s_containerd_cri_adapter_discovers_labelled_containers() {
+    live_cri_adapter_matrix(
+        AdapterKind::K3sContainerd,
+        "/run/k3s/containerd/containerd.sock",
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires k3s/kubectl access, RuntimeClasses, and root access to k3s CRI socket"]
+async fn live_kubernetes_cli_adapter_discovers_annotated_pods() {
+    require_command("crictl");
+    let kubectl = std::env::var("APOLYSIS_KUBECTL").unwrap_or_else(|_| "kubectl".to_string());
+    require_kubectl(&kubectl);
+    let endpoint = std::env::var("APOLYSIS_K3S_CRI_ENDPOINT")
+        .unwrap_or_else(|_| "/run/k3s/containerd/containerd.sock".to_string());
+    let runtimes = live_kubernetes_runtimes();
+
+    for (name, runtime_handler) in runtimes {
+        let session_id = format!(
+            "live-k8s-{name}-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let namespace = format!("apolysis-live-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let pod_name = format!("apolysis-{name}");
+        let runtime_class = runtime_handler.map(|_| {
+            format!(
+                "apolysis-{name}-{}",
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            )
+        });
+        let cleanup = KubernetesNamespaceCleanup {
+            kubectl: kubectl.clone(),
+            namespace: namespace.clone(),
+            runtime_class: runtime_class.clone(),
+        };
+        create_kubernetes_pod(
+            &kubectl,
+            &namespace,
+            &pod_name,
+            &session_id,
+            runtime_class.as_deref(),
+            runtime_handler,
+        );
+        wait_for_kubernetes_container_id(&kubectl, &namespace, &pod_name);
+
+        let mut adapter = KubernetesCliRuntimeAdapter::new(
+            KubernetesCliClient::new(&kubectl),
+            CriRuntimeClient::new(&endpoint).with_image_endpoint(None),
+            "/proc",
+            "/sys/fs/cgroup",
+            Duration::from_millis(100),
+            1024,
+        );
+        let workload = tokio::time::timeout(
+            Duration::from_secs(20),
+            next_workload_for_session(&mut adapter, &session_id),
+        )
         .await
-        .expect("adapter poll")
-        .expect("marked workload");
+        .expect("Kubernetes adapter timeout")
+        .expect("target annotated Kubernetes workload");
 
-    assert_eq!(workload.adapter, AdapterKind::Docker);
-    assert_eq!(workload.session_id, session_id);
-    assert_eq!(workload.workload_id, container_id);
-    assert!(workload.cgroup_id > 0);
-    assert_eq!(workload.image.as_deref(), Some("alpine:3.20"));
+        assert_eq!(workload.adapter, AdapterKind::Kubernetes);
+        assert_eq!(workload.session_id, session_id);
+        assert!(workload.cgroup_id > 0);
+        assert_eq!(
+            workload.runtime_handler.as_deref(),
+            runtime_class.as_deref()
+        );
+        drop(cleanup);
+    }
+}
 
-    drop(cleanup);
+async fn next_workload_for_session<B: RuntimeAdapterBackend>(
+    adapter: &mut B,
+    session_id: &str,
+) -> Result<RuntimeWorkload, String> {
+    loop {
+        match adapter.next_workload().await? {
+            Some(workload) if workload.session_id == session_id => return Ok(workload),
+            Some(_) => {}
+            None => {
+                return Err(format!(
+                    "runtime adapter ended before discovering {session_id}"
+                ))
+            }
+        }
+    }
 }
 
 #[test]
@@ -536,6 +673,78 @@ fn containerd_metadata_json_becomes_task_snapshot() {
 }
 
 #[test]
+fn crictl_ps_lists_only_marked_running_containers() {
+    let ids = crictl_marked_container_ids_from_ps(json!({
+        "containers": [
+            {
+                "id": "container-marked",
+                "state": "CONTAINER_RUNNING",
+                "labels": {"apolysis.session_id": "session-containerd"}
+            },
+            {
+                "id": "container-stopped",
+                "state": "CONTAINER_EXITED",
+                "labels": {"apolysis.session_id": "session-containerd"}
+            },
+            {
+                "id": "container-unmarked",
+                "state": "CONTAINER_RUNNING",
+                "labels": {"owner": "platform"}
+            }
+        ]
+    }))
+    .expect("marked CRI containers");
+
+    assert_eq!(ids, vec!["container-marked"]);
+}
+
+#[test]
+fn containerd_cri_inspect_json_becomes_task_snapshot() {
+    let snapshot = containerd_task_snapshot_from_cri_inspect(
+        AdapterKind::Containerd,
+        &json!({
+            "status": {
+                "id": "containerd-task-1",
+                "labels": {
+                    "apolysis.session_id": "session-containerd",
+                    "io.kubernetes.pod.namespace": "apolysis-validation"
+                },
+                "image": {
+                    "userSpecifiedImage": "docker.io/library/alpine:3.20",
+                    "runtimeHandler": "runsc"
+                }
+            },
+            "info": {
+                "pid": 48123,
+                "runtimeType": "io.containerd.runsc.v1"
+            }
+        }),
+        707,
+    )
+    .expect("containerd CRI snapshot");
+
+    assert_eq!(snapshot.adapter, AdapterKind::Containerd);
+    assert_eq!(snapshot.namespace, "apolysis-validation");
+    assert_eq!(snapshot.container_id, "containerd-task-1");
+    assert_eq!(snapshot.cgroup_id, 707);
+    assert_eq!(
+        snapshot
+            .labels
+            .get("apolysis.session_id")
+            .map(String::as_str),
+        Some("session-containerd")
+    );
+    assert_eq!(
+        snapshot.image.as_deref(),
+        Some("docker.io/library/alpine:3.20")
+    );
+    assert_eq!(
+        snapshot.runtime_handler.as_deref(),
+        Some("io.containerd.runsc.v1")
+    );
+}
+
+#[test]
 fn kubernetes_pod_snapshot_uses_session_annotation_and_pod_uid() {
     let mut annotations = BTreeMap::new();
     annotations.insert(
@@ -594,6 +803,88 @@ fn kubernetes_api_pod_object_becomes_pod_snapshot() {
         Some("session-kubernetes")
     );
     assert_eq!(snapshot.runtime_class_name.as_deref(), Some("gvisor"));
+}
+
+#[test]
+fn kubernetes_pod_list_uses_annotation_and_container_cgroup_map() {
+    let snapshots = kubernetes_marked_pod_snapshots_from_api_list(
+        &json!({
+            "items": [
+                {
+                    "metadata": {
+                        "namespace": "agent-jobs",
+                        "name": "apolysis-worker",
+                        "uid": "pod-uid-123",
+                        "resourceVersion": "2001",
+                        "annotations": {
+                            "apolysis.dev/session-id": "session-kubernetes"
+                        }
+                    },
+                    "spec": {
+                        "nodeName": "mactavish",
+                        "serviceAccountName": "agent-runner",
+                        "runtimeClassName": "gvisor"
+                    },
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [
+                            {
+                                "name": "worker",
+                                "containerID": "containerd://containerd-task-1"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "metadata": {
+                        "namespace": "kube-system",
+                        "name": "unmarked",
+                        "uid": "pod-uid-ignored"
+                    },
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [
+                            {
+                                "containerID": "containerd://containerd-task-ignored"
+                            }
+                        ]
+                    }
+                }
+            ]
+        }),
+        &BTreeMap::from([("containerd-task-1".to_string(), 808)]),
+    )
+    .expect("marked pod snapshots");
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].namespace, "agent-jobs");
+    assert_eq!(snapshots[0].pod_name, "apolysis-worker");
+    assert_eq!(snapshots[0].pod_uid.as_deref(), Some("pod-uid-123"));
+    assert_eq!(snapshots[0].cgroup_id, 808);
+    assert_eq!(snapshots[0].runtime_class_name.as_deref(), Some("gvisor"));
+
+    let workload = kubernetes_workload_from_pod_snapshot(snapshots[0].clone())
+        .expect("kubernetes workload")
+        .expect("marked workload");
+    assert_eq!(workload.session_id, "session-kubernetes");
+    assert_eq!(workload.workload_id, "pod-uid-123");
+}
+
+#[test]
+fn adapter_backoff_is_bounded_and_has_deterministic_jitter() {
+    let policy = AdapterBackoffPolicy {
+        initial_delay_ms: 100,
+        max_delay_ms: 1_000,
+        jitter_ms: 50,
+    };
+
+    let first = adapter_backoff_delay(policy, AdapterKind::Containerd, 1);
+    let later = adapter_backoff_delay(policy, AdapterKind::Containerd, 8);
+    let different_adapter = adapter_backoff_delay(policy, AdapterKind::Kubernetes, 1);
+
+    assert!((100..=150).contains(&first.as_millis()));
+    assert!((1_000..=1_050).contains(&later.as_millis()));
+    assert_ne!(first, different_adapter);
 }
 
 #[tokio::test]
@@ -756,6 +1047,434 @@ impl Drop for DockerContainerCleanup {
     }
 }
 
+struct CriWorkloadCleanup {
+    endpoint: String,
+    image_endpoint: Option<String>,
+    container_id: String,
+    pod_id: String,
+}
+
+impl Drop for CriWorkloadCleanup {
+    fn drop(&mut self) {
+        let _ = run_crictl(
+            &self.endpoint,
+            self.image_endpoint.as_deref(),
+            &["stop", &self.container_id],
+        );
+        let _ = run_crictl(
+            &self.endpoint,
+            self.image_endpoint.as_deref(),
+            &["rm", &self.container_id],
+        );
+        let _ = run_crictl(
+            &self.endpoint,
+            self.image_endpoint.as_deref(),
+            &["stopp", &self.pod_id],
+        );
+        let _ = run_crictl(
+            &self.endpoint,
+            self.image_endpoint.as_deref(),
+            &["rmp", &self.pod_id],
+        );
+    }
+}
+
+struct KubernetesNamespaceCleanup {
+    kubectl: String,
+    namespace: String,
+    runtime_class: Option<String>,
+}
+
+impl Drop for KubernetesNamespaceCleanup {
+    fn drop(&mut self) {
+        let _ = Command::new(&self.kubectl)
+            .args([
+                "delete",
+                "namespace",
+                &self.namespace,
+                "--ignore-not-found=true",
+                "--wait=true",
+                "--timeout=120s",
+            ])
+            .output();
+        if let Some(runtime_class) = &self.runtime_class {
+            let _ = Command::new(&self.kubectl)
+                .args([
+                    "delete",
+                    "runtimeclass",
+                    runtime_class,
+                    "--ignore-not-found=true",
+                    "--wait=false",
+                ])
+                .output();
+        }
+    }
+}
+
+async fn live_cri_adapter_matrix(
+    adapter_kind: AdapterKind,
+    socket_path: &str,
+    image_endpoint: Option<&str>,
+) {
+    require_command("crictl");
+    for runtime in live_cri_runtimes() {
+        let session_id = format!(
+            "live-cri-{runtime}-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let cleanup = create_cri_workload(socket_path, image_endpoint, runtime, &session_id);
+        let mut adapter = ContainerdCriRuntimeAdapter::new(
+            adapter_kind,
+            CriRuntimeClient::new(socket_path)
+                .with_image_endpoint(image_endpoint.map(ToOwned::to_owned)),
+            "/proc",
+            "/sys/fs/cgroup",
+            Duration::from_millis(100),
+            1024,
+        )
+        .expect("CRI adapter");
+        let workload = tokio::time::timeout(Duration::from_secs(15), adapter.next_workload())
+            .await
+            .expect("CRI adapter timeout")
+            .expect("CRI adapter poll")
+            .expect("labelled CRI workload");
+
+        assert_eq!(workload.adapter, adapter_kind);
+        assert_eq!(workload.session_id, session_id);
+        assert_eq!(
+            workload.workload_id,
+            format!("apolysis-validation/{}", cleanup.container_id)
+        );
+        assert!(workload.cgroup_id > 0);
+        assert_eq!(
+            workload.image.as_deref(),
+            Some("docker.io/library/alpine:3.20")
+        );
+        assert!(
+            workload
+                .runtime_handler
+                .as_deref()
+                .unwrap_or_default()
+                .contains(expected_cri_runtime_type(runtime)),
+            "runtime handler {:?} did not contain expected type {}",
+            workload.runtime_handler,
+            expected_cri_runtime_type(runtime)
+        );
+        drop(cleanup);
+    }
+}
+
+fn live_cri_runtimes() -> Vec<&'static str> {
+    if std::env::var("APOLYSIS_REQUIRE_FULL_RUNTIME_ADAPTERS")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        vec!["runc", "runsc", "kata"]
+    } else {
+        vec!["runc"]
+    }
+}
+
+fn live_docker_runtimes() -> Vec<Option<&'static str>> {
+    if std::env::var("APOLYSIS_REQUIRE_FULL_RUNTIME_ADAPTERS")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        vec![None, Some("runsc")]
+    } else {
+        vec![None]
+    }
+}
+
+fn live_kubernetes_runtimes() -> Vec<(&'static str, Option<&'static str>)> {
+    if std::env::var("APOLYSIS_REQUIRE_FULL_RUNTIME_ADAPTERS")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        vec![
+            ("runc", None),
+            ("gvisor", Some("runsc")),
+            ("kata", Some("kata")),
+        ]
+    } else {
+        vec![("runc", None)]
+    }
+}
+
+fn expected_cri_runtime_type(runtime: &str) -> &'static str {
+    match runtime {
+        "runsc" => "io.containerd.runsc.v1",
+        "kata" => "io.containerd.kata.v2",
+        _ => "io.containerd.runc.v2",
+    }
+}
+
+fn create_cri_workload(
+    socket_path: &str,
+    image_endpoint: Option<&str>,
+    runtime: &str,
+    session_id: &str,
+) -> CriWorkloadCleanup {
+    let endpoint = format!("unix://{socket_path}");
+    let root = std::env::temp_dir().join(format!(
+        "apolysis-cri-live-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create CRI config directory");
+    let pod_path = root.join("pod.json");
+    let container_path = root.join("container.json");
+    let uid = format!("apolysis-cri-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let mut pod_linux = json!({
+        "resources": {
+            "cpu_period": 100000,
+            "cpu_quota": 50000,
+            "memory_limit_in_bytes": 67108864
+        }
+    });
+    if socket_path.contains("/k3s/") {
+        pod_linux.as_object_mut().expect("pod linux object").insert(
+            "cgroup_parent".to_string(),
+            serde_json::Value::String("system.slice".to_string()),
+        );
+    }
+    let readonly_rootfs = !(socket_path.contains("/k3s/") && runtime == "runsc");
+    std::fs::write(
+        &pod_path,
+        serde_json::to_vec_pretty(&json!({
+            "metadata": {
+                "name": format!("apolysis-{runtime}"),
+                "namespace": "apolysis-validation",
+                "uid": uid,
+                "attempt": 0
+            },
+            "labels": {
+                "apolysis.session_id": session_id
+            },
+            "log_directory": root.to_string_lossy(),
+            "linux": pod_linux
+        }))
+        .expect("serialize CRI pod config"),
+    )
+    .expect("write CRI pod config");
+    std::fs::write(
+        &container_path,
+        serde_json::to_vec_pretty(&json!({
+            "metadata": {
+                "name": "workload",
+                "attempt": 0
+            },
+            "image": {
+                "image": "docker.io/library/alpine:3.20"
+            },
+            "command": ["sh", "-c", "sleep 60"],
+            "labels": {
+                "apolysis.session_id": session_id
+            },
+            "log_path": "workload.log",
+            "linux": {
+                "resources": {
+                    "cpu_period": 100000,
+                    "cpu_quota": 50000,
+                    "memory_limit_in_bytes": 67108864
+                },
+                "security_context": {
+                    "readonly_rootfs": readonly_rootfs,
+                    "no_new_privs": true
+                }
+            }
+        }))
+        .expect("serialize CRI container config"),
+    )
+    .expect("write CRI container config");
+    let pod = run_crictl(
+        &endpoint,
+        image_endpoint,
+        &[
+            "runp",
+            "--runtime",
+            runtime,
+            pod_path.to_str().expect("pod path UTF-8"),
+        ],
+    )
+    .unwrap_or_else(|error| panic!("run CRI pod with runtime {runtime}: {error}"));
+    let container = run_crictl(
+        &endpoint,
+        image_endpoint,
+        &[
+            "create",
+            "--no-pull",
+            &pod,
+            container_path.to_str().expect("container path UTF-8"),
+            pod_path.to_str().expect("pod path UTF-8"),
+        ],
+    )
+    .unwrap_or_else(|error| panic!("create CRI container with runtime {runtime}: {error}"));
+    run_crictl(&endpoint, image_endpoint, &["start", &container])
+        .unwrap_or_else(|error| panic!("start CRI container with runtime {runtime}: {error}"));
+    let _ = std::fs::remove_dir_all(&root);
+
+    CriWorkloadCleanup {
+        endpoint,
+        image_endpoint: image_endpoint.map(ToOwned::to_owned),
+        container_id: container,
+        pod_id: pod,
+    }
+}
+
+fn run_crictl(
+    endpoint: &str,
+    image_endpoint: Option<&str>,
+    command_args: &[&str],
+) -> Result<String, String> {
+    let mut command = Command::new("crictl");
+    command
+        .arg("--config")
+        .arg("/dev/null")
+        .arg("--runtime-endpoint")
+        .arg(endpoint)
+        .arg("--timeout")
+        .arg("10s");
+    if let Some(image_endpoint) = image_endpoint {
+        command.arg("--image-endpoint").arg(image_endpoint);
+    }
+    let output = command
+        .args(command_args)
+        .output()
+        .map_err(|error| format!("failed to run crictl: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn create_kubernetes_pod(
+    kubectl: &str,
+    namespace: &str,
+    pod_name: &str,
+    session_id: &str,
+    runtime_class: Option<&str>,
+    runtime_handler: Option<&str>,
+) {
+    let root = std::env::temp_dir().join(format!(
+        "apolysis-k8s-live-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create Kubernetes manifest directory");
+    let manifest = root.join("pod.yaml");
+    let runtime_class_object = match (runtime_class, runtime_handler) {
+        (Some(runtime_class), Some(runtime_handler)) => format!(
+            r#"apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: {runtime_class}
+handler: {runtime_handler}
+---
+"#
+        ),
+        _ => String::new(),
+    };
+    let runtime_class_line = runtime_class
+        .map(|runtime_class| format!("  runtimeClassName: {runtime_class}\n"))
+        .unwrap_or_default();
+    let readonly_rootfs = runtime_handler != Some("runsc");
+    std::fs::write(
+        &manifest,
+        format!(
+            r#"{runtime_class_object}apiVersion: v1
+kind: Namespace
+metadata:
+  name: {namespace}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {pod_name}
+  namespace: {namespace}
+  annotations:
+    apolysis.dev/session-id: {session_id}
+spec:
+  restartPolicy: Never
+{runtime_class_line}  tolerations:
+    - operator: Exists
+  containers:
+    - name: workload
+      image: docker.io/library/alpine:3.20
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "sleep 60"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 500m
+          memory: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: {readonly_rootfs}
+"#
+        ),
+    )
+    .expect("write Kubernetes manifest");
+    let output = Command::new(kubectl)
+        .args([
+            "apply",
+            "-f",
+            manifest.to_str().expect("manifest path UTF-8"),
+        ])
+        .output()
+        .expect("kubectl apply");
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        output.status.success(),
+        "kubectl apply failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn wait_for_kubernetes_container_id(kubectl: &str, namespace: &str, pod_name: &str) {
+    for _ in 0..90 {
+        let output = Command::new(kubectl)
+            .args(["get", "pod", pod_name, "-n", namespace, "-o", "json"])
+            .output()
+            .expect("kubectl get pod");
+        if output.status.success() {
+            let pod: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("Kubernetes Pod JSON");
+            let running = pod
+                .get("status")
+                .and_then(|status| status.get("phase"))
+                .and_then(serde_json::Value::as_str)
+                == Some("Running");
+            let has_container_id = pod
+                .get("status")
+                .and_then(|status| status.get("containerStatuses"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|status| {
+                    status
+                        .get("containerID")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|id| !id.trim().is_empty())
+                        .unwrap_or(false)
+                });
+            if running && has_container_id {
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    panic!("Kubernetes Pod {namespace}/{pod_name} did not reach Running with a containerID");
+}
+
 fn require_command(command: &str) {
     let output = Command::new(command)
         .arg("--version")
@@ -764,6 +1483,18 @@ fn require_command(command: &str) {
     assert!(
         output.status.success(),
         "{command} --version failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn require_kubectl(command: &str) {
+    let output = Command::new(command)
+        .args(["version", "--client"])
+        .output()
+        .unwrap_or_else(|error| panic!("{command} is required: {error}"));
+    assert!(
+        output.status.success(),
+        "{command} version --client failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

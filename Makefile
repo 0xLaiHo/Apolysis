@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters
+.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix
 
 build: build-ebpf
 	cargo build --workspace
@@ -33,3 +33,6 @@ test-f2-runtime-registration:
 
 test-f2-runtime-adapters:
 	./scripts/test-f2-runtime-adapters.sh
+
+test-f2-runtime-adapter-matrix:
+	./scripts/test-f2-runtime-adapter-matrix.sh

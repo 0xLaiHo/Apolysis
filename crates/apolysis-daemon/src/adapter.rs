@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use apolysis_accountability::{AdapterKind, AssociationOutcome, ComponentState};
 use serde_json::Value;
@@ -147,6 +149,81 @@ pub struct DockerEngineRuntimeAdapter {
     pending_container_ids: VecDeque<String>,
 }
 
+pub struct DockerEnginePollingRuntimeAdapter {
+    client: DockerEngineClient,
+    proc_root: PathBuf,
+    cgroup_root: PathBuf,
+    pending_container_ids: VecDeque<String>,
+    seen_container_ids: BTreeSet<String>,
+    seen_capacity: usize,
+    scan_interval: Duration,
+}
+
+impl DockerEnginePollingRuntimeAdapter {
+    pub fn new(
+        client: DockerEngineClient,
+        proc_root: impl Into<PathBuf>,
+        cgroup_root: impl Into<PathBuf>,
+        scan_interval: Duration,
+        seen_capacity: usize,
+    ) -> Self {
+        Self {
+            client,
+            proc_root: proc_root.into(),
+            cgroup_root: cgroup_root.into(),
+            pending_container_ids: VecDeque::new(),
+            seen_container_ids: BTreeSet::new(),
+            seen_capacity,
+            scan_interval,
+        }
+    }
+
+    async fn next_polled_workload(&mut self) -> Result<Option<RuntimeWorkload>, String> {
+        loop {
+            while let Some(container_id) = self.pending_container_ids.pop_front() {
+                if let Some(workload) = docker_workload_from_client(
+                    &self.client,
+                    &self.proc_root,
+                    &self.cgroup_root,
+                    &container_id,
+                )
+                .await?
+                {
+                    return Ok(Some(workload));
+                }
+            }
+            self.pending_container_ids = self
+                .client
+                .list_marked_running_container_ids()
+                .await?
+                .into_iter()
+                .filter(|container_id| {
+                    remember_seen(
+                        &mut self.seen_container_ids,
+                        self.seen_capacity,
+                        container_id,
+                    )
+                })
+                .collect();
+            if self.pending_container_ids.is_empty() {
+                tokio::time::sleep(self.scan_interval).await;
+            }
+        }
+    }
+}
+
+impl RuntimeAdapterBackend for DockerEnginePollingRuntimeAdapter {
+    fn kind(&self) -> AdapterKind {
+        AdapterKind::Docker
+    }
+
+    fn next_workload(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeWorkload>, String>> + Send + '_>> {
+        Box::pin(self.next_polled_workload())
+    }
+}
+
 impl DockerEngineRuntimeAdapter {
     pub fn new(
         client: DockerEngineClient,
@@ -164,23 +241,32 @@ impl DockerEngineRuntimeAdapter {
 
     async fn next_docker_workload(&mut self) -> Result<Option<RuntimeWorkload>, String> {
         while let Some(container_id) = self.pending_container_ids.pop_front() {
-            let inspect = self.client.inspect_container(&container_id).await?;
-            let pid = docker_container_pid_from_engine_inspect(&inspect)?;
-            let proc_cgroup_path = self.proc_root.join(pid.to_string()).join("cgroup");
-            let proc_cgroup = std::fs::read_to_string(&proc_cgroup_path).map_err(|error| {
-                format!(
-                    "failed to read process cgroup file {}: {error}",
-                    proc_cgroup_path.display()
-                )
-            })?;
-            let cgroup_id = cgroup_id_from_proc_cgroup(&proc_cgroup, &self.cgroup_root)?;
-            let snapshot = docker_snapshot_from_engine_inspect(&inspect, cgroup_id)?;
-            if let Some(workload) = docker_workload_from_snapshot(snapshot)? {
+            if let Some(workload) = docker_workload_from_client(
+                &self.client,
+                &self.proc_root,
+                &self.cgroup_root,
+                &container_id,
+            )
+            .await?
+            {
                 return Ok(Some(workload));
             }
         }
         Ok(None)
     }
+}
+
+async fn docker_workload_from_client(
+    client: &DockerEngineClient,
+    proc_root: &Path,
+    cgroup_root: &Path,
+    container_id: &str,
+) -> Result<Option<RuntimeWorkload>, String> {
+    let inspect = client.inspect_container(container_id).await?;
+    let pid = docker_container_pid_from_engine_inspect(&inspect)?;
+    let cgroup_id = cgroup_id_from_pid(pid, proc_root, cgroup_root)?;
+    let snapshot = docker_snapshot_from_engine_inspect(&inspect, cgroup_id)?;
+    docker_workload_from_snapshot(snapshot)
 }
 
 impl RuntimeAdapterBackend for DockerEngineRuntimeAdapter {
@@ -209,6 +295,122 @@ pub trait RuntimeAdapterBackend: Send + 'static {
     fn next_workload(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeWorkload>, String>> + Send + '_>>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdapterBackoffPolicy {
+    pub initial_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub jitter_ms: u64,
+}
+
+impl Default for AdapterBackoffPolicy {
+    fn default() -> Self {
+        Self {
+            initial_delay_ms: 250,
+            max_delay_ms: 5_000,
+            jitter_ms: 100,
+        }
+    }
+}
+
+pub fn adapter_backoff_delay(
+    policy: AdapterBackoffPolicy,
+    adapter: AdapterKind,
+    consecutive_errors: u64,
+) -> Duration {
+    let initial = policy.initial_delay_ms.max(1);
+    let max_delay = policy.max_delay_ms.max(initial);
+    let exponent = consecutive_errors.saturating_sub(1).min(16);
+    let base = initial.saturating_mul(1_u64 << exponent).min(max_delay);
+    let jitter = if policy.jitter_ms == 0 {
+        0
+    } else {
+        let adapter_seed = match adapter {
+            AdapterKind::Docker => 11,
+            AdapterKind::Containerd => 23,
+            AdapterKind::K3sContainerd => 37,
+            AdapterKind::Kubernetes => 53,
+        };
+        (adapter_seed + consecutive_errors.saturating_mul(17)) % (policy.jitter_ms + 1)
+    };
+    Duration::from_millis(base.saturating_add(jitter))
+}
+
+pub fn crictl_marked_container_ids_from_ps(value: Value) -> Result<Vec<String>, String> {
+    let containers = value
+        .get("containers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "crictl ps JSON must contain containers array".to_string())?;
+    let mut ids = Vec::new();
+    for container in containers {
+        if string_field(container, &["state"]).as_deref() != Some("CONTAINER_RUNNING") {
+            continue;
+        }
+        let labels = string_map_field(container, &["labels"], "CRI container labels")?;
+        let marked = labels
+            .get(APOLYSIS_SESSION_LABEL)
+            .map(String::as_str)
+            .map(str::trim)
+            .map(|session_id| !session_id.is_empty())
+            .unwrap_or(false);
+        if !marked {
+            continue;
+        }
+        let id = string_field(container, &["id"])
+            .ok_or_else(|| "marked CRI container id must be non-empty".to_string())?;
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+pub fn containerd_task_snapshot_from_cri_inspect(
+    adapter: AdapterKind,
+    inspect: &Value,
+    cgroup_id: u64,
+) -> Result<ContainerdTaskSnapshot, String> {
+    if !matches!(
+        adapter,
+        AdapterKind::Containerd | AdapterKind::K3sContainerd
+    ) {
+        return Err("CRI inspect adapter must be containerd or k3s_containerd".to_string());
+    }
+    if cgroup_id == 0 {
+        return Err("CRI cgroup id must be non-zero".to_string());
+    }
+    let container_id = string_field(inspect, &["status", "id"])
+        .ok_or_else(|| "CRI inspect status.id must be a non-empty string".to_string())?;
+    let labels = string_map_field(inspect, &["status", "labels"], "CRI status.labels")?;
+    let namespace = labels
+        .get("io.kubernetes.pod.namespace")
+        .cloned()
+        .or_else(|| {
+            string_field(
+                inspect,
+                &[
+                    "info",
+                    "runtimeSpec",
+                    "annotations",
+                    "io.kubernetes.cri.sandbox-namespace",
+                ],
+            )
+        })
+        .unwrap_or_else(|| "default".to_string());
+    let image = string_field(inspect, &["status", "image", "userSpecifiedImage"])
+        .or_else(|| string_field(inspect, &["status", "image", "image"]))
+        .or_else(|| string_field(inspect, &["status", "imageRef"]));
+    let runtime_handler = string_field(inspect, &["info", "runtimeType"])
+        .or_else(|| string_field(inspect, &["status", "image", "runtimeHandler"]));
+
+    Ok(ContainerdTaskSnapshot {
+        adapter,
+        namespace,
+        container_id,
+        labels,
+        cgroup_id,
+        image,
+        runtime_handler,
+    })
 }
 
 pub fn docker_workload_from_snapshot(
@@ -370,6 +572,47 @@ pub fn kubernetes_pod_snapshot_from_api_object(
     })
 }
 
+pub fn kubernetes_marked_pod_snapshots_from_api_list(
+    pod_list: &Value,
+    container_cgroups: &BTreeMap<String, u64>,
+) -> Result<Vec<KubernetesPodSnapshot>, String> {
+    let pods = pod_list
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Kubernetes PodList must contain items array".to_string())?;
+    let mut snapshots = Vec::new();
+    for pod in pods {
+        let annotations = string_map_field(
+            pod,
+            &["metadata", "annotations"],
+            "Kubernetes Pod metadata.annotations",
+        )?;
+        let marked = annotations
+            .get(APOLYSIS_SESSION_ANNOTATION)
+            .map(String::as_str)
+            .map(str::trim)
+            .map(|session_id| !session_id.is_empty())
+            .unwrap_or(false);
+        if !marked {
+            continue;
+        }
+        if string_field(pod, &["status", "phase"]).as_deref() != Some("Running") {
+            continue;
+        }
+        let Some(cgroup_id) = kubernetes_container_ids(pod)
+            .into_iter()
+            .find_map(|container_id| container_cgroups.get(&container_id).copied())
+        else {
+            return Err(format!(
+                "Kubernetes marked Pod {} has no known running container cgroup",
+                string_field(pod, &["metadata", "name"]).unwrap_or_else(|| "<unknown>".to_string())
+            ));
+        };
+        snapshots.push(kubernetes_pod_snapshot_from_api_object(pod, cgroup_id)?);
+    }
+    Ok(snapshots)
+}
+
 pub fn docker_snapshot_from_engine_inspect(
     inspect: &Value,
     cgroup_id: u64,
@@ -417,10 +660,42 @@ pub fn cgroup_id_from_proc_cgroup(proc_cgroup: &str, cgroup_root: &Path) -> Resu
         .map(|metadata| metadata.ino())
 }
 
+fn cgroup_id_from_pid(pid: u32, proc_root: &Path, cgroup_root: &Path) -> Result<u64, String> {
+    let proc_cgroup_path = proc_root.join(pid.to_string()).join("cgroup");
+    let proc_cgroup = std::fs::read_to_string(&proc_cgroup_path).map_err(|error| {
+        format!(
+            "failed to read process cgroup file {}: {error}",
+            proc_cgroup_path.display()
+        )
+    })?;
+    cgroup_id_from_proc_cgroup(&proc_cgroup, cgroup_root)
+}
+
+fn containerd_pid_from_cri_inspect(inspect: &Value) -> Result<u32, String> {
+    let pid = inspect
+        .get("info")
+        .and_then(|info| info.get("pid"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "CRI inspect info.pid must be a positive integer".to_string())?;
+    if pid == 0 {
+        return Err("CRI container is not running; info.pid is zero".to_string());
+    }
+    u32::try_from(pid).map_err(|_| format!("CRI inspect info.pid exceeds u32: {pid}"))
+}
+
 pub async fn run_runtime_adapter<B: RuntimeAdapterBackend>(
+    backend: B,
+    state: Arc<DaemonState>,
+    shutdown: oneshot::Receiver<()>,
+) -> RuntimeAdapterSummary {
+    run_runtime_adapter_with_policy(backend, state, shutdown, AdapterBackoffPolicy::default()).await
+}
+
+pub async fn run_runtime_adapter_with_policy<B: RuntimeAdapterBackend>(
     mut backend: B,
     state: Arc<DaemonState>,
     mut shutdown: oneshot::Receiver<()>,
+    backoff_policy: AdapterBackoffPolicy,
 ) -> RuntimeAdapterSummary {
     let adapter = backend.kind();
     let mut summary = RuntimeAdapterSummary {
@@ -430,6 +705,7 @@ pub async fn run_runtime_adapter<B: RuntimeAdapterBackend>(
         backend_errors: 0,
         ingest_errors: 0,
     };
+    let mut consecutive_backend_errors = 0_u64;
 
     loop {
         tokio::select! {
@@ -437,6 +713,7 @@ pub async fn run_runtime_adapter<B: RuntimeAdapterBackend>(
             workload = backend.next_workload() => {
                 match workload {
                     Ok(Some(workload)) => {
+                        consecutive_backend_errors = 0;
                         match state.ingest_runtime_workload(workload).await {
                             Ok(AssociationOutcome::Attached) => {
                                 summary.discovered = summary.discovered.saturating_add(1);
@@ -453,9 +730,18 @@ pub async fn run_runtime_adapter<B: RuntimeAdapterBackend>(
                     }
                     Ok(None) => break,
                     Err(_) => {
+                        consecutive_backend_errors = consecutive_backend_errors.saturating_add(1);
                         summary.backend_errors = summary.backend_errors.saturating_add(1);
                         state.set_adapter(adapter, ComponentState::Degraded).await;
-                        tokio::task::yield_now().await;
+                        let delay = adapter_backoff_delay(
+                            backoff_policy,
+                            adapter,
+                            consecutive_backend_errors,
+                        );
+                        tokio::select! {
+                            _ = &mut shutdown => break,
+                            _ = tokio::time::sleep(delay) => {}
+                        }
                     }
                 }
             }
@@ -463,6 +749,284 @@ pub async fn run_runtime_adapter<B: RuntimeAdapterBackend>(
     }
 
     summary
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CriRuntimeClient {
+    crictl_path: PathBuf,
+    runtime_endpoint: String,
+    image_endpoint: Option<String>,
+    timeout: Duration,
+}
+
+impl CriRuntimeClient {
+    pub fn new(socket_path: impl AsRef<Path>) -> Self {
+        let endpoint = format!("unix://{}", socket_path.as_ref().display());
+        Self {
+            crictl_path: PathBuf::from("crictl"),
+            runtime_endpoint: endpoint.clone(),
+            image_endpoint: Some(endpoint),
+            timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn with_crictl_path(mut self, crictl_path: impl Into<PathBuf>) -> Self {
+        self.crictl_path = crictl_path.into();
+        self
+    }
+
+    pub fn with_image_endpoint(mut self, image_endpoint: Option<String>) -> Self {
+        self.image_endpoint = image_endpoint;
+        self
+    }
+
+    pub async fn list_marked_running_container_ids(&self) -> Result<Vec<String>, String> {
+        crictl_marked_container_ids_from_ps(self.crictl_json(&["ps", "-o", "json"])?)
+    }
+
+    pub async fn inspect_container(&self, container_id: &str) -> Result<Value, String> {
+        let container_id = container_id.trim();
+        if container_id.is_empty()
+            || container_id
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == b'/')
+        {
+            return Err("CRI container id must be non-empty and path-safe".to_string());
+        }
+        self.crictl_json(&["inspect", "-o", "json", container_id])
+    }
+
+    fn crictl_json(&self, command_args: &[&str]) -> Result<Value, String> {
+        let timeout = format!("{}s", self.timeout.as_secs().max(1));
+        let mut command = Command::new(&self.crictl_path);
+        command
+            .arg("--config")
+            .arg("/dev/null")
+            .arg("--runtime-endpoint")
+            .arg(&self.runtime_endpoint)
+            .arg("--timeout")
+            .arg(&timeout);
+        if let Some(image_endpoint) = &self.image_endpoint {
+            command.arg("--image-endpoint").arg(image_endpoint);
+        }
+        command.args(command_args);
+        let output = command.output().map_err(|error| {
+            format!(
+                "failed to run {}: {error}",
+                self.crictl_path.as_path().display()
+            )
+        })?;
+        if !output.status.success() {
+            return Err(format!(
+                "crictl {:?} failed: {}",
+                command_args,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("failed to decode crictl JSON: {error}"))
+    }
+}
+
+pub struct ContainerdCriRuntimeAdapter {
+    adapter: AdapterKind,
+    client: CriRuntimeClient,
+    proc_root: PathBuf,
+    cgroup_root: PathBuf,
+    pending_container_ids: VecDeque<String>,
+    seen_container_ids: BTreeSet<String>,
+    seen_capacity: usize,
+    scan_interval: Duration,
+}
+
+impl ContainerdCriRuntimeAdapter {
+    pub fn new(
+        adapter: AdapterKind,
+        client: CriRuntimeClient,
+        proc_root: impl Into<PathBuf>,
+        cgroup_root: impl Into<PathBuf>,
+        scan_interval: Duration,
+        seen_capacity: usize,
+    ) -> Result<Self, String> {
+        if !matches!(
+            adapter,
+            AdapterKind::Containerd | AdapterKind::K3sContainerd
+        ) {
+            return Err("CRI runtime adapter must be containerd or k3s_containerd".to_string());
+        }
+        Ok(Self {
+            adapter,
+            client,
+            proc_root: proc_root.into(),
+            cgroup_root: cgroup_root.into(),
+            pending_container_ids: VecDeque::new(),
+            seen_container_ids: BTreeSet::new(),
+            seen_capacity,
+            scan_interval,
+        })
+    }
+
+    async fn next_cri_workload(&mut self) -> Result<Option<RuntimeWorkload>, String> {
+        loop {
+            while let Some(container_id) = self.pending_container_ids.pop_front() {
+                let inspect = self.client.inspect_container(&container_id).await?;
+                let pid = containerd_pid_from_cri_inspect(&inspect)?;
+                let cgroup_id = cgroup_id_from_pid(pid, &self.proc_root, &self.cgroup_root)?;
+                let snapshot =
+                    containerd_task_snapshot_from_cri_inspect(self.adapter, &inspect, cgroup_id)?;
+                if let Some(workload) = containerd_workload_from_snapshot(snapshot)? {
+                    return Ok(Some(workload));
+                }
+            }
+            self.pending_container_ids = self
+                .client
+                .list_marked_running_container_ids()
+                .await?
+                .into_iter()
+                .filter(|container_id| {
+                    remember_seen(
+                        &mut self.seen_container_ids,
+                        self.seen_capacity,
+                        container_id,
+                    )
+                })
+                .collect();
+            if self.pending_container_ids.is_empty() {
+                tokio::time::sleep(self.scan_interval).await;
+            }
+        }
+    }
+}
+
+impl RuntimeAdapterBackend for ContainerdCriRuntimeAdapter {
+    fn kind(&self) -> AdapterKind {
+        self.adapter
+    }
+
+    fn next_workload(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeWorkload>, String>> + Send + '_>> {
+        Box::pin(self.next_cri_workload())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KubernetesCliClient {
+    kubectl_path: PathBuf,
+}
+
+impl KubernetesCliClient {
+    pub fn new(kubectl_path: impl Into<PathBuf>) -> Self {
+        Self {
+            kubectl_path: kubectl_path.into(),
+        }
+    }
+
+    pub async fn list_pods(&self) -> Result<Value, String> {
+        let output = Command::new(&self.kubectl_path)
+            .args(["get", "pods", "--all-namespaces", "-o", "json"])
+            .output()
+            .map_err(|error| {
+                format!(
+                    "failed to run {}: {error}",
+                    self.kubectl_path.as_path().display()
+                )
+            })?;
+        if !output.status.success() {
+            return Err(format!(
+                "kubectl get pods failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("failed to decode Kubernetes PodList JSON: {error}"))
+    }
+}
+
+pub struct KubernetesCliRuntimeAdapter {
+    kubernetes: KubernetesCliClient,
+    cri: CriRuntimeClient,
+    proc_root: PathBuf,
+    cgroup_root: PathBuf,
+    seen_pod_uids: BTreeSet<String>,
+    seen_capacity: usize,
+    pending_snapshots: VecDeque<KubernetesPodSnapshot>,
+    scan_interval: Duration,
+}
+
+impl KubernetesCliRuntimeAdapter {
+    pub fn new(
+        kubernetes: KubernetesCliClient,
+        cri: CriRuntimeClient,
+        proc_root: impl Into<PathBuf>,
+        cgroup_root: impl Into<PathBuf>,
+        scan_interval: Duration,
+        seen_capacity: usize,
+    ) -> Self {
+        Self {
+            kubernetes,
+            cri,
+            proc_root: proc_root.into(),
+            cgroup_root: cgroup_root.into(),
+            seen_pod_uids: BTreeSet::new(),
+            seen_capacity,
+            pending_snapshots: VecDeque::new(),
+            scan_interval,
+        }
+    }
+
+    async fn next_kubernetes_workload(&mut self) -> Result<Option<RuntimeWorkload>, String> {
+        loop {
+            while let Some(snapshot) = self.pending_snapshots.pop_front() {
+                if let Some(workload) = kubernetes_workload_from_pod_snapshot(snapshot)? {
+                    return Ok(Some(workload));
+                }
+            }
+            let pod_list = self.kubernetes.list_pods().await?;
+            let cgroups = self.container_cgroups_from_pod_list(&pod_list).await?;
+            self.pending_snapshots =
+                kubernetes_marked_pod_snapshots_from_api_list(&pod_list, &cgroups)?
+                    .into_iter()
+                    .filter(|snapshot| {
+                        let key = snapshot
+                            .pod_uid
+                            .as_deref()
+                            .unwrap_or(&snapshot.pod_name)
+                            .to_string();
+                        remember_seen(&mut self.seen_pod_uids, self.seen_capacity, &key)
+                    })
+                    .collect();
+            if self.pending_snapshots.is_empty() {
+                tokio::time::sleep(self.scan_interval).await;
+            }
+        }
+    }
+
+    async fn container_cgroups_from_pod_list(
+        &self,
+        pod_list: &Value,
+    ) -> Result<BTreeMap<String, u64>, String> {
+        let mut cgroups = BTreeMap::new();
+        for container_id in kubernetes_marked_running_container_ids_from_list(pod_list)? {
+            let inspect = self.cri.inspect_container(&container_id).await?;
+            let pid = containerd_pid_from_cri_inspect(&inspect)?;
+            let cgroup_id = cgroup_id_from_pid(pid, &self.proc_root, &self.cgroup_root)?;
+            cgroups.insert(container_id, cgroup_id);
+        }
+        Ok(cgroups)
+    }
+}
+
+impl RuntimeAdapterBackend for KubernetesCliRuntimeAdapter {
+    fn kind(&self) -> AdapterKind {
+        AdapterKind::Kubernetes
+    }
+
+    fn next_workload(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeWorkload>, String>> + Send + '_>> {
+        Box::pin(self.next_kubernetes_workload())
+    }
 }
 
 fn string_field(value: &Value, path: &[&str]) -> Option<String> {
@@ -507,6 +1071,72 @@ fn string_map_field(
         labels.insert(key.clone(), label_value.to_string());
     }
     Ok(labels)
+}
+
+fn kubernetes_marked_running_container_ids_from_list(
+    pod_list: &Value,
+) -> Result<BTreeSet<String>, String> {
+    let pods = pod_list
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Kubernetes PodList must contain items array".to_string())?;
+    let mut ids = BTreeSet::new();
+    for pod in pods {
+        let annotations = string_map_field(
+            pod,
+            &["metadata", "annotations"],
+            "Kubernetes Pod metadata.annotations",
+        )?;
+        let marked = annotations
+            .get(APOLYSIS_SESSION_ANNOTATION)
+            .map(String::as_str)
+            .map(str::trim)
+            .map(|session_id| !session_id.is_empty())
+            .unwrap_or(false);
+        if !marked || string_field(pod, &["status", "phase"]).as_deref() != Some("Running") {
+            continue;
+        }
+        ids.extend(kubernetes_container_ids(pod));
+    }
+    Ok(ids)
+}
+
+fn kubernetes_container_ids(pod: &Value) -> Vec<String> {
+    pod.get("status")
+        .and_then(|status| status.get("containerStatuses"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|status| {
+            status
+                .get("containerID")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .and_then(|container_id| {
+                    container_id
+                        .strip_prefix("containerd://")
+                        .or_else(|| container_id.strip_prefix("cri-containerd://"))
+                        .or_else(|| container_id.strip_prefix("docker://"))
+                        .or(Some(container_id))
+                })
+                .map(str::trim)
+                .filter(|container_id| !container_id.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+fn remember_seen(seen: &mut BTreeSet<String>, seen_capacity: usize, id: &str) -> bool {
+    if seen.contains(id) {
+        return false;
+    }
+    if seen_capacity > 0 && seen.len() >= seen_capacity {
+        if let Some(first) = seen.iter().next().cloned() {
+            seen.remove(&first);
+        }
+    }
+    seen.insert(id.to_string());
+    true
 }
 
 fn parse_http_json_response(response: &[u8]) -> Result<Value, String> {
