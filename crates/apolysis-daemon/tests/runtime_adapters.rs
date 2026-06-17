@@ -743,6 +743,96 @@ async fn live_kubernetes_cli_adapter_discovers_annotated_pods() {
     }
 }
 
+#[tokio::test]
+#[ignore = "requires k3s/kubectl access and root access to k3s CRI socket"]
+async fn live_kubernetes_cli_adapter_recovers_after_cri_socket_disconnect() {
+    require_command("crictl");
+    let kubectl = std::env::var("APOLYSIS_KUBECTL").unwrap_or_else(|_| "kubectl".to_string());
+    require_kubectl(&kubectl);
+    let endpoint = std::env::var("APOLYSIS_K3S_CRI_ENDPOINT")
+        .unwrap_or_else(|_| "/run/k3s/containerd/containerd.sock".to_string());
+    let session_id = format!(
+        "live-k8s-cri-recovery-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let namespace = format!("apolysis-live-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let pod_name = "apolysis-k8s-cri-recovery";
+    let workload_cleanup = KubernetesNamespaceCleanup {
+        kubectl: kubectl.clone(),
+        namespace: namespace.clone(),
+        runtime_class: None,
+    };
+    create_kubernetes_pod(&kubectl, &namespace, pod_name, &session_id, None, None);
+    wait_for_kubernetes_container_id(&kubectl, &namespace, pod_name);
+    let config = config("k8s-cri-recovery");
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent(&session_id), 1_700_000_000_000)
+        .await
+        .expect("register intent");
+    let proxy_socket = config.state_dir.join("k8s-cri.sock");
+    let proxy = start_unix_socket_proxy_with_initial_disconnect(
+        &proxy_socket,
+        std::path::Path::new(&endpoint),
+    );
+    let adapter = KubernetesCliRuntimeAdapter::new(
+        KubernetesCliClient::new(&kubectl),
+        CriRuntimeClient::new(&proxy_socket).with_image_endpoint(None),
+        "/proc",
+        "/sys/fs/cgroup",
+        Duration::from_millis(100),
+        1024,
+    );
+    let (shutdown, receiver) = oneshot::channel();
+    let runner = tokio::spawn(run_runtime_adapter_with_policy(
+        adapter,
+        Arc::clone(&state),
+        receiver,
+        AdapterBackoffPolicy {
+            initial_delay_ms: 10,
+            max_delay_ms: 10,
+            jitter_ms: 0,
+        },
+    ));
+
+    let attach_result = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if state
+                .query(&session_id)
+                .await
+                .map(|session| !session.cgroup_ids.is_empty())
+                .unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    if attach_result.is_err() {
+        shutdown
+            .send(())
+            .expect("stop Kubernetes adapter after timeout");
+        let summary = runner.await.expect("Kubernetes adapter task after timeout");
+        panic!("session {session_id} did not attach a cgroup; summary={summary:?}");
+    }
+    shutdown.send(()).expect("stop Kubernetes adapter");
+    let summary = runner.await.expect("Kubernetes adapter task");
+
+    assert_eq!(summary.backend_errors, 1);
+    assert_eq!(summary.backend_recoveries, 1);
+    assert_eq!(summary.discovered, 1);
+    assert_eq!(
+        state.health().await.adapter(AdapterKind::Kubernetes),
+        ComponentState::Ready
+    );
+
+    proxy.abort();
+    drop(workload_cleanup);
+    cleanup(&config);
+}
+
 async fn next_workload_for_session<B: RuntimeAdapterBackend>(
     adapter: &mut B,
     session_id: &str,

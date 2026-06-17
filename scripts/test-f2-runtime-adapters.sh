@@ -72,6 +72,7 @@ fi
 
 if [[ "${APOLYSIS_REQUIRE_KUBERNETES_ADAPTER:-0}" == "1" ]]; then
     run_live_adapter_test live_kubernetes_cli_adapter_discovers_annotated_pods
+    run_live_adapter_test live_kubernetes_cli_adapter_recovers_after_cri_socket_disconnect
 else
     echo "apolysis-f2: Kubernetes live adapter validation skipped; set APOLYSIS_REQUIRE_KUBERNETES_ADAPTER=1 to run it"
 fi
