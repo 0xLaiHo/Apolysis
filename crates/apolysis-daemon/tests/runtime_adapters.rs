@@ -801,6 +801,129 @@ async fn live_k3s_containerd_cri_adapter_discovers_labelled_containers() {
 }
 
 #[tokio::test]
+#[ignore = "requires k3s/kubectl access, k3s CRI socket access, Docker helper access, and permission to terminate k3s for systemd restart"]
+async fn live_k3s_containerd_cri_adapter_recovers_after_systemd_restart() {
+    require_command("docker");
+    require_command("crictl");
+    require_command("systemctl");
+    let kubectl = std::env::var("APOLYSIS_KUBECTL").unwrap_or_else(|_| "kubectl".to_string());
+    require_kubectl(&kubectl);
+    let runtime_socket = std::env::var("APOLYSIS_K3S_CRI_ENDPOINT")
+        .unwrap_or_else(|_| "/run/k3s/containerd/containerd.sock".to_string());
+    let crictl = create_host_chroot_crictl_wrapper("k3s-systemd-restart");
+    wait_for_systemd_service_active("k3s.service", Duration::from_secs(90));
+    wait_for_kubernetes_api(&kubectl, Duration::from_secs(90));
+    wait_for_cri_runtime(
+        crictl.path(),
+        &runtime_socket,
+        None,
+        Duration::from_secs(90),
+    );
+    let session_id = format!(
+        "live-k3s-systemd-restart-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let namespace = format!("apolysis-live-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let first_pod = "apolysis-k3s-systemd-restart-a";
+    let second_pod = "apolysis-k3s-systemd-restart-b";
+    let workload_cleanup = KubernetesNamespaceCleanup {
+        kubectl: kubectl.clone(),
+        namespace: namespace.clone(),
+        runtime_class: None,
+    };
+    create_kubernetes_pod(&kubectl, &namespace, first_pod, &session_id, None, None);
+    wait_for_kubernetes_container_id(&kubectl, &namespace, first_pod);
+    let config = config("live-k3s-systemd-restart");
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent(&session_id), 1_700_000_000_000)
+        .await
+        .expect("register intent");
+    let adapter = ContainerdCriRuntimeAdapter::new(
+        AdapterKind::K3sContainerd,
+        CriRuntimeClient::new(&runtime_socket)
+            .with_crictl_path(crictl.path())
+            .with_image_endpoint(None),
+        "/proc",
+        "/sys/fs/cgroup",
+        Duration::from_millis(100),
+        1024,
+    )
+    .expect("k3s CRI adapter");
+    let (shutdown, receiver) = oneshot::channel();
+    let runner = tokio::spawn(run_runtime_adapter_with_policy(
+        adapter,
+        Arc::clone(&state),
+        receiver,
+        AdapterBackoffPolicy {
+            initial_delay_ms: 20,
+            max_delay_ms: 20,
+            jitter_ms: 0,
+        },
+    ));
+
+    wait_for_session_cgroup_count(&state, &session_id, 1, Duration::from_secs(30)).await;
+    let k3s_systemd = SystemdUnitRestoreGuard::capture(["k3s.service"]);
+    let previous_main_pid = terminate_k3s_processes_for_systemd_restart();
+    assert!(
+        wait_for_cri_runtime_unavailable(
+            crictl.path(),
+            &runtime_socket,
+            None,
+            Duration::from_secs(45)
+        ),
+        "k3s containerd CRI stayed responsive after k3s process termination"
+    );
+    let adapter_degraded = adapter_reaches_state(
+        &state,
+        AdapterKind::K3sContainerd,
+        ComponentState::Degraded,
+        Duration::from_secs(45),
+    )
+    .await;
+    wait_for_systemd_service_main_pid_change(
+        "k3s.service",
+        previous_main_pid,
+        Duration::from_secs(180),
+    );
+    wait_for_systemd_service_active("k3s.service", Duration::from_secs(120));
+    assert!(
+        adapter_degraded,
+        "k3s containerd adapter did not report degraded health during k3s process termination"
+    );
+    wait_for_kubernetes_api(&kubectl, Duration::from_secs(180));
+    wait_for_cri_runtime(
+        crictl.path(),
+        &runtime_socket,
+        None,
+        Duration::from_secs(120),
+    );
+    create_kubernetes_pod(&kubectl, &namespace, second_pod, &session_id, None, None);
+    wait_for_kubernetes_container_id(&kubectl, &namespace, second_pod);
+    wait_for_session_cgroup_count(&state, &session_id, 2, Duration::from_secs(45)).await;
+
+    shutdown.send(()).expect("stop k3s CRI adapter");
+    let summary = runner.await.expect("k3s CRI adapter task");
+
+    assert_eq!(summary.discovered, 2);
+    assert!(
+        summary.backend_errors > 0,
+        "k3s restart should produce at least one backend error: {summary:?}"
+    );
+    assert_eq!(summary.backend_recoveries, 1);
+    assert_eq!(
+        state.health().await.adapter(AdapterKind::K3sContainerd),
+        ComponentState::Ready
+    );
+
+    drop(workload_cleanup);
+    cleanup_cri_workloads_for_session(crictl.path(), &runtime_socket, None, &session_id);
+    cleanup(&config);
+    drop(k3s_systemd);
+}
+
+#[tokio::test]
 #[ignore = "requires root access to k3s containerd CRI socket and local Alpine image"]
 async fn live_k3s_containerd_cri_adapter_recovers_after_socket_disconnect() {
     require_command("crictl");
@@ -888,6 +1011,12 @@ async fn live_k3s_containerd_cri_adapter_recovers_after_socket_disconnect() {
 
     proxy.abort();
     drop(workload_cleanup);
+    cleanup_cri_workloads_for_session(
+        std::path::Path::new("crictl"),
+        &runtime_socket,
+        None,
+        &session_id,
+    );
     cleanup(&config);
 }
 
@@ -1044,6 +1173,7 @@ async fn live_kubernetes_cli_adapter_recovers_after_cri_socket_disconnect() {
 
     proxy.abort();
     drop(workload_cleanup);
+    cleanup_cri_workloads_for_session(std::path::Path::new("crictl"), &endpoint, None, &session_id);
     cleanup(&config);
 }
 
@@ -2062,6 +2192,12 @@ async fn live_k3s_cri_adapter_matrix() {
             expected_cri_runtime_type(expected_runtime)
         );
         drop(cleanup);
+        cleanup_cri_workloads_for_session(
+            std::path::Path::new("crictl"),
+            &endpoint,
+            None,
+            &session_id,
+        );
     }
 }
 
@@ -2306,6 +2442,67 @@ fn wait_for_cri_container_observable(
     panic!("CRI container {container_id} did not become observable through /proc");
 }
 
+fn cleanup_cri_workloads_for_session(
+    crictl_path: &std::path::Path,
+    socket_path: &str,
+    image_endpoint: Option<&str>,
+    session_id: &str,
+) {
+    let endpoint = format!("unix://{socket_path}");
+    let label = format!("apolysis.session_id={session_id}");
+    for _ in 0..30 {
+        let containers = run_crictl_with_command(
+            crictl_path,
+            &endpoint,
+            image_endpoint,
+            &["ps", "-a", "-q", "--label", &label],
+        )
+        .unwrap_or_default();
+        let pods = run_crictl_with_command(
+            crictl_path,
+            &endpoint,
+            image_endpoint,
+            &["pods", "-q", "--label", &label],
+        )
+        .unwrap_or_default();
+        let container_ids: Vec<&str> = containers
+            .lines()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .collect();
+        let pod_ids: Vec<&str> = pods
+            .lines()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .collect();
+        if container_ids.is_empty() && pod_ids.is_empty() {
+            return;
+        }
+        for container_id in container_ids {
+            let _ = run_crictl_with_command(
+                crictl_path,
+                &endpoint,
+                image_endpoint,
+                &["stop", container_id],
+            );
+            let _ = run_crictl_with_command(
+                crictl_path,
+                &endpoint,
+                image_endpoint,
+                &["rm", container_id],
+            );
+        }
+        for pod_id in pod_ids {
+            let _ =
+                run_crictl_with_command(crictl_path, &endpoint, image_endpoint, &["stopp", pod_id]);
+            let _ =
+                run_crictl_with_command(crictl_path, &endpoint, image_endpoint, &["rmp", pod_id]);
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    panic!("CRI workloads for session {session_id} were not removed");
+}
+
 fn create_host_chroot_crictl_wrapper(name: &str) -> TempScript {
     let path = std::env::temp_dir().join(format!(
         "apolysis-{name}-crictl-{}-{}",
@@ -2360,6 +2557,69 @@ fn wait_for_cri_runtime_unavailable(
     false
 }
 
+fn terminate_k3s_processes_for_systemd_restart() -> u32 {
+    let main_pid = systemd_unit_main_pid("k3s.service");
+    let mut pids = vec![main_pid.to_string()];
+    pids.extend(
+        k3s_containerd_child_pids(main_pid)
+            .into_iter()
+            .map(|pid| pid.to_string()),
+    );
+    let output = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--privileged",
+            "--pid=host",
+            "--cgroupns=host",
+            "--network=host",
+            "-v",
+            "/:/host",
+            "alpine:3.20",
+            "chroot",
+            "/host",
+            "/bin/kill",
+            "-TERM",
+        ])
+        .args(&pids)
+        .output()
+        .expect("host-root kill k3s processes");
+    assert!(
+        output.status.success(),
+        "host-root kill k3s processes failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    main_pid
+}
+
+fn k3s_containerd_child_pids(main_pid: u32) -> Vec<u32> {
+    let output = Command::new("ps")
+        .args(["-eo", "pid=,ppid=,comm="])
+        .output()
+        .expect("list processes");
+    assert!(
+        output.status.success(),
+        "ps failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let ppid = fields.next()?.parse::<u32>().ok()?;
+            let comm = fields.next()?;
+            (ppid == main_pid && comm == "containerd").then_some(pid)
+        })
+        .collect();
+    assert!(
+        !pids.is_empty(),
+        "k3s main process {main_pid} did not have a containerd child"
+    );
+    pids
+}
+
 struct SystemdUnitRestoreGuard {
     units: Vec<(&'static str, bool)>,
 }
@@ -2378,8 +2638,13 @@ impl SystemdUnitRestoreGuard {
 impl Drop for SystemdUnitRestoreGuard {
     fn drop(&mut self) {
         for (unit, was_active) in &self.units {
+            if systemd_unit_active(unit) == *was_active {
+                continue;
+            }
             let action = if *was_active { "start" } else { "stop" };
-            let _ = Command::new("systemctl").args([action, *unit]).status();
+            let _ = Command::new("timeout")
+                .args(["180s", "systemctl", action, *unit])
+                .status();
         }
     }
 }
@@ -2433,11 +2698,20 @@ fn run_systemd_unit_action(target_unit: &str, action: &str) {
         .arg(&command)
         .output()
         .unwrap_or_else(|error| panic!("systemd-run {action}: {error}"));
+    if output.status.success() {
+        return;
+    }
+    let fallback = Command::new("timeout")
+        .args(["180s", "systemctl", action, target_unit])
+        .output()
+        .unwrap_or_else(|error| panic!("systemctl {action}: {error}"));
     assert!(
-        output.status.success(),
-        "systemd-run {action} failed: {}{}",
+        fallback.status.success(),
+        "systemd-run {action} failed: {}{}\ndirect systemctl {action} failed: {}{}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&fallback.stdout),
+        String::from_utf8_lossy(&fallback.stderr)
     );
 }
 
@@ -2457,6 +2731,45 @@ fn wait_for_systemd_service_active(service: &str, timeout: Duration) {
         String::from_utf8_lossy(&status.stdout),
         String::from_utf8_lossy(&status.stderr)
     );
+}
+
+fn wait_for_systemd_service_main_pid_change(service: &str, previous_pid: u32, timeout: Duration) {
+    for _ in 0..timeout.as_secs().max(1) {
+        if systemd_unit_active(service) {
+            let current_pid = systemd_unit_main_pid(service);
+            if current_pid != 0 && current_pid != previous_pid {
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let status = Command::new("systemctl")
+        .args(["--no-pager", "--full", "status", service])
+        .output()
+        .expect("systemctl status");
+    panic!(
+        "{service} did not restart away from main PID {previous_pid}:\n{}{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn systemd_unit_main_pid(service: &str) -> u32 {
+    let output = Command::new("systemctl")
+        .args(["show", "--property=MainPID", "--value", service])
+        .output()
+        .expect("systemctl show MainPID");
+    assert!(
+        output.status.success(),
+        "systemctl show MainPID failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pid = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .expect("parse MainPID");
+    assert!(pid > 0, "{service} has no active MainPID");
+    pid
 }
 
 fn systemd_unit_exists(unit: &str) -> bool {
@@ -2629,6 +2942,20 @@ fn wait_for_kubernetes_container_id(kubectl: &str, namespace: &str, pod_name: &s
         std::thread::sleep(Duration::from_secs(1));
     }
     panic!("Kubernetes Pod {namespace}/{pod_name} did not reach Running with a containerID");
+}
+
+fn wait_for_kubernetes_api(kubectl: &str, timeout: Duration) {
+    for _ in 0..timeout.as_secs().max(1) {
+        let output = Command::new(kubectl)
+            .args(["get", "--raw=/readyz"])
+            .output()
+            .expect("kubectl readyz");
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).contains("ok") {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    panic!("Kubernetes API did not become ready");
 }
 
 fn require_command(command: &str) {
