@@ -8,7 +8,17 @@ cd "$repo_root"
 
 run_live_adapter_test() {
     local test_name="$1"
-    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    if [[ "$test_name" == "live_docker_engine_adapter_recovers_after_systemd_restart" ]]; then
+        if ! cargo test -p apolysis-daemon --test runtime_adapters \
+            "$test_name" \
+            -- --ignored --exact --list | grep -Fqx "$test_name: test"; then
+            echo "apolysis-f2: live adapter test not found: $test_name" >&2
+            exit 1
+        fi
+        cargo test -p apolysis-daemon --test runtime_adapters \
+            "$test_name" \
+            -- --ignored --exact --nocapture
+    elif [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
         if ! cargo test -p apolysis-daemon --test runtime_adapters \
             "$test_name" \
             -- --ignored --exact --list | grep -Fqx "$test_name: test"; then
@@ -50,6 +60,7 @@ cargo test -p apolysis-daemon --test metrics
 cargo test -p apolysis-feedback
 
 if [[ "${APOLYSIS_REQUIRE_DOCKER_ADAPTER:-0}" == "1" ]]; then
+    run_live_adapter_test live_docker_engine_adapter_recovers_after_systemd_restart
     run_live_adapter_test live_docker_engine_adapter_discovers_labelled_container
     run_live_adapter_test live_docker_engine_adapter_recovers_after_socket_disconnect
 else

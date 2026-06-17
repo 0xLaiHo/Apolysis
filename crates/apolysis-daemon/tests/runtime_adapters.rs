@@ -490,6 +490,95 @@ async fn live_docker_engine_adapter_recovers_after_socket_disconnect() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker Engine socket access, systemd access, and permission to restart Docker"]
+async fn live_docker_engine_adapter_recovers_after_systemd_restart() {
+    require_command("docker");
+    require_command("systemctl");
+    require_command("systemd-run");
+    ensure_docker_alpine_image();
+    wait_for_systemd_service_active("docker.service", Duration::from_secs(60));
+    wait_for_docker_engine(Duration::from_secs(60));
+    let session_id = format!(
+        "live-docker-systemd-restart-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let first_container = start_labelled_docker_container(None, &session_id, "sleep 120");
+    let first_cleanup = DockerContainerCleanup {
+        container_id: first_container,
+    };
+    let config = config("live-docker-systemd-restart");
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent(&session_id), 1_700_000_000_000)
+        .await
+        .expect("register intent");
+    let adapter = DockerEnginePollingRuntimeAdapter::new(
+        DockerEngineClient::new("/var/run/docker.sock"),
+        "/proc",
+        "/sys/fs/cgroup",
+        Duration::from_millis(10),
+        1024,
+    );
+    let (shutdown, receiver) = oneshot::channel();
+    let runner = tokio::spawn(run_runtime_adapter_with_policy(
+        adapter,
+        Arc::clone(&state),
+        receiver,
+        AdapterBackoffPolicy {
+            initial_delay_ms: 10,
+            max_delay_ms: 10,
+            jitter_ms: 0,
+        },
+    ));
+
+    wait_for_session_cgroup_count(&state, &session_id, 1, Duration::from_secs(20)).await;
+    let docker_systemd = DockerSystemdRestoreGuard::capture();
+    stop_docker_systemd_units();
+    assert!(
+        wait_for_docker_engine_unavailable(Duration::from_secs(30)),
+        "Docker Engine stayed responsive after systemd stop"
+    );
+    let adapter_degraded = adapter_reaches_state(
+        &state,
+        AdapterKind::Docker,
+        ComponentState::Degraded,
+        Duration::from_secs(30),
+    )
+    .await;
+    start_docker_systemd_units();
+    assert!(
+        adapter_degraded,
+        "Docker adapter did not report degraded health during Docker stop"
+    );
+    wait_for_docker_engine(Duration::from_secs(90));
+    let second_container = start_labelled_docker_container(None, &session_id, "sleep 60");
+    let second_cleanup = DockerContainerCleanup {
+        container_id: second_container,
+    };
+    wait_for_session_cgroup_count(&state, &session_id, 2, Duration::from_secs(30)).await;
+
+    shutdown.send(()).expect("stop Docker adapter");
+    let summary = runner.await.expect("Docker adapter task");
+
+    assert_eq!(summary.discovered, 2);
+    assert!(
+        summary.backend_errors > 0,
+        "Docker restart should produce at least one backend error: {summary:?}"
+    );
+    assert_eq!(summary.backend_recoveries, 1);
+    assert_eq!(
+        state.health().await.adapter(AdapterKind::Docker),
+        ComponentState::Ready
+    );
+
+    drop(second_cleanup);
+    drop(first_cleanup);
+    cleanup(&config);
+    drop(docker_systemd);
+}
+
+#[tokio::test]
 #[ignore = "requires root access to standalone containerd CRI socket and local Alpine image"]
 async fn live_containerd_cri_adapter_discovers_labelled_containers() {
     live_cri_adapter_matrix(
@@ -1596,6 +1685,47 @@ async fn wait_for_session_cgroup(state: &Arc<DaemonState>, session_id: &str, tim
     .unwrap_or_else(|_| panic!("session {session_id} did not attach a cgroup"));
 }
 
+async fn wait_for_session_cgroup_count(
+    state: &Arc<DaemonState>,
+    session_id: &str,
+    minimum_count: usize,
+    timeout: Duration,
+) {
+    tokio::time::timeout(timeout, async {
+        loop {
+            if state
+                .query(session_id)
+                .await
+                .map(|session| session.cgroup_ids.len() >= minimum_count)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("session {session_id} did not attach {minimum_count} cgroups"));
+}
+
+async fn adapter_reaches_state(
+    state: &Arc<DaemonState>,
+    adapter: AdapterKind,
+    expected: ComponentState,
+    timeout: Duration,
+) -> bool {
+    tokio::time::timeout(timeout, async {
+        loop {
+            if state.health().await.adapter(adapter) == expected {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
 struct CriWorkloadCleanup {
     endpoint: String,
     image_endpoint: Option<String>,
@@ -2007,6 +2137,153 @@ fn wait_for_cri_container_observable(
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!("CRI container {container_id} did not become observable through /proc");
+}
+
+struct DockerSystemdRestoreGuard {
+    units: Vec<(&'static str, bool)>,
+}
+
+impl DockerSystemdRestoreGuard {
+    fn capture() -> Self {
+        let units = ["docker.socket", "docker.service"]
+            .into_iter()
+            .filter(|unit| systemd_unit_exists(unit))
+            .map(|unit| (unit, systemd_unit_active(unit)))
+            .collect();
+        Self { units }
+    }
+}
+
+impl Drop for DockerSystemdRestoreGuard {
+    fn drop(&mut self) {
+        for (unit, was_active) in &self.units {
+            let action = if *was_active { "start" } else { "stop" };
+            let _ = Command::new("systemctl").args([action, *unit]).status();
+        }
+    }
+}
+
+fn stop_docker_systemd_units() {
+    if systemd_unit_exists("docker.socket") {
+        stop_systemd_unit("docker.socket");
+    }
+    stop_systemd_unit("docker.service");
+}
+
+fn start_docker_systemd_units() {
+    if systemd_unit_exists("docker.socket") {
+        start_systemd_unit("docker.socket");
+    }
+    start_systemd_unit("docker.service");
+    wait_for_systemd_service_active("docker.service", Duration::from_secs(90));
+}
+
+fn stop_systemd_unit(unit: &str) {
+    run_systemd_unit_action(unit, "stop");
+    for _ in 0..30 {
+        if !systemd_unit_active(unit) {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    panic!("{unit} did not stop");
+}
+
+fn start_systemd_unit(unit: &str) {
+    run_systemd_unit_action(unit, "start");
+}
+
+fn run_systemd_unit_action(target_unit: &str, action: &str) {
+    let transient_unit = format!(
+        "apolysis-live-{action}-{}-{}",
+        target_unit.replace('.', "-"),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let command = format!("systemctl {action} {target_unit}");
+    let output = Command::new("systemd-run")
+        .args([
+            "--unit",
+            &transient_unit,
+            "--collect",
+            "--wait",
+            "/bin/bash",
+            "-lc",
+        ])
+        .arg(&command)
+        .output()
+        .unwrap_or_else(|error| panic!("systemd-run {action}: {error}"));
+    assert!(
+        output.status.success(),
+        "systemd-run {action} failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn wait_for_systemd_service_active(service: &str, timeout: Duration) {
+    for _ in 0..timeout.as_secs().max(1) {
+        if systemd_unit_active(service) {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let status = Command::new("systemctl")
+        .args(["--no-pager", "--full", "status", service])
+        .output()
+        .expect("systemctl status");
+    panic!(
+        "{service} did not become active:\n{}{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn systemd_unit_exists(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["show", "--property=LoadState", "--value", unit])
+        .output()
+        .map(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() != "not-found"
+        })
+        .unwrap_or(false)
+}
+
+fn systemd_unit_active(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn wait_for_docker_engine(timeout: Duration) {
+    for _ in 0..timeout.as_secs().max(1) {
+        if Command::new("docker")
+            .arg("info")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    panic!("Docker Engine did not become responsive");
+}
+
+fn wait_for_docker_engine_unavailable(timeout: Duration) -> bool {
+    for _ in 0..timeout.as_secs().max(1) {
+        let responsive = Command::new("docker")
+            .arg("info")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !responsive {
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    false
 }
 
 fn create_kubernetes_pod(
