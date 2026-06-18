@@ -34,5 +34,6 @@ run_exact_test \
     scope_coordination \
     restart_restores_persisted_cgroup_ownership
 cargo test -p apolysis-store --test hash_chain
+./scripts/test-f2-apolysisd-systemd.sh
 
 echo "apolysis-f2: recovery qualification passed"
