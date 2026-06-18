@@ -44,6 +44,8 @@ dependencies = [
  "apolysis-observer",
  "apolysis-policy",
  "apolysis-store",
+ "apolysis-validation",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

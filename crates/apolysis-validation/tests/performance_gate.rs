@@ -14,6 +14,10 @@ fn f2_performance_gate_accepts_the_required_load_profile() {
                 events_per_second: 0,
                 milli_cpu: 10,
                 rss_mib: 128,
+                submitted_events: 0,
+                accepted_events: 0,
+                written_events: 0,
+                dropped_events: 0,
                 worker_pool_bounded: true,
                 loss_accounted: true,
                 queue_bounded: true,
@@ -24,6 +28,10 @@ fn f2_performance_gate_accepts_the_required_load_profile() {
                 events_per_second: 10_000,
                 milli_cpu: 1000,
                 rss_mib: 256,
+                submitted_events: 10_000,
+                accepted_events: 10_000,
+                written_events: 10_000,
+                dropped_events: 0,
                 worker_pool_bounded: true,
                 loss_accounted: true,
                 queue_bounded: true,
@@ -34,6 +42,10 @@ fn f2_performance_gate_accepts_the_required_load_profile() {
                 events_per_second: 50_000,
                 milli_cpu: 1400,
                 rss_mib: 256,
+                submitted_events: 50_000,
+                accepted_events: 16_384,
+                written_events: 16_384,
+                dropped_events: 33_616,
                 worker_pool_bounded: true,
                 loss_accounted: true,
                 queue_bounded: true,
@@ -60,6 +72,10 @@ fn f2_performance_gate_reports_each_budget_violation() {
                 events_per_second: 0,
                 milli_cpu: 11,
                 rss_mib: 129,
+                submitted_events: 0,
+                accepted_events: 0,
+                written_events: 0,
+                dropped_events: 0,
                 worker_pool_bounded: true,
                 loss_accounted: true,
                 queue_bounded: true,
@@ -70,6 +86,10 @@ fn f2_performance_gate_reports_each_budget_violation() {
                 events_per_second: 9_999,
                 milli_cpu: 1001,
                 rss_mib: 257,
+                submitted_events: 10_000,
+                accepted_events: 9_998,
+                written_events: 9_998,
+                dropped_events: 1,
                 worker_pool_bounded: true,
                 loss_accounted: true,
                 queue_bounded: false,
@@ -80,6 +100,10 @@ fn f2_performance_gate_reports_each_budget_violation() {
                 events_per_second: 49_999,
                 milli_cpu: 4000,
                 rss_mib: 512,
+                submitted_events: 50_000,
+                accepted_events: 20_000,
+                written_events: 19_000,
+                dropped_events: 0,
                 worker_pool_bounded: false,
                 loss_accounted: false,
                 queue_bounded: false,
@@ -116,6 +140,10 @@ fn f2_performance_gate_reports_each_budget_violation() {
     );
     assert!(
         failure_text.contains("burst_50000 loss was not accounted"),
+        "{failure_text}"
+    );
+    assert!(
+        failure_text.contains("burst_50000 submitted events were not fully accounted"),
         "{failure_text}"
     );
 }

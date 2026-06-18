@@ -76,9 +76,11 @@ if health.get("type") != "health" or not health.get("liveness"):
 PY
 
 samples_path="$output_dir/performance-samples.json"
+idle_sample_path="$output_dir/performance-idle-sample.json"
+pipeline_samples_path="$output_dir/performance-pipeline-samples.json"
 report_path="$output_dir/performance-report.json"
 
-python3 - "$daemon_pid" "$idle_seconds" >"$samples_path" <<'PY'
+python3 - "$daemon_pid" "$idle_seconds" >"$idle_sample_path" <<'PY'
 import json
 import os
 import sys
@@ -106,35 +108,36 @@ cpu_seconds = (end_ticks - start_ticks) / hertz
 milli_cpu = int(round((cpu_seconds / elapsed) * 1000))
 rss_mib = int((rss_pages * page_size + (1024 * 1024 - 1)) // (1024 * 1024))
 
-document = {
-    "budgets": [
-        {
-            "load": "idle",
-            "min_events_per_second": 0,
-            "max_milli_cpu": 10,
-            "max_rss_mib": 128,
-            "require_worker_pool_bounded": True,
-            "require_loss_accounted": True,
-            "require_queue_bounded": True,
-            "require_adapter_connected": True,
-        }
-    ],
-    "samples": [
-        {
-            "load": "idle",
-            "events_per_second": 0,
-            "milli_cpu": milli_cpu,
-            "rss_mib": rss_mib,
-            "worker_pool_bounded": True,
-            "loss_accounted": True,
-            "queue_bounded": True,
-            "adapter_connected": True,
-        }
-    ],
+sample = {
+    "load": "idle",
+    "events_per_second": 0,
+    "milli_cpu": milli_cpu,
+    "rss_mib": rss_mib,
+    "submitted_events": 0,
+    "accepted_events": 0,
+    "written_events": 0,
+    "dropped_events": 0,
+    "worker_pool_bounded": True,
+    "loss_accounted": True,
+    "queue_bounded": True,
+    "adapter_connected": True,
 }
-print(json.dumps(document, indent=2, sort_keys=True))
+print(json.dumps(sample, indent=2, sort_keys=True))
+PY
+
+"$repo_root/target/debug/apolysis-f2-pipeline-benchmark" >"$pipeline_samples_path"
+
+python3 - "$idle_sample_path" "$pipeline_samples_path" >"$samples_path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as idle_file:
+    idle = json.load(idle_file)
+with open(sys.argv[2], encoding="utf-8") as pipeline_file:
+    pipeline = json.load(pipeline_file)
+print(json.dumps([idle, *pipeline], indent=2, sort_keys=True))
 PY
 
 "$repo_root/target/debug/apolysis-f2-performance-report" <"$samples_path" >"$report_path"
 
-echo "apolysis-f2: performance idle smoke passed; report: $report_path"
+echo "apolysis-f2: performance qualification passed; report: $report_path"

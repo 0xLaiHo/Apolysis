@@ -136,6 +136,10 @@ pub struct PerformanceSample {
     pub events_per_second: u64,
     pub milli_cpu: u64,
     pub rss_mib: u64,
+    pub submitted_events: u64,
+    pub accepted_events: u64,
+    pub written_events: u64,
+    pub dropped_events: u64,
     pub worker_pool_bounded: bool,
     pub loss_accounted: bool,
     pub queue_bounded: bool,
@@ -158,6 +162,59 @@ pub struct PerformanceGateReport {
     pub budgets: Vec<PerformanceBudget>,
     pub samples: Vec<PerformanceSample>,
     pub failures: Vec<PerformanceGateFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisibilityTarget {
+    Local,
+    DockerRunc,
+    DockerGvisor,
+    ContainerdRunc,
+    ContainerdGvisor,
+    ContainerdKata,
+    K3sRunc,
+    K3sGvisor,
+    K3sKata,
+}
+
+impl VisibilityTarget {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::DockerRunc => "docker_runc",
+            Self::DockerGvisor => "docker_gvisor",
+            Self::ContainerdRunc => "containerd_runc",
+            Self::ContainerdGvisor => "containerd_gvisor",
+            Self::ContainerdKata => "containerd_kata",
+            Self::K3sRunc => "k3s_runc",
+            Self::K3sGvisor => "k3s_gvisor",
+            Self::K3sKata => "k3s_kata",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VisibilityReport {
+    pub target: VisibilityTarget,
+    pub live_validated: bool,
+    pub evidence_source: String,
+    pub host_visibility_scope: String,
+    pub guest_semantics_claimed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VisibilityReportGateFailure {
+    pub target: Option<VisibilityTarget>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VisibilityReportGateReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub reports: Vec<VisibilityReport>,
+    pub failures: Vec<VisibilityReportGateFailure>,
 }
 
 pub trait ServiceController {
@@ -493,6 +550,23 @@ pub fn evaluate_performance_gate(
                 "true",
             ));
         }
+
+        let accounted_events = sample
+            .written_events
+            .saturating_add(sample.dropped_events)
+            .max(sample.accepted_events.saturating_add(sample.dropped_events));
+        if accounted_events < sample.submitted_events {
+            failures.push(performance_failure(
+                budget.load,
+                "event_accounting",
+                &format!(
+                    "{} submitted events were not fully accounted",
+                    load_name(budget.load)
+                ),
+                accounted_events.to_string(),
+                sample.submitted_events.to_string(),
+            ));
+        }
     }
 
     PerformanceGateReport {
@@ -500,6 +574,77 @@ pub fn evaluate_performance_gate(
         passed: failures.is_empty(),
         budgets,
         samples,
+        failures,
+    }
+}
+
+pub fn required_f2_visibility_targets() -> Vec<VisibilityTarget> {
+    vec![
+        VisibilityTarget::Local,
+        VisibilityTarget::DockerRunc,
+        VisibilityTarget::DockerGvisor,
+        VisibilityTarget::ContainerdRunc,
+        VisibilityTarget::ContainerdGvisor,
+        VisibilityTarget::ContainerdKata,
+        VisibilityTarget::K3sRunc,
+        VisibilityTarget::K3sGvisor,
+        VisibilityTarget::K3sKata,
+    ]
+}
+
+pub fn evaluate_visibility_report_gate(
+    reports: Vec<VisibilityReport>,
+) -> VisibilityReportGateReport {
+    let reports_by_target: BTreeMap<VisibilityTarget, &VisibilityReport> = reports
+        .iter()
+        .map(|report| (report.target, report))
+        .collect();
+    let mut failures = Vec::new();
+
+    for target in required_f2_visibility_targets() {
+        let Some(report) = reports_by_target.get(&target) else {
+            failures.push(visibility_failure(
+                Some(target),
+                format!("missing visibility report for {}", target.as_str()),
+            ));
+            continue;
+        };
+
+        if !report.live_validated {
+            failures.push(visibility_failure(
+                Some(target),
+                "visibility report is not live validated",
+            ));
+        }
+        if report.evidence_source.trim().is_empty() {
+            failures.push(visibility_failure(
+                Some(target),
+                "visibility report is missing evidence source",
+            ));
+        }
+        if report.host_visibility_scope.trim().is_empty() {
+            failures.push(visibility_failure(
+                Some(target),
+                "visibility report is missing host visibility scope",
+            ));
+        }
+        if report.guest_semantics_claimed
+            && matches!(
+                target,
+                VisibilityTarget::ContainerdKata | VisibilityTarget::K3sKata
+            )
+        {
+            failures.push(visibility_failure(
+                Some(target),
+                "Kata host-boundary report must not claim full guest semantics",
+            ));
+        }
+    }
+
+    VisibilityReportGateReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        reports,
         failures,
     }
 }
@@ -1639,6 +1784,16 @@ fn load_name(load: PerformanceLoad) -> &'static str {
         PerformanceLoad::Idle => "idle",
         PerformanceLoad::Steady10000 => "steady_10000",
         PerformanceLoad::Burst50000 => "burst_50000",
+    }
+}
+
+fn visibility_failure(
+    target: Option<VisibilityTarget>,
+    message: impl Into<String>,
+) -> VisibilityReportGateFailure {
+    VisibilityReportGateFailure {
+        target,
+        message: message.into(),
     }
 }
 
