@@ -108,6 +108,58 @@ pub struct ServiceSpec {
     pub runtime_sockets: Vec<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceLoad {
+    Idle,
+    #[serde(rename = "steady_10000")]
+    Steady10000,
+    #[serde(rename = "burst_50000")]
+    Burst50000,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PerformanceBudget {
+    pub load: PerformanceLoad,
+    pub min_events_per_second: u64,
+    pub max_milli_cpu: Option<u64>,
+    pub max_rss_mib: u64,
+    pub require_worker_pool_bounded: bool,
+    pub require_loss_accounted: bool,
+    pub require_queue_bounded: bool,
+    pub require_adapter_connected: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PerformanceSample {
+    pub load: PerformanceLoad,
+    pub events_per_second: u64,
+    pub milli_cpu: u64,
+    pub rss_mib: u64,
+    pub worker_pool_bounded: bool,
+    pub loss_accounted: bool,
+    pub queue_bounded: bool,
+    pub adapter_connected: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PerformanceGateFailure {
+    pub load: PerformanceLoad,
+    pub metric: String,
+    pub message: String,
+    pub actual: String,
+    pub budget: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PerformanceGateReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub budgets: Vec<PerformanceBudget>,
+    pub samples: Vec<PerformanceSample>,
+    pub failures: Vec<PerformanceGateFailure>,
+}
+
 pub trait ServiceController {
     fn restore_unit_file_state(
         &mut self,
@@ -313,6 +365,143 @@ pub fn default_host_backup_sources() -> Vec<BackupSource> {
             "/etc/systemd/system/k3s.service.d/http-proxy.conf",
         ),
     ]
+}
+
+pub fn default_f2_performance_budgets() -> Vec<PerformanceBudget> {
+    vec![
+        PerformanceBudget {
+            load: PerformanceLoad::Idle,
+            min_events_per_second: 0,
+            max_milli_cpu: Some(10),
+            max_rss_mib: 128,
+            require_worker_pool_bounded: true,
+            require_loss_accounted: true,
+            require_queue_bounded: true,
+            require_adapter_connected: true,
+        },
+        PerformanceBudget {
+            load: PerformanceLoad::Steady10000,
+            min_events_per_second: 10_000,
+            max_milli_cpu: Some(1000),
+            max_rss_mib: 256,
+            require_worker_pool_bounded: true,
+            require_loss_accounted: true,
+            require_queue_bounded: true,
+            require_adapter_connected: true,
+        },
+        PerformanceBudget {
+            load: PerformanceLoad::Burst50000,
+            min_events_per_second: 50_000,
+            max_milli_cpu: None,
+            max_rss_mib: 256,
+            require_worker_pool_bounded: true,
+            require_loss_accounted: true,
+            require_queue_bounded: true,
+            require_adapter_connected: true,
+        },
+    ]
+}
+
+pub fn evaluate_performance_gate(
+    budgets: Vec<PerformanceBudget>,
+    samples: Vec<PerformanceSample>,
+) -> PerformanceGateReport {
+    let samples_by_load: BTreeMap<PerformanceLoad, &PerformanceSample> =
+        samples.iter().map(|sample| (sample.load, sample)).collect();
+    let mut failures = Vec::new();
+
+    for budget in &budgets {
+        let Some(sample) = samples_by_load.get(&budget.load) else {
+            failures.push(performance_failure(
+                budget.load,
+                "sample",
+                "required load sample missing",
+                "missing",
+                "present",
+            ));
+            continue;
+        };
+
+        if sample.events_per_second < budget.min_events_per_second {
+            failures.push(performance_failure(
+                budget.load,
+                "events_per_second",
+                &format!("{} event rate below required load", load_name(budget.load)),
+                sample.events_per_second.to_string(),
+                budget.min_events_per_second.to_string(),
+            ));
+        }
+
+        if let Some(max_milli_cpu) = budget.max_milli_cpu {
+            if sample.milli_cpu > max_milli_cpu {
+                failures.push(performance_failure(
+                    budget.load,
+                    "milli_cpu",
+                    &format!("{} cpu budget exceeded", load_name(budget.load)),
+                    sample.milli_cpu.to_string(),
+                    max_milli_cpu.to_string(),
+                ));
+            }
+        }
+
+        if sample.rss_mib > budget.max_rss_mib {
+            failures.push(performance_failure(
+                budget.load,
+                "rss_mib",
+                &format!("{} rss budget exceeded", load_name(budget.load)),
+                sample.rss_mib.to_string(),
+                budget.max_rss_mib.to_string(),
+            ));
+        }
+
+        if budget.require_worker_pool_bounded && !sample.worker_pool_bounded {
+            failures.push(performance_failure(
+                budget.load,
+                "worker_pool_bounded",
+                &format!("{} worker pool was not bounded", load_name(budget.load)),
+                "false",
+                "true",
+            ));
+        }
+
+        if budget.require_loss_accounted && !sample.loss_accounted {
+            failures.push(performance_failure(
+                budget.load,
+                "loss_accounted",
+                &format!("{} loss was not accounted", load_name(budget.load)),
+                "false",
+                "true",
+            ));
+        }
+
+        if budget.require_queue_bounded && !sample.queue_bounded {
+            failures.push(performance_failure(
+                budget.load,
+                "queue_bounded",
+                &format!("{} queue was not bounded", load_name(budget.load)),
+                "false",
+                "true",
+            ));
+        }
+
+        if budget.require_adapter_connected && !sample.adapter_connected {
+            failures.push(performance_failure(
+                budget.load,
+                "adapter_connected",
+                &format!("{} adapters not connected", load_name(budget.load)),
+                "false",
+                "true",
+            ));
+        }
+    }
+
+    PerformanceGateReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        budgets,
+        samples,
+        failures,
+    }
 }
 
 pub fn default_service_specs() -> Vec<ServiceSpec> {
@@ -1427,6 +1616,30 @@ fn command_output(program: &str, args: &[&str]) -> Result<String, String> {
     }
     String::from_utf8(output.stdout)
         .map_err(|error| format!("{program} output is not UTF-8: {error}"))
+}
+
+fn performance_failure(
+    load: PerformanceLoad,
+    metric: &str,
+    message: &str,
+    actual: impl ToString,
+    budget: impl ToString,
+) -> PerformanceGateFailure {
+    PerformanceGateFailure {
+        load,
+        metric: metric.to_string(),
+        message: message.to_string(),
+        actual: actual.to_string(),
+        budget: budget.to_string(),
+    }
+}
+
+fn load_name(load: PerformanceLoad) -> &'static str {
+    match load {
+        PerformanceLoad::Idle => "idle",
+        PerformanceLoad::Steady10000 => "steady_10000",
+        PerformanceLoad::Burst50000 => "burst_50000",
+    }
 }
 
 fn items(value: &serde_json::Value) -> &[serde_json::Value] {

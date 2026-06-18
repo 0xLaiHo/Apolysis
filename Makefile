@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery
+.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery test-f2-performance
 
 build: build-ebpf
 	cargo build --workspace
@@ -39,3 +39,6 @@ test-f2-runtime-adapter-matrix:
 
 test-f2-recovery:
 	./scripts/test-f2-recovery.sh
+
+test-f2-performance:
+	./scripts/test-f2-performance.sh

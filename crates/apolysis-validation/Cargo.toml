@@ -18,3 +18,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "apolysis-validate-host"
 path = "src/bin/apolysis-validate-host.rs"
+
+[[bin]]
+name = "apolysis-f2-performance-report"
+path = "src/bin/apolysis-f2-performance-report.rs"

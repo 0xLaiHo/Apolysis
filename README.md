@@ -290,7 +290,7 @@ Focused roadmap:
 | --- | --- | --- |
 | F0 | PoC baseline: M1-M7 schema, adapters, fixture observer, feedback, Kubernetes metadata, strong-isolation visibility modeling | ✅ **Completed** |
 | F1 | Independent Observability MVP: live audit-only eBPF observer, CO-RE/Aya loader, process/file/network/credential timeline, loss accounting, redaction | ✅ **Completed** |
-| F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | 🚧 **In progress: F2.1-F2.5 complete; production architecture hardening next** |
+| F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | 🚧 **In progress: F2.1-F2.5 complete; F2.6 production architecture and performance gates underway** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | 🚧 **Planned** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | 🚧 **Planned** |
 | F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM, operator, large-scale chaos and performance testing | ⏳ **Deferred** |
