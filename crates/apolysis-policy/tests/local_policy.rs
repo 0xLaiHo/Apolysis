@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_core::{CanonicalEvent, EnforcementBackend, EventSource, EventType};
-use apolysis_policy::{Policy, PolicyDecision, PolicyRuntimeCapabilities};
+use apolysis_policy::{
+    DecisionKind, EnforcementCapabilityMatrix, EnforcementRuntime, EnforcementTiming, Policy,
+    PolicyDecision, PolicyRuntimeCapabilities, PreoperationBlockSupport,
+};
 
 #[test]
 fn local_policy_parses_credential_deny_and_runtime_limits() {
@@ -112,6 +115,7 @@ network:
         &event,
         &PolicyRuntimeCapabilities {
             bpf_lsm_available: false,
+            ..PolicyRuntimeCapabilities::default()
         },
     );
 
@@ -154,6 +158,7 @@ workspace:
         &event,
         &PolicyRuntimeCapabilities {
             bpf_lsm_available: false,
+            ..PolicyRuntimeCapabilities::default()
         },
     );
 
@@ -162,4 +167,136 @@ workspace:
         evaluation.enforcement_backend,
         EnforcementBackend::AuditOnly
     );
+}
+
+#[test]
+fn capability_matrix_keeps_notify_and_review_as_default_guardrails() {
+    let capabilities = PolicyRuntimeCapabilities::default();
+    let matrix = EnforcementCapabilityMatrix::new(&capabilities);
+
+    for requested in [DecisionKind::Notify, DecisionKind::Review] {
+        let capability = matrix.resolve(
+            requested,
+            DecisionKind::Notify,
+            EnforcementRuntime::Docker,
+            EventType::NetworkConnect,
+        );
+
+        assert!(capability.requested_supported);
+        assert_eq!(capability.requested, requested);
+        assert_eq!(capability.effective, requested);
+        assert_eq!(
+            capability.enforcement_backend,
+            EnforcementBackend::TracepointNotify
+        );
+        assert_eq!(capability.timing, EnforcementTiming::PostEventFeedback);
+        assert!(!capability.preoperation_prevention);
+        assert_eq!(capability.downgrade, None);
+    }
+}
+
+#[test]
+fn capability_matrix_marks_kill_as_post_event_containment() {
+    let capabilities = PolicyRuntimeCapabilities::default();
+    let matrix = EnforcementCapabilityMatrix::new(&capabilities);
+
+    let capability = matrix.resolve(
+        DecisionKind::Kill,
+        DecisionKind::Notify,
+        EnforcementRuntime::Containerd,
+        EventType::Exec,
+    );
+
+    assert!(capability.requested_supported);
+    assert_eq!(capability.effective, DecisionKind::Kill);
+    assert_eq!(
+        capability.enforcement_backend,
+        EnforcementBackend::SignalKill
+    );
+    assert_eq!(capability.timing, EnforcementTiming::PostEventContainment);
+    assert!(!capability.preoperation_prevention);
+    assert_eq!(capability.downgrade, None);
+}
+
+#[test]
+fn block_requires_runtime_action_and_prototype_support() {
+    let policy = Policy::parse(
+        r#"
+version: 1
+enforcement:
+  requested: block
+  fallback: review
+workspace:
+  allow_read:
+    - ./safe
+network:
+  allow_egress:
+    - 127.0.0.1:0
+"#,
+    )
+    .expect("parse policy");
+    let capabilities = PolicyRuntimeCapabilities {
+        bpf_lsm_available: true,
+        runtime: EnforcementRuntime::Local,
+        preoperation_block: PreoperationBlockSupport {
+            file_read: true,
+            ..PreoperationBlockSupport::default()
+        },
+        ..PolicyRuntimeCapabilities::default()
+    };
+
+    let file_event = CanonicalEvent::new(
+        "session-f3",
+        EventSource::KernelTracepoint,
+        EventType::FileOpen,
+        42,
+        1,
+        "python3",
+        "/tmp/secret.txt",
+        "open",
+    );
+    let network_event = CanonicalEvent::new(
+        "session-f3",
+        EventSource::KernelTracepoint,
+        EventType::NetworkConnect,
+        42,
+        1,
+        "curl",
+        "1.1.1.1:443",
+        "connect",
+    );
+
+    let file_evaluation = policy.evaluate_event(&file_event, &capabilities);
+    assert_eq!(
+        file_evaluation.decision,
+        PolicyDecision::Block {
+            rule_id: "workspace.allow_read".to_string(),
+            reason: "file read is outside workspace read allow list".to_string()
+        }
+    );
+    assert_eq!(
+        file_evaluation.enforcement_backend,
+        EnforcementBackend::BpfLsmBlock
+    );
+    assert_eq!(file_evaluation.downgrade, None);
+
+    let network_evaluation = policy.evaluate_event(&network_event, &capabilities);
+    assert_eq!(
+        network_evaluation.decision,
+        PolicyDecision::Review {
+            rule_id: "network.allow_egress".to_string(),
+            reason: "network endpoint is outside egress allow list".to_string()
+        }
+    );
+    assert_eq!(
+        network_evaluation.enforcement_backend,
+        EnforcementBackend::TracepointNotify
+    );
+    let downgrade = network_evaluation
+        .downgrade
+        .expect("unsupported block should downgrade");
+    assert_eq!(downgrade.from, DecisionKind::Block);
+    assert_eq!(downgrade.to, DecisionKind::Review);
+    assert!(downgrade.reason.contains("network_connect"));
+    assert!(downgrade.reason.contains("local"));
 }

@@ -66,7 +66,7 @@ impl Default for EnforcementPolicy {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecisionKind {
     Allow,
     Notify,
@@ -84,6 +84,233 @@ impl DecisionKind {
             Self::Block => "block",
             Self::Kill => "kill",
             Self::Review => "review",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EnforcementRuntime {
+    #[default]
+    Local,
+    Docker,
+    Containerd,
+    Kubernetes,
+    Gvisor,
+    Kata,
+    Firecracker,
+    Unknown,
+}
+
+impl EnforcementRuntime {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Docker => "docker",
+            Self::Containerd => "containerd",
+            Self::Kubernetes => "kubernetes",
+            Self::Gvisor => "gvisor",
+            Self::Kata => "kata",
+            Self::Firecracker => "firecracker",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnforcementAction {
+    Exec,
+    FileRead,
+    FileWrite,
+    NetworkConnect,
+    CredentialRead,
+    Other,
+}
+
+impl EnforcementAction {
+    pub fn from_event_type(event_type: &EventType) -> Self {
+        match event_type {
+            EventType::Exec => Self::Exec,
+            EventType::FileOpen => Self::FileRead,
+            EventType::CredentialRead => Self::CredentialRead,
+            EventType::FileCreate
+            | EventType::FileTruncate
+            | EventType::FileUnlink
+            | EventType::FileRename => Self::FileWrite,
+            EventType::NetworkConnect => Self::NetworkConnect,
+            EventType::SessionStarted | EventType::RuntimeMetadata | EventType::ProcessExit => {
+                Self::Other
+            }
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Exec => "exec",
+            Self::FileRead => "file_read",
+            Self::FileWrite => "file_write",
+            Self::NetworkConnect => "network_connect",
+            Self::CredentialRead => "credential_read",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PreoperationBlockSupport {
+    pub exec: bool,
+    pub file_read: bool,
+    pub file_write: bool,
+    pub network_connect: bool,
+    pub credential_read: bool,
+}
+
+impl PreoperationBlockSupport {
+    fn any(self) -> bool {
+        self.exec
+            || self.file_read
+            || self.file_write
+            || self.network_connect
+            || self.credential_read
+    }
+
+    fn supports(self, action: EnforcementAction) -> bool {
+        match action {
+            EnforcementAction::Exec => self.exec,
+            EnforcementAction::FileRead => self.file_read,
+            EnforcementAction::FileWrite => self.file_write,
+            EnforcementAction::NetworkConnect => self.network_connect,
+            EnforcementAction::CredentialRead => self.credential_read,
+            EnforcementAction::Other => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnforcementTiming {
+    AuditOnly,
+    PostEventFeedback,
+    PostEventContainment,
+    PreOperation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnforcementCapability {
+    pub requested: DecisionKind,
+    pub effective: DecisionKind,
+    pub action: EnforcementAction,
+    pub runtime: EnforcementRuntime,
+    pub requested_supported: bool,
+    pub enforcement_backend: EnforcementBackend,
+    pub timing: EnforcementTiming,
+    pub preoperation_prevention: bool,
+    pub downgrade: Option<DecisionDowngrade>,
+}
+
+pub struct EnforcementCapabilityMatrix<'a> {
+    capabilities: &'a PolicyRuntimeCapabilities,
+}
+
+impl<'a> EnforcementCapabilityMatrix<'a> {
+    pub fn new(capabilities: &'a PolicyRuntimeCapabilities) -> Self {
+        Self { capabilities }
+    }
+
+    pub fn resolve(
+        &self,
+        requested: DecisionKind,
+        fallback: DecisionKind,
+        runtime: EnforcementRuntime,
+        event_type: EventType,
+    ) -> EnforcementCapability {
+        let action = EnforcementAction::from_event_type(&event_type);
+
+        match requested {
+            DecisionKind::Allow => EnforcementCapability {
+                requested,
+                effective: DecisionKind::Allow,
+                action,
+                runtime,
+                requested_supported: true,
+                enforcement_backend: EnforcementBackend::AuditOnly,
+                timing: EnforcementTiming::AuditOnly,
+                preoperation_prevention: false,
+                downgrade: None,
+            },
+            DecisionKind::Notify => EnforcementCapability {
+                requested,
+                effective: DecisionKind::Notify,
+                action,
+                runtime,
+                requested_supported: true,
+                enforcement_backend: EnforcementBackend::TracepointNotify,
+                timing: EnforcementTiming::PostEventFeedback,
+                preoperation_prevention: false,
+                downgrade: None,
+            },
+            DecisionKind::Review => EnforcementCapability {
+                requested,
+                effective: DecisionKind::Review,
+                action,
+                runtime,
+                requested_supported: true,
+                enforcement_backend: EnforcementBackend::TracepointNotify,
+                timing: EnforcementTiming::PostEventFeedback,
+                preoperation_prevention: false,
+                downgrade: None,
+            },
+            DecisionKind::Kill => EnforcementCapability {
+                requested,
+                effective: DecisionKind::Kill,
+                action,
+                runtime,
+                requested_supported: true,
+                enforcement_backend: EnforcementBackend::SignalKill,
+                timing: EnforcementTiming::PostEventContainment,
+                preoperation_prevention: false,
+                downgrade: None,
+            },
+            DecisionKind::Block => self.resolve_block(fallback, runtime, action),
+        }
+    }
+
+    fn resolve_block(
+        &self,
+        fallback: DecisionKind,
+        runtime: EnforcementRuntime,
+        action: EnforcementAction,
+    ) -> EnforcementCapability {
+        if self.capabilities.can_preoperation_block(runtime, action) {
+            return EnforcementCapability {
+                requested: DecisionKind::Block,
+                effective: DecisionKind::Block,
+                action,
+                runtime,
+                requested_supported: true,
+                enforcement_backend: EnforcementBackend::BpfLsmBlock,
+                timing: EnforcementTiming::PreOperation,
+                preoperation_prevention: true,
+                downgrade: None,
+            };
+        }
+
+        let fallback = safe_non_block_fallback(&fallback);
+        let reason = self
+            .capabilities
+            .block_downgrade_reason(runtime, action, fallback);
+        EnforcementCapability {
+            requested: DecisionKind::Block,
+            effective: fallback,
+            action,
+            runtime,
+            requested_supported: false,
+            enforcement_backend: backend_for_fallback(&fallback),
+            timing: timing_for_fallback(fallback),
+            preoperation_prevention: false,
+            downgrade: Some(DecisionDowngrade {
+                from: DecisionKind::Block,
+                to: fallback,
+                reason,
+            }),
         }
     }
 }
@@ -139,7 +366,23 @@ impl PolicyDecision {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyRuntimeCapabilities {
+    pub kernel_release: Option<String>,
     pub bpf_lsm_available: bool,
+    pub seccomp_available: bool,
+    pub runtime: EnforcementRuntime,
+    pub preoperation_block: PreoperationBlockSupport,
+}
+
+impl Default for PolicyRuntimeCapabilities {
+    fn default() -> Self {
+        Self {
+            kernel_release: None,
+            bpf_lsm_available: false,
+            seccomp_available: false,
+            runtime: EnforcementRuntime::Local,
+            preoperation_block: PreoperationBlockSupport::default(),
+        }
+    }
 }
 
 impl PolicyRuntimeCapabilities {
@@ -147,15 +390,69 @@ impl PolicyRuntimeCapabilities {
     pub fn detect() -> Self {
         if let Ok(value) = std::env::var(env::BPF_LSM_AVAILABLE) {
             return Self {
+                kernel_release: kernel_release(),
                 bpf_lsm_available: matches!(value.as_str(), "1" | "true" | "yes" | "on"),
+                seccomp_available: seccomp_available(),
+                ..Self::default()
             };
         }
 
         Self {
+            kernel_release: kernel_release(),
             bpf_lsm_available: fs::read_to_string("/sys/kernel/security/lsm")
                 .map(|lsm| lsm.split(',').any(|name| name.trim() == "bpf"))
                 .unwrap_or(false),
+            seccomp_available: seccomp_available(),
+            ..Self::default()
         }
+    }
+
+    pub fn can_preoperation_block(
+        &self,
+        runtime: EnforcementRuntime,
+        action: EnforcementAction,
+    ) -> bool {
+        self.bpf_lsm_available
+            && runtime_supports_host_bpf_lsm(runtime)
+            && self.preoperation_block.supports(action)
+    }
+
+    fn any_preoperation_block_available(&self) -> bool {
+        self.bpf_lsm_available
+            && runtime_supports_host_bpf_lsm(self.runtime)
+            && self.preoperation_block.any()
+    }
+
+    fn block_downgrade_reason(
+        &self,
+        runtime: EnforcementRuntime,
+        action: EnforcementAction,
+        fallback: DecisionKind,
+    ) -> String {
+        if !self.bpf_lsm_available {
+            return format!(
+                "BPF-LSM is not available; requested block for {}/{} downgraded to {}",
+                runtime.as_str(),
+                action.as_str(),
+                fallback.as_str()
+            );
+        }
+
+        if !runtime_supports_host_bpf_lsm(runtime) {
+            return format!(
+                "pre-operation block is unsupported for {}/{}; requested block downgraded to {}",
+                runtime.as_str(),
+                action.as_str(),
+                fallback.as_str()
+            );
+        }
+
+        format!(
+            "pre-operation block prototype is not enabled for {}/{}; requested block downgraded to {}",
+            runtime.as_str(),
+            action.as_str(),
+            fallback.as_str()
+        )
     }
 }
 
@@ -269,13 +566,16 @@ impl Policy {
         &self,
         capabilities: &PolicyRuntimeCapabilities,
     ) -> Option<DecisionDowngrade> {
-        if self.enforcement.requested == DecisionKind::Block && !capabilities.bpf_lsm_available {
+        if self.enforcement.requested == DecisionKind::Block
+            && !capabilities.any_preoperation_block_available()
+        {
             let fallback = safe_non_block_fallback(&self.enforcement.fallback);
             return Some(DecisionDowngrade {
                 from: DecisionKind::Block,
-                to: fallback.clone(),
+                to: fallback,
                 reason: format!(
-                    "BPF-LSM is not available; requested block downgraded to {}",
+                    "pre-operation block is not available for runtime {}; requested block downgraded to {}",
+                    capabilities.runtime.as_str(),
                     fallback.as_str()
                 ),
             });
@@ -294,11 +594,11 @@ impl Policy {
             return PolicyEvaluation::allow();
         };
 
-        let (effective, backend, downgrade) = self.effective_decision(capabilities);
+        let capability = self.effective_decision(capabilities, event.event_type.clone());
         PolicyEvaluation {
-            decision: decision_for_kind(effective, rule_id, reason),
-            enforcement_backend: backend,
-            downgrade,
+            decision: decision_for_kind(capability.effective, rule_id, reason),
+            enforcement_backend: capability.enforcement_backend,
+            downgrade: capability.downgrade,
         }
     }
 
@@ -362,37 +662,14 @@ impl Policy {
     fn effective_decision(
         &self,
         capabilities: &PolicyRuntimeCapabilities,
-    ) -> (DecisionKind, EnforcementBackend, Option<DecisionDowngrade>) {
-        match self.enforcement.requested {
-            DecisionKind::Allow => (DecisionKind::Allow, EnforcementBackend::AuditOnly, None),
-            DecisionKind::Notify => (
-                DecisionKind::Notify,
-                EnforcementBackend::TracepointNotify,
-                None,
-            ),
-            DecisionKind::Review => (
-                DecisionKind::Review,
-                EnforcementBackend::TracepointNotify,
-                None,
-            ),
-            DecisionKind::Kill => (DecisionKind::Kill, EnforcementBackend::SignalKill, None),
-            DecisionKind::Block if capabilities.bpf_lsm_available => {
-                (DecisionKind::Block, EnforcementBackend::BpfLsmBlock, None)
-            }
-            DecisionKind::Block => {
-                let fallback = safe_non_block_fallback(&self.enforcement.fallback);
-                let backend = backend_for_fallback(&fallback);
-                let downgrade = DecisionDowngrade {
-                    from: DecisionKind::Block,
-                    to: fallback.clone(),
-                    reason: format!(
-                        "BPF-LSM is not available; requested block downgraded to {}",
-                        fallback.as_str()
-                    ),
-                };
-                (fallback, backend, Some(downgrade))
-            }
-        }
+        event_type: EventType,
+    ) -> EnforcementCapability {
+        EnforcementCapabilityMatrix::new(capabilities).resolve(
+            self.enforcement.requested,
+            self.enforcement.fallback,
+            capabilities.runtime,
+            event_type,
+        )
     }
 }
 
@@ -656,11 +933,42 @@ fn backend_for_fallback(kind: &DecisionKind) -> EnforcementBackend {
     }
 }
 
+fn timing_for_fallback(kind: DecisionKind) -> EnforcementTiming {
+    match kind {
+        DecisionKind::Allow => EnforcementTiming::AuditOnly,
+        DecisionKind::Notify | DecisionKind::Review | DecisionKind::Block => {
+            EnforcementTiming::PostEventFeedback
+        }
+        DecisionKind::Kill => EnforcementTiming::PostEventContainment,
+    }
+}
+
 fn safe_non_block_fallback(kind: &DecisionKind) -> DecisionKind {
     match kind {
         DecisionKind::Block => DecisionKind::Notify,
-        other => other.clone(),
+        other => *other,
     }
+}
+
+fn runtime_supports_host_bpf_lsm(runtime: EnforcementRuntime) -> bool {
+    matches!(
+        runtime,
+        EnforcementRuntime::Local
+            | EnforcementRuntime::Docker
+            | EnforcementRuntime::Containerd
+            | EnforcementRuntime::Kubernetes
+    )
+}
+
+fn kernel_release() -> Option<String> {
+    fs::read_to_string("/proc/sys/kernel/osrelease")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn seccomp_available() -> bool {
+    fs::metadata("/proc/sys/kernel/seccomp/actions_avail").is_ok()
 }
 
 fn path_matches(pattern: &str, path: &str) -> bool {

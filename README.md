@@ -268,9 +268,9 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 
 ## 🗺️ Feature Plan And Progress
 
-Current status: Apolysis is a PoC / audit-only prototype. F0 (M1-M7) and F1
-Independent Observability MVP are complete. F2 Accountability Beta is in
-progress.
+Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
+Independent Observability MVP, and F2 Accountability Beta are complete. F3
+Limited Guardrails has started with the enforcement capability matrix.
 
 Implementation milestones:
 
@@ -291,7 +291,7 @@ Focused roadmap:
 | F0 | PoC baseline: M1-M7 schema, adapters, fixture observer, feedback, Kubernetes metadata, strong-isolation visibility modeling | ✅ **Completed** |
 | F1 | Independent Observability MVP: live audit-only eBPF observer, CO-RE/Aya loader, process/file/network/credential timeline, loss accounting, redaction | ✅ **Completed** |
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
-| F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | 🚧 **Planned** |
+| F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | 🚧 **In Progress** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | 🚧 **Planned** |
 | F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM, operator, large-scale chaos and performance testing | ⏳ **Deferred** |
 
