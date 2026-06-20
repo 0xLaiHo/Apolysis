@@ -165,6 +165,12 @@ impl EnforcementAction {
     }
 }
 
+impl From<EventType> for EnforcementAction {
+    fn from(event_type: EventType) -> Self {
+        Self::from_event_type(&event_type)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PreoperationBlockSupport {
     pub exec: bool,
@@ -183,6 +189,10 @@ impl PreoperationBlockSupport {
             || self.credential_read
     }
 
+    pub fn any_enabled(self) -> bool {
+        self.any()
+    }
+
     fn supports(self, action: EnforcementAction) -> bool {
         match action {
             EnforcementAction::Exec => self.exec,
@@ -193,6 +203,36 @@ impl PreoperationBlockSupport {
             EnforcementAction::Other => false,
         }
     }
+
+    fn enable(&mut self, action: EnforcementAction) -> Result<(), String> {
+        match action {
+            EnforcementAction::Exec => self.exec = true,
+            EnforcementAction::FileRead => self.file_read = true,
+            EnforcementAction::FileWrite => self.file_write = true,
+            EnforcementAction::NetworkConnect => self.network_connect = true,
+            EnforcementAction::CredentialRead => self.credential_read = true,
+            EnforcementAction::Other => {
+                return Err("event type does not map to a blockable action".to_string())
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockPrototypeEvidenceSource {
+    Fixture,
+    LiveHost,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockPrototypeEvidence {
+    pub source: BlockPrototypeEvidenceSource,
+    pub runtime: EnforcementRuntime,
+    pub action: EventType,
+    pub preoperation_prevention: bool,
+    pub decision_latency_ms: Option<u128>,
+    pub side_effect_race_window_ms: Option<u128>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -428,14 +468,55 @@ impl PolicyRuntimeCapabilities {
         }
     }
 
-    pub fn can_preoperation_block(
+    pub fn can_preoperation_block<A: Into<EnforcementAction>>(
         &self,
         runtime: EnforcementRuntime,
-        action: EnforcementAction,
+        action: A,
     ) -> bool {
+        let action = action.into();
         self.bpf_lsm_available
             && runtime_supports_host_bpf_lsm(runtime)
             && self.preoperation_block.supports(action)
+    }
+
+    pub fn with_validated_block_prototype(
+        mut self,
+        evidence: BlockPrototypeEvidence,
+    ) -> Result<Self, String> {
+        if evidence.source != BlockPrototypeEvidenceSource::LiveHost {
+            return Err("pre-operation block requires live-host validation evidence".to_string());
+        }
+        if !self.bpf_lsm_available {
+            return Err("BPF-LSM must be available before enabling block prototype".to_string());
+        }
+        if !runtime_supports_host_bpf_lsm(evidence.runtime) {
+            return Err(format!(
+                "runtime {} does not support host BPF-LSM block validation",
+                evidence.runtime.as_str()
+            ));
+        }
+        if self.runtime != evidence.runtime {
+            return Err(format!(
+                "validation runtime {} does not match capability runtime {}",
+                evidence.runtime.as_str(),
+                self.runtime.as_str()
+            ));
+        }
+        if !evidence.preoperation_prevention {
+            return Err("block prototype evidence must prove pre-operation prevention".to_string());
+        }
+        if evidence.decision_latency_ms.is_none() {
+            return Err("block prototype evidence must include decision latency".to_string());
+        }
+        if evidence.side_effect_race_window_ms != Some(0) {
+            return Err(
+                "block prototype evidence must prove a zero side-effect race window".to_string(),
+            );
+        }
+
+        self.preoperation_block
+            .enable(EnforcementAction::from_event_type(&evidence.action))?;
+        Ok(self)
     }
 
     fn any_preoperation_block_available(&self) -> bool {

@@ -217,8 +217,8 @@ tests/fixtures/     本地/Docker 命令测试夹具和预期 timeline 片段。
 
 当前状态：Apolysis 是 PoC / audit-first 原型。F0（M1-M7）、F1
 Independent Observability MVP 和 F2 Accountability Beta 均已完成。F3
-Limited Guardrails 正在推进，已包含 enforcement capability matrix 和 kill
-containment latency/race-window metadata。
+Limited Guardrails 正在推进，已包含 enforcement capability matrix，以及未来
+pre-operation `Block` prototype 的 validated-enable gate。
 
 实现里程碑：
 

@@ -2,8 +2,9 @@
 
 use apolysis_core::{CanonicalEvent, EnforcementBackend, EventSource, EventType};
 use apolysis_policy::{
-    DecisionKind, EnforcementCapabilityMatrix, EnforcementRuntime, EnforcementTiming, Policy,
-    PolicyDecision, PolicyRuntimeCapabilities, PreoperationBlockSupport,
+    BlockPrototypeEvidence, BlockPrototypeEvidenceSource, DecisionKind,
+    EnforcementCapabilityMatrix, EnforcementRuntime, EnforcementTiming, Policy, PolicyDecision,
+    PolicyRuntimeCapabilities, PreoperationBlockSupport,
 };
 
 #[test]
@@ -299,4 +300,62 @@ network:
     assert_eq!(downgrade.to, DecisionKind::Review);
     assert!(downgrade.reason.contains("network_connect"));
     assert!(downgrade.reason.contains("local"));
+}
+
+#[test]
+fn detected_capabilities_do_not_enable_preoperation_block_by_default() {
+    let capabilities = PolicyRuntimeCapabilities::detect();
+
+    assert!(!capabilities.preoperation_block.any_enabled());
+}
+
+#[test]
+fn fixture_evidence_cannot_enable_preoperation_block_support() {
+    let capabilities = PolicyRuntimeCapabilities {
+        bpf_lsm_available: true,
+        runtime: EnforcementRuntime::Local,
+        ..PolicyRuntimeCapabilities::default()
+    };
+    let evidence = BlockPrototypeEvidence {
+        source: BlockPrototypeEvidenceSource::Fixture,
+        runtime: EnforcementRuntime::Local,
+        action: EventType::FileOpen,
+        preoperation_prevention: true,
+        decision_latency_ms: Some(2),
+        side_effect_race_window_ms: Some(0),
+    };
+
+    let error = capabilities
+        .with_validated_block_prototype(evidence)
+        .expect_err("fixture evidence must not enable live block");
+
+    assert!(error.contains("live-host validation"));
+}
+
+#[test]
+fn live_zero_race_window_evidence_enables_only_the_validated_action() {
+    let capabilities = PolicyRuntimeCapabilities {
+        bpf_lsm_available: true,
+        runtime: EnforcementRuntime::Local,
+        ..PolicyRuntimeCapabilities::default()
+    };
+    let evidence = BlockPrototypeEvidence {
+        source: BlockPrototypeEvidenceSource::LiveHost,
+        runtime: EnforcementRuntime::Local,
+        action: EventType::FileOpen,
+        preoperation_prevention: true,
+        decision_latency_ms: Some(2),
+        side_effect_race_window_ms: Some(0),
+    };
+
+    let capabilities = capabilities
+        .with_validated_block_prototype(evidence)
+        .expect("live zero-race evidence should enable file read block");
+
+    assert!(capabilities.preoperation_block.file_read);
+    assert!(!capabilities.preoperation_block.network_connect);
+    assert!(capabilities.can_preoperation_block(EnforcementRuntime::Local, EventType::FileOpen));
+    assert!(
+        !capabilities.can_preoperation_block(EnforcementRuntime::Local, EventType::NetworkConnect)
+    );
 }
