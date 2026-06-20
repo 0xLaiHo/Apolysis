@@ -541,6 +541,36 @@ pub struct F4RuntimeAdapterEvidenceGateReport {
     pub failures: Vec<F4RuntimeAdapterEvidenceGateFailure>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4GvisorMetadataEvidenceReport {
+    pub evidence_id: String,
+    pub source: F4RuntimeAdapterEvidenceSource,
+    pub runtime_adapter_evidence_id: String,
+    pub session_id: String,
+    pub runtime_handler: Option<String>,
+    pub host_event_subjects: Vec<String>,
+    pub runsc_observed: bool,
+    pub sentry_observed: bool,
+    pub gofer_observed: bool,
+    pub host_semantics_collapsed: bool,
+    pub guest_semantics_claimed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4GvisorMetadataEvidenceGateFailure {
+    pub evidence_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4GvisorMetadataEvidenceGateReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub reports: Vec<F4GvisorMetadataEvidenceReport>,
+    pub validated_evidence: Vec<F4GvisorMetadataEvidenceReport>,
+    pub failures: Vec<F4GvisorMetadataEvidenceGateFailure>,
+}
+
 impl F3BlockOperatorAuditRecord {
     pub fn to_json_line(&self) -> Result<String, String> {
         serde_json::to_string(self)
@@ -1129,9 +1159,32 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
     reports: Vec<F3BlockValidationReport>,
     adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
 ) -> F4RuntimeGuardrailMatrixReport {
+    evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
+        reports,
+        adapter_evidence,
+        F4GvisorMetadataEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        },
+    )
+}
+
+pub fn evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
+    reports: Vec<F3BlockValidationReport>,
+    adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
+    gvisor_metadata: F4GvisorMetadataEvidenceGateReport,
+) -> F4RuntimeGuardrailMatrixReport {
     let local_seccomp_evidence = f4_validated_local_block_evidence(&reports, "seccomp_block");
     let local_bpf_lsm_evidence = f4_validated_local_block_evidence(&reports, "bpf_lsm_block");
     let adapter_evidence_ids = f4_adapter_evidence_ids_by_runtime(&adapter_evidence);
+    let gvisor_evidence_ids = f4_gvisor_metadata_evidence_ids(&gvisor_metadata);
+    let gvisor_combined_evidence_ids = f4_merge_evidence_ids(
+        f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
+        gvisor_evidence_ids,
+    );
 
     F4RuntimeGuardrailMatrixReport {
         schema_version: 1,
@@ -1241,26 +1294,26 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
                 runtime: F4RuntimeGuardrailTarget::Gvisor,
                 notify: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
+                    gvisor_combined_evidence_ids.clone(),
                     "runsc, sentry, and gofer metadata can identify the sandbox boundary",
                 ),
                 review: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
+                    gvisor_combined_evidence_ids.clone(),
                     "gVisor metadata can support review findings without claiming guest syscall semantics",
                 ),
                 kill: f4_entry(
                     F4GuardrailSupportStatus::RequiresRuntimeEvidence,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
+                    gvisor_combined_evidence_ids.clone(),
                     "kill containment needs runtime-specific evidence for runsc/sentry/gofer behavior",
                 ),
                 seccomp_block: f4_metadata_only_block(
                     "gVisor seccomp block",
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
+                    gvisor_combined_evidence_ids.clone(),
                 ),
                 bpf_lsm_block: f4_metadata_only_block(
                     "gVisor BPF-LSM block",
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
+                    gvisor_combined_evidence_ids,
                 ),
                 requires_guest_collector: false,
                 no_go_claims: vec![
@@ -1331,6 +1384,115 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
                 ],
             },
         ],
+    }
+}
+
+pub fn evaluate_f4_gvisor_metadata_evidence_gate(
+    reports: Vec<F4GvisorMetadataEvidenceReport>,
+) -> F4GvisorMetadataEvidenceGateReport {
+    let mut failures = Vec::new();
+    let mut validated_evidence = Vec::new();
+
+    if reports.is_empty() {
+        failures.push(f4_gvisor_failure(
+            None,
+            "at least one F4 gVisor metadata evidence report is required",
+        ));
+    }
+
+    for report in &reports {
+        let evidence_id = if report.evidence_id.trim().is_empty() {
+            None
+        } else {
+            Some(report.evidence_id.clone())
+        };
+        let mut report_failures = Vec::new();
+
+        if report.evidence_id.trim().is_empty() {
+            report_failures.push(f4_gvisor_failure(
+                None,
+                "gVisor metadata evidence is missing evidence id",
+            ));
+        }
+        if report.source != F4RuntimeAdapterEvidenceSource::LiveHost {
+            report_failures.push(f4_gvisor_failure(
+                evidence_id.clone(),
+                "gVisor metadata evidence requires live-host evidence",
+            ));
+        }
+        if report.runtime_adapter_evidence_id.trim().is_empty() {
+            report_failures.push(f4_gvisor_failure(
+                evidence_id.clone(),
+                "gVisor metadata evidence is missing runtime adapter evidence id",
+            ));
+        }
+        if report.session_id.trim().is_empty() {
+            report_failures.push(f4_gvisor_failure(
+                evidence_id.clone(),
+                "gVisor metadata evidence is missing session id",
+            ));
+        }
+        if !report
+            .runtime_handler
+            .as_deref()
+            .map(f4_is_gvisor_handler)
+            .unwrap_or(false)
+        {
+            report_failures.push(f4_gvisor_failure(
+                evidence_id.clone(),
+                "gVisor metadata evidence requires a runsc or gvisor runtime handler",
+            ));
+        }
+        if report.host_event_subjects.is_empty() {
+            report_failures.push(f4_gvisor_failure(
+                evidence_id.clone(),
+                "gVisor metadata evidence must include host event subjects",
+            ));
+        }
+        if !report.runsc_observed || !report.sentry_observed || !report.gofer_observed {
+            report_failures.push(f4_gvisor_failure(
+                evidence_id.clone(),
+                "gVisor metadata evidence must observe runsc, sentry, and gofer",
+            ));
+        }
+        if !f4_subject_observed(&report.host_event_subjects, "runsc")
+            || !f4_subject_observed(&report.host_event_subjects, "sentry")
+            || !f4_subject_observed(&report.host_event_subjects, "gofer")
+        {
+            report_failures.push(f4_gvisor_failure(
+                evidence_id.clone(),
+                "gVisor host event subjects must include runsc, sentry, and gofer",
+            ));
+        }
+        if !report.host_semantics_collapsed {
+            report_failures.push(f4_gvisor_failure(
+                evidence_id.clone(),
+                "gVisor metadata evidence must prove host semantics are collapsed to the runtime boundary",
+            ));
+        }
+        if report.guest_semantics_claimed {
+            report_failures.push(f4_gvisor_failure(
+                evidence_id.clone(),
+                "gVisor metadata evidence must not claim guest semantics",
+            ));
+        }
+
+        if report_failures.is_empty() {
+            validated_evidence.push(report.clone());
+        }
+        failures.extend(report_failures);
+    }
+
+    F4GvisorMetadataEvidenceGateReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        reports,
+        validated_evidence: if failures.is_empty() {
+            validated_evidence
+        } else {
+            Vec::new()
+        },
+        failures,
     }
 }
 
@@ -3024,6 +3186,44 @@ fn f4_adapter_failure(
         evidence_id,
         message: message.into(),
     }
+}
+
+fn f4_gvisor_metadata_evidence_ids(gate: &F4GvisorMetadataEvidenceGateReport) -> Vec<String> {
+    if !gate.passed {
+        return Vec::new();
+    }
+    gate.validated_evidence
+        .iter()
+        .map(|report| report.evidence_id.clone())
+        .collect()
+}
+
+fn f4_merge_evidence_ids(left: Vec<String>, right: Vec<String>) -> Vec<String> {
+    let mut merged = BTreeSet::new();
+    merged.extend(left);
+    merged.extend(right);
+    merged.into_iter().collect()
+}
+
+fn f4_gvisor_failure(
+    evidence_id: Option<String>,
+    message: impl Into<String>,
+) -> F4GvisorMetadataEvidenceGateFailure {
+    F4GvisorMetadataEvidenceGateFailure {
+        evidence_id,
+        message: message.into(),
+    }
+}
+
+fn f4_is_gvisor_handler(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    normalized.contains("runsc") || normalized.contains("gvisor")
+}
+
+fn f4_subject_observed(subjects: &[String], needle: &str) -> bool {
+    subjects
+        .iter()
+        .any(|subject| subject.to_ascii_lowercase().contains(needle))
 }
 
 fn f3_local_seccomp_execution_failure(

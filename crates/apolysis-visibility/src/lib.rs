@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 
 use apolysis_core::{fields::PipeFields, json_string, records, JsonLine};
 use apolysis_kubernetes::KubernetesMetadata;
+use apolysis_validation::{F4GvisorMetadataEvidenceReport, F4RuntimeAdapterEvidenceSource};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeVisibilityProfile {
@@ -159,6 +160,47 @@ pub fn assess_visibility(input: VisibilityInput) -> Result<VisibilityAssessment,
     })
 }
 
+pub fn f4_gvisor_metadata_evidence_from_assessment(
+    assessment: &VisibilityAssessment,
+    evidence_id: impl Into<String>,
+    runtime_adapter_evidence_id: impl Into<String>,
+    runtime_handler: Option<&str>,
+    source: F4RuntimeAdapterEvidenceSource,
+) -> Result<F4GvisorMetadataEvidenceReport, String> {
+    if !matches!(
+        assessment.runtime_profile,
+        RuntimeVisibilityProfile::DockerGvisor | RuntimeVisibilityProfile::KubernetesGvisor
+    ) {
+        return Err("F4 gVisor metadata evidence requires a gVisor visibility profile".to_string());
+    }
+
+    let evidence_id = evidence_id.into();
+    if evidence_id.trim().is_empty() {
+        return Err("F4 gVisor metadata evidence id must not be empty".to_string());
+    }
+    let runtime_adapter_evidence_id = runtime_adapter_evidence_id.into();
+    if runtime_adapter_evidence_id.trim().is_empty() {
+        return Err("F4 gVisor runtime adapter evidence reference must not be empty".to_string());
+    }
+    let runsc_observed = subject_observed(&assessment.host_event_subjects, "runsc");
+    let sentry_observed = subject_observed(&assessment.host_event_subjects, "sentry");
+    let gofer_observed = subject_observed(&assessment.host_event_subjects, "gofer");
+
+    Ok(F4GvisorMetadataEvidenceReport {
+        evidence_id,
+        source,
+        runtime_adapter_evidence_id,
+        session_id: assessment.session_id.clone(),
+        runtime_handler: runtime_handler.map(ToOwned::to_owned),
+        host_event_subjects: assessment.host_event_subjects.clone(),
+        runsc_observed,
+        sentry_observed,
+        gofer_observed,
+        host_semantics_collapsed: assessment.host_semantics_collapsed,
+        guest_semantics_claimed: false,
+    })
+}
+
 fn classify_profile(
     profile: &RuntimeVisibilityProfile,
 ) -> (HostVisibilityScope, bool, bool, bool, &'static str) {
@@ -231,4 +273,10 @@ fn json_string_array(values: &[String]) -> String {
 
 fn json_option(value: Option<&str>) -> String {
     value.map(json_string).unwrap_or_else(|| "null".to_string())
+}
+
+fn subject_observed(subjects: &[String], needle: &str) -> bool {
+    subjects
+        .iter()
+        .any(|subject| subject.to_ascii_lowercase().contains(needle))
 }

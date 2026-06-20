@@ -3,9 +3,10 @@
 use std::io::Read;
 
 use apolysis_validation::{
-    evaluate_f4_runtime_adapter_evidence_gate, evaluate_f4_runtime_guardrail_matrix,
+    evaluate_f4_gvisor_metadata_evidence_gate, evaluate_f4_runtime_adapter_evidence_gate,
+    evaluate_f4_runtime_guardrail_matrix,
     evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence, F3BlockValidationReport,
-    F4RuntimeAdapterEvidenceReport,
+    F4GvisorMetadataEvidenceReport, F4RuntimeAdapterEvidenceReport,
 };
 use serde_json::Value;
 
@@ -47,6 +48,13 @@ fn run() -> Result<(), String> {
             .map_err(|error| {
                 format!("failed to parse runtime_adapter_evidence_reports: {error}")
             })?;
+        let gvisor_metadata_evidence_reports: Vec<F4GvisorMetadataEvidenceReport> = parsed
+            .get("gvisor_metadata_evidence_reports")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| format!("failed to parse gvisor_metadata_evidence_reports: {error}"))?
+            .unwrap_or_default();
         let adapter_gate =
             evaluate_f4_runtime_adapter_evidence_gate(runtime_adapter_evidence_reports);
         if !adapter_gate.passed {
@@ -56,10 +64,27 @@ fn run() -> Result<(), String> {
             eprintln!("{gate_json}");
             std::process::exit(1);
         }
-        evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
-            block_validation_reports,
-            adapter_gate,
-        )
+        if gvisor_metadata_evidence_reports.is_empty() {
+            evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
+                block_validation_reports,
+                adapter_gate,
+            )
+        } else {
+            let gvisor_gate =
+                evaluate_f4_gvisor_metadata_evidence_gate(gvisor_metadata_evidence_reports);
+            if !gvisor_gate.passed {
+                let gate_json = serde_json::to_string_pretty(&gvisor_gate).map_err(|error| {
+                    format!("failed to serialize F4 gVisor metadata evidence gate: {error}")
+                })?;
+                eprintln!("{gate_json}");
+                std::process::exit(1);
+            }
+            apolysis_validation::evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
+                block_validation_reports,
+                adapter_gate,
+                gvisor_gate,
+            )
+        }
     } else {
         return Err("F4 runtime guardrail matrix input must be a JSON array or object".to_string());
     };

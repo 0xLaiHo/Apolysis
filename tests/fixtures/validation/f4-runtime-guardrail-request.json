@@ -27,6 +27,35 @@
       "cgroup_correlation": true,
       "host_boundary_visibility": true,
       "guest_semantics_claimed": false
+    },
+    {
+      "evidence_id": "live-containerd-gvisor-cgroup",
+      "source": "live_host",
+      "runtime": "gvisor",
+      "adapter": "containerd",
+      "session_id": "session-gvisor",
+      "workload_id": "default/task-gvisor",
+      "cgroup_id": 88,
+      "runtime_handler": "io.containerd.runsc.v1",
+      "metadata_correlation": true,
+      "cgroup_correlation": true,
+      "host_boundary_visibility": true,
+      "guest_semantics_claimed": false
+    }
+  ],
+  "gvisor_metadata_evidence_reports": [
+    {
+      "evidence_id": "live-gvisor-runsc-sentry-gofer",
+      "source": "live_host",
+      "runtime_adapter_evidence_id": "live-containerd-gvisor-cgroup",
+      "session_id": "session-gvisor",
+      "runtime_handler": "io.containerd.runsc.v1",
+      "host_event_subjects": ["gofer", "runsc-sandbox", "sentry"],
+      "runsc_observed": true,
+      "sentry_observed": true,
+      "gofer_observed": true,
+      "host_semantics_collapsed": true,
+      "guest_semantics_claimed": false
     }
   ]
 }
