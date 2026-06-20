@@ -10,6 +10,7 @@ cargo test -p apolysis-policy
 cargo test -p apolysis-core enforcement_metadata
 cargo test -p apolysis-cli observe_fixture_emits_kill_containment_metadata
 cargo test -p apolysis-validation --test f3_block_validation_gate
+cargo test -p apolysis-validation --test f3_local_seccomp_execution
 cargo run -p apolysis-validation --bin apolysis-f3-block-validation-report \
   < tests/fixtures/validation/f3-block-live-valid.json \
   > /tmp/apolysis-f3-block-live-valid-report.json
@@ -42,5 +43,18 @@ cargo run -p apolysis-validation --bin apolysis-f3-block-operator-audit -- \
   --timestamp-unix-ms 1780328000456 \
   < /tmp/apolysis-f3-block-enablement-policy.json \
   > /tmp/apolysis-f3-block-rollback-audit.jsonl
+cargo run -p apolysis-validation --bin apolysis-f3-local-seccomp-execution -- \
+  --enablement-policy /tmp/apolysis-f3-block-enablement-policy.json \
+  --evidence-id live-seccomp-local-file-read \
+  --target-path /etc/passwd \
+  > /tmp/apolysis-f3-local-seccomp-execution.json
+if cargo run -p apolysis-validation --bin apolysis-f3-local-seccomp-execution -- \
+  --enablement-policy /tmp/apolysis-f3-block-enablement-policy.json \
+  --evidence-id unknown-live-report \
+  --target-path /etc/passwd \
+  > /tmp/apolysis-f3-local-seccomp-execution-invalid.json 2>&1; then
+  echo "apolysis-f3: local seccomp execution unexpectedly passed without approved evidence" >&2
+  exit 1
+fi
 
 echo "apolysis-f3: guardrail capability validation passed"

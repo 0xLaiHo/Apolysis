@@ -390,6 +390,34 @@ pub struct F3BlockOperatorAuditRecord {
     pub timestamp_unix_ms: u128,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3LocalSeccompExecutionRequest {
+    pub evidence_id: String,
+    pub backend: String,
+    pub runtime: F3BlockValidationRuntime,
+    pub action: F3BlockValidationAction,
+    pub target_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3LocalSeccompExecutionFailure {
+    pub evidence_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3LocalSeccompExecutionReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub evidence_id: String,
+    pub target_path: String,
+    pub applied_enablement_id: Option<String>,
+    pub enforcement_backend: Option<String>,
+    pub blocked_errno: Option<i32>,
+    pub blocked_message: Option<String>,
+    pub failures: Vec<F3LocalSeccompExecutionFailure>,
+}
+
 impl F3BlockOperatorAuditRecord {
     pub fn to_json_line(&self) -> Result<String, String> {
         serde_json::to_string(self)
@@ -1129,6 +1157,86 @@ pub fn f3_block_operator_audit_records(
             timestamp_unix_ms,
         })
         .collect())
+}
+
+pub fn evaluate_f3_local_seccomp_execution_gate(
+    report: &F3BlockEnablementPolicyReport,
+    request: F3LocalSeccompExecutionRequest,
+) -> F3LocalSeccompExecutionReport {
+    let evidence_id = request.evidence_id.trim().to_string();
+    let target_path = request.target_path.trim().to_string();
+    let mut failures = Vec::new();
+
+    if !report.passed {
+        failures.push(f3_local_seccomp_execution_failure(
+            None,
+            "local seccomp execution requires a passed enablement policy report",
+        ));
+    }
+    if evidence_id.is_empty() {
+        failures.push(f3_local_seccomp_execution_failure(
+            None,
+            "evidence id is required",
+        ));
+    }
+    if target_path.is_empty() {
+        failures.push(f3_local_seccomp_execution_failure(
+            evidence_id_opt(&evidence_id),
+            "target path is required",
+        ));
+    }
+    if request.backend != "seccomp_block" {
+        failures.push(f3_local_seccomp_execution_failure(
+            evidence_id_opt(&evidence_id),
+            "local seccomp execution only supports backend seccomp_block",
+        ));
+    }
+    if request.runtime != F3BlockValidationRuntime::Local {
+        failures.push(f3_local_seccomp_execution_failure(
+            evidence_id_opt(&evidence_id),
+            "local seccomp execution only supports local runtime",
+        ));
+    }
+    if request.action != F3BlockValidationAction::FileRead {
+        failures.push(f3_local_seccomp_execution_failure(
+            evidence_id_opt(&evidence_id),
+            "local seccomp execution only supports file_read action",
+        ));
+    }
+
+    let matching_enablement = report.approved_enablements.iter().find(|enablement| {
+        enablement.evidence_id == evidence_id
+            && enablement.backend == request.backend
+            && enablement.runtime == request.runtime
+            && enablement.action == request.action
+            && !enablement.default_enabled
+    });
+    if matching_enablement.is_none() {
+        failures.push(f3_local_seccomp_execution_failure(
+            evidence_id_opt(&evidence_id),
+            "no matching approved local seccomp file-read enablement",
+        ));
+    }
+
+    F3LocalSeccompExecutionReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        evidence_id,
+        target_path,
+        applied_enablement_id: if failures.is_empty() {
+            matching_enablement.map(|enablement| enablement.request_id.clone())
+        } else {
+            None
+        },
+        enforcement_backend: if failures.is_empty() {
+            Some("seccomp_block".to_string())
+        } else {
+            None
+        },
+        blocked_errno: None,
+        blocked_message: None,
+        failures,
+    }
 }
 
 pub fn default_service_specs() -> Vec<ServiceSpec> {
@@ -2296,6 +2404,24 @@ fn f3_enablement_failure(
     F3BlockEnablementFailure {
         request_id,
         message: message.into(),
+    }
+}
+
+fn f3_local_seccomp_execution_failure(
+    evidence_id: Option<String>,
+    message: impl Into<String>,
+) -> F3LocalSeccompExecutionFailure {
+    F3LocalSeccompExecutionFailure {
+        evidence_id,
+        message: message.into(),
+    }
+}
+
+fn evidence_id_opt(evidence_id: &str) -> Option<String> {
+    if evidence_id.is_empty() {
+        None
+    } else {
+        Some(evidence_id.to_string())
     }
 }
 

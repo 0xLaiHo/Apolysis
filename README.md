@@ -48,7 +48,8 @@ audit-only eBPF observer with a CO-RE build, Aya loader, process/file/network
 events, loss diagnostics, and persistence-time redaction. Its privileged
 live-host validation is complete. BPF-LSM enforcement remains modeled and
 capability-gated, and F3 includes a live seccomp pre-operation block prototype
-validation path; production-facing kernel blocking is not enabled by default.
+validation and approved local execution path; production-facing kernel
+blocking is not enabled by default.
 
 ## 🚀 Runtime Scenarios
 
@@ -274,7 +275,8 @@ Independent Observability MVP, and F2 Accountability Beta are complete. F3
 Limited Guardrails is in progress with the enforcement capability matrix and
 validated-enable/report gates, including a live seccomp pre-operation `Block`
 prototype validation path, an operator-approved opt-in enablement gate, and
-persistent approval/rollback audit records.
+persistent approval/rollback audit records, plus a local seccomp execution gate
+that consumes approved enablement reports.
 
 Implementation milestones:
 
