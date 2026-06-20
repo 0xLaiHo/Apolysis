@@ -222,7 +222,8 @@ pre-operation `Block` prototype 的 validated-enable/report gate，并包含 liv
 seccomp pre-operation `Block` prototype validation path 和 operator-approved
 opt-in enablement gate、持久化 approval/rollback audit record，以及消费
 approved enablement report 的 local seccomp execution gate。BPF-LSM file-read
-prototype 已接入 preflight/build validation，仍等待特权 live attach evidence。
+prototype 已接入 preflight/build validation，并提供严格的 privileged live
+validation target；当前仍等待特权 live attach evidence。
 
 实现里程碑：
 

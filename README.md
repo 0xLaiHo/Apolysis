@@ -278,8 +278,8 @@ validated-enable/report gates, including a live seccomp pre-operation `Block`
 prototype validation path, an operator-approved opt-in enablement gate, and
 persistent approval/rollback audit records, plus a local seccomp execution gate
 that consumes approved enablement reports. The BPF-LSM file-read prototype is
-wired for preflight/build validation and awaits privileged live attach
-evidence.
+wired for preflight/build validation with a strict privileged live validation
+target, and awaits privileged live attach evidence.
 
 Implementation milestones:
 

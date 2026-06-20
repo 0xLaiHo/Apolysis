@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery test-f2-performance test-f2-visibility-reports test-f2-production-qualification test-f3-guardrails
+.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery test-f2-performance test-f2-visibility-reports test-f2-production-qualification test-f3-guardrails test-f3-bpf-lsm-live
 
 build: build-ebpf
 	cargo build --workspace
@@ -50,3 +50,6 @@ test-f2-production-qualification: test-f2-recovery test-f2-performance test-f2-v
 
 test-f3-guardrails:
 	./scripts/test-f3-guardrails.sh
+
+test-f3-bpf-lsm-live:
+	./scripts/test-f3-bpf-lsm-live.sh
