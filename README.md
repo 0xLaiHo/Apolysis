@@ -51,7 +51,8 @@ disabled by default while validating narrow local seccomp and BPF-LSM
 pre-operation block prototypes with operator-approved enablement and rollback
 audit records. F4 has started with a runtime guardrail support matrix that
 separates supported audit/review/kill paths, local-only block prototypes,
-metadata-only strong-isolation claims, and boundary-only VM-backed runtimes.
+metadata-only strong-isolation claims, boundary-only VM-backed runtimes, and
+validated Docker/containerd/Kubernetes adapter evidence.
 
 ## 🚀 Runtime Scenarios
 
@@ -275,7 +276,7 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
 Independent Observability MVP, F2 Accountability Beta, and F3 Limited
 Guardrails are complete. F4 Runtime Adapter Depth is in progress, starting with
-the runtime guardrail support matrix.
+the runtime guardrail support matrix and runtime adapter evidence correlation.
 
 Implementation milestones:
 

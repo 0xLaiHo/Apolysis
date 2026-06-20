@@ -20,14 +20,15 @@ use apolysis_daemon::{
     containerd_task_snapshot_from_metadata, containerd_workload_from_snapshot,
     crictl_marked_container_candidates_from_ps_and_pods, crictl_marked_container_ids_from_ps,
     docker_container_pid_from_engine_inspect, docker_snapshot_from_engine_inspect,
-    docker_workload_from_snapshot, kubernetes_marked_pod_snapshots_from_api_list,
-    kubernetes_pod_snapshot_from_api_object, kubernetes_workload_from_pod_snapshot,
-    run_runtime_adapter_with_policy, AdapterBackoffPolicy, ContainerdCriRuntimeAdapter,
-    ContainerdTaskSnapshot, CriRuntimeClient, DaemonConfig, DaemonState, DockerContainerSnapshot,
-    DockerEngineClient, DockerEnginePollingRuntimeAdapter, DockerEngineRuntimeAdapter,
-    KubernetesCliClient, KubernetesCliRuntimeAdapter, KubernetesPodSnapshot, RuntimeAdapterBackend,
-    RuntimeWorkload, APOLYSIS_SESSION_ANNOTATION,
+    docker_workload_from_snapshot, f4_runtime_adapter_evidence_from_workload,
+    kubernetes_marked_pod_snapshots_from_api_list, kubernetes_pod_snapshot_from_api_object,
+    kubernetes_workload_from_pod_snapshot, run_runtime_adapter_with_policy, AdapterBackoffPolicy,
+    ContainerdCriRuntimeAdapter, ContainerdTaskSnapshot, CriRuntimeClient, DaemonConfig,
+    DaemonState, DockerContainerSnapshot, DockerEngineClient, DockerEnginePollingRuntimeAdapter,
+    DockerEngineRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
+    KubernetesPodSnapshot, RuntimeAdapterBackend, RuntimeWorkload, APOLYSIS_SESSION_ANNOTATION,
 };
+use apolysis_validation::{F4RuntimeAdapterEvidenceSource, F4RuntimeGuardrailTarget};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -1243,6 +1244,68 @@ fn containerd_task_snapshot_becomes_runtime_workload_for_standalone_and_k3s() {
         k3s.runtime_handler.as_deref(),
         Some("io.containerd.kata.v2")
     );
+}
+
+#[test]
+fn runtime_workload_becomes_f4_runtime_adapter_evidence() {
+    let docker = f4_runtime_adapter_evidence_from_workload(
+        &RuntimeWorkload {
+            adapter: AdapterKind::Docker,
+            session_id: "session-docker".to_string(),
+            workload_id: "container-123".to_string(),
+            cgroup_id: 77,
+            image: Some("alpine:3.20".to_string()),
+            runtime_handler: Some("runc".to_string()),
+        },
+        "live-docker-runc-cgroup",
+        F4RuntimeAdapterEvidenceSource::LiveHost,
+    )
+    .expect("docker evidence");
+
+    assert_eq!(docker.runtime, F4RuntimeGuardrailTarget::Docker);
+    assert_eq!(docker.adapter, "docker");
+    assert_eq!(docker.evidence_id, "live-docker-runc-cgroup");
+    assert_eq!(docker.runtime_handler.as_deref(), Some("runc"));
+    assert!(docker.metadata_correlation);
+    assert!(docker.cgroup_correlation);
+    assert!(docker.host_boundary_visibility);
+    assert!(!docker.guest_semantics_claimed);
+
+    let gvisor = f4_runtime_adapter_evidence_from_workload(
+        &RuntimeWorkload {
+            adapter: AdapterKind::Containerd,
+            session_id: "session-gvisor".to_string(),
+            workload_id: "default/task-gvisor".to_string(),
+            cgroup_id: 88,
+            image: Some("alpine:3.20".to_string()),
+            runtime_handler: Some("io.containerd.runsc.v1".to_string()),
+        },
+        "live-containerd-gvisor-cgroup",
+        F4RuntimeAdapterEvidenceSource::LiveHost,
+    )
+    .expect("gvisor evidence");
+
+    assert_eq!(gvisor.runtime, F4RuntimeGuardrailTarget::Gvisor);
+    assert!(gvisor.host_boundary_visibility);
+    assert!(!gvisor.guest_semantics_claimed);
+
+    let kata = f4_runtime_adapter_evidence_from_workload(
+        &RuntimeWorkload {
+            adapter: AdapterKind::Kubernetes,
+            session_id: "session-kata".to_string(),
+            workload_id: "pod-uid-123".to_string(),
+            cgroup_id: 99,
+            image: None,
+            runtime_handler: Some("kata".to_string()),
+        },
+        "live-kubernetes-kata-boundary",
+        F4RuntimeAdapterEvidenceSource::LiveHost,
+    )
+    .expect("kata evidence");
+
+    assert_eq!(kata.runtime, F4RuntimeGuardrailTarget::Kata);
+    assert!(kata.host_boundary_visibility);
+    assert!(!kata.guest_semantics_claimed);
 }
 
 #[test]

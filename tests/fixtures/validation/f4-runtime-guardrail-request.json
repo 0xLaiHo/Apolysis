@@ -1,0 +1,32 @@
+{
+  "block_validation_reports": [
+    {
+      "evidence_id": "live-seccomp-local-file-read",
+      "source": "live_host",
+      "runtime": "local",
+      "action": "file_read",
+      "backend": "seccomp_block",
+      "host_bpf_lsm_available": false,
+      "seccomp_available": true,
+      "preoperation_prevention": true,
+      "decision_latency_ms": 1,
+      "side_effect_race_window_ms": 0
+    }
+  ],
+  "runtime_adapter_evidence_reports": [
+    {
+      "evidence_id": "live-docker-runc-cgroup",
+      "source": "live_host",
+      "runtime": "docker",
+      "adapter": "docker",
+      "session_id": "session-docker",
+      "workload_id": "container-123",
+      "cgroup_id": 77,
+      "runtime_handler": "runc",
+      "metadata_correlation": true,
+      "cgroup_correlation": true,
+      "host_boundary_visibility": true,
+      "guest_semantics_claimed": false
+    }
+  ]
+}

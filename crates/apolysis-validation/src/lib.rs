@@ -503,6 +503,44 @@ pub struct F4RuntimeGuardrailMatrixReport {
     pub runtimes: Vec<F4RuntimeGuardrailSupport>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F4RuntimeAdapterEvidenceSource {
+    Fixture,
+    LiveHost,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4RuntimeAdapterEvidenceReport {
+    pub evidence_id: String,
+    pub source: F4RuntimeAdapterEvidenceSource,
+    pub runtime: F4RuntimeGuardrailTarget,
+    pub adapter: String,
+    pub session_id: String,
+    pub workload_id: String,
+    pub cgroup_id: u64,
+    pub runtime_handler: Option<String>,
+    pub metadata_correlation: bool,
+    pub cgroup_correlation: bool,
+    pub host_boundary_visibility: bool,
+    pub guest_semantics_claimed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4RuntimeAdapterEvidenceGateFailure {
+    pub evidence_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4RuntimeAdapterEvidenceGateReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub reports: Vec<F4RuntimeAdapterEvidenceReport>,
+    pub validated_evidence: Vec<F4RuntimeAdapterEvidenceReport>,
+    pub failures: Vec<F4RuntimeAdapterEvidenceGateFailure>,
+}
+
 impl F3BlockOperatorAuditRecord {
     pub fn to_json_line(&self) -> Result<String, String> {
         serde_json::to_string(self)
@@ -1075,8 +1113,25 @@ pub fn evaluate_f3_block_validation_gate(
 pub fn evaluate_f4_runtime_guardrail_matrix(
     reports: Vec<F3BlockValidationReport>,
 ) -> F4RuntimeGuardrailMatrixReport {
+    evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
+        reports,
+        F4RuntimeAdapterEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        },
+    )
+}
+
+pub fn evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
+    reports: Vec<F3BlockValidationReport>,
+    adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
+) -> F4RuntimeGuardrailMatrixReport {
     let local_seccomp_evidence = f4_validated_local_block_evidence(&reports, "seccomp_block");
     let local_bpf_lsm_evidence = f4_validated_local_block_evidence(&reports, "bpf_lsm_block");
+    let adapter_evidence_ids = f4_adapter_evidence_ids_by_runtime(&adapter_evidence);
 
     F4RuntimeGuardrailMatrixReport {
         schema_version: 1,
@@ -1111,17 +1166,17 @@ pub fn evaluate_f4_runtime_guardrail_matrix(
                 runtime: F4RuntimeGuardrailTarget::Docker,
                 notify: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Docker),
                     "Docker metadata correlation supports accountable notify findings",
                 ),
                 review: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Docker),
                     "Docker workload identity can be attached to review findings",
                 ),
                 kill: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Docker),
                     "Docker workload metadata supports post-event kill containment decisions",
                 ),
                 seccomp_block: f4_runtime_evidence_required("Docker seccomp block"),
@@ -1136,17 +1191,17 @@ pub fn evaluate_f4_runtime_guardrail_matrix(
                 runtime: F4RuntimeGuardrailTarget::Containerd,
                 notify: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Containerd),
                     "containerd task metadata supports accountable notify findings",
                 ),
                 review: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Containerd),
                     "containerd workload identity can be attached to review findings",
                 ),
                 kill: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Containerd),
                     "containerd task metadata supports post-event kill containment decisions",
                 ),
                 seccomp_block: f4_runtime_evidence_required("containerd seccomp block"),
@@ -1161,17 +1216,17 @@ pub fn evaluate_f4_runtime_guardrail_matrix(
                 runtime: F4RuntimeGuardrailTarget::Kubernetes,
                 notify: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kubernetes),
                     "Pod, namespace, service account, and RuntimeClass metadata support notify findings",
                 ),
                 review: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kubernetes),
                     "Kubernetes identity can be attached to review findings",
                 ),
                 kill: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kubernetes),
                     "Kubernetes workload identity supports post-event containment decisions",
                 ),
                 seccomp_block: f4_runtime_evidence_required("Kubernetes seccomp block"),
@@ -1186,21 +1241,27 @@ pub fn evaluate_f4_runtime_guardrail_matrix(
                 runtime: F4RuntimeGuardrailTarget::Gvisor,
                 notify: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
                     "runsc, sentry, and gofer metadata can identify the sandbox boundary",
                 ),
                 review: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
                     "gVisor metadata can support review findings without claiming guest syscall semantics",
                 ),
                 kill: f4_entry(
                     F4GuardrailSupportStatus::RequiresRuntimeEvidence,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
                     "kill containment needs runtime-specific evidence for runsc/sentry/gofer behavior",
                 ),
-                seccomp_block: f4_metadata_only_block("gVisor seccomp block"),
-                bpf_lsm_block: f4_metadata_only_block("gVisor BPF-LSM block"),
+                seccomp_block: f4_metadata_only_block(
+                    "gVisor seccomp block",
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
+                ),
+                bpf_lsm_block: f4_metadata_only_block(
+                    "gVisor BPF-LSM block",
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
+                ),
                 requires_guest_collector: false,
                 no_go_claims: vec![
                     "host-side evidence must not claim gVisor guest syscall semantics".to_string(),
@@ -1211,21 +1272,27 @@ pub fn evaluate_f4_runtime_guardrail_matrix(
                 runtime: F4RuntimeGuardrailTarget::Kata,
                 notify: f4_entry(
                     F4GuardrailSupportStatus::BoundaryOnly,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
                     "host visibility can identify the Kata VM boundary",
                 ),
                 review: f4_entry(
                     F4GuardrailSupportStatus::BoundaryOnly,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
                     "review findings must be scoped to host-boundary evidence unless a guest collector exists",
                 ),
                 kill: f4_entry(
                     F4GuardrailSupportStatus::BoundaryOnly,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
                     "kill containment is limited to boundary-level actions without guest evidence",
                 ),
-                seccomp_block: f4_boundary_only_block("Kata seccomp block"),
-                bpf_lsm_block: f4_boundary_only_block("Kata BPF-LSM block"),
+                seccomp_block: f4_boundary_only_block(
+                    "Kata seccomp block",
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
+                ),
+                bpf_lsm_block: f4_boundary_only_block(
+                    "Kata BPF-LSM block",
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
+                ),
                 requires_guest_collector: true,
                 no_go_claims: vec![
                     "host-side kernel block must not claim Kata guest-semantic prevention".to_string(),
@@ -1236,21 +1303,27 @@ pub fn evaluate_f4_runtime_guardrail_matrix(
                 runtime: F4RuntimeGuardrailTarget::Firecracker,
                 notify: f4_entry(
                     F4GuardrailSupportStatus::BoundaryOnly,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Firecracker),
                     "Firecracker support remains a host-boundary research prototype",
                 ),
                 review: f4_entry(
                     F4GuardrailSupportStatus::BoundaryOnly,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Firecracker),
                     "review findings must be scoped to the VM boundary in the research prototype",
                 ),
                 kill: f4_entry(
                     F4GuardrailSupportStatus::BoundaryOnly,
-                    Vec::new(),
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Firecracker),
                     "kill containment is limited to boundary-level research behavior",
                 ),
-                seccomp_block: f4_boundary_only_block("Firecracker seccomp block"),
-                bpf_lsm_block: f4_boundary_only_block("Firecracker BPF-LSM block"),
+                seccomp_block: f4_boundary_only_block(
+                    "Firecracker seccomp block",
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Firecracker),
+                ),
+                bpf_lsm_block: f4_boundary_only_block(
+                    "Firecracker BPF-LSM block",
+                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Firecracker),
+                ),
                 requires_guest_collector: true,
                 no_go_claims: vec![
                     "Firecracker is not a production runtime lifecycle manager in F4".to_string(),
@@ -1258,6 +1331,114 @@ pub fn evaluate_f4_runtime_guardrail_matrix(
                 ],
             },
         ],
+    }
+}
+
+pub fn evaluate_f4_runtime_adapter_evidence_gate(
+    reports: Vec<F4RuntimeAdapterEvidenceReport>,
+) -> F4RuntimeAdapterEvidenceGateReport {
+    let mut failures = Vec::new();
+    let mut validated_evidence = Vec::new();
+
+    if reports.is_empty() {
+        failures.push(f4_adapter_failure(
+            None,
+            "at least one F4 runtime adapter evidence report is required",
+        ));
+    }
+
+    for report in &reports {
+        let evidence_id = if report.evidence_id.trim().is_empty() {
+            None
+        } else {
+            Some(report.evidence_id.clone())
+        };
+        let mut report_failures = Vec::new();
+
+        if report.evidence_id.trim().is_empty() {
+            report_failures.push(f4_adapter_failure(
+                None,
+                "runtime adapter evidence is missing evidence id",
+            ));
+        }
+        if report.source != F4RuntimeAdapterEvidenceSource::LiveHost {
+            report_failures.push(f4_adapter_failure(
+                evidence_id.clone(),
+                "F4 runtime guardrail support requires live runtime adapter evidence",
+            ));
+        }
+        if report.adapter.trim().is_empty() {
+            report_failures.push(f4_adapter_failure(
+                evidence_id.clone(),
+                "runtime adapter evidence is missing adapter name",
+            ));
+        }
+        if report.session_id.trim().is_empty() {
+            report_failures.push(f4_adapter_failure(
+                evidence_id.clone(),
+                "runtime adapter evidence is missing session id",
+            ));
+        }
+        if report.workload_id.trim().is_empty() {
+            report_failures.push(f4_adapter_failure(
+                evidence_id.clone(),
+                "runtime adapter evidence is missing workload id",
+            ));
+        }
+        if report.cgroup_id == 0 {
+            report_failures.push(f4_adapter_failure(
+                evidence_id.clone(),
+                "runtime adapter evidence must include a non-zero cgroup id",
+            ));
+        }
+        if !report.metadata_correlation {
+            report_failures.push(f4_adapter_failure(
+                evidence_id.clone(),
+                "runtime adapter evidence must prove metadata correlation",
+            ));
+        }
+        if !report.cgroup_correlation {
+            report_failures.push(f4_adapter_failure(
+                evidence_id.clone(),
+                "runtime adapter evidence must prove cgroup correlation",
+            ));
+        }
+        if !report.host_boundary_visibility {
+            report_failures.push(f4_adapter_failure(
+                evidence_id.clone(),
+                "runtime adapter evidence must prove host-boundary visibility",
+            ));
+        }
+        if report.guest_semantics_claimed
+            && matches!(
+                report.runtime,
+                F4RuntimeGuardrailTarget::Gvisor
+                    | F4RuntimeGuardrailTarget::Kata
+                    | F4RuntimeGuardrailTarget::Firecracker
+            )
+        {
+            report_failures.push(f4_adapter_failure(
+                evidence_id.clone(),
+                "strong-isolation runtime adapter evidence must not claim guest semantics",
+            ));
+        }
+
+        if report_failures.is_empty() {
+            validated_evidence.push(report.clone());
+        }
+        failures.extend(report_failures);
+    }
+
+    F4RuntimeAdapterEvidenceGateReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        reports,
+        validated_evidence: if failures.is_empty() {
+            validated_evidence
+        } else {
+            Vec::new()
+        },
+        failures,
     }
 }
 
@@ -2788,22 +2969,61 @@ fn f4_runtime_evidence_required(capability: &'static str) -> F4GuardrailSupportE
     )
 }
 
-fn f4_metadata_only_block(capability: &'static str) -> F4GuardrailSupportEntry {
+fn f4_metadata_only_block(
+    capability: &'static str,
+    evidence_ids: Vec<String>,
+) -> F4GuardrailSupportEntry {
     f4_entry(
         F4GuardrailSupportStatus::MetadataOnly,
-        Vec::new(),
+        evidence_ids,
         format!(
             "{capability} is metadata-only until guest/runtime prevention semantics are proven"
         ),
     )
 }
 
-fn f4_boundary_only_block(capability: &'static str) -> F4GuardrailSupportEntry {
+fn f4_boundary_only_block(
+    capability: &'static str,
+    evidence_ids: Vec<String>,
+) -> F4GuardrailSupportEntry {
     f4_entry(
         F4GuardrailSupportStatus::BoundaryOnly,
-        Vec::new(),
+        evidence_ids,
         format!("{capability} is boundary-only without guest collector evidence"),
     )
+}
+
+fn f4_adapter_evidence_ids_by_runtime(
+    gate: &F4RuntimeAdapterEvidenceGateReport,
+) -> BTreeMap<F4RuntimeGuardrailTarget, Vec<String>> {
+    let mut by_runtime: BTreeMap<F4RuntimeGuardrailTarget, Vec<String>> = BTreeMap::new();
+    if !gate.passed {
+        return by_runtime;
+    }
+    for report in &gate.validated_evidence {
+        by_runtime
+            .entry(report.runtime)
+            .or_default()
+            .push(report.evidence_id.clone());
+    }
+    by_runtime
+}
+
+fn f4_adapter_ids(
+    by_runtime: &BTreeMap<F4RuntimeGuardrailTarget, Vec<String>>,
+    runtime: F4RuntimeGuardrailTarget,
+) -> Vec<String> {
+    by_runtime.get(&runtime).cloned().unwrap_or_default()
+}
+
+fn f4_adapter_failure(
+    evidence_id: Option<String>,
+    message: impl Into<String>,
+) -> F4RuntimeAdapterEvidenceGateFailure {
+    F4RuntimeAdapterEvidenceGateFailure {
+        evidence_id,
+        message: message.into(),
+    }
 }
 
 fn f3_local_seccomp_execution_failure(

@@ -2,7 +2,12 @@
 
 use std::io::Read;
 
-use apolysis_validation::{evaluate_f4_runtime_guardrail_matrix, F3BlockValidationReport};
+use apolysis_validation::{
+    evaluate_f4_runtime_adapter_evidence_gate, evaluate_f4_runtime_guardrail_matrix,
+    evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence, F3BlockValidationReport,
+    F4RuntimeAdapterEvidenceReport,
+};
+use serde_json::Value;
 
 fn main() {
     if let Err(error) = run() {
@@ -16,10 +21,48 @@ fn run() -> Result<(), String> {
     std::io::stdin()
         .read_to_string(&mut input)
         .map_err(|error| format!("failed to read stdin: {error}"))?;
-    let reports: Vec<F3BlockValidationReport> = serde_json::from_str(&input)
-        .map_err(|error| format!("failed to parse F3 block validation reports JSON: {error}"))?;
-
-    let matrix = evaluate_f4_runtime_guardrail_matrix(reports);
+    let parsed: Value = serde_json::from_str(&input)
+        .map_err(|error| format!("failed to parse F4 runtime guardrail matrix JSON: {error}"))?;
+    let matrix = if parsed.is_array() {
+        let reports: Vec<F3BlockValidationReport> =
+            serde_json::from_value(parsed).map_err(|error| {
+                format!("failed to parse F3 block validation reports JSON: {error}")
+            })?;
+        evaluate_f4_runtime_guardrail_matrix(reports)
+    } else if parsed.is_object() {
+        let block_validation_reports: Vec<F3BlockValidationReport> = serde_json::from_value(
+            parsed
+                .get("block_validation_reports")
+                .cloned()
+                .ok_or_else(|| "missing block_validation_reports".to_string())?,
+        )
+        .map_err(|error| format!("failed to parse block_validation_reports: {error}"))?;
+        let runtime_adapter_evidence_reports: Vec<F4RuntimeAdapterEvidenceReport> =
+            serde_json::from_value(
+                parsed
+                    .get("runtime_adapter_evidence_reports")
+                    .cloned()
+                    .ok_or_else(|| "missing runtime_adapter_evidence_reports".to_string())?,
+            )
+            .map_err(|error| {
+                format!("failed to parse runtime_adapter_evidence_reports: {error}")
+            })?;
+        let adapter_gate =
+            evaluate_f4_runtime_adapter_evidence_gate(runtime_adapter_evidence_reports);
+        if !adapter_gate.passed {
+            let gate_json = serde_json::to_string_pretty(&adapter_gate).map_err(|error| {
+                format!("failed to serialize F4 runtime adapter evidence gate: {error}")
+            })?;
+            eprintln!("{gate_json}");
+            std::process::exit(1);
+        }
+        evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
+            block_validation_reports,
+            adapter_gate,
+        )
+    } else {
+        return Err("F4 runtime guardrail matrix input must be a JSON array or object".to_string());
+    };
     let output = serde_json::to_string_pretty(&matrix)
         .map_err(|error| format!("failed to serialize F4 runtime guardrail matrix: {error}"))?;
     println!("{output}");
