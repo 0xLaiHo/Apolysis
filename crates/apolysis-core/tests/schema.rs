@@ -38,7 +38,8 @@ fn enforcement_metadata_json_line_records_timing_and_capability_context() {
         false,
     )
     .with_rule_id("credentials.deny_read")
-    .with_downgrade_reason(None::<String>);
+    .with_downgrade_reason(None::<String>)
+    .with_measurement(1_780_328_000_003, 1_780_328_000_123);
 
     let line = metadata.to_json_line();
 
@@ -50,8 +51,31 @@ fn enforcement_metadata_json_line_records_timing_and_capability_context() {
     assert!(line.contains(r#""runtime":"local""#));
     assert!(line.contains(r#""action":"credential_read""#));
     assert!(line.contains(r#""preoperation_prevention":false"#));
+    assert!(line.contains(r#""observed_event_timestamp_unix_ms":1780328000003"#));
+    assert!(line.contains(r#""decision_latency_ms":120"#));
+    assert!(line.contains(r#""side_effect_race_window_ms":120"#));
     assert!(line.contains(r#""rule_id":"credentials.deny_read""#));
     assert!(line.contains(r#""downgrade_reason":null"#));
+}
+
+#[test]
+fn enforcement_metadata_records_zero_race_window_for_preoperation_prevention() {
+    let metadata = EnforcementMetadata::new(
+        "session-1",
+        PolicyDecision::Block,
+        PolicyDecision::Block,
+        EnforcementBackend::BpfLsmBlock,
+        "pre_operation",
+        "local",
+        "file_read",
+        true,
+    )
+    .with_measurement(1_780_328_000_003, 1_780_328_000_123);
+
+    let line = metadata.to_json_line();
+
+    assert!(line.contains(r#""decision_latency_ms":120"#));
+    assert!(line.contains(r#""side_effect_race_window_ms":0"#));
 }
 
 #[test]

@@ -529,6 +529,9 @@ pub struct EnforcementMetadata {
     pub runtime: String,
     pub action: String,
     pub preoperation_prevention: bool,
+    pub observed_event_timestamp_unix_ms: Option<u128>,
+    pub decision_latency_ms: Option<u128>,
+    pub side_effect_race_window_ms: Option<u128>,
     pub downgrade_reason: Option<String>,
 }
 
@@ -555,6 +558,9 @@ impl EnforcementMetadata {
             runtime: runtime.into(),
             action: action.into(),
             preoperation_prevention,
+            observed_event_timestamp_unix_ms: None,
+            decision_latency_ms: None,
+            side_effect_race_window_ms: None,
             downgrade_reason: None,
         }
     }
@@ -569,6 +575,23 @@ impl EnforcementMetadata {
         self
     }
 
+    pub fn with_measurement(
+        mut self,
+        observed_event_timestamp_unix_ms: u128,
+        decision_timestamp_unix_ms: u128,
+    ) -> Self {
+        let latency = decision_timestamp_unix_ms.saturating_sub(observed_event_timestamp_unix_ms);
+        self.timestamp_unix_ms = decision_timestamp_unix_ms;
+        self.observed_event_timestamp_unix_ms = Some(observed_event_timestamp_unix_ms);
+        self.decision_latency_ms = Some(latency);
+        self.side_effect_race_window_ms = Some(if self.preoperation_prevention {
+            0
+        } else {
+            latency
+        });
+        self
+    }
+
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
     }
@@ -577,7 +600,7 @@ impl EnforcementMetadata {
 impl JsonLine for EnforcementMetadata {
     fn to_json_line(&self) -> String {
         format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"rule_id\":{},\"requested_decision\":{},\"effective_decision\":{},\"enforcement_backend\":{},\"timing\":{},\"runtime\":{},\"action\":{},\"preoperation_prevention\":{},\"downgrade_reason\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"rule_id\":{},\"requested_decision\":{},\"effective_decision\":{},\"enforcement_backend\":{},\"timing\":{},\"runtime\":{},\"action\":{},\"preoperation_prevention\":{},\"observed_event_timestamp_unix_ms\":{},\"decision_latency_ms\":{},\"side_effect_race_window_ms\":{},\"downgrade_reason\":{}}}",
             json_string(records::ENFORCEMENT_METADATA),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
@@ -589,6 +612,9 @@ impl JsonLine for EnforcementMetadata {
             json_string(&self.runtime),
             json_string(&self.action),
             self.preoperation_prevention,
+            optional_json_u128(self.observed_event_timestamp_unix_ms),
+            optional_json_u128(self.decision_latency_ms),
+            optional_json_u128(self.side_effect_race_window_ms),
             optional_json_string(self.downgrade_reason.as_deref())
         )
     }
@@ -618,6 +644,12 @@ pub fn json_string(value: &str) -> String {
 
 fn optional_json_string(value: Option<&str>) -> String {
     value.map(json_string).unwrap_or_else(|| "null".to_string())
+}
+
+fn optional_json_u128(value: Option<u128>) -> String {
+    value
+        .map(|number| number.to_string())
+        .unwrap_or_else(|| "null".to_string())
 }
 
 /// Return the current Unix timestamp in milliseconds.

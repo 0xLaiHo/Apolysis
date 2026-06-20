@@ -169,6 +169,9 @@ fn observe_fixture_emits_kill_containment_metadata() {
     assert!(timeline.contains(r#""timing":"post_event_containment""#));
     assert!(timeline.contains(r#""preoperation_prevention":false"#));
     assert!(timeline.contains(r#""action":"credential_read""#));
+    assert!(timeline.contains(r#""observed_event_timestamp_unix_ms":"#));
+    assert!(timeline.contains(r#""decision_latency_ms":"#));
+    assert!(timeline.contains(r#""side_effect_race_window_ms":"#));
 
     let _ = std::fs::remove_file(&output);
 }

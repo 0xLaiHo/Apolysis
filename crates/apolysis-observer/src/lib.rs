@@ -26,8 +26,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use apolysis_core::{
-    actors, fields::PipeFields, resources, CanonicalEvent, EnforcementMetadata, EventSource,
-    EventType, PolicyViolation, RawKernelEvent,
+    actors, fields::PipeFields, now_unix_ms, resources, CanonicalEvent, EnforcementMetadata,
+    EventSource, EventType, PolicyViolation, RawKernelEvent,
 };
 use apolysis_feedback::FeedbackWriter;
 use apolysis_kubernetes::KubernetesMetadata;
@@ -389,7 +389,8 @@ fn append_policy_evaluation(
         evaluation.preoperation_prevention,
     )
     .with_rule_id(rule_id)
-    .with_downgrade_reason(downgrade_reason);
+    .with_downgrade_reason(downgrade_reason)
+    .with_measurement(canonical.timestamp_unix_ms, now_unix_ms());
     store
         .append(&metadata)
         .map_err(|error| format!("failed to write enforcement metadata: {error}"))?;
