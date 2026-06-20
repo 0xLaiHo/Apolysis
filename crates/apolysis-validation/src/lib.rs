@@ -324,6 +324,50 @@ pub struct F3BlockValidationGateReport {
     pub failures: Vec<F3BlockValidationGateFailure>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BlockRollbackPlan {
+    pub plan_id: String,
+    pub disable_command: String,
+    pub validation_command: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BlockEnablementRequest {
+    pub request_id: String,
+    pub evidence_id: String,
+    pub backend: String,
+    pub runtime: F3BlockValidationRuntime,
+    pub action: F3BlockValidationAction,
+    pub operator_approved: bool,
+    pub default_enabled: bool,
+    pub rollback: Option<F3BlockRollbackPlan>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BlockApprovedEnablement {
+    pub request_id: String,
+    pub evidence_id: String,
+    pub backend: String,
+    pub runtime: F3BlockValidationRuntime,
+    pub action: F3BlockValidationAction,
+    pub default_enabled: bool,
+    pub rollback_plan_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BlockEnablementFailure {
+    pub request_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BlockEnablementPolicyReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approved_enablements: Vec<F3BlockApprovedEnablement>,
+    pub failures: Vec<F3BlockEnablementFailure>,
+}
+
 pub trait ServiceController {
     fn restore_unit_file_state(
         &mut self,
@@ -879,6 +923,143 @@ pub fn evaluate_f3_block_validation_gate(
         reports,
         validated_blocks: if failures.is_empty() {
             validated_blocks
+        } else {
+            Vec::new()
+        },
+        failures,
+    }
+}
+
+pub fn evaluate_f3_block_enablement_policy(
+    validation: F3BlockValidationGateReport,
+    requests: Vec<F3BlockEnablementRequest>,
+) -> F3BlockEnablementPolicyReport {
+    let mut failures = Vec::new();
+    let mut approved_enablements = Vec::new();
+    let reports_by_evidence: BTreeMap<&str, &F3BlockValidationReport> = validation
+        .reports
+        .iter()
+        .map(|report| (report.evidence_id.as_str(), report))
+        .collect();
+    let validated_by_evidence: BTreeSet<&str> = validation
+        .validated_blocks
+        .iter()
+        .map(|enablement| enablement.evidence_id.as_str())
+        .collect();
+
+    if !validation.passed {
+        failures.push(f3_enablement_failure(
+            None,
+            "block validation gate must pass before enablement can be approved",
+        ));
+    }
+    if requests.is_empty() {
+        failures.push(f3_enablement_failure(
+            None,
+            "at least one block enablement request is required",
+        ));
+    }
+
+    for request in &requests {
+        let mut request_failures = Vec::new();
+        let request_id = if request.request_id.trim().is_empty() {
+            None
+        } else {
+            Some(request.request_id.clone())
+        };
+
+        if request.request_id.trim().is_empty() {
+            request_failures.push(f3_enablement_failure(
+                None,
+                "block enablement request is missing request id",
+            ));
+        }
+        if request.evidence_id.trim().is_empty() {
+            request_failures.push(f3_enablement_failure(
+                request_id.clone(),
+                "block enablement request is missing evidence id",
+            ));
+        }
+        if !request.operator_approved {
+            request_failures.push(f3_enablement_failure(
+                request_id.clone(),
+                "operator approval is required",
+            ));
+        }
+        if request.default_enabled {
+            request_failures.push(f3_enablement_failure(
+                request_id.clone(),
+                "production-facing block must remain opt-in",
+            ));
+        }
+
+        match &request.rollback {
+            Some(rollback) => {
+                if rollback.plan_id.trim().is_empty() {
+                    request_failures.push(f3_enablement_failure(
+                        request_id.clone(),
+                        "rollback plan is missing plan id",
+                    ));
+                }
+                if rollback.disable_command.trim().is_empty() {
+                    request_failures.push(f3_enablement_failure(
+                        request_id.clone(),
+                        "rollback plan is missing disable command",
+                    ));
+                }
+                if rollback.validation_command.trim().is_empty() {
+                    request_failures.push(f3_enablement_failure(
+                        request_id.clone(),
+                        "rollback plan is missing validation command",
+                    ));
+                }
+            }
+            None => request_failures.push(f3_enablement_failure(
+                request_id.clone(),
+                "rollback plan is required",
+            )),
+        }
+
+        let validated_report = reports_by_evidence.get(request.evidence_id.as_str());
+        if !validated_by_evidence.contains(request.evidence_id.as_str()) {
+            request_failures.push(f3_enablement_failure(
+                request_id.clone(),
+                "no matching validated block evidence",
+            ));
+        }
+        if let Some(report) = validated_report {
+            if report.backend != request.backend
+                || report.runtime != request.runtime
+                || report.action != request.action
+            {
+                request_failures.push(f3_enablement_failure(
+                    request_id.clone(),
+                    "enablement request does not match validated runtime/action/backend",
+                ));
+            }
+        }
+
+        if request_failures.is_empty() {
+            let rollback = request.rollback.as_ref().expect("rollback was validated");
+            approved_enablements.push(F3BlockApprovedEnablement {
+                request_id: request.request_id.clone(),
+                evidence_id: request.evidence_id.clone(),
+                backend: request.backend.clone(),
+                runtime: request.runtime,
+                action: request.action,
+                default_enabled: request.default_enabled,
+                rollback_plan_id: rollback.plan_id.clone(),
+            });
+        }
+
+        failures.extend(request_failures);
+    }
+
+    F3BlockEnablementPolicyReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        approved_enablements: if failures.is_empty() {
+            approved_enablements
         } else {
             Vec::new()
         },
@@ -2040,6 +2221,16 @@ fn f3_block_failure(
 ) -> F3BlockValidationGateFailure {
     F3BlockValidationGateFailure {
         evidence_id,
+        message: message.into(),
+    }
+}
+
+fn f3_enablement_failure(
+    request_id: Option<String>,
+    message: impl Into<String>,
+) -> F3BlockEnablementFailure {
+    F3BlockEnablementFailure {
+        request_id,
         message: message.into(),
     }
 }

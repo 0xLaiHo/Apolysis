@@ -26,5 +26,9 @@ cargo run -p apolysis-validation --bin apolysis-f3-seccomp-file-read-prototype \
 cargo run -p apolysis-validation --bin apolysis-f3-block-validation-report \
   < /tmp/apolysis-f3-seccomp-file-read-report.json \
   > /tmp/apolysis-f3-seccomp-file-read-gate.json
+cargo run -p apolysis-validation --bin apolysis-f3-block-enablement-policy -- \
+  --validation-gate /tmp/apolysis-f3-seccomp-file-read-gate.json \
+  < tests/fixtures/validation/f3-block-enablement-valid.json \
+  > /tmp/apolysis-f3-block-enablement-policy.json
 
 echo "apolysis-f3: guardrail capability validation passed"
