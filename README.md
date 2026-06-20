@@ -49,7 +49,8 @@ events, loss diagnostics, and persistence-time redaction. Its privileged
 live-host validation is complete. BPF-LSM enforcement remains modeled and
 capability-gated, and F3 includes a live seccomp pre-operation block prototype
 validation and approved local execution path; production-facing kernel
-blocking is not enabled by default.
+blocking is not enabled by default. A BPF-LSM file-read prototype loader and
+preflight gate exist, but BPF-LSM live attach still requires a privileged run.
 
 ## 🚀 Runtime Scenarios
 
@@ -276,7 +277,9 @@ Limited Guardrails is in progress with the enforcement capability matrix and
 validated-enable/report gates, including a live seccomp pre-operation `Block`
 prototype validation path, an operator-approved opt-in enablement gate, and
 persistent approval/rollback audit records, plus a local seccomp execution gate
-that consumes approved enablement reports.
+that consumes approved enablement reports. The BPF-LSM file-read prototype is
+wired for preflight/build validation and awaits privileged live attach
+evidence.
 
 Implementation milestones:
 

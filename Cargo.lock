@@ -115,6 +115,7 @@ version = "0.1.0"
 dependencies = [
  "apolysis-core",
  "apolysis-policy",
+ "aya",
  "libc",
  "serde",
  "serde_json",

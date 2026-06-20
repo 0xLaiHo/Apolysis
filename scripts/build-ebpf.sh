@@ -7,6 +7,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 output_dir="$repo_root/target/ebpf"
 vmlinux_header="$output_dir/vmlinux.h"
 object="$output_dir/apolysis_observer.bpf.o"
+bpf_lsm_object="$output_dir/apolysis_bpf_lsm_file_read.bpf.o"
 
 set +e
 "$repo_root/scripts/check-bpf-prereqs.sh" build
@@ -43,3 +44,16 @@ clang \
 
 llvm-strip -g "$object"
 printf 'apolysis-bpf: built %s\n' "$object"
+
+clang \
+    -g \
+    -O2 \
+    -target bpf \
+    -D"__TARGET_ARCH_${target_arch}" \
+    -I"$output_dir" \
+    -I"$repo_root/ebpf/include" \
+    -c "$repo_root/ebpf/observer/apolysis_bpf_lsm_file_read.bpf.c" \
+    -o "$bpf_lsm_object"
+
+llvm-strip -g "$bpf_lsm_object"
+printf 'apolysis-bpf: built %s\n' "$bpf_lsm_object"

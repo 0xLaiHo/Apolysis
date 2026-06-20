@@ -418,6 +418,29 @@ pub struct F3LocalSeccompExecutionReport {
     pub failures: Vec<F3LocalSeccompExecutionFailure>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BpfLsmPrototypeEnvironment {
+    pub linux: bool,
+    pub btf_available: bool,
+    pub bpf_lsm_configured: bool,
+    pub bpf_lsm_active: bool,
+    pub prototype_object_available: bool,
+    pub privileged_for_bpf: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BpfLsmPrototypePrerequisiteFailure {
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BpfLsmPrototypePrerequisiteReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub environment: F3BpfLsmPrototypeEnvironment,
+    pub failures: Vec<F3BpfLsmPrototypePrerequisiteFailure>,
+}
+
 impl F3BlockOperatorAuditRecord {
     pub fn to_json_line(&self) -> Result<String, String> {
         serde_json::to_string(self)
@@ -1235,6 +1258,50 @@ pub fn evaluate_f3_local_seccomp_execution_gate(
         },
         blocked_errno: None,
         blocked_message: None,
+        failures,
+    }
+}
+
+pub fn evaluate_f3_bpf_lsm_prototype_prerequisites(
+    environment: F3BpfLsmPrototypeEnvironment,
+) -> F3BpfLsmPrototypePrerequisiteReport {
+    let mut failures = Vec::new();
+
+    if !environment.linux {
+        failures.push(f3_bpf_lsm_prerequisite_failure(
+            "BPF-LSM prototype requires Linux",
+        ));
+    }
+    if !environment.btf_available {
+        failures.push(f3_bpf_lsm_prerequisite_failure(
+            "readable kernel BTF is required",
+        ));
+    }
+    if !environment.bpf_lsm_configured {
+        failures.push(f3_bpf_lsm_prerequisite_failure(
+            "kernel must be configured with CONFIG_BPF_LSM",
+        ));
+    }
+    if !environment.bpf_lsm_active {
+        failures.push(f3_bpf_lsm_prerequisite_failure(
+            "active LSM list must include bpf",
+        ));
+    }
+    if !environment.prototype_object_available {
+        failures.push(f3_bpf_lsm_prerequisite_failure(
+            "BPF-LSM prototype object is required",
+        ));
+    }
+    if !environment.privileged_for_bpf {
+        failures.push(f3_bpf_lsm_prerequisite_failure(
+            "CAP_BPF and CAP_PERFMON or CAP_SYS_ADMIN are required",
+        ));
+    }
+
+    F3BpfLsmPrototypePrerequisiteReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        environment,
         failures,
     }
 }
@@ -2422,6 +2489,14 @@ fn evidence_id_opt(evidence_id: &str) -> Option<String> {
         None
     } else {
         Some(evidence_id.to_string())
+    }
+}
+
+fn f3_bpf_lsm_prerequisite_failure(
+    message: impl Into<String>,
+) -> F3BpfLsmPrototypePrerequisiteFailure {
+    F3BpfLsmPrototypePrerequisiteFailure {
+        message: message.into(),
     }
 }
 
