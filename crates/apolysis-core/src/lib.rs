@@ -131,6 +131,7 @@ pub enum EnforcementBackend {
     AuditOnly,
     TracepointNotify,
     BpfLsmBlock,
+    SeccompBlock,
     SignalKill,
 }
 
@@ -141,6 +142,7 @@ impl EnforcementBackend {
             Self::AuditOnly => "audit_only",
             Self::TracepointNotify => "tracepoint_notify",
             Self::BpfLsmBlock => "bpf_lsm_block",
+            Self::SeccompBlock => "seccomp_block",
             Self::SignalKill => "signal_kill",
         }
     }

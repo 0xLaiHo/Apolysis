@@ -6,6 +6,7 @@
     "action": "file_read",
     "backend": "bpf_lsm_block",
     "host_bpf_lsm_available": true,
+    "seccomp_available": false,
     "preoperation_prevention": true,
     "decision_latency_ms": 3,
     "side_effect_race_window_ms": 0

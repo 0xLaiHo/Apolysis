@@ -32,3 +32,7 @@ path = "src/bin/apolysis-f2-visibility-report.rs"
 [[bin]]
 name = "apolysis-f3-block-validation-report"
 path = "src/bin/apolysis-f3-block-validation-report.rs"
+
+[[bin]]
+name = "apolysis-f3-seccomp-file-read-prototype"
+path = "src/bin/apolysis-f3-seccomp-file-read-prototype.rs"

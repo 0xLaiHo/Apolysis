@@ -21,4 +21,10 @@ if cargo run -p apolysis-validation --bin apolysis-f3-block-validation-report \
   exit 1
 fi
 
+cargo run -p apolysis-validation --bin apolysis-f3-seccomp-file-read-prototype \
+  > /tmp/apolysis-f3-seccomp-file-read-report.json
+cargo run -p apolysis-validation --bin apolysis-f3-block-validation-report \
+  < /tmp/apolysis-f3-seccomp-file-read-report.json \
+  > /tmp/apolysis-f3-seccomp-file-read-gate.json
+
 echo "apolysis-f3: guardrail capability validation passed"

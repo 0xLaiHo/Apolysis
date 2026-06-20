@@ -2,7 +2,7 @@
 
 use apolysis_core::{CanonicalEvent, EnforcementBackend, EventSource, EventType};
 use apolysis_policy::{
-    BlockPrototypeEvidence, BlockPrototypeEvidenceSource, DecisionKind,
+    BlockPrototypeBackend, BlockPrototypeEvidence, BlockPrototypeEvidenceSource, DecisionKind,
     EnforcementCapabilityMatrix, EnforcementRuntime, EnforcementTiming, Policy, PolicyDecision,
     PolicyRuntimeCapabilities, PreoperationBlockSupport,
 };
@@ -239,6 +239,7 @@ network:
     let capabilities = PolicyRuntimeCapabilities {
         bpf_lsm_available: true,
         runtime: EnforcementRuntime::Local,
+        preoperation_block_backend: Some(BlockPrototypeBackend::BpfLsm),
         preoperation_block: PreoperationBlockSupport {
             file_read: true,
             ..PreoperationBlockSupport::default()
@@ -317,6 +318,7 @@ fn fixture_evidence_cannot_enable_preoperation_block_support() {
         ..PolicyRuntimeCapabilities::default()
     };
     let evidence = BlockPrototypeEvidence {
+        backend: BlockPrototypeBackend::BpfLsm,
         source: BlockPrototypeEvidenceSource::Fixture,
         runtime: EnforcementRuntime::Local,
         action: EventType::FileOpen,
@@ -340,6 +342,7 @@ fn live_zero_race_window_evidence_enables_only_the_validated_action() {
         ..PolicyRuntimeCapabilities::default()
     };
     let evidence = BlockPrototypeEvidence {
+        backend: BlockPrototypeBackend::BpfLsm,
         source: BlockPrototypeEvidenceSource::LiveHost,
         runtime: EnforcementRuntime::Local,
         action: EventType::FileOpen,
@@ -358,4 +361,41 @@ fn live_zero_race_window_evidence_enables_only_the_validated_action() {
     assert!(
         !capabilities.can_preoperation_block(EnforcementRuntime::Local, EventType::NetworkConnect)
     );
+}
+
+#[test]
+fn live_seccomp_zero_race_window_evidence_uses_seccomp_backend() {
+    let capabilities = PolicyRuntimeCapabilities {
+        seccomp_available: true,
+        runtime: EnforcementRuntime::Local,
+        ..PolicyRuntimeCapabilities::default()
+    };
+    let evidence = BlockPrototypeEvidence {
+        backend: BlockPrototypeBackend::Seccomp,
+        source: BlockPrototypeEvidenceSource::LiveHost,
+        runtime: EnforcementRuntime::Local,
+        action: EventType::FileOpen,
+        preoperation_prevention: true,
+        decision_latency_ms: Some(2),
+        side_effect_race_window_ms: Some(0),
+    };
+
+    let capabilities = capabilities
+        .with_validated_block_prototype(evidence)
+        .expect("live seccomp zero-race evidence should enable file read block");
+    let matrix = EnforcementCapabilityMatrix::new(&capabilities);
+    let capability = matrix.resolve(
+        DecisionKind::Block,
+        DecisionKind::Notify,
+        EnforcementRuntime::Local,
+        EventType::FileOpen,
+    );
+
+    assert!(capabilities.preoperation_block.file_read);
+    assert_eq!(
+        capability.enforcement_backend,
+        EnforcementBackend::SeccompBlock
+    );
+    assert_eq!(capability.timing, EnforcementTiming::PreOperation);
+    assert!(capability.preoperation_prevention);
 }

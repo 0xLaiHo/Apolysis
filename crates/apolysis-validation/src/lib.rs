@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use apolysis_core::EventType;
 use apolysis_policy::{
-    BlockPrototypeEvidence, BlockPrototypeEvidenceSource, EnforcementRuntime,
-    PolicyRuntimeCapabilities,
+    BlockPrototypeBackend, BlockPrototypeEvidence, BlockPrototypeEvidenceSource,
+    EnforcementRuntime, PolicyRuntimeCapabilities,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -296,6 +296,7 @@ pub struct F3BlockValidationReport {
     pub action: F3BlockValidationAction,
     pub backend: String,
     pub host_bpf_lsm_available: bool,
+    pub seccomp_available: bool,
     pub preoperation_prevention: bool,
     pub decision_latency_ms: Option<u128>,
     pub side_effect_race_window_ms: Option<u128>,
@@ -775,6 +776,11 @@ pub fn evaluate_f3_block_validation_gate(
         } else {
             Some(report.evidence_id.clone())
         };
+        let backend = match report.backend.as_str() {
+            "bpf_lsm_block" => Some(BlockPrototypeBackend::BpfLsm),
+            "seccomp_block" => Some(BlockPrototypeBackend::Seccomp),
+            _ => None,
+        };
 
         if report.evidence_id.trim().is_empty() {
             report_failures.push(f3_block_failure(
@@ -782,10 +788,10 @@ pub fn evaluate_f3_block_validation_gate(
                 "block validation report is missing evidence id",
             ));
         }
-        if report.backend != "bpf_lsm_block" {
+        if backend.is_none() {
             report_failures.push(f3_block_failure(
                 evidence_id.clone(),
-                "F3 block validation report must target bpf_lsm_block backend",
+                "F3 block validation report must target bpf_lsm_block or seccomp_block backend",
             ));
         }
         if report.source != F3BlockValidationSource::LiveHost {
@@ -794,10 +800,16 @@ pub fn evaluate_f3_block_validation_gate(
                 "pre-operation block requires live-host validation evidence",
             ));
         }
-        if !report.host_bpf_lsm_available {
+        if backend == Some(BlockPrototypeBackend::BpfLsm) && !report.host_bpf_lsm_available {
             report_failures.push(f3_block_failure(
                 evidence_id.clone(),
                 "BPF-LSM must be available before enabling block prototype",
+            ));
+        }
+        if backend == Some(BlockPrototypeBackend::Seccomp) && !report.seccomp_available {
+            report_failures.push(f3_block_failure(
+                evidence_id.clone(),
+                "seccomp must be available before enabling block prototype",
             ));
         }
         if !report.preoperation_prevention {
@@ -822,10 +834,12 @@ pub fn evaluate_f3_block_validation_gate(
         if report_failures.is_empty() {
             let capabilities = PolicyRuntimeCapabilities {
                 bpf_lsm_available: report.host_bpf_lsm_available,
+                seccomp_available: report.seccomp_available,
                 runtime: report.runtime.policy_runtime(),
                 ..PolicyRuntimeCapabilities::default()
             };
             let evidence = BlockPrototypeEvidence {
+                backend: backend.expect("backend was validated"),
                 source: report.source.policy_source(),
                 runtime: report.runtime.policy_runtime(),
                 action: report.action.policy_event_type(),

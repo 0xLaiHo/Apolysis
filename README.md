@@ -47,7 +47,8 @@ visibility assessments, and JSONL timelines. F1 now implements a scoped, live,
 audit-only eBPF observer with a CO-RE build, Aya loader, process/file/network
 events, loss diagnostics, and persistence-time redaction. Its privileged
 live-host validation is complete. BPF-LSM enforcement remains modeled and
-capability-gated; real kernel blocking is not enabled.
+capability-gated, and F3 includes a live seccomp pre-operation block prototype
+validation path; production-facing kernel blocking is not enabled by default.
 
 ## 🚀 Runtime Scenarios
 
@@ -271,7 +272,8 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
 Independent Observability MVP, and F2 Accountability Beta are complete. F3
 Limited Guardrails is in progress with the enforcement capability matrix and
-validated-enable/report gates for any future pre-operation `Block` prototype.
+validated-enable/report gates, including a live seccomp pre-operation `Block`
+prototype validation path.
 
 Implementation milestones:
 

@@ -23,6 +23,7 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
     assert_eq!(actions::EXEC, "exec");
     assert_eq!(env::SESSION_ID, "APOLYSIS_SESSION_ID");
     assert_eq!(feedback::VIOLATION_TAG, "APOLYSIS_VIOLATION");
+    assert_eq!(EnforcementBackend::SeccompBlock.as_str(), "seccomp_block");
 }
 
 #[test]

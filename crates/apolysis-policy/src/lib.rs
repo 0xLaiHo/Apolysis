@@ -225,8 +225,31 @@ pub enum BlockPrototypeEvidenceSource {
     LiveHost,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockPrototypeBackend {
+    BpfLsm,
+    Seccomp,
+}
+
+impl BlockPrototypeBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BpfLsm => "bpf_lsm_block",
+            Self::Seccomp => "seccomp_block",
+        }
+    }
+
+    fn enforcement_backend(self) -> EnforcementBackend {
+        match self {
+            Self::BpfLsm => EnforcementBackend::BpfLsmBlock,
+            Self::Seccomp => EnforcementBackend::SeccompBlock,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockPrototypeEvidence {
+    pub backend: BlockPrototypeBackend,
     pub source: BlockPrototypeEvidenceSource,
     pub runtime: EnforcementRuntime,
     pub action: EventType,
@@ -347,7 +370,11 @@ impl<'a> EnforcementCapabilityMatrix<'a> {
                 action,
                 runtime,
                 requested_supported: true,
-                enforcement_backend: EnforcementBackend::BpfLsmBlock,
+                enforcement_backend: self
+                    .capabilities
+                    .preoperation_block_backend
+                    .map(BlockPrototypeBackend::enforcement_backend)
+                    .unwrap_or(EnforcementBackend::BpfLsmBlock),
                 timing: EnforcementTiming::PreOperation,
                 preoperation_prevention: true,
                 downgrade: None,
@@ -431,6 +458,7 @@ pub struct PolicyRuntimeCapabilities {
     pub bpf_lsm_available: bool,
     pub seccomp_available: bool,
     pub runtime: EnforcementRuntime,
+    pub preoperation_block_backend: Option<BlockPrototypeBackend>,
     pub preoperation_block: PreoperationBlockSupport,
 }
 
@@ -441,6 +469,7 @@ impl Default for PolicyRuntimeCapabilities {
             bpf_lsm_available: false,
             seccomp_available: false,
             runtime: EnforcementRuntime::Local,
+            preoperation_block_backend: None,
             preoperation_block: PreoperationBlockSupport::default(),
         }
     }
@@ -474,8 +503,8 @@ impl PolicyRuntimeCapabilities {
         action: A,
     ) -> bool {
         let action = action.into();
-        self.bpf_lsm_available
-            && runtime_supports_host_bpf_lsm(runtime)
+        self.preoperation_block_backend
+            .is_some_and(|backend| self.backend_available_for_runtime(backend, runtime))
             && self.preoperation_block.supports(action)
     }
 
@@ -486,15 +515,7 @@ impl PolicyRuntimeCapabilities {
         if evidence.source != BlockPrototypeEvidenceSource::LiveHost {
             return Err("pre-operation block requires live-host validation evidence".to_string());
         }
-        if !self.bpf_lsm_available {
-            return Err("BPF-LSM must be available before enabling block prototype".to_string());
-        }
-        if !runtime_supports_host_bpf_lsm(evidence.runtime) {
-            return Err(format!(
-                "runtime {} does not support host BPF-LSM block validation",
-                evidence.runtime.as_str()
-            ));
-        }
+        self.validate_block_backend(evidence.backend, evidence.runtime)?;
         if self.runtime != evidence.runtime {
             return Err(format!(
                 "validation runtime {} does not match capability runtime {}",
@@ -514,14 +535,15 @@ impl PolicyRuntimeCapabilities {
             );
         }
 
+        self.preoperation_block_backend = Some(evidence.backend);
         self.preoperation_block
             .enable(EnforcementAction::from_event_type(&evidence.action))?;
         Ok(self)
     }
 
     fn any_preoperation_block_available(&self) -> bool {
-        self.bpf_lsm_available
-            && runtime_supports_host_bpf_lsm(self.runtime)
+        self.preoperation_block_backend
+            .is_some_and(|backend| self.backend_available_for_runtime(backend, self.runtime))
             && self.preoperation_block.any()
     }
 
@@ -555,6 +577,57 @@ impl PolicyRuntimeCapabilities {
             action.as_str(),
             fallback.as_str()
         )
+    }
+
+    fn validate_block_backend(
+        &self,
+        backend: BlockPrototypeBackend,
+        runtime: EnforcementRuntime,
+    ) -> Result<(), String> {
+        match backend {
+            BlockPrototypeBackend::BpfLsm => {
+                if !self.bpf_lsm_available {
+                    return Err(
+                        "BPF-LSM must be available before enabling block prototype".to_string()
+                    );
+                }
+                if !runtime_supports_host_bpf_lsm(runtime) {
+                    return Err(format!(
+                        "runtime {} does not support host BPF-LSM block validation",
+                        runtime.as_str()
+                    ));
+                }
+            }
+            BlockPrototypeBackend::Seccomp => {
+                if !self.seccomp_available {
+                    return Err(
+                        "seccomp must be available before enabling block prototype".to_string()
+                    );
+                }
+                if !runtime_supports_seccomp_prototype(runtime) {
+                    return Err(format!(
+                        "runtime {} does not support seccomp block validation",
+                        runtime.as_str()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn backend_available_for_runtime(
+        &self,
+        backend: BlockPrototypeBackend,
+        runtime: EnforcementRuntime,
+    ) -> bool {
+        match backend {
+            BlockPrototypeBackend::BpfLsm => {
+                self.bpf_lsm_available && runtime_supports_host_bpf_lsm(runtime)
+            }
+            BlockPrototypeBackend::Seccomp => {
+                self.seccomp_available && runtime_supports_seccomp_prototype(runtime)
+            }
+        }
     }
 }
 
@@ -1078,6 +1151,10 @@ fn runtime_supports_host_bpf_lsm(runtime: EnforcementRuntime) -> bool {
             | EnforcementRuntime::Containerd
             | EnforcementRuntime::Kubernetes
     )
+}
+
+fn runtime_supports_seccomp_prototype(runtime: EnforcementRuntime) -> bool {
+    matches!(runtime, EnforcementRuntime::Local)
 }
 
 fn kernel_release() -> Option<String> {

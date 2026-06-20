@@ -23,6 +23,21 @@ fn f3_block_validation_gate_accepts_live_zero_race_window_report() {
 }
 
 #[test]
+fn f3_block_validation_gate_accepts_live_seccomp_block_report() {
+    let mut report = live_block_report();
+    report.evidence_id = "live-seccomp-file-read".to_string();
+    report.backend = "seccomp_block".to_string();
+    report.host_bpf_lsm_available = false;
+    report.seccomp_available = true;
+
+    let gate = evaluate_f3_block_validation_gate(vec![report]);
+
+    assert!(gate.passed, "{gate:#?}");
+    assert!(gate.failures.is_empty(), "{gate:#?}");
+    assert_eq!(gate.validated_blocks.len(), 1);
+}
+
+#[test]
 fn f3_block_validation_gate_rejects_fixture_or_post_event_reports() {
     let mut fixture = live_block_report();
     fixture.evidence_id = "fixture-report".to_string();
@@ -77,6 +92,24 @@ fn f3_block_validation_gate_rejects_runtime_mismatch_or_missing_latency() {
     );
 }
 
+#[test]
+fn f3_block_validation_gate_rejects_seccomp_report_without_seccomp_availability() {
+    let mut report = live_block_report();
+    report.evidence_id = "seccomp-unavailable".to_string();
+    report.backend = "seccomp_block".to_string();
+    report.host_bpf_lsm_available = false;
+    report.seccomp_available = false;
+
+    let gate = evaluate_f3_block_validation_gate(vec![report]);
+
+    assert!(!gate.passed, "{gate:#?}");
+    let failure_text = serde_json::to_string(&gate.failures).expect("serialize failures");
+    assert!(
+        failure_text.contains("seccomp must be available before enabling block prototype"),
+        "{failure_text}"
+    );
+}
+
 fn live_block_report() -> F3BlockValidationReport {
     F3BlockValidationReport {
         evidence_id: "live-local-file-read".to_string(),
@@ -85,6 +118,7 @@ fn live_block_report() -> F3BlockValidationReport {
         action: F3BlockValidationAction::FileRead,
         backend: "bpf_lsm_block".to_string(),
         host_bpf_lsm_available: true,
+        seccomp_available: false,
         preoperation_prevention: true,
         decision_latency_ms: Some(3),
         side_effect_race_window_ms: Some(0),
