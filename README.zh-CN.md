@@ -220,7 +220,7 @@ Independent Observability MVP 和 F2 Accountability Beta 均已完成。F3
 Limited Guardrails 正在推进，已包含 enforcement capability matrix，以及未来
 pre-operation `Block` prototype 的 validated-enable/report gate，并包含 live
 seccomp pre-operation `Block` prototype validation path 和 operator-approved
-opt-in enablement gate。
+opt-in enablement gate，以及持久化 approval/rollback audit record。
 
 实现里程碑：
 

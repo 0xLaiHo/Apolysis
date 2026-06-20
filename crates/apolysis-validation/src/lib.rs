@@ -368,6 +368,35 @@ pub struct F3BlockEnablementPolicyReport {
     pub failures: Vec<F3BlockEnablementFailure>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F3BlockOperatorAuditOperation {
+    Approve,
+    Rollback,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BlockOperatorAuditRecord {
+    pub record_type: String,
+    pub operation: F3BlockOperatorAuditOperation,
+    pub request_id: String,
+    pub evidence_id: String,
+    pub backend: String,
+    pub runtime: F3BlockValidationRuntime,
+    pub action: F3BlockValidationAction,
+    pub default_enabled: bool,
+    pub rollback_plan_id: String,
+    pub operator: String,
+    pub timestamp_unix_ms: u128,
+}
+
+impl F3BlockOperatorAuditRecord {
+    pub fn to_json_line(&self) -> Result<String, String> {
+        serde_json::to_string(self)
+            .map_err(|error| format!("failed to serialize F3 block operator audit record: {error}"))
+    }
+}
+
 pub trait ServiceController {
     fn restore_unit_file_state(
         &mut self,
@@ -1065,6 +1094,41 @@ pub fn evaluate_f3_block_enablement_policy(
         },
         failures,
     }
+}
+
+pub fn f3_block_operator_audit_records(
+    report: &F3BlockEnablementPolicyReport,
+    operation: F3BlockOperatorAuditOperation,
+    operator: &str,
+    timestamp_unix_ms: u128,
+) -> Result<Vec<F3BlockOperatorAuditRecord>, String> {
+    let operator = operator.trim();
+    if operator.is_empty() {
+        return Err("operator is required for F3 block operator audit".to_string());
+    }
+    if !report.passed {
+        return Err(
+            "F3 block operator audit requires a passed enablement policy report".to_string(),
+        );
+    }
+
+    Ok(report
+        .approved_enablements
+        .iter()
+        .map(|enablement| F3BlockOperatorAuditRecord {
+            record_type: "f3_block_operator_audit".to_string(),
+            operation,
+            request_id: enablement.request_id.clone(),
+            evidence_id: enablement.evidence_id.clone(),
+            backend: enablement.backend.clone(),
+            runtime: enablement.runtime,
+            action: enablement.action,
+            default_enabled: enablement.default_enabled,
+            rollback_plan_id: enablement.rollback_plan_id.clone(),
+            operator: operator.to_string(),
+            timestamp_unix_ms,
+        })
+        .collect())
 }
 
 pub fn default_service_specs() -> Vec<ServiceSpec> {

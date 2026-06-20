@@ -273,7 +273,8 @@ Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
 Independent Observability MVP, and F2 Accountability Beta are complete. F3
 Limited Guardrails is in progress with the enforcement capability matrix and
 validated-enable/report gates, including a live seccomp pre-operation `Block`
-prototype validation path and an operator-approved opt-in enablement gate.
+prototype validation path, an operator-approved opt-in enablement gate, and
+persistent approval/rollback audit records.
 
 Implementation milestones:
 

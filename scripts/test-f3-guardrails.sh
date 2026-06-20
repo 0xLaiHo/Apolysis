@@ -30,5 +30,17 @@ cargo run -p apolysis-validation --bin apolysis-f3-block-enablement-policy -- \
   --validation-gate /tmp/apolysis-f3-seccomp-file-read-gate.json \
   < tests/fixtures/validation/f3-block-enablement-valid.json \
   > /tmp/apolysis-f3-block-enablement-policy.json
+cargo run -p apolysis-validation --bin apolysis-f3-block-operator-audit -- \
+  --operation approve \
+  --operator f3-test-operator \
+  --timestamp-unix-ms 1780328000123 \
+  < /tmp/apolysis-f3-block-enablement-policy.json \
+  > /tmp/apolysis-f3-block-approval-audit.jsonl
+cargo run -p apolysis-validation --bin apolysis-f3-block-operator-audit -- \
+  --operation rollback \
+  --operator f3-test-operator \
+  --timestamp-unix-ms 1780328000456 \
+  < /tmp/apolysis-f3-block-enablement-policy.json \
+  > /tmp/apolysis-f3-block-rollback-audit.jsonl
 
 echo "apolysis-f3: guardrail capability validation passed"
