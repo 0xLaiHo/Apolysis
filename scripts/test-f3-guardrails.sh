@@ -69,6 +69,22 @@ if [[ "$bpf_lsm_status" == "0" ]]; then
   cargo run -p apolysis-validation --bin apolysis-f3-block-validation-report \
     < /tmp/apolysis-f3-bpf-lsm-file-read-report.json \
     > /tmp/apolysis-f3-bpf-lsm-file-read-gate.json
+  cargo run -p apolysis-validation --bin apolysis-f3-block-enablement-policy -- \
+    --validation-gate /tmp/apolysis-f3-bpf-lsm-file-read-gate.json \
+    < tests/fixtures/validation/f3-bpf-lsm-enablement-valid.json \
+    > /tmp/apolysis-f3-bpf-lsm-enablement-policy.json
+  cargo run -p apolysis-validation --bin apolysis-f3-block-operator-audit -- \
+    --operation approve \
+    --operator f3-test-operator \
+    --timestamp-unix-ms 1780328000789 \
+    < /tmp/apolysis-f3-bpf-lsm-enablement-policy.json \
+    > /tmp/apolysis-f3-bpf-lsm-approval-audit.jsonl
+  cargo run -p apolysis-validation --bin apolysis-f3-block-operator-audit -- \
+    --operation rollback \
+    --operator f3-test-operator \
+    --timestamp-unix-ms 1780328000890 \
+    < /tmp/apolysis-f3-bpf-lsm-enablement-policy.json \
+    > /tmp/apolysis-f3-bpf-lsm-rollback-audit.jsonl
 elif [[ "$bpf_lsm_status" == "77" ]]; then
   echo "apolysis-f3: BPF-LSM live prototype skipped; prerequisite report written to /tmp/apolysis-f3-bpf-lsm-file-read-report.json"
 else

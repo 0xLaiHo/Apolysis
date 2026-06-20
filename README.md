@@ -46,11 +46,10 @@ side-effect events, policy violations, downgrade metadata, feedback files,
 visibility assessments, and JSONL timelines. F1 now implements a scoped, live,
 audit-only eBPF observer with a CO-RE build, Aya loader, process/file/network
 events, loss diagnostics, and persistence-time redaction. Its privileged
-live-host validation is complete. BPF-LSM enforcement remains modeled and
-capability-gated, and F3 includes a live seccomp pre-operation block prototype
-validation and approved local execution path; production-facing kernel
-blocking is not enabled by default. A BPF-LSM file-read prototype loader and
-preflight gate exist, but BPF-LSM live attach still requires a privileged run.
+live-host validation is complete. F3 keeps production-facing kernel blocking
+disabled by default while validating narrow local seccomp and BPF-LSM
+pre-operation block prototypes with operator-approved enablement and rollback
+audit records.
 
 ## 🚀 Runtime Scenarios
 
@@ -272,14 +271,12 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 ## 🗺️ Feature Plan And Progress
 
 Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
-Independent Observability MVP, and F2 Accountability Beta are complete. F3
-Limited Guardrails is in progress with the enforcement capability matrix and
-validated-enable/report gates, including a live seccomp pre-operation `Block`
-prototype validation path, an operator-approved opt-in enablement gate, and
-persistent approval/rollback audit records, plus a local seccomp execution gate
-that consumes approved enablement reports. The BPF-LSM file-read prototype is
-wired for preflight/build validation with a strict privileged live validation
-target, and awaits privileged live attach evidence.
+Independent Observability MVP, F2 Accountability Beta, and F3 Limited
+Guardrails are complete. F3 includes the enforcement capability matrix,
+validated-enable/report gates, live seccomp and BPF-LSM pre-operation `Block`
+prototype evidence, operator-approved opt-in enablement, persistent
+approval/rollback audit records, and a local seccomp execution gate that
+consumes approved enablement reports.
 
 Implementation milestones:
 
@@ -300,7 +297,7 @@ Focused roadmap:
 | F0 | PoC baseline: M1-M7 schema, adapters, fixture observer, feedback, Kubernetes metadata, strong-isolation visibility modeling | ✅ **Completed** |
 | F1 | Independent Observability MVP: live audit-only eBPF observer, CO-RE/Aya loader, process/file/network/credential timeline, loss accounting, redaction | ✅ **Completed** |
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
-| F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | 🚧 **In Progress** |
+| F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | 🚧 **Planned** |
 | F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM, operator, large-scale chaos and performance testing | ⏳ **Deferred** |
 
