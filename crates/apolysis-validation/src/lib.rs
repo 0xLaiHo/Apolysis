@@ -441,6 +441,68 @@ pub struct F3BpfLsmPrototypePrerequisiteReport {
     pub failures: Vec<F3BpfLsmPrototypePrerequisiteFailure>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F4RuntimeGuardrailTarget {
+    Local,
+    Docker,
+    Containerd,
+    Kubernetes,
+    Gvisor,
+    Kata,
+    Firecracker,
+}
+
+impl F4RuntimeGuardrailTarget {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Docker => "docker",
+            Self::Containerd => "containerd",
+            Self::Kubernetes => "kubernetes",
+            Self::Gvisor => "gvisor",
+            Self::Kata => "kata",
+            Self::Firecracker => "firecracker",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F4GuardrailSupportStatus {
+    Supported,
+    PrototypeValidated,
+    RequiresRuntimeEvidence,
+    MetadataOnly,
+    BoundaryOnly,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4GuardrailSupportEntry {
+    pub status: F4GuardrailSupportStatus,
+    pub evidence_ids: Vec<String>,
+    pub note: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4RuntimeGuardrailSupport {
+    pub runtime: F4RuntimeGuardrailTarget,
+    pub notify: F4GuardrailSupportEntry,
+    pub review: F4GuardrailSupportEntry,
+    pub kill: F4GuardrailSupportEntry,
+    pub seccomp_block: F4GuardrailSupportEntry,
+    pub bpf_lsm_block: F4GuardrailSupportEntry,
+    pub requires_guest_collector: bool,
+    pub no_go_claims: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4RuntimeGuardrailMatrixReport {
+    pub schema_version: u32,
+    pub production_facing_kernel_blocking_supported: bool,
+    pub runtimes: Vec<F4RuntimeGuardrailSupport>,
+}
+
 impl F3BlockOperatorAuditRecord {
     pub fn to_json_line(&self) -> Result<String, String> {
         serde_json::to_string(self)
@@ -1007,6 +1069,195 @@ pub fn evaluate_f3_block_validation_gate(
             Vec::new()
         },
         failures,
+    }
+}
+
+pub fn evaluate_f4_runtime_guardrail_matrix(
+    reports: Vec<F3BlockValidationReport>,
+) -> F4RuntimeGuardrailMatrixReport {
+    let local_seccomp_evidence = f4_validated_local_block_evidence(&reports, "seccomp_block");
+    let local_bpf_lsm_evidence = f4_validated_local_block_evidence(&reports, "bpf_lsm_block");
+
+    F4RuntimeGuardrailMatrixReport {
+        schema_version: 1,
+        production_facing_kernel_blocking_supported: false,
+        runtimes: vec![
+            F4RuntimeGuardrailSupport {
+                runtime: F4RuntimeGuardrailTarget::Local,
+                notify: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "audit timeline can emit notify findings for local process sessions",
+                ),
+                review: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "review findings can be attached to local session evidence",
+                ),
+                kill: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "post-event kill containment is available for local process sessions",
+                ),
+                seccomp_block: f4_local_block_entry(local_seccomp_evidence, "seccomp_block"),
+                bpf_lsm_block: f4_local_block_entry(local_bpf_lsm_evidence, "bpf_lsm_block"),
+                requires_guest_collector: false,
+                no_go_claims: vec![
+                    "local block prototypes are not production-facing kernel blocking".to_string(),
+                    "block remains opt-in and must keep validation, approval, rollback, and audit evidence".to_string(),
+                ],
+            },
+            F4RuntimeGuardrailSupport {
+                runtime: F4RuntimeGuardrailTarget::Docker,
+                notify: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "Docker metadata correlation supports accountable notify findings",
+                ),
+                review: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "Docker workload identity can be attached to review findings",
+                ),
+                kill: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "Docker workload metadata supports post-event kill containment decisions",
+                ),
+                seccomp_block: f4_runtime_evidence_required("Docker seccomp block"),
+                bpf_lsm_block: f4_runtime_evidence_required("Docker BPF-LSM block"),
+                requires_guest_collector: false,
+                no_go_claims: vec![
+                    "Docker block support must not inherit local-only F3 evidence".to_string(),
+                    "runtime-specific live evidence is required before any Docker block enablement".to_string(),
+                ],
+            },
+            F4RuntimeGuardrailSupport {
+                runtime: F4RuntimeGuardrailTarget::Containerd,
+                notify: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "containerd task metadata supports accountable notify findings",
+                ),
+                review: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "containerd workload identity can be attached to review findings",
+                ),
+                kill: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "containerd task metadata supports post-event kill containment decisions",
+                ),
+                seccomp_block: f4_runtime_evidence_required("containerd seccomp block"),
+                bpf_lsm_block: f4_runtime_evidence_required("containerd BPF-LSM block"),
+                requires_guest_collector: false,
+                no_go_claims: vec![
+                    "containerd block support must not inherit local-only F3 evidence".to_string(),
+                    "runtime-specific live evidence is required before any containerd block enablement".to_string(),
+                ],
+            },
+            F4RuntimeGuardrailSupport {
+                runtime: F4RuntimeGuardrailTarget::Kubernetes,
+                notify: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "Pod, namespace, service account, and RuntimeClass metadata support notify findings",
+                ),
+                review: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "Kubernetes identity can be attached to review findings",
+                ),
+                kill: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "Kubernetes workload identity supports post-event containment decisions",
+                ),
+                seccomp_block: f4_runtime_evidence_required("Kubernetes seccomp block"),
+                bpf_lsm_block: f4_runtime_evidence_required("Kubernetes BPF-LSM block"),
+                requires_guest_collector: false,
+                no_go_claims: vec![
+                    "Kubernetes block support must not inherit local-only F3 evidence".to_string(),
+                    "RuntimeClass-specific live evidence is required before any Kubernetes block enablement".to_string(),
+                ],
+            },
+            F4RuntimeGuardrailSupport {
+                runtime: F4RuntimeGuardrailTarget::Gvisor,
+                notify: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "runsc, sentry, and gofer metadata can identify the sandbox boundary",
+                ),
+                review: f4_entry(
+                    F4GuardrailSupportStatus::Supported,
+                    Vec::new(),
+                    "gVisor metadata can support review findings without claiming guest syscall semantics",
+                ),
+                kill: f4_entry(
+                    F4GuardrailSupportStatus::RequiresRuntimeEvidence,
+                    Vec::new(),
+                    "kill containment needs runtime-specific evidence for runsc/sentry/gofer behavior",
+                ),
+                seccomp_block: f4_metadata_only_block("gVisor seccomp block"),
+                bpf_lsm_block: f4_metadata_only_block("gVisor BPF-LSM block"),
+                requires_guest_collector: false,
+                no_go_claims: vec![
+                    "host-side evidence must not claim gVisor guest syscall semantics".to_string(),
+                    "block support is metadata-only until runtime-specific prevention is proven".to_string(),
+                ],
+            },
+            F4RuntimeGuardrailSupport {
+                runtime: F4RuntimeGuardrailTarget::Kata,
+                notify: f4_entry(
+                    F4GuardrailSupportStatus::BoundaryOnly,
+                    Vec::new(),
+                    "host visibility can identify the Kata VM boundary",
+                ),
+                review: f4_entry(
+                    F4GuardrailSupportStatus::BoundaryOnly,
+                    Vec::new(),
+                    "review findings must be scoped to host-boundary evidence unless a guest collector exists",
+                ),
+                kill: f4_entry(
+                    F4GuardrailSupportStatus::BoundaryOnly,
+                    Vec::new(),
+                    "kill containment is limited to boundary-level actions without guest evidence",
+                ),
+                seccomp_block: f4_boundary_only_block("Kata seccomp block"),
+                bpf_lsm_block: f4_boundary_only_block("Kata BPF-LSM block"),
+                requires_guest_collector: true,
+                no_go_claims: vec![
+                    "host-side kernel block must not claim Kata guest-semantic prevention".to_string(),
+                    "guest collector evidence is required for guest-semantic guardrail claims".to_string(),
+                ],
+            },
+            F4RuntimeGuardrailSupport {
+                runtime: F4RuntimeGuardrailTarget::Firecracker,
+                notify: f4_entry(
+                    F4GuardrailSupportStatus::BoundaryOnly,
+                    Vec::new(),
+                    "Firecracker support remains a host-boundary research prototype",
+                ),
+                review: f4_entry(
+                    F4GuardrailSupportStatus::BoundaryOnly,
+                    Vec::new(),
+                    "review findings must be scoped to the VM boundary in the research prototype",
+                ),
+                kill: f4_entry(
+                    F4GuardrailSupportStatus::BoundaryOnly,
+                    Vec::new(),
+                    "kill containment is limited to boundary-level research behavior",
+                ),
+                seccomp_block: f4_boundary_only_block("Firecracker seccomp block"),
+                bpf_lsm_block: f4_boundary_only_block("Firecracker BPF-LSM block"),
+                requires_guest_collector: true,
+                no_go_claims: vec![
+                    "Firecracker is not a production runtime lifecycle manager in F4".to_string(),
+                    "host-side kernel block must not claim Firecracker guest-semantic prevention".to_string(),
+                ],
+            },
+        ],
     }
 }
 
@@ -2472,6 +2723,87 @@ fn f3_enablement_failure(
         request_id,
         message: message.into(),
     }
+}
+
+fn f4_validated_local_block_evidence(
+    reports: &[F3BlockValidationReport],
+    backend: &str,
+) -> Vec<String> {
+    reports
+        .iter()
+        .filter(|report| {
+            report.source == F3BlockValidationSource::LiveHost
+                && report.runtime == F3BlockValidationRuntime::Local
+                && report.action == F3BlockValidationAction::FileRead
+                && report.backend == backend
+                && report.preoperation_prevention
+                && report.decision_latency_ms.is_some()
+                && report.side_effect_race_window_ms == Some(0)
+                && match backend {
+                    "seccomp_block" => report.seccomp_available,
+                    "bpf_lsm_block" => report.host_bpf_lsm_available,
+                    _ => false,
+                }
+        })
+        .map(|report| report.evidence_id.clone())
+        .collect()
+}
+
+fn f4_entry(
+    status: F4GuardrailSupportStatus,
+    evidence_ids: Vec<String>,
+    note: impl Into<String>,
+) -> F4GuardrailSupportEntry {
+    F4GuardrailSupportEntry {
+        status,
+        evidence_ids,
+        note: note.into(),
+    }
+}
+
+fn f4_local_block_entry(
+    evidence_ids: Vec<String>,
+    backend_label: &'static str,
+) -> F4GuardrailSupportEntry {
+    if evidence_ids.is_empty() {
+        f4_entry(
+            F4GuardrailSupportStatus::RequiresRuntimeEvidence,
+            evidence_ids,
+            format!("{backend_label} requires live local F3 validation evidence"),
+        )
+    } else {
+        f4_entry(
+            F4GuardrailSupportStatus::PrototypeValidated,
+            evidence_ids,
+            format!("{backend_label} has narrow live local file-read prototype evidence only"),
+        )
+    }
+}
+
+fn f4_runtime_evidence_required(capability: &'static str) -> F4GuardrailSupportEntry {
+    f4_entry(
+        F4GuardrailSupportStatus::RequiresRuntimeEvidence,
+        Vec::new(),
+        format!("{capability} requires runtime-specific live prevention evidence"),
+    )
+}
+
+fn f4_metadata_only_block(capability: &'static str) -> F4GuardrailSupportEntry {
+    f4_entry(
+        F4GuardrailSupportStatus::MetadataOnly,
+        Vec::new(),
+        format!(
+            "{capability} is metadata-only until guest/runtime prevention semantics are proven"
+        ),
+    )
+}
+
+fn f4_boundary_only_block(capability: &'static str) -> F4GuardrailSupportEntry {
+    f4_entry(
+        F4GuardrailSupportStatus::BoundaryOnly,
+        Vec::new(),
+        format!("{capability} is boundary-only without guest collector evidence"),
+    )
 }
 
 fn f3_local_seccomp_execution_failure(

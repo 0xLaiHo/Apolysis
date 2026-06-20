@@ -1,0 +1,26 @@
+[
+  {
+    "evidence_id": "live-seccomp-local-file-read",
+    "source": "live_host",
+    "runtime": "local",
+    "action": "file_read",
+    "backend": "seccomp_block",
+    "host_bpf_lsm_available": false,
+    "seccomp_available": true,
+    "preoperation_prevention": true,
+    "decision_latency_ms": 1,
+    "side_effect_race_window_ms": 0
+  },
+  {
+    "evidence_id": "live-bpf-lsm-local-file-read",
+    "source": "live_host",
+    "runtime": "local",
+    "action": "file_read",
+    "backend": "bpf_lsm_block",
+    "host_bpf_lsm_available": true,
+    "seccomp_available": false,
+    "preoperation_prevention": true,
+    "decision_latency_ms": 2,
+    "side_effect_race_window_ms": 0
+  }
+]

@@ -45,3 +45,7 @@ path = "src/bin/apolysis-f3-block-enablement-policy.rs"
 [[bin]]
 name = "apolysis-f3-block-operator-audit"
 path = "src/bin/apolysis-f3-block-operator-audit.rs"
+
+[[bin]]
+name = "apolysis-f4-runtime-guardrail-matrix"
+path = "src/bin/apolysis-f4-runtime-guardrail-matrix.rs"

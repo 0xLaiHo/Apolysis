@@ -49,7 +49,9 @@ events, loss diagnostics, and persistence-time redaction. Its privileged
 live-host validation is complete. F3 keeps production-facing kernel blocking
 disabled by default while validating narrow local seccomp and BPF-LSM
 pre-operation block prototypes with operator-approved enablement and rollback
-audit records.
+audit records. F4 has started with a runtime guardrail support matrix that
+separates supported audit/review/kill paths, local-only block prototypes,
+metadata-only strong-isolation claims, and boundary-only VM-backed runtimes.
 
 ## 🚀 Runtime Scenarios
 
@@ -272,11 +274,8 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 
 Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
 Independent Observability MVP, F2 Accountability Beta, and F3 Limited
-Guardrails are complete. F3 includes the enforcement capability matrix,
-validated-enable/report gates, live seccomp and BPF-LSM pre-operation `Block`
-prototype evidence, operator-approved opt-in enablement, persistent
-approval/rollback audit records, and a local seccomp execution gate that
-consumes approved enablement reports.
+Guardrails are complete. F4 Runtime Adapter Depth is in progress, starting with
+the runtime guardrail support matrix.
 
 Implementation milestones:
 
@@ -298,7 +297,7 @@ Focused roadmap:
 | F1 | Independent Observability MVP: live audit-only eBPF observer, CO-RE/Aya loader, process/file/network/credential timeline, loss accounting, redaction | ✅ **Completed** |
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
-| F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | 🚧 **Planned** |
+| F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | 🚧 **In Progress** |
 | F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM, operator, large-scale chaos and performance testing | ⏳ **Deferred** |
 
 ## 📜 License
