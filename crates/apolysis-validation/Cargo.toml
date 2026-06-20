@@ -6,6 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+apolysis-core = { path = "../apolysis-core" }
+apolysis-policy = { path = "../apolysis-policy" }
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,3 +28,7 @@ path = "src/bin/apolysis-f2-performance-report.rs"
 [[bin]]
 name = "apolysis-f2-visibility-report"
 path = "src/bin/apolysis-f2-visibility-report.rs"
+
+[[bin]]
+name = "apolysis-f3-block-validation-report"
+path = "src/bin/apolysis-f3-block-validation-report.rs"

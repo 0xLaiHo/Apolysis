@@ -6,6 +6,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use apolysis_core::EventType;
+use apolysis_policy::{
+    BlockPrototypeEvidence, BlockPrototypeEvidenceSource, EnforcementRuntime,
+    PolicyRuntimeCapabilities,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toml_edit::{value as toml_value, DocumentMut, Item, Table};
@@ -215,6 +220,107 @@ pub struct VisibilityReportGateReport {
     pub passed: bool,
     pub reports: Vec<VisibilityReport>,
     pub failures: Vec<VisibilityReportGateFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F3BlockValidationSource {
+    Fixture,
+    LiveHost,
+}
+
+impl F3BlockValidationSource {
+    fn policy_source(self) -> BlockPrototypeEvidenceSource {
+        match self {
+            Self::Fixture => BlockPrototypeEvidenceSource::Fixture,
+            Self::LiveHost => BlockPrototypeEvidenceSource::LiveHost,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F3BlockValidationRuntime {
+    Local,
+    Docker,
+    Containerd,
+    Kubernetes,
+    Gvisor,
+    Kata,
+    Firecracker,
+    Unknown,
+}
+
+impl F3BlockValidationRuntime {
+    fn policy_runtime(self) -> EnforcementRuntime {
+        match self {
+            Self::Local => EnforcementRuntime::Local,
+            Self::Docker => EnforcementRuntime::Docker,
+            Self::Containerd => EnforcementRuntime::Containerd,
+            Self::Kubernetes => EnforcementRuntime::Kubernetes,
+            Self::Gvisor => EnforcementRuntime::Gvisor,
+            Self::Kata => EnforcementRuntime::Kata,
+            Self::Firecracker => EnforcementRuntime::Firecracker,
+            Self::Unknown => EnforcementRuntime::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F3BlockValidationAction {
+    Exec,
+    FileRead,
+    FileWrite,
+    NetworkConnect,
+    CredentialRead,
+}
+
+impl F3BlockValidationAction {
+    fn policy_event_type(self) -> EventType {
+        match self {
+            Self::Exec => EventType::Exec,
+            Self::FileRead => EventType::FileOpen,
+            Self::FileWrite => EventType::FileCreate,
+            Self::NetworkConnect => EventType::NetworkConnect,
+            Self::CredentialRead => EventType::CredentialRead,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BlockValidationReport {
+    pub evidence_id: String,
+    pub source: F3BlockValidationSource,
+    pub runtime: F3BlockValidationRuntime,
+    pub action: F3BlockValidationAction,
+    pub backend: String,
+    pub host_bpf_lsm_available: bool,
+    pub preoperation_prevention: bool,
+    pub decision_latency_ms: Option<u128>,
+    pub side_effect_race_window_ms: Option<u128>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BlockValidationEnablement {
+    pub evidence_id: String,
+    pub runtime: F3BlockValidationRuntime,
+    pub action: F3BlockValidationAction,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BlockValidationGateFailure {
+    pub evidence_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F3BlockValidationGateReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub reports: Vec<F3BlockValidationReport>,
+    pub validated_blocks: Vec<F3BlockValidationEnablement>,
+    pub failures: Vec<F3BlockValidationGateFailure>,
 }
 
 pub trait ServiceController {
@@ -645,6 +751,123 @@ pub fn evaluate_visibility_report_gate(
         schema_version: 1,
         passed: failures.is_empty(),
         reports,
+        failures,
+    }
+}
+
+pub fn evaluate_f3_block_validation_gate(
+    reports: Vec<F3BlockValidationReport>,
+) -> F3BlockValidationGateReport {
+    let mut failures = Vec::new();
+    let mut validated_blocks = Vec::new();
+
+    if reports.is_empty() {
+        failures.push(f3_block_failure(
+            None,
+            "at least one F3 block validation report is required",
+        ));
+    }
+
+    for report in &reports {
+        let mut report_failures = Vec::new();
+        let evidence_id = if report.evidence_id.trim().is_empty() {
+            None
+        } else {
+            Some(report.evidence_id.clone())
+        };
+
+        if report.evidence_id.trim().is_empty() {
+            report_failures.push(f3_block_failure(
+                None,
+                "block validation report is missing evidence id",
+            ));
+        }
+        if report.backend != "bpf_lsm_block" {
+            report_failures.push(f3_block_failure(
+                evidence_id.clone(),
+                "F3 block validation report must target bpf_lsm_block backend",
+            ));
+        }
+        if report.source != F3BlockValidationSource::LiveHost {
+            report_failures.push(f3_block_failure(
+                evidence_id.clone(),
+                "pre-operation block requires live-host validation evidence",
+            ));
+        }
+        if !report.host_bpf_lsm_available {
+            report_failures.push(f3_block_failure(
+                evidence_id.clone(),
+                "BPF-LSM must be available before enabling block prototype",
+            ));
+        }
+        if !report.preoperation_prevention {
+            report_failures.push(f3_block_failure(
+                evidence_id.clone(),
+                "block prototype evidence must prove pre-operation prevention",
+            ));
+        }
+        if report.decision_latency_ms.is_none() {
+            report_failures.push(f3_block_failure(
+                evidence_id.clone(),
+                "block prototype evidence must include decision latency",
+            ));
+        }
+        if report.side_effect_race_window_ms != Some(0) {
+            report_failures.push(f3_block_failure(
+                evidence_id.clone(),
+                "block prototype evidence must prove a zero side-effect race window",
+            ));
+        }
+
+        if report_failures.is_empty() {
+            let capabilities = PolicyRuntimeCapabilities {
+                bpf_lsm_available: report.host_bpf_lsm_available,
+                runtime: report.runtime.policy_runtime(),
+                ..PolicyRuntimeCapabilities::default()
+            };
+            let evidence = BlockPrototypeEvidence {
+                source: report.source.policy_source(),
+                runtime: report.runtime.policy_runtime(),
+                action: report.action.policy_event_type(),
+                preoperation_prevention: report.preoperation_prevention,
+                decision_latency_ms: report.decision_latency_ms,
+                side_effect_race_window_ms: report.side_effect_race_window_ms,
+            };
+
+            match capabilities.with_validated_block_prototype(evidence) {
+                Ok(validated_capabilities) => {
+                    if validated_capabilities.can_preoperation_block(
+                        report.runtime.policy_runtime(),
+                        report.action.policy_event_type(),
+                    ) {
+                        validated_blocks.push(F3BlockValidationEnablement {
+                            evidence_id: report.evidence_id.clone(),
+                            runtime: report.runtime,
+                            action: report.action,
+                        });
+                    } else {
+                        report_failures.push(f3_block_failure(
+                            evidence_id.clone(),
+                            "validated block prototype did not enable the requested action",
+                        ));
+                    }
+                }
+                Err(error) => report_failures.push(f3_block_failure(evidence_id.clone(), error)),
+            }
+        }
+
+        failures.extend(report_failures);
+    }
+
+    F3BlockValidationGateReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        reports,
+        validated_blocks: if failures.is_empty() {
+            validated_blocks
+        } else {
+            Vec::new()
+        },
         failures,
     }
 }
@@ -1793,6 +2016,16 @@ fn visibility_failure(
 ) -> VisibilityReportGateFailure {
     VisibilityReportGateFailure {
         target,
+        message: message.into(),
+    }
+}
+
+fn f3_block_failure(
+    evidence_id: Option<String>,
+    message: impl Into<String>,
+) -> F3BlockValidationGateFailure {
+    F3BlockValidationGateFailure {
+        evidence_id,
         message: message.into(),
     }
 }

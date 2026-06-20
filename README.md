@@ -271,7 +271,7 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
 Independent Observability MVP, and F2 Accountability Beta are complete. F3
 Limited Guardrails is in progress with the enforcement capability matrix and
-validated-enable gates for any future pre-operation `Block` prototype.
+validated-enable/report gates for any future pre-operation `Block` prototype.
 
 Implementation milestones:
 
