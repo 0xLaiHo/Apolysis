@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+
+version: 1
+enforcement:
+  requested: kill
+  fallback: notify
+credentials:
+  deny_read:
+    - ~/.ssh
+workspace:
+  allow_read:
+    - ./tests
+  allow_write:
+    - ./.apolysis
+network:
+  allow_egress:
+    - 127.0.0.1:0

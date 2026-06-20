@@ -26,8 +26,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use apolysis_core::{
-    actors, fields::PipeFields, resources, CanonicalEvent, EventSource, EventType, PolicyViolation,
-    RawKernelEvent,
+    actors, fields::PipeFields, resources, CanonicalEvent, EnforcementMetadata, EventSource,
+    EventType, PolicyViolation, RawKernelEvent,
 };
 use apolysis_feedback::FeedbackWriter;
 use apolysis_kubernetes::KubernetesMetadata;
@@ -368,11 +368,31 @@ fn append_policy_evaluation(
         reason,
         canonical.pid,
         persisted_target.unwrap_or(&canonical.resource),
-        evaluation.enforcement_backend,
+        evaluation.enforcement_backend.clone(),
     );
     store
         .append(&violation)
         .map_err(|error| format!("failed to write policy violation: {error}"))?;
+
+    let downgrade_reason = evaluation
+        .downgrade
+        .as_ref()
+        .map(|downgrade| downgrade.reason.clone());
+    let metadata = EnforcementMetadata::new(
+        &canonical.session_id,
+        evaluation.requested.core_decision(),
+        evaluation.effective.core_decision(),
+        evaluation.enforcement_backend,
+        evaluation.timing.as_str(),
+        evaluation.runtime.as_str(),
+        evaluation.action.as_str(),
+        evaluation.preoperation_prevention,
+    )
+    .with_rule_id(rule_id)
+    .with_downgrade_reason(downgrade_reason);
+    store
+        .append(&metadata)
+        .map_err(|error| format!("failed to write enforcement metadata: {error}"))?;
 
     if let Some(writer) = feedback {
         writer.write_last_violation(&violation)?;

@@ -17,6 +17,8 @@ pub mod records {
     pub const RAW_KERNEL_EVENT: &str = "raw_kernel_event";
     /// A policy decision that should be visible to operators or agent hooks.
     pub const POLICY_VIOLATION: &str = "policy_violation";
+    /// Capability and timing metadata for a policy enforcement decision.
+    pub const ENFORCEMENT_METADATA: &str = "enforcement_metadata";
     /// Observer loss, truncation, lifecycle, or summary evidence.
     pub const OBSERVER_DIAGNOSTIC: &str = "observer_diagnostic";
     /// A runtime visibility assessment for strong-isolation backends.

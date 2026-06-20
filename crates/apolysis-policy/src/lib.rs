@@ -86,6 +86,16 @@ impl DecisionKind {
             Self::Review => "review",
         }
     }
+
+    pub fn core_decision(&self) -> CorePolicyDecision {
+        match self {
+            Self::Allow => CorePolicyDecision::Allow,
+            Self::Notify => CorePolicyDecision::Notify,
+            Self::Block => CorePolicyDecision::Block,
+            Self::Kill => CorePolicyDecision::Kill,
+            Self::Review => CorePolicyDecision::Review,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -191,6 +201,17 @@ pub enum EnforcementTiming {
     PostEventFeedback,
     PostEventContainment,
     PreOperation,
+}
+
+impl EnforcementTiming {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AuditOnly => "audit_only",
+            Self::PostEventFeedback => "post_event_feedback",
+            Self::PostEventContainment => "post_event_containment",
+            Self::PreOperation => "pre_operation",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -466,7 +487,13 @@ pub struct DecisionDowngrade {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyEvaluation {
     pub decision: PolicyDecision,
+    pub requested: DecisionKind,
+    pub effective: DecisionKind,
     pub enforcement_backend: EnforcementBackend,
+    pub timing: EnforcementTiming,
+    pub runtime: EnforcementRuntime,
+    pub action: EnforcementAction,
+    pub preoperation_prevention: bool,
     pub downgrade: Option<DecisionDowngrade>,
 }
 
@@ -475,7 +502,13 @@ impl PolicyEvaluation {
     pub fn allow() -> Self {
         Self {
             decision: PolicyDecision::Allow,
+            requested: DecisionKind::Allow,
+            effective: DecisionKind::Allow,
             enforcement_backend: EnforcementBackend::AuditOnly,
+            timing: EnforcementTiming::AuditOnly,
+            runtime: EnforcementRuntime::Local,
+            action: EnforcementAction::Other,
+            preoperation_prevention: false,
             downgrade: None,
         }
     }
@@ -597,7 +630,13 @@ impl Policy {
         let capability = self.effective_decision(capabilities, event.event_type.clone());
         PolicyEvaluation {
             decision: decision_for_kind(capability.effective, rule_id, reason),
+            requested: capability.requested,
+            effective: capability.effective,
             enforcement_backend: capability.enforcement_backend,
+            timing: capability.timing,
+            runtime: capability.runtime,
+            action: capability.action,
+            preoperation_prevention: capability.preoperation_prevention,
             downgrade: capability.downgrade,
         }
     }

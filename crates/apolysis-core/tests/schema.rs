@@ -2,8 +2,9 @@
 
 use apolysis_core::{
     actions, actors, env, feedback, records, resources, runtimes, CanonicalEvent,
-    EnforcementBackend, EventSource, EventType, ObserverDiagnostic, ObserverDiagnosticKind,
-    PolicyDecision, PolicyViolation, RawKernelEvent, RuntimeKind, SandboxSession,
+    EnforcementBackend, EnforcementMetadata, EventSource, EventType, ObserverDiagnostic,
+    ObserverDiagnosticKind, PolicyDecision, PolicyViolation, RawKernelEvent, RuntimeKind,
+    SandboxSession,
 };
 
 #[test]
@@ -12,6 +13,7 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
     assert_eq!(records::EVENT, "event");
     assert_eq!(records::RAW_KERNEL_EVENT, "raw_kernel_event");
     assert_eq!(records::POLICY_VIOLATION, "policy_violation");
+    assert_eq!(records::ENFORCEMENT_METADATA, "enforcement_metadata");
     assert_eq!(records::OBSERVER_DIAGNOSTIC, "observer_diagnostic");
     assert_eq!(actors::APOLYSIS, "apolysis");
     assert_eq!(actors::DOCKER, "docker");
@@ -21,6 +23,35 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
     assert_eq!(actions::EXEC, "exec");
     assert_eq!(env::SESSION_ID, "APOLYSIS_SESSION_ID");
     assert_eq!(feedback::VIOLATION_TAG, "APOLYSIS_VIOLATION");
+}
+
+#[test]
+fn enforcement_metadata_json_line_records_timing_and_capability_context() {
+    let metadata = EnforcementMetadata::new(
+        "session-1",
+        PolicyDecision::Kill,
+        PolicyDecision::Kill,
+        EnforcementBackend::SignalKill,
+        "post_event_containment",
+        "local",
+        "credential_read",
+        false,
+    )
+    .with_rule_id("credentials.deny_read")
+    .with_downgrade_reason(None::<String>);
+
+    let line = metadata.to_json_line();
+
+    assert!(line.contains(r#""record_type":"enforcement_metadata""#));
+    assert!(line.contains(r#""requested_decision":"kill""#));
+    assert!(line.contains(r#""effective_decision":"kill""#));
+    assert!(line.contains(r#""enforcement_backend":"signal_kill""#));
+    assert!(line.contains(r#""timing":"post_event_containment""#));
+    assert!(line.contains(r#""runtime":"local""#));
+    assert!(line.contains(r#""action":"credential_read""#));
+    assert!(line.contains(r#""preoperation_prevention":false"#));
+    assert!(line.contains(r#""rule_id":"credentials.deny_read""#));
+    assert!(line.contains(r#""downgrade_reason":null"#));
 }
 
 #[test]

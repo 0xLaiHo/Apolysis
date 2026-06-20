@@ -517,6 +517,83 @@ impl JsonLine for PolicyViolation {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnforcementMetadata {
+    pub timestamp_unix_ms: u128,
+    pub session_id: String,
+    pub rule_id: Option<String>,
+    pub requested_decision: PolicyDecision,
+    pub effective_decision: PolicyDecision,
+    pub enforcement_backend: EnforcementBackend,
+    pub timing: String,
+    pub runtime: String,
+    pub action: String,
+    pub preoperation_prevention: bool,
+    pub downgrade_reason: Option<String>,
+}
+
+impl EnforcementMetadata {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        session_id: impl Into<String>,
+        requested_decision: PolicyDecision,
+        effective_decision: PolicyDecision,
+        enforcement_backend: EnforcementBackend,
+        timing: impl Into<String>,
+        runtime: impl Into<String>,
+        action: impl Into<String>,
+        preoperation_prevention: bool,
+    ) -> Self {
+        Self {
+            timestamp_unix_ms: now_unix_ms(),
+            session_id: session_id.into(),
+            rule_id: None,
+            requested_decision,
+            effective_decision,
+            enforcement_backend,
+            timing: timing.into(),
+            runtime: runtime.into(),
+            action: action.into(),
+            preoperation_prevention,
+            downgrade_reason: None,
+        }
+    }
+
+    pub fn with_rule_id(mut self, rule_id: impl Into<String>) -> Self {
+        self.rule_id = Some(rule_id.into());
+        self
+    }
+
+    pub fn with_downgrade_reason(mut self, reason: Option<impl Into<String>>) -> Self {
+        self.downgrade_reason = reason.map(Into::into);
+        self
+    }
+
+    pub fn to_json_line(&self) -> String {
+        <Self as JsonLine>::to_json_line(self)
+    }
+}
+
+impl JsonLine for EnforcementMetadata {
+    fn to_json_line(&self) -> String {
+        format!(
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"rule_id\":{},\"requested_decision\":{},\"effective_decision\":{},\"enforcement_backend\":{},\"timing\":{},\"runtime\":{},\"action\":{},\"preoperation_prevention\":{},\"downgrade_reason\":{}}}",
+            json_string(records::ENFORCEMENT_METADATA),
+            self.timestamp_unix_ms,
+            json_string(&self.session_id),
+            optional_json_string(self.rule_id.as_deref()),
+            json_string(self.requested_decision.as_str()),
+            json_string(self.effective_decision.as_str()),
+            json_string(self.enforcement_backend.as_str()),
+            json_string(&self.timing),
+            json_string(&self.runtime),
+            json_string(&self.action),
+            self.preoperation_prevention,
+            optional_json_string(self.downgrade_reason.as_deref())
+        )
+    }
+}
+
 /// Escape a Rust string as a JSON string.
 ///
 /// This only implements the JSON escapes Apolysis can emit today.  It handles
@@ -537,6 +614,10 @@ pub fn json_string(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+fn optional_json_string(value: Option<&str>) -> String {
+    value.map(json_string).unwrap_or_else(|| "null".to_string())
 }
 
 /// Return the current Unix timestamp in milliseconds.

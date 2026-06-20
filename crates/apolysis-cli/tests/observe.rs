@@ -137,6 +137,43 @@ fn observe_fixture_emits_policy_violations_and_feedback_file() {
 }
 
 #[test]
+fn observe_fixture_emits_kill_containment_metadata() {
+    let output = temp_jsonl("apolysis-observe-kill-metadata");
+    let _ = std::fs::remove_file(&output);
+
+    let status = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "fixture",
+            "--input",
+            "tests/fixtures/raw-kernel-events.txt",
+            "--session",
+            "session-f3-kill",
+            "--policy",
+            "tests/fixtures/policies/f3-kill-policy.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+        ])
+        .status()
+        .expect("run apolysis observe with kill policy");
+
+    assert!(status.success());
+    let timeline = std::fs::read_to_string(&output).expect("read observer timeline");
+    assert!(timeline.contains(r#""record_type":"policy_violation""#));
+    assert!(timeline.contains(r#""decision":"kill""#));
+    assert!(timeline.contains(r#""enforcement_backend":"signal_kill""#));
+    assert!(timeline.contains(r#""record_type":"enforcement_metadata""#));
+    assert!(timeline.contains(r#""requested_decision":"kill""#));
+    assert!(timeline.contains(r#""effective_decision":"kill""#));
+    assert!(timeline.contains(r#""timing":"post_event_containment""#));
+    assert!(timeline.contains(r#""preoperation_prevention":false"#));
+    assert!(timeline.contains(r#""action":"credential_read""#));
+
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
 fn observe_fixture_preserves_policy_feedback_with_kubernetes_metadata() {
     let output = temp_jsonl("apolysis-observe-kubernetes");
     let feedback_dir = temp_dir("apolysis-k8s-feedback");
