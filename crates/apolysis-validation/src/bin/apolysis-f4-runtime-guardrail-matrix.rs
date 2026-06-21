@@ -3,10 +3,12 @@
 use std::io::Read;
 
 use apolysis_validation::{
-    evaluate_f4_gvisor_metadata_evidence_gate, evaluate_f4_runtime_adapter_evidence_gate,
-    evaluate_f4_runtime_guardrail_matrix,
-    evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence, F3BlockValidationReport,
-    F4GvisorMetadataEvidenceReport, F4RuntimeAdapterEvidenceReport,
+    evaluate_f4_gvisor_metadata_evidence_gate, evaluate_f4_kubernetes_agent_sandbox_evidence_gate,
+    evaluate_f4_runtime_adapter_evidence_gate, evaluate_f4_runtime_guardrail_matrix,
+    evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata, F3BlockValidationReport,
+    F4GvisorMetadataEvidenceGateReport, F4GvisorMetadataEvidenceReport,
+    F4KubernetesAgentSandboxEvidenceGateReport, F4KubernetesAgentSandboxEvidenceReport,
+    F4RuntimeAdapterEvidenceReport,
 };
 use serde_json::Value;
 
@@ -55,6 +57,16 @@ fn run() -> Result<(), String> {
             .transpose()
             .map_err(|error| format!("failed to parse gvisor_metadata_evidence_reports: {error}"))?
             .unwrap_or_default();
+        let kubernetes_agent_sandbox_evidence_reports: Vec<F4KubernetesAgentSandboxEvidenceReport> =
+            parsed
+                .get("kubernetes_agent_sandbox_evidence_reports")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| {
+                    format!("failed to parse kubernetes_agent_sandbox_evidence_reports: {error}")
+                })?
+                .unwrap_or_default();
         let adapter_gate =
             evaluate_f4_runtime_adapter_evidence_gate(runtime_adapter_evidence_reports);
         if !adapter_gate.passed {
@@ -64,11 +76,14 @@ fn run() -> Result<(), String> {
             eprintln!("{gate_json}");
             std::process::exit(1);
         }
-        if gvisor_metadata_evidence_reports.is_empty() {
-            evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
-                block_validation_reports,
-                adapter_gate,
-            )
+        let gvisor_gate = if gvisor_metadata_evidence_reports.is_empty() {
+            F4GvisorMetadataEvidenceGateReport {
+                schema_version: 1,
+                passed: true,
+                reports: Vec::new(),
+                validated_evidence: Vec::new(),
+                failures: Vec::new(),
+            }
         } else {
             let gvisor_gate =
                 evaluate_f4_gvisor_metadata_evidence_gate(gvisor_metadata_evidence_reports);
@@ -79,12 +94,36 @@ fn run() -> Result<(), String> {
                 eprintln!("{gate_json}");
                 std::process::exit(1);
             }
-            apolysis_validation::evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
-                block_validation_reports,
-                adapter_gate,
-                gvisor_gate,
-            )
-        }
+            gvisor_gate
+        };
+        let kubernetes_gate = if kubernetes_agent_sandbox_evidence_reports.is_empty() {
+            F4KubernetesAgentSandboxEvidenceGateReport {
+                schema_version: 1,
+                passed: true,
+                reports: Vec::new(),
+                validated_evidence: Vec::new(),
+                failures: Vec::new(),
+            }
+        } else {
+            let kubernetes_gate = evaluate_f4_kubernetes_agent_sandbox_evidence_gate(
+                kubernetes_agent_sandbox_evidence_reports,
+            );
+            if !kubernetes_gate.passed {
+                let gate_json =
+                    serde_json::to_string_pretty(&kubernetes_gate).map_err(|error| {
+                        format!("failed to serialize F4 Kubernetes Agent Sandbox evidence gate: {error}")
+                    })?;
+                eprintln!("{gate_json}");
+                std::process::exit(1);
+            }
+            kubernetes_gate
+        };
+        evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
+            block_validation_reports,
+            adapter_gate,
+            gvisor_gate,
+            kubernetes_gate,
+        )
     } else {
         return Err("F4 runtime guardrail matrix input must be a JSON array or object".to_string());
     };

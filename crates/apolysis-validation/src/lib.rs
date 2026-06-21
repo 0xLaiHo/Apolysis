@@ -571,6 +571,38 @@ pub struct F4GvisorMetadataEvidenceGateReport {
     pub failures: Vec<F4GvisorMetadataEvidenceGateFailure>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4KubernetesAgentSandboxEvidenceReport {
+    pub evidence_id: String,
+    pub source: F4RuntimeAdapterEvidenceSource,
+    pub runtime_adapter_evidence_id: String,
+    pub session_id: String,
+    pub pod_name: String,
+    pub namespace: String,
+    pub service_account: Option<String>,
+    pub runtime_class_name: Option<String>,
+    pub sandbox_name: Option<String>,
+    pub node_name: Option<String>,
+    pub pod_uid: Option<String>,
+    pub host_boundary_visibility: bool,
+    pub guest_semantics_claimed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4KubernetesAgentSandboxEvidenceGateFailure {
+    pub evidence_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4KubernetesAgentSandboxEvidenceGateReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub reports: Vec<F4KubernetesAgentSandboxEvidenceReport>,
+    pub validated_evidence: Vec<F4KubernetesAgentSandboxEvidenceReport>,
+    pub failures: Vec<F4KubernetesAgentSandboxEvidenceGateFailure>,
+}
+
 impl F3BlockOperatorAuditRecord {
     pub fn to_json_line(&self) -> Result<String, String> {
         serde_json::to_string(self)
@@ -1177,6 +1209,45 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
     adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
     gvisor_metadata: F4GvisorMetadataEvidenceGateReport,
 ) -> F4RuntimeGuardrailMatrixReport {
+    evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
+        reports,
+        adapter_evidence,
+        gvisor_metadata,
+        F4KubernetesAgentSandboxEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        },
+    )
+}
+
+pub fn evaluate_f4_runtime_guardrail_matrix_with_kubernetes_agent_sandbox(
+    reports: Vec<F3BlockValidationReport>,
+    adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
+    kubernetes_agent_sandbox: F4KubernetesAgentSandboxEvidenceGateReport,
+) -> F4RuntimeGuardrailMatrixReport {
+    evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
+        reports,
+        adapter_evidence,
+        F4GvisorMetadataEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        },
+        kubernetes_agent_sandbox,
+    )
+}
+
+pub fn evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
+    reports: Vec<F3BlockValidationReport>,
+    adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
+    gvisor_metadata: F4GvisorMetadataEvidenceGateReport,
+    kubernetes_agent_sandbox: F4KubernetesAgentSandboxEvidenceGateReport,
+) -> F4RuntimeGuardrailMatrixReport {
     let local_seccomp_evidence = f4_validated_local_block_evidence(&reports, "seccomp_block");
     let local_bpf_lsm_evidence = f4_validated_local_block_evidence(&reports, "bpf_lsm_block");
     let adapter_evidence_ids = f4_adapter_evidence_ids_by_runtime(&adapter_evidence);
@@ -1184,6 +1255,12 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
     let gvisor_combined_evidence_ids = f4_merge_evidence_ids(
         f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
         gvisor_evidence_ids,
+    );
+    let kubernetes_evidence_ids =
+        f4_kubernetes_agent_sandbox_evidence_ids(&kubernetes_agent_sandbox);
+    let kubernetes_combined_evidence_ids = f4_merge_evidence_ids(
+        f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kubernetes),
+        kubernetes_evidence_ids,
     );
 
     F4RuntimeGuardrailMatrixReport {
@@ -1269,17 +1346,17 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
                 runtime: F4RuntimeGuardrailTarget::Kubernetes,
                 notify: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kubernetes),
+                    kubernetes_combined_evidence_ids.clone(),
                     "Pod, namespace, service account, and RuntimeClass metadata support notify findings",
                 ),
                 review: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kubernetes),
+                    kubernetes_combined_evidence_ids.clone(),
                     "Kubernetes identity can be attached to review findings",
                 ),
                 kill: f4_entry(
                     F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kubernetes),
+                    kubernetes_combined_evidence_ids,
                     "Kubernetes workload identity supports post-event containment decisions",
                 ),
                 seccomp_block: f4_runtime_evidence_required("Kubernetes seccomp block"),
@@ -1484,6 +1561,113 @@ pub fn evaluate_f4_gvisor_metadata_evidence_gate(
     }
 
     F4GvisorMetadataEvidenceGateReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        reports,
+        validated_evidence: if failures.is_empty() {
+            validated_evidence
+        } else {
+            Vec::new()
+        },
+        failures,
+    }
+}
+
+pub fn evaluate_f4_kubernetes_agent_sandbox_evidence_gate(
+    reports: Vec<F4KubernetesAgentSandboxEvidenceReport>,
+) -> F4KubernetesAgentSandboxEvidenceGateReport {
+    let mut failures = Vec::new();
+    let mut validated_evidence = Vec::new();
+
+    if reports.is_empty() {
+        failures.push(f4_kubernetes_agent_sandbox_failure(
+            None,
+            "at least one F4 Kubernetes Agent Sandbox evidence report is required",
+        ));
+    }
+
+    for report in &reports {
+        let evidence_id = if report.evidence_id.trim().is_empty() {
+            None
+        } else {
+            Some(report.evidence_id.clone())
+        };
+        let mut report_failures = Vec::new();
+
+        if report.evidence_id.trim().is_empty() {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                None,
+                "Kubernetes Agent Sandbox evidence is missing evidence id",
+            ));
+        }
+        if report.source != F4RuntimeAdapterEvidenceSource::LiveHost {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                evidence_id.clone(),
+                "Kubernetes Agent Sandbox evidence requires live-host evidence",
+            ));
+        }
+        if report.runtime_adapter_evidence_id.trim().is_empty() {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                evidence_id.clone(),
+                "Kubernetes Agent Sandbox evidence is missing runtime adapter evidence id",
+            ));
+        }
+        if report.session_id.trim().is_empty() {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                evidence_id.clone(),
+                "Kubernetes Agent Sandbox evidence is missing session id",
+            ));
+        }
+        if report.pod_name.trim().is_empty() {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                evidence_id.clone(),
+                "Kubernetes Agent Sandbox evidence is missing pod name",
+            ));
+        }
+        if report.namespace.trim().is_empty() {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                evidence_id.clone(),
+                "Kubernetes Agent Sandbox evidence is missing namespace",
+            ));
+        }
+        if !f4_optional_nonempty(&report.service_account) {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                evidence_id.clone(),
+                "Kubernetes Agent Sandbox evidence is missing service account",
+            ));
+        }
+        if !f4_optional_nonempty(&report.runtime_class_name) {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                evidence_id.clone(),
+                "Kubernetes Agent Sandbox evidence is missing RuntimeClass",
+            ));
+        }
+        if !f4_optional_nonempty(&report.sandbox_name) {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                evidence_id.clone(),
+                "Kubernetes Agent Sandbox evidence is missing sandbox name",
+            ));
+        }
+        if !report.host_boundary_visibility {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                evidence_id.clone(),
+                "Kubernetes Agent Sandbox evidence must prove host-boundary visibility",
+            ));
+        }
+        if report.guest_semantics_claimed {
+            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+                evidence_id.clone(),
+                "Kubernetes Agent Sandbox evidence must not claim guest semantics",
+            ));
+        }
+
+        if report_failures.is_empty() {
+            validated_evidence.push(report.clone());
+        }
+        failures.extend(report_failures);
+    }
+
+    F4KubernetesAgentSandboxEvidenceGateReport {
         schema_version: 1,
         passed: failures.is_empty(),
         reports,
@@ -3198,6 +3382,18 @@ fn f4_gvisor_metadata_evidence_ids(gate: &F4GvisorMetadataEvidenceGateReport) ->
         .collect()
 }
 
+fn f4_kubernetes_agent_sandbox_evidence_ids(
+    gate: &F4KubernetesAgentSandboxEvidenceGateReport,
+) -> Vec<String> {
+    if !gate.passed {
+        return Vec::new();
+    }
+    gate.validated_evidence
+        .iter()
+        .map(|report| report.evidence_id.clone())
+        .collect()
+}
+
 fn f4_merge_evidence_ids(left: Vec<String>, right: Vec<String>) -> Vec<String> {
     let mut merged = BTreeSet::new();
     merged.extend(left);
@@ -3215,9 +3411,26 @@ fn f4_gvisor_failure(
     }
 }
 
+fn f4_kubernetes_agent_sandbox_failure(
+    evidence_id: Option<String>,
+    message: impl Into<String>,
+) -> F4KubernetesAgentSandboxEvidenceGateFailure {
+    F4KubernetesAgentSandboxEvidenceGateFailure {
+        evidence_id,
+        message: message.into(),
+    }
+}
+
 fn f4_is_gvisor_handler(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
     normalized.contains("runsc") || normalized.contains("gvisor")
+}
+
+fn f4_optional_nonempty(value: &Option<String>) -> bool {
+    value
+        .as_deref()
+        .map(|text| !text.trim().is_empty())
+        .unwrap_or(false)
 }
 
 fn f4_subject_observed(subjects: &[String], needle: &str) -> bool {

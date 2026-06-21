@@ -9,8 +9,10 @@ cd "$repo_root"
 cargo test -p apolysis-validation --test f4_runtime_guardrail_matrix
 cargo test -p apolysis-validation --test f4_runtime_adapter_evidence
 cargo test -p apolysis-validation --test f4_gvisor_metadata_evidence
+cargo test -p apolysis-validation --test f4_kubernetes_agent_sandbox_evidence
 cargo test -p apolysis-daemon --test runtime_adapters runtime_workload_becomes_f4_runtime_adapter_evidence
 cargo test -p apolysis-visibility --test f4_gvisor_metadata
+cargo test -p apolysis-kubernetes --test f4_agent_sandbox_evidence
 cargo run -p apolysis-validation --bin apolysis-f4-runtime-guardrail-matrix \
   < tests/fixtures/validation/f4-runtime-guardrail-local-live.json \
   > /tmp/apolysis-f4-runtime-guardrail-matrix.json
@@ -48,6 +50,20 @@ assert adapter_by_runtime["gvisor"]["bpf_lsm_block"]["evidence_ids"] == [
     "live-containerd-gvisor-cgroup",
     "live-gvisor-runsc-sentry-gofer",
 ]
+assert adapter_by_runtime["kubernetes"]["notify"]["evidence_ids"] == [
+    "live-kubernetes-agent-sandbox-gvisor",
+    "live-kubernetes-gvisor-cgroup",
+]
+assert adapter_by_runtime["kubernetes"]["review"]["evidence_ids"] == [
+    "live-kubernetes-agent-sandbox-gvisor",
+    "live-kubernetes-gvisor-cgroup",
+]
+assert adapter_by_runtime["kubernetes"]["kill"]["evidence_ids"] == [
+    "live-kubernetes-agent-sandbox-gvisor",
+    "live-kubernetes-gvisor-cgroup",
+]
+assert adapter_by_runtime["kubernetes"]["seccomp_block"]["status"] == "requires_runtime_evidence"
+assert adapter_by_runtime["kubernetes"]["seccomp_block"]["evidence_ids"] == []
 PY
 
 echo "apolysis-f4: runtime guardrail support matrix validation passed"

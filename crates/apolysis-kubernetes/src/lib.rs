@@ -12,6 +12,7 @@ use apolysis_core::{
     scalars::{clean_scalar, parse_bool},
     CanonicalEvent, EventSource, EventType,
 };
+use apolysis_validation::{F4KubernetesAgentSandboxEvidenceReport, F4RuntimeAdapterEvidenceSource};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KubernetesMetadata {
@@ -127,6 +128,52 @@ impl KubernetesMetadata {
 
         records
     }
+}
+
+pub fn f4_agent_sandbox_evidence_from_metadata(
+    metadata: &KubernetesMetadata,
+    session_id: impl Into<String>,
+    evidence_id: impl Into<String>,
+    runtime_adapter_evidence_id: impl Into<String>,
+    source: F4RuntimeAdapterEvidenceSource,
+) -> Result<F4KubernetesAgentSandboxEvidenceReport, String> {
+    let session_id = session_id.into();
+    let evidence_id = evidence_id.into();
+    let runtime_adapter_evidence_id = runtime_adapter_evidence_id.into();
+
+    if session_id.trim().is_empty() {
+        return Err("F4 Kubernetes Agent Sandbox evidence requires session id".to_string());
+    }
+    if evidence_id.trim().is_empty() {
+        return Err("F4 Kubernetes Agent Sandbox evidence requires evidence id".to_string());
+    }
+    if runtime_adapter_evidence_id.trim().is_empty() {
+        return Err(
+            "F4 Kubernetes Agent Sandbox evidence requires runtime adapter evidence id".to_string(),
+        );
+    }
+    if metadata.pod_name.trim().is_empty() {
+        return Err("F4 Kubernetes Agent Sandbox evidence requires pod name".to_string());
+    }
+    if metadata.namespace.trim().is_empty() {
+        return Err("F4 Kubernetes Agent Sandbox evidence requires namespace".to_string());
+    }
+
+    Ok(F4KubernetesAgentSandboxEvidenceReport {
+        evidence_id,
+        source,
+        runtime_adapter_evidence_id,
+        session_id,
+        pod_name: metadata.pod_name.clone(),
+        namespace: metadata.namespace.clone(),
+        service_account: metadata.service_account.clone(),
+        runtime_class_name: metadata.runtime_class_name.clone(),
+        sandbox_name: metadata.sandbox_name.clone(),
+        node_name: metadata.node_name.clone(),
+        pod_uid: metadata.pod_uid.clone(),
+        host_boundary_visibility: true,
+        guest_semantics_claimed: false,
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

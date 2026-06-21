@@ -41,6 +41,20 @@
       "cgroup_correlation": true,
       "host_boundary_visibility": true,
       "guest_semantics_claimed": false
+    },
+    {
+      "evidence_id": "live-kubernetes-gvisor-cgroup",
+      "source": "live_host",
+      "runtime": "kubernetes",
+      "adapter": "kubernetes",
+      "session_id": "session-k8s-gvisor",
+      "workload_id": "pod-uid-123",
+      "cgroup_id": 99,
+      "runtime_handler": "gvisor",
+      "metadata_correlation": true,
+      "cgroup_correlation": true,
+      "host_boundary_visibility": true,
+      "guest_semantics_claimed": false
     }
   ],
   "gvisor_metadata_evidence_reports": [
@@ -55,6 +69,23 @@
       "sentry_observed": true,
       "gofer_observed": true,
       "host_semantics_collapsed": true,
+      "guest_semantics_claimed": false
+    }
+  ],
+  "kubernetes_agent_sandbox_evidence_reports": [
+    {
+      "evidence_id": "live-kubernetes-agent-sandbox-gvisor",
+      "source": "live_host",
+      "runtime_adapter_evidence_id": "live-kubernetes-gvisor-cgroup",
+      "session_id": "session-k8s-gvisor",
+      "pod_name": "codex-session-7",
+      "namespace": "agents",
+      "service_account": "agent-runner",
+      "runtime_class_name": "gvisor",
+      "sandbox_name": "codex-sandbox",
+      "node_name": "worker-a",
+      "pod_uid": "pod-uid-123",
+      "host_boundary_visibility": true,
       "guest_semantics_claimed": false
     }
   ]

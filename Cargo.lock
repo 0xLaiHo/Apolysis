@@ -65,6 +65,7 @@ name = "apolysis-kubernetes"
 version = "0.1.0"
 dependencies = [
  "apolysis-core",
+ "apolysis-validation",
 ]
 
 [[package]]
