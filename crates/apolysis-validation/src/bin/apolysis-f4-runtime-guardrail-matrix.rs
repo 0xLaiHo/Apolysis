@@ -3,10 +3,12 @@
 use std::io::Read;
 
 use apolysis_validation::{
-    evaluate_f4_gvisor_metadata_evidence_gate, evaluate_f4_kubernetes_agent_sandbox_evidence_gate,
-    evaluate_f4_runtime_adapter_evidence_gate, evaluate_f4_runtime_guardrail_matrix,
+    evaluate_f4_gvisor_metadata_evidence_gate, evaluate_f4_kata_boundary_evidence_gate,
+    evaluate_f4_kubernetes_agent_sandbox_evidence_gate, evaluate_f4_runtime_adapter_evidence_gate,
+    evaluate_f4_runtime_guardrail_matrix,
     evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata, F3BlockValidationReport,
     F4GvisorMetadataEvidenceGateReport, F4GvisorMetadataEvidenceReport,
+    F4KataBoundaryEvidenceGateReport, F4KataBoundaryEvidenceReport,
     F4KubernetesAgentSandboxEvidenceGateReport, F4KubernetesAgentSandboxEvidenceReport,
     F4RuntimeAdapterEvidenceReport,
 };
@@ -67,6 +69,13 @@ fn run() -> Result<(), String> {
                     format!("failed to parse kubernetes_agent_sandbox_evidence_reports: {error}")
                 })?
                 .unwrap_or_default();
+        let kata_boundary_evidence_reports: Vec<F4KataBoundaryEvidenceReport> = parsed
+            .get("kata_boundary_evidence_reports")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| format!("failed to parse kata_boundary_evidence_reports: {error}"))?
+            .unwrap_or_default();
         let adapter_gate =
             evaluate_f4_runtime_adapter_evidence_gate(runtime_adapter_evidence_reports);
         if !adapter_gate.passed {
@@ -118,11 +127,31 @@ fn run() -> Result<(), String> {
             }
             kubernetes_gate
         };
+        let kata_gate = if kata_boundary_evidence_reports.is_empty() {
+            F4KataBoundaryEvidenceGateReport {
+                schema_version: 1,
+                passed: true,
+                reports: Vec::new(),
+                validated_evidence: Vec::new(),
+                failures: Vec::new(),
+            }
+        } else {
+            let kata_gate = evaluate_f4_kata_boundary_evidence_gate(kata_boundary_evidence_reports);
+            if !kata_gate.passed {
+                let gate_json = serde_json::to_string_pretty(&kata_gate).map_err(|error| {
+                    format!("failed to serialize F4 Kata boundary evidence gate: {error}")
+                })?;
+                eprintln!("{gate_json}");
+                std::process::exit(1);
+            }
+            kata_gate
+        };
         evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
             block_validation_reports,
             adapter_gate,
             gvisor_gate,
             kubernetes_gate,
+            kata_gate,
         )
     } else {
         return Err("F4 runtime guardrail matrix input must be a JSON array or object".to_string());

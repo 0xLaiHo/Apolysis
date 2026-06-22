@@ -603,6 +603,36 @@ pub struct F4KubernetesAgentSandboxEvidenceGateReport {
     pub failures: Vec<F4KubernetesAgentSandboxEvidenceGateFailure>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4KataBoundaryEvidenceReport {
+    pub evidence_id: String,
+    pub source: F4RuntimeAdapterEvidenceSource,
+    pub runtime_adapter_evidence_id: String,
+    pub session_id: String,
+    pub runtime_handler: Option<String>,
+    pub host_event_subjects: Vec<String>,
+    pub shim_observed: bool,
+    pub vmm_observed: bool,
+    pub host_boundary_visibility: bool,
+    pub guest_collector_required: bool,
+    pub guest_semantics_claimed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4KataBoundaryEvidenceGateFailure {
+    pub evidence_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4KataBoundaryEvidenceGateReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub reports: Vec<F4KataBoundaryEvidenceReport>,
+    pub validated_evidence: Vec<F4KataBoundaryEvidenceReport>,
+    pub failures: Vec<F4KataBoundaryEvidenceGateFailure>,
+}
+
 impl F3BlockOperatorAuditRecord {
     pub fn to_json_line(&self) -> Result<String, String> {
         serde_json::to_string(self)
@@ -1220,6 +1250,13 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
             validated_evidence: Vec::new(),
             failures: Vec::new(),
         },
+        F4KataBoundaryEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        },
     )
 }
 
@@ -1239,6 +1276,39 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_kubernetes_agent_sandbox(
             failures: Vec::new(),
         },
         kubernetes_agent_sandbox,
+        F4KataBoundaryEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        },
+    )
+}
+
+pub fn evaluate_f4_runtime_guardrail_matrix_with_kata_boundary(
+    reports: Vec<F3BlockValidationReport>,
+    adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
+    kata_boundary: F4KataBoundaryEvidenceGateReport,
+) -> F4RuntimeGuardrailMatrixReport {
+    evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
+        reports,
+        adapter_evidence,
+        F4GvisorMetadataEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        },
+        F4KubernetesAgentSandboxEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        },
+        kata_boundary,
     )
 }
 
@@ -1247,6 +1317,7 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
     adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
     gvisor_metadata: F4GvisorMetadataEvidenceGateReport,
     kubernetes_agent_sandbox: F4KubernetesAgentSandboxEvidenceGateReport,
+    kata_boundary: F4KataBoundaryEvidenceGateReport,
 ) -> F4RuntimeGuardrailMatrixReport {
     let local_seccomp_evidence = f4_validated_local_block_evidence(&reports, "seccomp_block");
     let local_bpf_lsm_evidence = f4_validated_local_block_evidence(&reports, "bpf_lsm_block");
@@ -1261,6 +1332,11 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
     let kubernetes_combined_evidence_ids = f4_merge_evidence_ids(
         f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kubernetes),
         kubernetes_evidence_ids,
+    );
+    let kata_evidence_ids = f4_kata_boundary_evidence_ids(&kata_boundary);
+    let kata_combined_evidence_ids = f4_merge_evidence_ids(
+        f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
+        kata_evidence_ids,
     );
 
     F4RuntimeGuardrailMatrixReport {
@@ -1402,26 +1478,26 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
                 runtime: F4RuntimeGuardrailTarget::Kata,
                 notify: f4_entry(
                     F4GuardrailSupportStatus::BoundaryOnly,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
+                    kata_combined_evidence_ids.clone(),
                     "host visibility can identify the Kata VM boundary",
                 ),
                 review: f4_entry(
                     F4GuardrailSupportStatus::BoundaryOnly,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
+                    kata_combined_evidence_ids.clone(),
                     "review findings must be scoped to host-boundary evidence unless a guest collector exists",
                 ),
                 kill: f4_entry(
                     F4GuardrailSupportStatus::BoundaryOnly,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
+                    kata_combined_evidence_ids.clone(),
                     "kill containment is limited to boundary-level actions without guest evidence",
                 ),
                 seccomp_block: f4_boundary_only_block(
                     "Kata seccomp block",
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
+                    kata_combined_evidence_ids.clone(),
                 ),
                 bpf_lsm_block: f4_boundary_only_block(
                     "Kata BPF-LSM block",
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
+                    kata_combined_evidence_ids,
                 ),
                 requires_guest_collector: true,
                 no_go_claims: vec![
@@ -1668,6 +1744,134 @@ pub fn evaluate_f4_kubernetes_agent_sandbox_evidence_gate(
     }
 
     F4KubernetesAgentSandboxEvidenceGateReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        reports,
+        validated_evidence: if failures.is_empty() {
+            validated_evidence
+        } else {
+            Vec::new()
+        },
+        failures,
+    }
+}
+
+pub fn evaluate_f4_kata_boundary_evidence_gate(
+    reports: Vec<F4KataBoundaryEvidenceReport>,
+) -> F4KataBoundaryEvidenceGateReport {
+    let mut failures = Vec::new();
+    let mut validated_evidence = Vec::new();
+
+    if reports.is_empty() {
+        failures.push(f4_kata_boundary_failure(
+            None,
+            "at least one F4 Kata boundary evidence report is required",
+        ));
+    }
+
+    for report in &reports {
+        let evidence_id = if report.evidence_id.trim().is_empty() {
+            None
+        } else {
+            Some(report.evidence_id.clone())
+        };
+        let mut report_failures = Vec::new();
+
+        if report.evidence_id.trim().is_empty() {
+            report_failures.push(f4_kata_boundary_failure(
+                None,
+                "Kata boundary evidence is missing evidence id",
+            ));
+        }
+        if report.source != F4RuntimeAdapterEvidenceSource::LiveHost {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata boundary evidence requires live-host evidence",
+            ));
+        }
+        if report.runtime_adapter_evidence_id.trim().is_empty() {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata boundary evidence is missing runtime adapter evidence id",
+            ));
+        }
+        if report.session_id.trim().is_empty() {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata boundary evidence is missing session id",
+            ));
+        }
+        if !report
+            .runtime_handler
+            .as_deref()
+            .map(f4_is_kata_handler)
+            .unwrap_or(false)
+        {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata boundary evidence requires a Kata runtime handler",
+            ));
+        }
+        if report.host_event_subjects.is_empty() {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata boundary evidence must include host event subjects",
+            ));
+        }
+        if !report.shim_observed {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata boundary evidence must observe the containerd shim",
+            ));
+        }
+        if !report.vmm_observed {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata boundary evidence must observe the VMM",
+            ));
+        }
+        if !f4_subject_observed(&report.host_event_subjects, "shim")
+            || !f4_subject_observed(&report.host_event_subjects, "kata")
+        {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata host event subjects must include the Kata shim",
+            ));
+        }
+        if !f4_subject_observed(&report.host_event_subjects, "qemu")
+            && !f4_subject_observed(&report.host_event_subjects, "vmm")
+        {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata host event subjects must include a VMM",
+            ));
+        }
+        if !report.host_boundary_visibility {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata boundary evidence must prove host-boundary visibility",
+            ));
+        }
+        if !report.guest_collector_required {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata boundary evidence must require a guest collector for guest semantics",
+            ));
+        }
+        if report.guest_semantics_claimed {
+            report_failures.push(f4_kata_boundary_failure(
+                evidence_id.clone(),
+                "Kata boundary evidence must not claim guest semantics",
+            ));
+        }
+
+        if report_failures.is_empty() {
+            validated_evidence.push(report.clone());
+        }
+        failures.extend(report_failures);
+    }
+
+    F4KataBoundaryEvidenceGateReport {
         schema_version: 1,
         passed: failures.is_empty(),
         reports,
@@ -3394,6 +3598,16 @@ fn f4_kubernetes_agent_sandbox_evidence_ids(
         .collect()
 }
 
+fn f4_kata_boundary_evidence_ids(gate: &F4KataBoundaryEvidenceGateReport) -> Vec<String> {
+    if !gate.passed {
+        return Vec::new();
+    }
+    gate.validated_evidence
+        .iter()
+        .map(|report| report.evidence_id.clone())
+        .collect()
+}
+
 fn f4_merge_evidence_ids(left: Vec<String>, right: Vec<String>) -> Vec<String> {
     let mut merged = BTreeSet::new();
     merged.extend(left);
@@ -3421,9 +3635,23 @@ fn f4_kubernetes_agent_sandbox_failure(
     }
 }
 
+fn f4_kata_boundary_failure(
+    evidence_id: Option<String>,
+    message: impl Into<String>,
+) -> F4KataBoundaryEvidenceGateFailure {
+    F4KataBoundaryEvidenceGateFailure {
+        evidence_id,
+        message: message.into(),
+    }
+}
+
 fn f4_is_gvisor_handler(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
     normalized.contains("runsc") || normalized.contains("gvisor")
+}
+
+fn f4_is_kata_handler(value: &str) -> bool {
+    value.to_ascii_lowercase().contains("kata")
 }
 
 fn f4_optional_nonempty(value: &Option<String>) -> bool {

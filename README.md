@@ -53,8 +53,9 @@ audit records. F4 has started with a runtime guardrail support matrix that
 separates supported audit/review/kill paths, local-only block prototypes,
 metadata-only strong-isolation claims, boundary-only VM-backed runtimes, and
 validated Docker/containerd/Kubernetes adapter evidence. It now also adds
-gVisor-specific runsc/sentry/gofer metadata evidence and Kubernetes Agent
-Sandbox metadata evidence for runtime-boundary visibility.
+gVisor-specific runsc/sentry/gofer metadata evidence, Kubernetes Agent Sandbox
+metadata evidence, and Kata boundary-only evidence for runtime-boundary
+visibility.
 
 ## 🚀 Runtime Scenarios
 
@@ -279,7 +280,7 @@ Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
 Independent Observability MVP, F2 Accountability Beta, and F3 Limited
 Guardrails are complete. F4 Runtime Adapter Depth is in progress, starting with
 the runtime guardrail support matrix, runtime adapter evidence correlation, and
-gVisor and Kubernetes Agent Sandbox metadata evidence.
+gVisor, Kubernetes Agent Sandbox, and Kata boundary metadata evidence.
 
 Implementation milestones:
 

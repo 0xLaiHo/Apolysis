@@ -55,6 +55,20 @@
       "cgroup_correlation": true,
       "host_boundary_visibility": true,
       "guest_semantics_claimed": false
+    },
+    {
+      "evidence_id": "live-kubernetes-kata-cgroup",
+      "source": "live_host",
+      "runtime": "kata",
+      "adapter": "kubernetes",
+      "session_id": "session-kata",
+      "workload_id": "pod-uid-kata-456",
+      "cgroup_id": 100,
+      "runtime_handler": "kata",
+      "metadata_correlation": true,
+      "cgroup_correlation": true,
+      "host_boundary_visibility": true,
+      "guest_semantics_claimed": false
     }
   ],
   "gvisor_metadata_evidence_reports": [
@@ -86,6 +100,21 @@
       "node_name": "worker-a",
       "pod_uid": "pod-uid-123",
       "host_boundary_visibility": true,
+      "guest_semantics_claimed": false
+    }
+  ],
+  "kata_boundary_evidence_reports": [
+    {
+      "evidence_id": "live-kata-qemu-shim-boundary",
+      "source": "live_host",
+      "runtime_adapter_evidence_id": "live-kubernetes-kata-cgroup",
+      "session_id": "session-kata",
+      "runtime_handler": "kata",
+      "host_event_subjects": ["containerd-shim-kata-v2", "qemu-system-x86"],
+      "shim_observed": true,
+      "vmm_observed": true,
+      "host_boundary_visibility": true,
+      "guest_collector_required": true,
       "guest_semantics_claimed": false
     }
   ]

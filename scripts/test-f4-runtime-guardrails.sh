@@ -10,8 +10,10 @@ cargo test -p apolysis-validation --test f4_runtime_guardrail_matrix
 cargo test -p apolysis-validation --test f4_runtime_adapter_evidence
 cargo test -p apolysis-validation --test f4_gvisor_metadata_evidence
 cargo test -p apolysis-validation --test f4_kubernetes_agent_sandbox_evidence
+cargo test -p apolysis-validation --test f4_kata_boundary_evidence
 cargo test -p apolysis-daemon --test runtime_adapters runtime_workload_becomes_f4_runtime_adapter_evidence
 cargo test -p apolysis-visibility --test f4_gvisor_metadata
+cargo test -p apolysis-visibility --test f4_kata_boundary
 cargo test -p apolysis-kubernetes --test f4_agent_sandbox_evidence
 cargo run -p apolysis-validation --bin apolysis-f4-runtime-guardrail-matrix \
   < tests/fixtures/validation/f4-runtime-guardrail-local-live.json \
@@ -64,6 +66,24 @@ assert adapter_by_runtime["kubernetes"]["kill"]["evidence_ids"] == [
 ]
 assert adapter_by_runtime["kubernetes"]["seccomp_block"]["status"] == "requires_runtime_evidence"
 assert adapter_by_runtime["kubernetes"]["seccomp_block"]["evidence_ids"] == []
+assert adapter_by_runtime["kata"]["notify"]["evidence_ids"] == [
+    "live-kata-qemu-shim-boundary",
+    "live-kubernetes-kata-cgroup",
+]
+assert adapter_by_runtime["kata"]["review"]["evidence_ids"] == [
+    "live-kata-qemu-shim-boundary",
+    "live-kubernetes-kata-cgroup",
+]
+assert adapter_by_runtime["kata"]["kill"]["evidence_ids"] == [
+    "live-kata-qemu-shim-boundary",
+    "live-kubernetes-kata-cgroup",
+]
+assert adapter_by_runtime["kata"]["seccomp_block"]["status"] == "boundary_only"
+assert adapter_by_runtime["kata"]["seccomp_block"]["evidence_ids"] == [
+    "live-kata-qemu-shim-boundary",
+    "live-kubernetes-kata-cgroup",
+]
+assert adapter_by_runtime["kata"]["requires_guest_collector"] is True
 PY
 
 echo "apolysis-f4: runtime guardrail support matrix validation passed"
