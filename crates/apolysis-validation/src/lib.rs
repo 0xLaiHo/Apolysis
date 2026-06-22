@@ -503,6 +503,32 @@ pub struct F4RuntimeGuardrailMatrixReport {
     pub runtimes: Vec<F4RuntimeGuardrailSupport>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4LiveRuntimeEvidenceBundleRequest {
+    pub artifact_dir: PathBuf,
+    pub visibility_reports: Vec<VisibilityReport>,
+    pub block_validation_reports: Vec<F3BlockValidationReport>,
+    pub runtime_adapter_evidence_reports: Vec<F4RuntimeAdapterEvidenceReport>,
+    pub gvisor_metadata_evidence_reports: Vec<F4GvisorMetadataEvidenceReport>,
+    pub kubernetes_agent_sandbox_evidence_reports: Vec<F4KubernetesAgentSandboxEvidenceReport>,
+    pub kata_boundary_evidence_reports: Vec<F4KataBoundaryEvidenceReport>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4LiveRuntimeEvidenceBundleFailure {
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F4LiveRuntimeEvidenceBundleReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub artifact_dir: PathBuf,
+    pub visibility_gate: VisibilityReportGateReport,
+    pub matrix: Option<F4RuntimeGuardrailMatrixReport>,
+    pub failures: Vec<F4LiveRuntimeEvidenceBundleFailure>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum F4RuntimeAdapterEvidenceSource {
@@ -1068,6 +1094,122 @@ pub fn evaluate_visibility_report_gate(
         schema_version: 1,
         passed: failures.is_empty(),
         reports,
+        failures,
+    }
+}
+
+pub fn evaluate_f4_live_runtime_evidence_bundle(
+    request: F4LiveRuntimeEvidenceBundleRequest,
+) -> F4LiveRuntimeEvidenceBundleReport {
+    let mut failures = Vec::new();
+
+    for artifact in required_f4_live_runtime_artifacts() {
+        let path = request.artifact_dir.join(artifact);
+        if !path.is_file() {
+            failures.push(f4_live_runtime_evidence_failure(format!(
+                "runtime adapter matrix artifact missing required file: {}",
+                path.display()
+            )));
+        }
+    }
+
+    let artifact_marker = request.artifact_dir.display().to_string();
+    let visibility_gate = evaluate_visibility_report_gate(request.visibility_reports);
+    if !visibility_gate.passed {
+        failures.push(f4_live_runtime_evidence_failure(
+            "F4 live runtime evidence requires a passed F2 visibility report gate",
+        ));
+    }
+    for report in &visibility_gate.reports {
+        if !report.evidence_source.contains(&artifact_marker) {
+            failures.push(f4_live_runtime_evidence_failure(format!(
+                "visibility evidence source for {} must reference runtime adapter matrix artifact {}",
+                report.target.as_str(),
+                artifact_marker
+            )));
+        }
+    }
+
+    let adapter_gate =
+        evaluate_f4_runtime_adapter_evidence_gate(request.runtime_adapter_evidence_reports);
+    if !adapter_gate.passed {
+        failures.push(f4_live_runtime_evidence_failure(
+            "F4 live runtime evidence requires a passed runtime adapter evidence gate",
+        ));
+    }
+    let gvisor_gate = if request.gvisor_metadata_evidence_reports.is_empty() {
+        F4GvisorMetadataEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        }
+    } else {
+        let gate =
+            evaluate_f4_gvisor_metadata_evidence_gate(request.gvisor_metadata_evidence_reports);
+        if !gate.passed {
+            failures.push(f4_live_runtime_evidence_failure(
+                "F4 live runtime evidence requires a passed gVisor metadata evidence gate",
+            ));
+        }
+        gate
+    };
+    let kubernetes_gate = if request.kubernetes_agent_sandbox_evidence_reports.is_empty() {
+        F4KubernetesAgentSandboxEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        }
+    } else {
+        let gate = evaluate_f4_kubernetes_agent_sandbox_evidence_gate(
+            request.kubernetes_agent_sandbox_evidence_reports,
+        );
+        if !gate.passed {
+            failures.push(f4_live_runtime_evidence_failure(
+                "F4 live runtime evidence requires a passed Kubernetes Agent Sandbox evidence gate",
+            ));
+        }
+        gate
+    };
+    let kata_gate = if request.kata_boundary_evidence_reports.is_empty() {
+        F4KataBoundaryEvidenceGateReport {
+            schema_version: 1,
+            passed: true,
+            reports: Vec::new(),
+            validated_evidence: Vec::new(),
+            failures: Vec::new(),
+        }
+    } else {
+        let gate = evaluate_f4_kata_boundary_evidence_gate(request.kata_boundary_evidence_reports);
+        if !gate.passed {
+            failures.push(f4_live_runtime_evidence_failure(
+                "F4 live runtime evidence requires a passed Kata boundary evidence gate",
+            ));
+        }
+        gate
+    };
+
+    let matrix = if failures.is_empty() {
+        Some(evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
+            request.block_validation_reports,
+            adapter_gate,
+            gvisor_gate,
+            kubernetes_gate,
+            kata_gate,
+        ))
+    } else {
+        None
+    };
+
+    F4LiveRuntimeEvidenceBundleReport {
+        schema_version: 1,
+        passed: failures.is_empty(),
+        artifact_dir: request.artifact_dir,
+        visibility_gate,
+        matrix,
         failures,
     }
 }
@@ -3452,6 +3594,25 @@ fn f3_enablement_failure(
 ) -> F3BlockEnablementFailure {
     F3BlockEnablementFailure {
         request_id,
+        message: message.into(),
+    }
+}
+
+fn required_f4_live_runtime_artifacts() -> [&'static str; 6] {
+    [
+        "backup-manifest.json",
+        "service-state.json",
+        "kubernetes-context.json",
+        "restore-plan.json",
+        "runtime-registration-report.json",
+        "restore-execution-report.json",
+    ]
+}
+
+fn f4_live_runtime_evidence_failure(
+    message: impl Into<String>,
+) -> F4LiveRuntimeEvidenceBundleFailure {
+    F4LiveRuntimeEvidenceBundleFailure {
         message: message.into(),
     }
 }

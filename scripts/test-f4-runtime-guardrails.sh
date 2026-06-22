@@ -22,6 +22,50 @@ cargo run -p apolysis-validation --bin apolysis-f4-runtime-guardrail-matrix \
   < tests/fixtures/validation/f4-runtime-guardrail-request.json \
   > /tmp/apolysis-f4-runtime-guardrail-adapter-matrix.json
 
+live_bundle_artifacts="$(mktemp -d "${TMPDIR:-/tmp}/apolysis-f4-live-runtime-evidence.XXXXXX")"
+for artifact in \
+  backup-manifest.json \
+  service-state.json \
+  kubernetes-context.json \
+  restore-plan.json \
+  runtime-registration-report.json \
+  restore-execution-report.json
+do
+  printf '{}\n' > "$live_bundle_artifacts/$artifact"
+done
+
+python - "$live_bundle_artifacts" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+artifact_dir = sys.argv[1]
+source = f"scripts/test-f2-runtime-adapter-matrix.sh artifacts={artifact_dir}"
+request = json.loads(Path("tests/fixtures/validation/f4-runtime-guardrail-request.json").read_text())
+request["artifact_dir"] = artifact_dir
+request["visibility_reports"] = [
+    {"target": target, "live_validated": True, "evidence_source": source, "host_visibility_scope": scope, "guest_semantics_claimed": False}
+    for target, scope in [
+        ("local", "guest_process"),
+        ("docker_runc", "guest_process"),
+        ("docker_gvisor", "runtime_boundary"),
+        ("containerd_runc", "guest_process"),
+        ("containerd_gvisor", "runtime_boundary"),
+        ("containerd_kata", "boundary_only"),
+        ("k3s_runc", "guest_process"),
+        ("k3s_gvisor", "runtime_boundary"),
+        ("k3s_kata", "boundary_only"),
+    ]
+]
+Path("/tmp/apolysis-f4-live-runtime-evidence-request.json").write_text(
+    json.dumps(request, indent=2, sort_keys=True)
+)
+PY
+
+cargo run -p apolysis-validation --bin apolysis-f4-live-runtime-evidence \
+  < /tmp/apolysis-f4-live-runtime-evidence-request.json \
+  > /tmp/apolysis-f4-live-runtime-evidence-report.json
+
 python - <<'PY'
 import json
 from pathlib import Path
@@ -84,6 +128,12 @@ assert adapter_by_runtime["kata"]["seccomp_block"]["evidence_ids"] == [
     "live-kubernetes-kata-cgroup",
 ]
 assert adapter_by_runtime["kata"]["requires_guest_collector"] is True
+
+bundle = json.loads(Path("/tmp/apolysis-f4-live-runtime-evidence-report.json").read_text())
+assert bundle["passed"] is True
+assert bundle["matrix"]["production_facing_kernel_blocking_supported"] is False
+bundle_by_runtime = {entry["runtime"]: entry for entry in bundle["matrix"]["runtimes"]}
+assert bundle_by_runtime["kata"]["seccomp_block"]["status"] == "boundary_only"
 PY
 
 echo "apolysis-f4: runtime guardrail support matrix validation passed"
