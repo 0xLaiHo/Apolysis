@@ -23,6 +23,7 @@ cargo run -p apolysis-validation --bin apolysis-f4-runtime-guardrail-matrix \
   > /tmp/apolysis-f4-runtime-guardrail-adapter-matrix.json
 
 live_bundle_artifacts="$(mktemp -d "${TMPDIR:-/tmp}/apolysis-f4-live-runtime-evidence.XXXXXX")"
+live_bundle_output="$(mktemp -d "${TMPDIR:-/tmp}/apolysis-f4-live-runtime-evidence-output.XXXXXX")"
 for artifact in \
   backup-manifest.json \
   service-state.json \
@@ -34,40 +35,66 @@ do
   printf '{}\n' > "$live_bundle_artifacts/$artifact"
 done
 
-python - "$live_bundle_artifacts" <<'PY'
+APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR="$live_bundle_artifacts" \
+APOLYSIS_F4_LIVE_RUNTIME_EVIDENCE_OUTPUT_DIR="$live_bundle_output" \
+  ./scripts/write-f4-live-runtime-evidence-bundle.sh
+
+test -s "$live_bundle_output/f4-live-runtime-evidence-request.json"
+test -s "$live_bundle_output/f4-live-runtime-evidence-report.json"
+
+restore_check_root="$(mktemp -d "${TMPDIR:-/tmp}/apolysis-f2-restore-check-root.XXXXXX")"
+restore_check_artifacts="$(mktemp -d "${TMPDIR:-/tmp}/apolysis-f2-restore-check-artifacts.XXXXXX")"
+mkdir -p "$restore_check_root/etc/containerd"
+mkdir -p "$restore_check_root/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d"
+printf 'original-containerd-config\n' > "$restore_check_root/etc/containerd/config.toml"
+containerd_sha="$(sha256sum "$restore_check_root/etc/containerd/config.toml" | awk '{print $1}')"
+python - "$restore_check_artifacts/backup-manifest.json" "$containerd_sha" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-artifact_dir = sys.argv[1]
-source = f"scripts/test-f2-runtime-adapter-matrix.sh artifacts={artifact_dir}"
-request = json.loads(Path("tests/fixtures/validation/f4-runtime-guardrail-request.json").read_text())
-request["artifact_dir"] = artifact_dir
-request["visibility_reports"] = [
-    {"target": target, "live_validated": True, "evidence_source": source, "host_visibility_scope": scope, "guest_semantics_claimed": False}
-    for target, scope in [
-        ("local", "guest_process"),
-        ("docker_runc", "guest_process"),
-        ("docker_gvisor", "runtime_boundary"),
-        ("containerd_runc", "guest_process"),
-        ("containerd_gvisor", "runtime_boundary"),
-        ("containerd_kata", "boundary_only"),
-        ("k3s_runc", "guest_process"),
-        ("k3s_gvisor", "runtime_boundary"),
-        ("k3s_kata", "boundary_only"),
-    ]
-]
-Path("/tmp/apolysis-f4-live-runtime-evidence-request.json").write_text(
-    json.dumps(request, indent=2, sort_keys=True)
-)
+Path(sys.argv[1]).write_text(json.dumps({
+    "schema_version": 1,
+    "entries": [
+        {
+            "id": "containerd_config",
+            "original_path": "/etc/containerd/config.toml",
+            "kind": "regular_file",
+            "backup_relative_path": "files/containerd_config",
+            "sha256_hex": sys.argv[2],
+            "symlink_target": None,
+            "uid": 0,
+            "gid": 0,
+            "mode": 420,
+        },
+        {
+            "id": "k3s_runtime_dropin",
+            "original_path": "/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/99-apolysis-runtimes.toml",
+            "kind": "missing",
+            "backup_relative_path": None,
+            "sha256_hex": None,
+            "symlink_target": None,
+            "uid": None,
+            "gid": None,
+            "mode": None,
+        },
+    ],
+}, indent=2, sort_keys=True))
 PY
+APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR="$restore_check_artifacts" \
+APOLYSIS_HOST_ROOT="$restore_check_root" \
+  ./scripts/assert-f2-runtime-matrix-restored.sh
+printf 'unexpected dropin\n' > "$restore_check_root/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/99-apolysis-runtimes.toml"
+if APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR="$restore_check_artifacts" \
+  APOLYSIS_HOST_ROOT="$restore_check_root" \
+  ./scripts/assert-f2-runtime-matrix-restored.sh; then
+  echo "apolysis-f4: restore manifest check accepted a stale runtime drop-in" >&2
+  exit 1
+fi
 
-cargo run -p apolysis-validation --bin apolysis-f4-live-runtime-evidence \
-  < /tmp/apolysis-f4-live-runtime-evidence-request.json \
-  > /tmp/apolysis-f4-live-runtime-evidence-report.json
-
-python - <<'PY'
+python - "$live_bundle_output/f4-live-runtime-evidence-report.json" <<'PY'
 import json
+import sys
 from pathlib import Path
 
 report = json.loads(Path("/tmp/apolysis-f4-runtime-guardrail-matrix.json").read_text())
@@ -129,7 +156,7 @@ assert adapter_by_runtime["kata"]["seccomp_block"]["evidence_ids"] == [
 ]
 assert adapter_by_runtime["kata"]["requires_guest_collector"] is True
 
-bundle = json.loads(Path("/tmp/apolysis-f4-live-runtime-evidence-report.json").read_text())
+bundle = json.loads(Path(sys.argv[1]).read_text())
 assert bundle["passed"] is True
 assert bundle["matrix"]["production_facing_kernel_blocking_supported"] is False
 bundle_by_runtime = {entry["runtime"]: entry for entry in bundle["matrix"]["runtimes"]}

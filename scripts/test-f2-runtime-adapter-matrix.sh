@@ -49,6 +49,20 @@ wait_for_services() {
     return 1
 }
 
+wait_for_docker_runtime() {
+    local runtime="$1"
+    local expected="$2"
+    local i
+    for i in $(seq 1 60); do
+        if docker info --format '{{json .Runtimes}}' | jq -e "has(\"$runtime\") == $expected"; then
+            return 0
+        fi
+        sleep 1
+    done
+    docker info --format '{{json .Runtimes}}' || true
+    return 1
+}
+
 start_host_unit() {
     local unit="$1"
     shift
@@ -64,10 +78,19 @@ restart_runtime_services() {
     wait_for_services
 }
 
+make_output_dir_user_writable() {
+    [[ "${EUID:-$(id -u)}" -ne 0 ]] || return 0
+    run_host /bin/chown -R "$(id -u):$(id -g)" "$output_dir"
+}
+
 restore_runtime_registration() {
     [[ "$applied" == "1" ]] || return 0
     echo "apolysis-f2: restoring runtime configuration from $output_dir"
-    rm -f "$output_dir/restore-execution-report.json"
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        rm -f "$output_dir/restore-execution-report.json"
+    else
+        run_host /bin/rm -f "$output_dir/restore-execution-report.json"
+    fi
     if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
         "$binary" --restore --output "$output_dir"
     else
@@ -84,6 +107,7 @@ restore_runtime_registration() {
         fi
     fi
     wait_for_services
+    make_output_dir_user_writable
     applied=0
 }
 
@@ -116,10 +140,11 @@ else
     run_host "$binary" --apply-runtime-registration --output "$output_dir"
 fi
 applied=1
+make_output_dir_user_writable
 
 restart_runtime_services
 
-docker info --format '{{json .Runtimes}}' | jq -e 'has("runsc")'
+wait_for_docker_runtime runsc true
 host_bash 'crictl --config /dev/null --runtime-endpoint unix:///run/containerd/containerd.sock --image-endpoint unix:///run/containerd/containerd.sock info | jq -e '\''.config.containerd.runtimes | has("runc") and has("runsc") and has("kata")'\'''
 host_bash 'crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock info | jq -e '\''.config.containerd.runtimes | has("runc") and has("runsc") and has("kata")'\'''
 
@@ -132,10 +157,19 @@ APOLYSIS_REQUIRE_KUBERNETES_ADAPTER=1 \
 
 restore_runtime_registration
 
-docker info --format '{{json .Runtimes}}' | jq -e 'has("runsc") | not'
-host_bash 'test ! -e /etc/containerd/config.toml'
-host_bash 'test ! -e /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/99-apolysis-runtimes.toml'
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR="$output_dir" \
+        ./scripts/assert-f2-runtime-matrix-restored.sh
+else
+    host_bash "cd '$repo_root' && APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR='$output_dir' ./scripts/assert-f2-runtime-matrix-restored.sh"
+fi
+wait_for_docker_runtime runsc false
 host_bash 'crictl --config /dev/null --runtime-endpoint unix:///run/containerd/containerd.sock --image-endpoint unix:///run/containerd/containerd.sock info | jq -e '\''(.config.containerd.runtimes // {}) as $r | (($r | has("runsc") | not) and ($r | has("kata") | not))'\'''
 host_bash 'crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock info | jq -e '\''(.config.containerd.runtimes // {}) as $r | (($r | has("runsc") | not) and ($r | has("kata") | not))'\'''
+
+APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR="$output_dir" \
+    ./scripts/write-f4-live-runtime-evidence-bundle.sh
+test -s "$output_dir/f4-live-runtime-evidence-request.json"
+test -s "$output_dir/f4-live-runtime-evidence-report.json"
 
 echo "apolysis-f2: runtime adapter matrix passed; artifacts kept at $output_dir"

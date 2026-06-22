@@ -56,7 +56,8 @@ validated Docker/containerd/Kubernetes adapter evidence. It now also adds
 gVisor-specific runsc/sentry/gofer metadata evidence, Kubernetes Agent Sandbox
 metadata evidence, and Kata boundary-only evidence for runtime-boundary
 visibility. F4 also includes a live-runtime evidence bundle gate that binds F4
-claims to retained F2 runtime adapter matrix artifacts.
+claims to retained F2 runtime adapter matrix artifacts, and the full live
+runtime adapter matrix now writes retained F4 bundle request/report artifacts.
 
 ## 🚀 Runtime Scenarios
 
@@ -282,7 +283,8 @@ Independent Observability MVP, F2 Accountability Beta, and F3 Limited
 Guardrails are complete. F4 Runtime Adapter Depth is in progress, starting with
 the runtime guardrail support matrix, runtime adapter evidence correlation, and
 gVisor, Kubernetes Agent Sandbox, Kata boundary, and live-runtime evidence
-bundle gates.
+bundle gates, plus retained F4 bundle artifacts from the live runtime adapter
+matrix.
 
 Implementation milestones:
 
