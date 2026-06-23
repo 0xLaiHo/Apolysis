@@ -46,3 +46,14 @@ apolysis.dev/tenant-id: {{ include "apolysis.tenantId" . | quote }}
 {{- printf "%s:%s" .Values.image.repository .Values.image.tag -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "apolysis.meshMtlsMode" -}}
+{{- $mode := upper (default "strict" .Values.mesh.mtls.mode) -}}
+{{- if eq $mode "STRICT" -}}
+STRICT
+{{- else if eq $mode "PERMISSIVE" -}}
+PERMISSIVE
+{{- else -}}
+{{- fail (printf "unsupported mesh.mtls.mode %q" .Values.mesh.mtls.mode) -}}
+{{- end -}}
+{{- end -}}

@@ -65,7 +65,9 @@ supply-chain bundle gate for signed artifacts, SBOM, provenance, and
 high/critical vulnerability scan evidence, plus Helm-rendered tenant-isolated
 deployment packaging with metrics mTLS handoff annotations and a narrow
 metrics NetworkPolicy allowlist, and a local OCI registry/archive gate for
-release image publishing, SBOM attachment, and read-only archive evidence.
+release image publishing, SBOM attachment, and read-only archive evidence. The
+Helm packaging now also renders optional Istio strict mTLS and metrics
+AuthorizationPolicy resources for service-account-scoped metrics access.
 
 ## 🚀 Runtime Scenarios
 
@@ -294,7 +296,8 @@ hardening gate, live k3s deployment validation gate, and production DaemonSet
 metrics, resilience, queue pressure, storage-failure, and release
 supply-chain validation, plus Helm production packaging for tenant-isolated
 node-local deployments and local OCI registry/archive validation for release
-artifacts.
+artifacts, plus rendered service-mesh identity policy validation for metrics
+access.
 
 Implementation milestones:
 
@@ -317,7 +320,7 @@ Focused roadmap:
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
-| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM/provenance, Helm, registry/archive validation, operator, large-scale chaos and performance testing | 🚧 **In Progress** |
+| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM/provenance, Helm, registry/archive validation, service-mesh identity policy, operator, large-scale chaos and performance testing | 🚧 **In Progress** |
 
 ## 📜 License
 

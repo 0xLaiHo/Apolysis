@@ -81,6 +81,11 @@ mesh:
   mtls:
     required: true
     mode: strict
+  istio:
+    enabled: false
+    metricsAuthorizationPolicy:
+      allowedPrincipals:
+        - cluster.local/ns/monitoring/sa/prometheus
 
 podAnnotations: {}
 podLabels: {}

@@ -310,6 +310,26 @@ grep -R -q 'apolysisd-metrics-allow' "$helm_chart" || {
     exit 1
 }
 
+grep -R -q 'security.istio.io/v1beta1' "$helm_chart" || {
+    echo "F5.9 Helm chart must render service-mesh identity policy resources" >&2
+    exit 1
+}
+
+grep -R -q 'PeerAuthentication' "$helm_chart" || {
+    echo "F5.9 Helm chart must render strict mTLS PeerAuthentication" >&2
+    exit 1
+}
+
+grep -R -q 'AuthorizationPolicy' "$helm_chart" || {
+    echo "F5.9 Helm chart must render metrics identity AuthorizationPolicy" >&2
+    exit 1
+}
+
+grep -R -q 'allowedPrincipals' "$helm_chart" || {
+    echo "F5.9 Helm chart must require bounded service-account principals" >&2
+    exit 1
+}
+
 grep -q 'helm lint' "$helm_gate" || {
     echo "F5.7 Helm gate must lint the chart" >&2
     exit 1

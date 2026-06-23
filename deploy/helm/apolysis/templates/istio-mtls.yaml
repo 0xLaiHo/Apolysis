@@ -1,0 +1,41 @@
+{{- if and .Values.mesh.mtls.required .Values.mesh.istio.enabled }}
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: {{ include "apolysis.fullname" . }}-mtls
+  namespace: {{ include "apolysis.namespace" . }}
+  labels:
+    {{- include "apolysis.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "apolysis.selectorLabels" . | nindent 6 }}
+  mtls:
+    mode: {{ include "apolysis.meshMtlsMode" . }}
+{{- if and .Values.metrics.enabled .Values.metrics.service.enabled }}
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ include "apolysis.fullname" . }}-metrics
+  namespace: {{ include "apolysis.namespace" . }}
+  labels:
+    {{- include "apolysis.labels" . | nindent 4 }}
+spec:
+  action: ALLOW
+  selector:
+    matchLabels:
+      {{- include "apolysis.selectorLabels" . | nindent 6 }}
+  rules:
+    - from:
+        - source:
+            principals:
+              {{- range required "mesh.istio.metricsAuthorizationPolicy.allowedPrincipals must not be empty" .Values.mesh.istio.metricsAuthorizationPolicy.allowedPrincipals }}
+              - {{ . | quote }}
+              {{- end }}
+      to:
+        - operation:
+            ports:
+              - {{ .Values.metrics.port | quote }}
+{{- end }}
+{{- end }}

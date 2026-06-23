@@ -8,6 +8,8 @@ chart="$repo_root/deploy/helm/apolysis"
 output_dir="${APOLYSIS_F5_HELM_OUTPUT_DIR:-$(mktemp -d "$repo_root/target/f5-helm-production.XXXXXX")}"
 primary_render="$output_dir/apolysis-platform-prod.yaml"
 secondary_render="$output_dir/apolysis-tenant-b.yaml"
+primary_core_render="$output_dir/apolysis-platform-prod-core.yaml"
+secondary_core_render="$output_dir/apolysis-tenant-b-core.yaml"
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -35,16 +37,34 @@ helm template apolysis "$chart" \
     --namespace apolysis-system \
     --set tenant.id=platform-prod \
     --set namespace.name=apolysis-system \
+    --set mesh.istio.enabled=true \
+    --set mesh.istio.metricsAuthorizationPolicy.allowedPrincipals[0]=cluster.local/ns/apolysis-monitoring/sa/prometheus \
     >"$primary_render"
 
 helm template apolysis-tenant-b "$chart" \
     --namespace apolysis-tenant-b \
     --set tenant.id=tenant-b \
     --set namespace.name=apolysis-tenant-b \
+    --set mesh.istio.enabled=true \
+    --set mesh.istio.metricsAuthorizationPolicy.allowedPrincipals[0]=cluster.local/ns/apolysis-monitoring/sa/prometheus-tenant-b \
     >"$secondary_render"
 
-kubectl apply --dry-run=client --validate=false -f "$primary_render" >/dev/null
-kubectl apply --dry-run=client --validate=false -f "$secondary_render" >/dev/null
+python3 - "$primary_render" "$primary_core_render" "$secondary_render" "$secondary_core_render" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+custom_kinds = {"AuthorizationPolicy", "PeerAuthentication"}
+
+for render_path, core_path in [(sys.argv[1], sys.argv[2]), (sys.argv[3], sys.argv[4])]:
+    docs = [doc for doc in yaml.safe_load_all(Path(render_path).read_text(encoding="utf-8")) if doc]
+    core_docs = [doc for doc in docs if doc.get("kind") not in custom_kinds]
+    Path(core_path).write_text(yaml.safe_dump_all(core_docs, sort_keys=False), encoding="utf-8")
+PY
+
+kubectl apply --dry-run=client --validate=false -f "$primary_core_render" >/dev/null
+kubectl apply --dry-run=client --validate=false -f "$secondary_core_render" >/dev/null
 
 python3 - "$primary_render" "$secondary_render" <<'PY'
 import sys
@@ -81,7 +101,7 @@ def assert_true(value, message: str) -> None:
         raise SystemExit(message)
 
 
-def verify_render(docs: list[dict], release: str, namespace: str, tenant: str) -> None:
+def verify_render(docs: list[dict], release: str, namespace: str, tenant: str, expected_principal: str) -> None:
     expected_kinds = {
         "Namespace",
         "ServiceAccount",
@@ -90,6 +110,8 @@ def verify_render(docs: list[dict], release: str, namespace: str, tenant: str) -
         "DaemonSet",
         "NetworkPolicy",
         "Service",
+        "PeerAuthentication",
+        "AuthorizationPolicy",
     }
     rendered_kinds = {doc.get("kind") for doc in docs}
     missing = expected_kinds - rendered_kinds
@@ -184,11 +206,50 @@ def verify_render(docs: list[dict], release: str, namespace: str, tenant: str) -
     assert_equal(service.get("spec", {}).get("ports", [{}])[0].get("port"), 9909, "metrics service port")
     assert_equal(service.get("metadata", {}).get("annotations", {}).get("apolysis.dev/mtls-required"), "true", "metrics service mTLS annotation")
 
+    peer_authentication = by_kind_name(docs, "PeerAuthentication", f"{release}-mtls")
+    assert_equal(peer_authentication.get("apiVersion"), "security.istio.io/v1beta1", "PeerAuthentication apiVersion")
+    assert_equal(peer_authentication.get("metadata", {}).get("namespace"), namespace, "PeerAuthentication namespace")
+    assert_equal(
+        peer_authentication.get("spec", {}).get("selector", {}).get("matchLabels", {}).get("apolysis.dev/tenant-id"),
+        tenant,
+        "PeerAuthentication tenant selector",
+    )
+    assert_equal(peer_authentication.get("spec", {}).get("mtls", {}).get("mode"), "STRICT", "PeerAuthentication mTLS mode")
+
+    authorization_policy = by_kind_name(docs, "AuthorizationPolicy", f"{release}-metrics")
+    assert_equal(authorization_policy.get("apiVersion"), "security.istio.io/v1beta1", "AuthorizationPolicy apiVersion")
+    assert_equal(authorization_policy.get("metadata", {}).get("namespace"), namespace, "AuthorizationPolicy namespace")
+    assert_equal(authorization_policy.get("spec", {}).get("action"), "ALLOW", "AuthorizationPolicy action")
+    assert_equal(
+        authorization_policy.get("spec", {}).get("selector", {}).get("matchLabels", {}).get("apolysis.dev/tenant-id"),
+        tenant,
+        "AuthorizationPolicy tenant selector",
+    )
+    rules = authorization_policy.get("spec", {}).get("rules", [])
+    assert_true(rules, "AuthorizationPolicy rules missing")
+    principals = rules[0].get("from", [{}])[0].get("source", {}).get("principals", [])
+    assert_equal(principals, [expected_principal], "AuthorizationPolicy source principal")
+    assert_true("/sa/" in expected_principal, "AuthorizationPolicy must use service-account principals")
+    ports = rules[0].get("to", [{}])[0].get("operation", {}).get("ports", [])
+    assert_equal(ports, ["9909"], "AuthorizationPolicy metrics port")
+
 
 primary = load(sys.argv[1])
 secondary = load(sys.argv[2])
-verify_render(primary, "apolysis", "apolysis-system", "platform-prod")
-verify_render(secondary, "apolysis-tenant-b", "apolysis-tenant-b", "tenant-b")
+verify_render(
+    primary,
+    "apolysis",
+    "apolysis-system",
+    "platform-prod",
+    "cluster.local/ns/apolysis-monitoring/sa/prometheus",
+)
+verify_render(
+    secondary,
+    "apolysis-tenant-b",
+    "apolysis-tenant-b",
+    "tenant-b",
+    "cluster.local/ns/apolysis-monitoring/sa/prometheus-tenant-b",
+)
 
 primary_state = by_kind_name(primary, "DaemonSet", "apolysis")["spec"]["template"]["spec"]["volumes"][1]["hostPath"]["path"]
 secondary_state = by_kind_name(secondary, "DaemonSet", "apolysis-tenant-b")["spec"]["template"]["spec"]["volumes"][1]["hostPath"]["path"]
