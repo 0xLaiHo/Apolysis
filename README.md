@@ -58,7 +58,7 @@ evidence, Kata boundary-only evidence, and a live-runtime evidence bundle gate
 that binds F4 claims to retained F2 runtime adapter matrix artifacts. F5 has
 started with a production-hardening baseline for a bounded Kubernetes
 DaemonSet/RBAC deployment surface and a live k3s rollout/restore validation
-gate for the node-local daemon.
+gate for the node-local daemon, including live metrics scrape validation.
 
 ## 🚀 Runtime Scenarios
 
@@ -283,7 +283,8 @@ Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
 Independent Observability MVP, F2 Accountability Beta, F3 Limited Guardrails,
 and F4 Runtime Adapter Depth are complete. F5 Production Hardening is in
 progress, with a Kubernetes DaemonSet/RBAC deployment baseline, local manifest
-hardening gate, and live k3s deployment validation gate.
+hardening gate, live k3s deployment validation gate, and production DaemonSet
+metrics validation.
 
 Implementation milestones:
 

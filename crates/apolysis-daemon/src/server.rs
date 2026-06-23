@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::SocketAddr;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,13 +12,13 @@ use apolysis_accountability::{
 use apolysis_observer::{DaemonObserver, DaemonObserverConfig};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::{oneshot, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::{
-    run_observer_runtime, run_runtime_adapter, scope_channel, ContainerdCriRuntimeAdapter,
-    CriRuntimeClient, DaemonConfig, DaemonState, DockerEngineClient,
+    render_prometheus_metrics, run_observer_runtime, run_runtime_adapter, scope_channel,
+    ContainerdCriRuntimeAdapter, CriRuntimeClient, DaemonConfig, DaemonState, DockerEngineClient,
     DockerEnginePollingRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
     RuntimeAdapterSummary,
 };
@@ -79,6 +80,15 @@ pub async fn serve(
             return Err(error);
         }
     };
+    let (metrics_shutdown, mut metrics_task) =
+        match start_metrics_listener(config.metrics_listen, Arc::clone(&state)).await {
+            Ok(metrics) => metrics,
+            Err(error) => {
+                drop(listener);
+                remove_socket_if_socket(&config.socket_path)?;
+                return Err(error);
+            }
+        };
     let (writer_shutdown, writer_shutdown_receiver) = oneshot::channel();
     let mut writer_task = {
         let state = Arc::clone(&state);
@@ -168,6 +178,24 @@ pub async fn serve(
     if let Some(observer_shutdown) = observer_shutdown {
         let _ = observer_shutdown.send(());
     }
+    if let Some(metrics_shutdown) = metrics_shutdown {
+        let _ = metrics_shutdown.send(());
+    }
+    if let Some(task) = metrics_task.as_mut() {
+        match tokio::time::timeout(config.shutdown_drain_timeout, &mut *task).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                eprintln!("apolysisd: metrics listener stopped with error: {error}");
+            }
+            Ok(Err(error)) => {
+                eprintln!("apolysisd: metrics listener task failed: {error}");
+            }
+            Err(_) => {
+                task.abort();
+                eprintln!("apolysisd: metrics listener shutdown deadline exceeded");
+            }
+        }
+    }
     if let Some(task) = observer_task.as_mut() {
         match tokio::time::timeout(config.shutdown_drain_timeout, &mut *task).await {
             Ok(Ok(Ok(_))) => {}
@@ -221,6 +249,120 @@ pub async fn serve(
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+async fn start_metrics_listener(
+    metrics_listen: Option<SocketAddr>,
+    state: Arc<DaemonState>,
+) -> Result<
+    (
+        Option<oneshot::Sender<()>>,
+        Option<tokio::task::JoinHandle<Result<(), String>>>,
+    ),
+    String,
+> {
+    let Some(addr) = metrics_listen else {
+        return Ok((None, None));
+    };
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|error| format!("failed to bind metrics listener {addr}: {error}"))?;
+    let (shutdown, receiver) = oneshot::channel();
+    let task = tokio::spawn(run_metrics_listener(listener, state, receiver));
+    Ok((Some(shutdown), Some(task)))
+}
+
+async fn run_metrics_listener(
+    listener: TcpListener,
+    state: Arc<DaemonState>,
+    mut shutdown: oneshot::Receiver<()>,
+) -> Result<(), String> {
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => {
+                let (stream, _) = accepted
+                    .map_err(|error| format!("failed to accept metrics connection: {error}"))?;
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    if let Err(error) = handle_metrics_connection(stream, state).await {
+                        eprintln!("apolysisd: metrics request failed: {error}");
+                    }
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_metrics_connection(
+    mut stream: TcpStream,
+    state: Arc<DaemonState>,
+) -> Result<(), String> {
+    let request = read_http_request(&mut stream).await?;
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+    if path != "/metrics" {
+        return write_http_response(
+            &mut stream,
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            "not found\n",
+        )
+        .await;
+    }
+
+    let health = state.health().await;
+    let metrics = render_prometheus_metrics(&health);
+    write_http_response(
+        &mut stream,
+        "200 OK",
+        "text/plain; version=0.0.4; charset=utf-8",
+        &metrics,
+    )
+    .await
+}
+
+async fn read_http_request(stream: &mut TcpStream) -> Result<String, String> {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 512];
+    loop {
+        let read = stream
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("failed to read metrics HTTP request: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if request.len() > 8 * 1024 {
+            return Err("metrics HTTP request exceeded 8 KiB".to_string());
+        }
+    }
+    String::from_utf8(request)
+        .map_err(|error| format!("metrics HTTP request was not UTF-8: {error}"))
+}
+
+async fn write_http_response(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> Result<(), String> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|error| format!("failed to write metrics HTTP response: {error}"))
 }
 
 fn start_runtime_adapters(

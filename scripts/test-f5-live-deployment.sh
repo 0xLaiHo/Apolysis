@@ -66,8 +66,13 @@ workload_manifest="$output_dir/apolysis-f5-live-workload.apply.yaml"
 state_path="/tmp/apolysis-f5-live-state-$stamp"
 session_id="apolysis-f5-live"
 applied=0
+port_forward_pid=""
 
 cleanup() {
+    if [[ -n "$port_forward_pid" ]]; then
+        kill "$port_forward_pid" >/dev/null 2>&1 || true
+        wait "$port_forward_pid" >/dev/null 2>&1 || true
+    fi
     if [[ "$applied" == "1" ]]; then
         kubectl delete -f "$live_manifest" --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
     fi
@@ -244,6 +249,65 @@ if [[ "$health_ready" != "1" ]]; then
     tail -n 80 "$output_dir/apolysisd.log" >&2 || true
     exit 1
 fi
+
+metrics_port="$(
+    python3 <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+    listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1])
+PY
+)"
+kubectl -n apolysis-system port-forward \
+    --address 127.0.0.1 \
+    "pod/$pod" \
+    "${metrics_port}:9909" \
+    >"$output_dir/apolysisd-metrics-port-forward.log" \
+    2>&1 &
+port_forward_pid="$!"
+
+metrics_ready=0
+for _ in $(seq 1 60); do
+    if curl -fsS \
+        "http://127.0.0.1:${metrics_port}/metrics" \
+        -o "$output_dir/apolysisd-metrics.prom" \
+        2>"$output_dir/apolysisd-metrics.err"; then
+        metrics_ready=1
+        break
+    fi
+    sleep 1
+done
+kill "$port_forward_pid" >/dev/null 2>&1 || true
+wait "$port_forward_pid" >/dev/null 2>&1 || true
+port_forward_pid=""
+
+if [[ "$metrics_ready" != "1" ]]; then
+    echo "apolysis-f5: metrics scrape did not become ready" >&2
+    cat "$output_dir/apolysisd-metrics.err" >&2 || true
+    cat "$output_dir/apolysisd-metrics-port-forward.log" >&2 || true
+    exit 1
+fi
+
+python3 - "$output_dir/apolysisd-metrics.prom" <<'PY'
+import sys
+from pathlib import Path
+
+metrics = Path(sys.argv[1]).read_text(encoding="utf-8")
+required = [
+    'apolysis_component_state{component="ebpf"} 1',
+    'apolysis_component_state{component="storage"} 1',
+    'apolysis_adapter_state{adapter="k3s_containerd"} 1',
+    'apolysis_queue_capacity 16384',
+    'apolysis_queue_depth 0',
+]
+missing = [line for line in required if line not in metrics]
+if missing:
+    raise SystemExit(f"missing live metrics: {missing}")
+for forbidden in ["session_id", "container_id", "workload_id"]:
+    if forbidden in metrics:
+        raise SystemExit(f"metrics contain forbidden high-cardinality label: {forbidden}")
+PY
 
 python3 - "$output_dir/apolysisd-health.json" "$output_dir/apolysisd.log" <<'PY'
 import json

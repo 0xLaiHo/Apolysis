@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io::Write;
+use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apolysis_daemon::{serve, DaemonConfig, DaemonResponse, DAEMON_SCHEMA_V1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpStream, UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -40,6 +41,32 @@ async fn health_request_reports_liveness_and_secure_socket_mode() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o660);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn metrics_endpoint_exports_prometheus_health_snapshot() {
+    let mut config = config("metrics", 16);
+    config.metrics_listen = Some(unused_loopback_addr());
+    let metrics_addr = config.metrics_listen.unwrap();
+    let server = TestServer::start_config(config).await;
+
+    let response = http_get(metrics_addr, "/metrics").await;
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("Content-Type: text/plain; version=0.0.4"));
+    assert!(response.contains("apolysis_component_state{component=\"ebpf\"} 0"));
+    assert!(response.contains("apolysis_component_state{component=\"storage\"} 1"));
+    assert!(response.contains("apolysis_queue_capacity 16384"));
+    assert!(!response.contains("session_id"));
+    assert!(!response.contains("workload_id"));
+
+    let not_found = http_get(metrics_addr, "/not-found").await;
+    assert!(
+        not_found.starts_with("HTTP/1.1 404 Not Found"),
+        "{not_found}"
+    );
 
     server.stop().await;
 }
@@ -498,6 +525,36 @@ async fn request_with_declared_length(path: &std::path::Path, length: u32) -> Da
     read_response(&mut stream).await
 }
 
+async fn http_get(addr: SocketAddr, path: &str) -> String {
+    let mut last_error = None;
+    for _ in 0..100 {
+        match TcpStream::connect(addr).await {
+            Ok(mut stream) => {
+                stream
+                    .write_all(
+                        format!(
+                            "GET {path} HTTP/1.1\r\nHost: apolysisd\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("write HTTP request");
+                let mut response = Vec::new();
+                stream
+                    .read_to_end(&mut response)
+                    .await
+                    .expect("read HTTP response");
+                return String::from_utf8(response).expect("UTF-8 HTTP response");
+            }
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+    }
+    panic!("metrics endpoint {addr} did not accept connections: {last_error:?}");
+}
+
 async fn read_response(stream: &mut UnixStream) -> DaemonResponse {
     let length = stream.read_u32().await.expect("response length") as usize;
     let mut response = vec![0_u8; length];
@@ -586,6 +643,11 @@ fn config(name: &str, max_connections: usize) -> DaemonConfig {
         request_timeout: Duration::from_millis(100),
         ..DaemonConfig::default()
     }
+}
+
+fn unused_loopback_addr() -> SocketAddr {
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind unused loopback port");
+    listener.local_addr().expect("local addr")
 }
 
 fn cleanup(config: &DaemonConfig) {

@@ -42,7 +42,9 @@ required_snippets = [
     "--docker-socket\n            - /host/run/docker.sock",
     "--containerd-socket\n            - /host/run/containerd/containerd.sock",
     "--k3s-containerd-socket\n            - /host/run/k3s/containerd/containerd.sock",
+    "--metrics-listen\n            - 0.0.0.0:9909",
     "apolysis.dev/production-facing-kernel-blocking: \"disabled\"",
+    "ports:\n            - name: metrics\n              containerPort: 9909\n              protocol: TCP",
     "readinessProbe:",
     "livenessProbe:",
     "/usr/local/bin/apolysisd-health",
@@ -131,5 +133,20 @@ grep -q 'apolysis-f5-live-workload' "$live_gate" || {
 
 grep -q 'k3s_containerd' "$live_gate" || {
     echo "F5.2 live deployment gate must assert k3s containerd adapter readiness" >&2
+    exit 1
+}
+
+grep -q 'port-forward' "$live_gate" || {
+    echo "F5.3 live deployment gate must scrape metrics through kubectl port-forward" >&2
+    exit 1
+}
+
+grep -q 'apolysis_component_state{component="ebpf"} 1' "$live_gate" || {
+    echo "F5.3 live deployment gate must assert live eBPF metrics readiness" >&2
+    exit 1
+}
+
+grep -q 'apolysis_adapter_state{adapter="k3s_containerd"} 1' "$live_gate" || {
+    echo "F5.3 live deployment gate must assert live k3s adapter metrics readiness" >&2
     exit 1
 }

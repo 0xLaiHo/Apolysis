@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ pub struct DaemonConfig {
     pub max_connections: usize,
     pub queue_capacity: usize,
     pub scope_command_capacity: usize,
+    pub metrics_listen: Option<SocketAddr>,
     pub request_timeout: Duration,
     pub shutdown_drain_timeout: Duration,
 }
@@ -48,6 +50,7 @@ impl Default for DaemonConfig {
             max_connections: 128,
             queue_capacity: 16_384,
             scope_command_capacity: 1_024,
+            metrics_listen: None,
             request_timeout: Duration::from_secs(5),
             shutdown_drain_timeout: Duration::from_secs(5),
         }
@@ -90,6 +93,13 @@ impl DaemonConfig {
                 "--queue-capacity" => config.queue_capacity = parse_usize(option, value)?,
                 "--scope-command-capacity" => {
                     config.scope_command_capacity = parse_usize(option, value)?
+                }
+                "--metrics-listen" => {
+                    config.metrics_listen = Some(
+                        value
+                            .parse()
+                            .map_err(|error| format!("invalid value for {option}: {error}"))?,
+                    )
                 }
                 "--request-timeout-ms" => {
                     config.request_timeout = Duration::from_millis(parse_u64(option, value)?)

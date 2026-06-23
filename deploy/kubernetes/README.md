@@ -37,8 +37,9 @@ Recommended baseline:
 deployment baseline for running `apolysisd` as a node-local DaemonSet. It keeps
 production-facing kernel blocking disabled, uses explicit Linux capabilities
 instead of `privileged: true`, mounts runtime sockets read-only, sets bounded
-CPU/memory requests and limits, installs a default-deny `NetworkPolicy`, and
-uses semantic health probes for liveness and readiness.
+CPU/memory requests and limits, installs a default-deny `NetworkPolicy`, uses
+semantic health probes for liveness and readiness, and exposes low-cardinality
+Prometheus metrics on the pod-local metrics port.
 
 Validate the manifest before live deployment:
 
@@ -56,5 +57,5 @@ APOLYSIS_CONFIRM_F5_LIVE_DEPLOYMENT=1 make test-f5-live-deployment
 
 The live gate builds a local image, imports it into k3s containerd, deploys the
 DaemonSet, creates a marked workload for runtime adapter evidence, captures
-health/log/Kubernetes artifacts, and removes the validation namespace and
-temporary state path before exiting.
+health/metrics/log/Kubernetes artifacts, and removes the validation namespace
+and temporary state path before exiting.

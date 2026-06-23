@@ -108,8 +108,14 @@ spec:
             - "16384"
             - --scope-command-capacity
             - "1024"
+            - --metrics-listen
+            - 0.0.0.0:9909
             - --shutdown-drain-ms
             - "5000"
+          ports:
+            - name: metrics
+              containerPort: 9909
+              protocol: TCP
           securityContext:
             runAsUser: 0
             runAsGroup: 0

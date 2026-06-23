@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -35,6 +36,8 @@ fn parses_bounded_runtime_configuration() {
             "8192",
             "--scope-command-capacity",
             "256",
+            "--metrics-listen",
+            "127.0.0.1:9909",
             "--shutdown-drain-ms",
             "3000",
         ]
@@ -80,6 +83,10 @@ fn parses_bounded_runtime_configuration() {
     assert_eq!(config.runtime_adapter_seen_capacity, 2048);
     assert_eq!(config.queue_capacity, 8192);
     assert_eq!(config.scope_command_capacity, 256);
+    assert_eq!(
+        config.metrics_listen,
+        Some("127.0.0.1:9909".parse::<SocketAddr>().unwrap())
+    );
     assert_eq!(config.shutdown_drain_timeout, Duration::from_secs(3));
 }
 
