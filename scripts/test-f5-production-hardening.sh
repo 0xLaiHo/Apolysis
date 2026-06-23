@@ -16,6 +16,7 @@ promotion_policy_gate="$repo_root/scripts/test-f5-release-promotion-policy.sh"
 registry_promotion_execution_gate="$repo_root/scripts/test-f5-registry-promotion-execution.sh"
 signing_profile_gate="$repo_root/scripts/test-f5-signing-profile.sh"
 signing_execution_gate="$repo_root/scripts/test-f5-signing-execution.sh"
+aws_kms_signing_gate="$repo_root/scripts/test-f5-aws-kms-signing.sh"
 worm_archive_policy_gate="$repo_root/scripts/test-f5-worm-archive-policy.sh"
 worm_archive_execution_gate="$repo_root/scripts/test-f5-worm-archive-execution.sh"
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
@@ -163,6 +164,11 @@ if [[ ! -s "$signing_execution_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$aws_kms_signing_gate" ]]; then
+    echo "missing F5.25 AWS KMS signing artifact: $aws_kms_signing_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$worm_archive_policy_gate" ]]; then
     echo "missing F5.14 WORM archive policy artifact: $worm_archive_policy_gate" >&2
     exit 1
@@ -245,6 +251,11 @@ grep -q '^test-f5-signing-profile:' "$makefile" || {
 
 grep -q '^test-f5-signing-execution:' "$makefile" || {
     echo "missing Makefile target: test-f5-signing-execution" >&2
+    exit 1
+}
+
+grep -q '^test-f5-aws-kms-signing:' "$makefile" || {
+    echo "missing Makefile target: test-f5-aws-kms-signing" >&2
     exit 1
 }
 
@@ -760,6 +771,41 @@ grep -q 'private key must be non-extractable' "$repo_root/crates/apolysis-valida
 
 grep -q 'key must be generated inside the signing provider' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
     echo "F5.16 signing execution evidence must require provider-generated keys" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_AWS_KMS_SIGNING' "$aws_kms_signing_gate" || {
+    echo "F5.25 AWS KMS signing gate must require explicit live confirmation" >&2
+    exit 1
+}
+
+grep -q 'aws kms describe-key' "$aws_kms_signing_gate" || {
+    echo "F5.25 AWS KMS signing gate must inspect KMS key metadata" >&2
+    exit 1
+}
+
+grep -q 'aws kms get-public-key' "$aws_kms_signing_gate" || {
+    echo "F5.25 AWS KMS signing gate must retain KMS public key evidence" >&2
+    exit 1
+}
+
+grep -q 'aws kms sign' "$aws_kms_signing_gate" || {
+    echo "F5.25 AWS KMS signing gate must execute a real KMS sign operation" >&2
+    exit 1
+}
+
+grep -q -- '--message-type DIGEST' "$aws_kms_signing_gate" || {
+    echo "F5.25 AWS KMS signing gate must sign a release manifest digest" >&2
+    exit 1
+}
+
+grep -q 'provider": "cloud_kms"' "$aws_kms_signing_gate" || {
+    echo "F5.25 AWS KMS signing evidence must use the cloud_kms provider" >&2
+    exit 1
+}
+
+grep -q 'awskms://' "$aws_kms_signing_gate" || {
+    echo "F5.25 AWS KMS signing evidence must retain an awskms provider URI" >&2
     exit 1
 }
 
