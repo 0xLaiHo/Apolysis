@@ -60,7 +60,9 @@ started with a production-hardening baseline for a bounded Kubernetes
 DaemonSet/RBAC deployment surface and a live k3s rollout/restore validation
 gate for the node-local daemon, including live metrics scrape validation and
 live DaemonSet restart, k3s CRI socket outage recovery, queue pressure, and
-unwritable-store recovery evidence.
+unwritable-store recovery evidence. It now also includes a local release
+supply-chain bundle gate for signed artifacts, SBOM, provenance, and
+high/critical vulnerability scan evidence.
 
 ## 🚀 Runtime Scenarios
 
@@ -286,7 +288,8 @@ Independent Observability MVP, F2 Accountability Beta, F3 Limited Guardrails,
 and F4 Runtime Adapter Depth are complete. F5 Production Hardening is in
 progress, with a Kubernetes DaemonSet/RBAC deployment baseline, local manifest
 hardening gate, live k3s deployment validation gate, and production DaemonSet
-metrics, resilience, queue pressure, and storage-failure validation.
+metrics, resilience, queue pressure, storage-failure, and release
+supply-chain validation.
 
 Implementation milestones:
 
@@ -309,7 +312,7 @@ Focused roadmap:
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
-| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM, operator, large-scale chaos and performance testing | 🚧 **In Progress** |
+| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM/provenance, operator, large-scale chaos and performance testing | 🚧 **In Progress** |
 
 ## 📜 License
 

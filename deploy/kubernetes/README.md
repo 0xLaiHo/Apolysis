@@ -62,3 +62,13 @@ recovery, validates k3s CRI socket outage/recovery through a bad socket
 rollout and restore rollout, validates queue pressure and unwritable-store
 failure/recovery evidence, and removes the validation namespace and temporary
 state path before exiting.
+
+The release supply-chain gate builds the release payload and local container
+archive, generates a CycloneDX SBOM and provenance statement, signs the release
+manifest and provenance with `cosign`, runs a `trivy fs` high/critical
+vulnerability scan against the staged payload, and verifies the resulting
+checksums and signatures:
+
+```bash
+make test-f5-supply-chain
+```

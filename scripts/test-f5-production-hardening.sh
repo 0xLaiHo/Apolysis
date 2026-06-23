@@ -7,6 +7,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/deploy/kubernetes/apolysisd-production-baseline.yaml"
 containerfile="$repo_root/deploy/container/apolysisd.Dockerfile"
 live_gate="$repo_root/scripts/test-f5-live-deployment.sh"
+supply_chain_builder="$repo_root/scripts/build-f5-release-bundle.sh"
+supply_chain_gate="$repo_root/scripts/test-f5-supply-chain.sh"
 makefile="$repo_root/Makefile"
 
 python3 - "$manifest" <<'PY'
@@ -96,8 +98,20 @@ for required_path in "$containerfile" "$live_gate"; do
     fi
 done
 
+for required_path in "$supply_chain_builder" "$supply_chain_gate"; do
+    if [[ ! -s "$required_path" ]]; then
+        echo "missing F5.6 supply-chain release artifact: $required_path" >&2
+        exit 1
+    fi
+done
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
+    exit 1
+}
+
+grep -q '^test-f5-supply-chain:' "$makefile" || {
+    echo "missing Makefile target: test-f5-supply-chain" >&2
     exit 1
 }
 
@@ -213,5 +227,40 @@ grep -q 'apolysisd-unwritable-store-health.json' "$live_gate" || {
 
 grep -q '"unavailable"' "$live_gate" || {
     echo "F5.5 live deployment gate must assert unavailable storage during unwritable-store injection" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-release-manifest.json' "$supply_chain_builder" || {
+    echo "F5.6 supply-chain builder must create a signed release manifest" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-sbom.cdx.json' "$supply_chain_builder" || {
+    echo "F5.6 supply-chain builder must create a CycloneDX SBOM" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-provenance.intoto.json' "$supply_chain_builder" || {
+    echo "F5.6 supply-chain builder must create provenance evidence" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-vulnerability-scan.json' "$supply_chain_builder" || {
+    echo "F5.6 supply-chain builder must create vulnerability scan evidence" >&2
+    exit 1
+}
+
+grep -q 'cosign verify-blob' "$supply_chain_gate" || {
+    echo "F5.6 supply-chain gate must verify signed release artifacts" >&2
+    exit 1
+}
+
+grep -q 'syft scan' "$supply_chain_gate" || {
+    echo "F5.6 supply-chain gate must run a real SBOM scan" >&2
+    exit 1
+}
+
+grep -q 'trivy fs' "$supply_chain_gate" || {
+    echo "F5.6 supply-chain gate must run a real vulnerability scan" >&2
     exit 1
 }
