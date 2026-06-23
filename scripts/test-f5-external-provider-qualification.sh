@@ -59,12 +59,12 @@ cat >"$contract_bundle" <<'JSON'
     },
     {
       "requirement": "cloud_registry_promotion_retention",
-      "provider": "aws_ecr",
-      "provider_control_plane": "aws-ecr:us-west-2:apolysis/apolysisd",
-      "evidence_ref": "evidence/aws-ecr-promotion.json",
-      "evidence_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-      "report_ref": "reports/aws-ecr-promotion.json",
-      "report_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "provider": "docker_hub",
+      "provider_control_plane": "docker-hub:devlaiho:apolysis-f5-registry",
+      "evidence_ref": "target/f5-dockerhub-registry-promotion.aByXvA/apolysis-f5-dockerhub-registry-promotion-evidence.json",
+      "evidence_sha256": "sha256:7f934c70a1fe8a589030d0470a653841f7f05ff4a1d591c2e9c1cea70c6f38ef",
+      "report_ref": "target/f5-dockerhub-registry-promotion.aByXvA/apolysis-f5-dockerhub-registry-promotion-report.json",
+      "report_sha256": "sha256:78e8e8d4d0f89e862ca05aa9032f9716198775ad8135880dd51b4d82af307641",
       "live_provider": true,
       "external_provider": true,
       "observed_at_unix_ms": 1782259200000
@@ -94,7 +94,7 @@ jq -e '
   and (.approval.qualified_requirements | length) == 4
   and (.approval.providers | index("aws_kms"))
   and (.approval.providers | index("cloudflare_r2_bucket_lock"))
-  and (.approval.providers | index("aws_ecr"))
+  and (.approval.providers | index("docker_hub"))
   and (.approval.providers | index("gke_anthos_service_mesh"))
 ' "$contract_report" >/dev/null
 

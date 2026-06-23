@@ -29,6 +29,30 @@ fn f5_registry_promotion_execution_accepts_live_digest_locked_registry_promotion
 }
 
 #[test]
+fn f5_registry_promotion_execution_accepts_live_docker_hub_immutable_tag_evidence() {
+    let mut evidence = registry_promotion_execution_evidence();
+    evidence.evidence_id = "f5-docker-hub-registry-promotion-20260624".to_string();
+    evidence.provider = F5RegistryPromotionExecutionProvider::DockerHub;
+    evidence.registry_uri = "https://index.docker.io/v2/devlaiho/apolysis-f5-registry".to_string();
+    evidence.repository = "devlaiho/apolysis-f5-registry".to_string();
+    evidence.source_tag = "staging-f5-20260624".to_string();
+    evidence.target_tag = "prod-f5-20260624".to_string();
+    evidence.rollback_tag = "rollback-f5-20260624".to_string();
+    evidence.api_tool = "docker push plus Docker Hub immutable tags API".to_string();
+
+    let report = evaluate_f5_registry_promotion_execution_evidence(evidence);
+
+    assert!(report.passed, "{:#?}", report.failures);
+    let approval = report.approval.expect("Docker Hub registry approval");
+    assert_eq!(
+        approval.provider,
+        F5RegistryPromotionExecutionProvider::DockerHub
+    );
+    assert_eq!(approval.repository, "devlaiho/apolysis-f5-registry");
+    assert_eq!(approval.target_tag, "prod-f5-20260624");
+}
+
+#[test]
 fn f5_registry_promotion_execution_rejects_fixture_or_mutable_promotion() {
     let mut evidence = registry_promotion_execution_evidence();
     evidence.source = F5RegistryPromotionExecutionSource::Fixture;
@@ -64,7 +88,7 @@ fn f5_registry_promotion_execution_rejects_fixture_or_mutable_promotion() {
     let failure_text = serde_json::to_string(&report.failures).expect("serialize failures");
     for expected in [
         "live registry promotion execution evidence is required",
-        "registry promotion execution requires an OCI registry provider",
+        "registry promotion execution requires a provider-backed OCI registry",
         "registry URI must be provider-backed",
         "repository is required",
         "source tag is required",

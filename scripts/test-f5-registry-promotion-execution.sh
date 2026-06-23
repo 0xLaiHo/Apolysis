@@ -392,7 +392,7 @@ fi
 jq -e '
   .passed == false
   and (.failures | map(.message) | index("live registry promotion execution evidence is required"))
-  and (.failures | map(.message) | index("registry promotion execution requires an OCI registry provider"))
+  and (.failures | map(.message) | index("registry promotion execution requires a provider-backed OCI registry"))
   and (.failures | map(.message) | index("target tag must be immutable and start with prod-"))
   and (.failures | map(.message) | index("production delete without retention bypass must be denied by the registry API"))
   and (.failures | map(.message) | index("minimum production retention is 90 days"))

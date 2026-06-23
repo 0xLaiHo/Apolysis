@@ -1122,3 +1122,18 @@ grep -q 'cloudflare_r2_bucket_lock' "$external_provider_qualification_gate" || {
     echo "F5.22 external provider qualification contract must include Cloudflare R2 Bucket Lock evidence" >&2
     exit 1
 }
+
+grep -q 'DockerHub' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.23 registry promotion execution must support Docker Hub evidence" >&2
+    exit 1
+}
+
+grep -q 'test-f5-dockerhub-registry-promotion' "$repo_root/Makefile" || {
+    echo "F5.23 must expose a Docker Hub live registry promotion target" >&2
+    exit 1
+}
+
+grep -q '/immutabletags' "$repo_root/scripts/test-f5-dockerhub-registry-promotion.sh" || {
+    echo "F5.23 Docker Hub live gate must configure immutable tags" >&2
+    exit 1
+}

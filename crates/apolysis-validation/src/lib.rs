@@ -610,6 +610,7 @@ pub enum F5RegistryPromotionExecutionProvider {
     AwsEcr,
     GcpArtifactRegistry,
     AzureContainerRegistry,
+    DockerHub,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1956,11 +1957,12 @@ pub fn evaluate_f5_registry_promotion_execution_evidence(
             | F5RegistryPromotionExecutionProvider::AwsEcr
             | F5RegistryPromotionExecutionProvider::GcpArtifactRegistry
             | F5RegistryPromotionExecutionProvider::AzureContainerRegistry
+            | F5RegistryPromotionExecutionProvider::DockerHub
     ) {
         f5_registry_promotion_execution_failure(
             &mut failures,
             "provider",
-            "registry promotion execution requires an OCI registry provider",
+            "registry promotion execution requires a provider-backed OCI registry",
         );
     }
     if !f5_registry_promotion_uri_matches_provider(evidence.provider, &evidence.registry_uri) {
@@ -6696,6 +6698,11 @@ fn f5_registry_promotion_uri_matches_provider(
         }
         F5RegistryPromotionExecutionProvider::AzureContainerRegistry => {
             value.starts_with("https://") || value.starts_with("acr://")
+        }
+        F5RegistryPromotionExecutionProvider::DockerHub => {
+            value.starts_with("https://index.docker.io/")
+                || value.starts_with("https://registry-1.docker.io/")
+                || value.starts_with("dockerhub://")
         }
         F5RegistryPromotionExecutionProvider::LocalFilesystem => false,
     }

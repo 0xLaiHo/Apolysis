@@ -7,7 +7,7 @@ use apolysis_validation::{
 };
 
 #[test]
-fn f5_external_provider_qualification_accepts_bundle_with_cloudflare_r2_worm_evidence() {
+fn f5_external_provider_qualification_accepts_bundle_with_r2_and_dockerhub_evidence() {
     let report = evaluate_f5_external_provider_qualification_bundle(qualification_bundle());
 
     assert!(report.passed, "{:#?}", report.failures);
@@ -21,7 +21,7 @@ fn f5_external_provider_qualification_accepts_bundle_with_cloudflare_r2_worm_evi
     assert!(approval
         .providers
         .contains(&"cloudflare_r2_bucket_lock".to_string()));
-    assert!(approval.providers.contains(&"aws_ecr".to_string()));
+    assert!(approval.providers.contains(&"docker_hub".to_string()));
     assert!(approval
         .providers
         .contains(&"gke_anthos_service_mesh".to_string()));
@@ -89,8 +89,8 @@ fn qualification_bundle() -> F5ExternalProviderQualificationBundle {
             ),
             qualification_entry(
                 F5ExternalProviderQualificationRequirement::CloudRegistryPromotionRetention,
-                "aws_ecr",
-                "aws-ecr:us-west-2:apolysis/apolysisd",
+                "docker_hub",
+                "docker-hub:devlaiho:apolysis-f5-registry",
             ),
             qualification_entry(
                 F5ExternalProviderQualificationRequirement::ManagedServiceMesh,
