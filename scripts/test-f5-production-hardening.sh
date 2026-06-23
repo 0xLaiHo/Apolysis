@@ -21,6 +21,7 @@ worm_archive_policy_gate="$repo_root/scripts/test-f5-worm-archive-policy.sh"
 worm_archive_execution_gate="$repo_root/scripts/test-f5-worm-archive-execution.sh"
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
 service_mesh_live_istio_gate="$repo_root/scripts/test-f5-service-mesh-live-istio.sh"
+managed_cloud_service_mesh_gate="$repo_root/scripts/test-f5-managed-cloud-service-mesh.sh"
 operator_controller_gate="$repo_root/scripts/test-f5-operator-controller.sh"
 chaos_performance_gate="$repo_root/scripts/test-f5-chaos-performance.sh"
 external_provider_qualification_gate="$repo_root/scripts/test-f5-external-provider-qualification.sh"
@@ -191,6 +192,11 @@ if [[ ! -s "$service_mesh_live_istio_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$managed_cloud_service_mesh_gate" ]]; then
+    echo "missing F5.27 managed Cloud Service Mesh artifact: $managed_cloud_service_mesh_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$operator_controller_gate" ]]; then
     echo "missing F5.19 operator/controller artifact: $operator_controller_gate" >&2
     exit 1
@@ -288,6 +294,11 @@ grep -q '^test-f5-service-mesh-live-evidence:' "$makefile" || {
 
 grep -q '^test-f5-service-mesh-live-istio:' "$makefile" || {
     echo "missing Makefile target: test-f5-service-mesh-live-istio" >&2
+    exit 1
+}
+
+grep -q '^test-f5-managed-cloud-service-mesh:' "$makefile" || {
+    echo "missing Makefile target: test-f5-managed-cloud-service-mesh" >&2
     exit 1
 }
 
@@ -973,6 +984,41 @@ grep -q 'plaintext client unexpectedly reached the strict-mTLS server' "$service
 
 grep -q 'apolysis-f5-service-mesh-live-evidence' "$service_mesh_live_istio_gate" || {
     echo "F5.15 live Istio gate must validate collected evidence with the CLI" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_MANAGED_CLOUD_SERVICE_MESH' "$managed_cloud_service_mesh_gate" || {
+    echo "F5.27 managed Cloud Service Mesh gate must require explicit live confirmation" >&2
+    exit 1
+}
+
+grep -q 'gcloud container fleet mesh describe' "$managed_cloud_service_mesh_gate" || {
+    echo "F5.27 managed Cloud Service Mesh gate must inspect fleet mesh state" >&2
+    exit 1
+}
+
+grep -q 'controlPlaneManagement' "$managed_cloud_service_mesh_gate" || {
+    echo "F5.27 managed Cloud Service Mesh gate must require managed control-plane evidence" >&2
+    exit 1
+}
+
+grep -q 'MANAGEMENT_AUTOMATIC' "$managed_cloud_service_mesh_gate" || {
+    echo "F5.27 managed Cloud Service Mesh gate must require automatic managed mesh configuration" >&2
+    exit 1
+}
+
+grep -q 'controlplanerevision' "$managed_cloud_service_mesh_gate" || {
+    echo "F5.27 managed Cloud Service Mesh gate must inspect in-cluster managed mesh revision evidence" >&2
+    exit 1
+}
+
+grep -q 'gke_anthos_service_mesh' "$managed_cloud_service_mesh_gate" || {
+    echo "F5.27 managed Cloud Service Mesh evidence must use accepted managed mesh provider identity" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_MANAGED_MESH_EVIDENCE' "$managed_cloud_service_mesh_gate" || {
+    echo "F5.27 managed Cloud Service Mesh gate must publish final-bundle evidence path" >&2
     exit 1
 }
 
