@@ -134,6 +134,9 @@ host_bash '/usr/local/bin/kata-runtime check --verbose >/dev/null'
 cargo test -p apolysis-validation
 cargo build -p apolysis-validation --bin apolysis-validate-host
 
+f4_runtime_adapter_evidence_output="$output_dir/f4-runtime-adapter-evidence.jsonl"
+: >"$f4_runtime_adapter_evidence_output"
+
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
     "$binary" --apply-runtime-registration --output "$output_dir"
 else
@@ -148,12 +151,14 @@ wait_for_docker_runtime runsc true
 host_bash 'crictl --config /dev/null --runtime-endpoint unix:///run/containerd/containerd.sock --image-endpoint unix:///run/containerd/containerd.sock info | jq -e '\''.config.containerd.runtimes | has("runc") and has("runsc") and has("kata")'\'''
 host_bash 'crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock info | jq -e '\''.config.containerd.runtimes | has("runc") and has("runsc") and has("kata")'\'''
 
+APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT="$f4_runtime_adapter_evidence_output" \
 APOLYSIS_REQUIRE_FULL_RUNTIME_ADAPTERS=1 \
 APOLYSIS_REQUIRE_DOCKER_ADAPTER=1 \
 APOLYSIS_REQUIRE_CONTAINERD_ADAPTER=1 \
 APOLYSIS_REQUIRE_K3S_CONTAINERD_ADAPTER=1 \
 APOLYSIS_REQUIRE_KUBERNETES_ADAPTER=1 \
     ./scripts/test-f2-runtime-adapters.sh
+test -s "$f4_runtime_adapter_evidence_output"
 
 restore_runtime_registration
 
@@ -168,6 +173,7 @@ host_bash 'crictl --config /dev/null --runtime-endpoint unix:///run/containerd/c
 host_bash 'crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock info | jq -e '\''(.config.containerd.runtimes // {}) as $r | (($r | has("runsc") | not) and ($r | has("kata") | not))'\'''
 
 APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR="$output_dir" \
+APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT="$f4_runtime_adapter_evidence_output" \
     ./scripts/write-f4-live-runtime-evidence-bundle.sh
 test -s "$output_dir/f4-live-runtime-evidence-request.json"
 test -s "$output_dir/f4-live-runtime-evidence-report.json"

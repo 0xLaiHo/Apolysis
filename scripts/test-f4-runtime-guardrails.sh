@@ -34,6 +34,26 @@ for artifact in \
 do
   printf '{}\n' > "$live_bundle_artifacts/$artifact"
 done
+python - "$live_bundle_artifacts/f4-runtime-adapter-evidence.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(json.dumps({
+    "evidence_id": "live-docker-runc-from-output",
+    "source": "live_host",
+    "runtime": "docker",
+    "adapter": "docker",
+    "session_id": "session-from-live-output",
+    "workload_id": "container-from-live-output",
+    "cgroup_id": 777,
+    "runtime_handler": "runc",
+    "metadata_correlation": True,
+    "cgroup_correlation": True,
+    "host_boundary_visibility": True,
+    "guest_semantics_claimed": False,
+}) + "\n")
+PY
 
 APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR="$live_bundle_artifacts" \
 APOLYSIS_F4_LIVE_RUNTIME_EVIDENCE_OUTPUT_DIR="$live_bundle_output" \
@@ -41,6 +61,19 @@ APOLYSIS_F4_LIVE_RUNTIME_EVIDENCE_OUTPUT_DIR="$live_bundle_output" \
 
 test -s "$live_bundle_output/f4-live-runtime-evidence-request.json"
 test -s "$live_bundle_output/f4-live-runtime-evidence-report.json"
+python - "$live_bundle_output/f4-live-runtime-evidence-request.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(Path(sys.argv[1]).read_text())
+evidence_ids = {
+    entry["evidence_id"]
+    for entry in request["runtime_adapter_evidence_reports"]
+}
+assert "live-docker-runc-from-output" in evidence_ids
+assert "live-docker-runc-cgroup" not in evidence_ids
+PY
 
 restore_check_root="$(mktemp -d "${TMPDIR:-/tmp}/apolysis-f2-restore-check-root.XXXXXX")"
 restore_check_artifacts="$(mktemp -d "${TMPDIR:-/tmp}/apolysis-f2-restore-check-artifacts.XXXXXX")"

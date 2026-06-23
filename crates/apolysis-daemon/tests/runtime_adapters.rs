@@ -2,9 +2,11 @@
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::fs::OpenOptions;
 use std::future::Future;
+use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -424,6 +426,8 @@ async fn live_docker_engine_adapter_discovers_labelled_container() {
         if let Some(runtime) = runtime {
             assert_eq!(workload.runtime_handler.as_deref(), Some(runtime));
         }
+        record_f4_runtime_adapter_evidence(&workload, f4_live_adapter_evidence_id(&workload))
+            .expect("write live Docker F4 runtime adapter evidence");
 
         drop(cleanup);
     }
@@ -1083,6 +1087,8 @@ async fn live_kubernetes_cli_adapter_discovers_annotated_pods() {
             workload.runtime_handler.as_deref(),
             runtime_class.as_deref()
         );
+        record_f4_runtime_adapter_evidence(&workload, f4_live_adapter_evidence_id(&workload))
+            .expect("write live Kubernetes F4 runtime adapter evidence");
         drop(cleanup);
     }
 }
@@ -1193,6 +1199,69 @@ async fn next_workload_for_session<B: RuntimeAdapterBackend>(
             }
         }
     }
+}
+
+fn record_f4_runtime_adapter_evidence(
+    workload: &RuntimeWorkload,
+    evidence_id: impl Into<String>,
+) -> Result<(), String> {
+    let Ok(output_path) = std::env::var("APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT") else {
+        return Ok(());
+    };
+    let evidence = f4_runtime_adapter_evidence_from_workload(
+        workload,
+        evidence_id,
+        F4RuntimeAdapterEvidenceSource::LiveHost,
+    )?;
+    let mut output = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&output_path)
+        .map_err(|error| format!("failed to open F4 runtime adapter evidence output: {error}"))?;
+    serde_json::to_writer(&mut output, &evidence)
+        .map_err(|error| format!("failed to serialize F4 runtime adapter evidence: {error}"))?;
+    output
+        .write_all(b"\n")
+        .map_err(|error| format!("failed to write F4 runtime adapter evidence newline: {error}"))?;
+    Ok(())
+}
+
+fn f4_live_adapter_evidence_id(workload: &RuntimeWorkload) -> String {
+    format!(
+        "live-{}-{}-cgroup",
+        f4_live_adapter_name(workload.adapter),
+        f4_live_runtime_name(workload.runtime_handler.as_deref())
+    )
+}
+
+fn f4_live_adapter_name(adapter: AdapterKind) -> &'static str {
+    match adapter {
+        AdapterKind::Docker => "docker",
+        AdapterKind::Containerd => "containerd",
+        AdapterKind::K3sContainerd => "k3s-containerd",
+        AdapterKind::Kubernetes => "kubernetes",
+    }
+}
+
+fn f4_live_runtime_name(runtime_handler: Option<&str>) -> &'static str {
+    let handler = runtime_handler.unwrap_or("runc").to_ascii_lowercase();
+    if handler.contains("runsc") || handler.contains("gvisor") {
+        "gvisor"
+    } else if handler.contains("kata") {
+        "kata"
+    } else if handler.contains("firecracker") {
+        "firecracker"
+    } else {
+        "runc"
+    }
+}
+
+fn temp_file_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "apolysis-{name}-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 #[test]
@@ -1306,6 +1375,33 @@ fn runtime_workload_becomes_f4_runtime_adapter_evidence() {
     assert_eq!(kata.runtime, F4RuntimeGuardrailTarget::Kata);
     assert!(kata.host_boundary_visibility);
     assert!(!kata.guest_semantics_claimed);
+}
+
+#[test]
+fn live_adapter_workload_writes_f4_runtime_adapter_evidence_output() {
+    let output = temp_file_path("f4-runtime-adapter-evidence.jsonl");
+    std::env::set_var("APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT", &output);
+    let workload = RuntimeWorkload {
+        adapter: AdapterKind::Docker,
+        session_id: "session-output".to_string(),
+        workload_id: "container-output".to_string(),
+        cgroup_id: 4242,
+        image: Some("alpine:3.20".to_string()),
+        runtime_handler: Some("runc".to_string()),
+    };
+
+    record_f4_runtime_adapter_evidence(&workload, "live-docker-output-cgroup")
+        .expect("write F4 evidence output");
+
+    std::env::remove_var("APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT");
+    let line = std::fs::read_to_string(&output).expect("read evidence output");
+    let report: serde_json::Value = serde_json::from_str(line.trim()).expect("parse evidence");
+    assert_eq!(report["evidence_id"], "live-docker-output-cgroup");
+    assert_eq!(report["source"], "live_host");
+    assert_eq!(report["adapter"], "docker");
+    assert_eq!(report["runtime"], "docker");
+    assert_eq!(report["cgroup_id"], 4242);
+    let _ = std::fs::remove_file(output);
 }
 
 #[test]
@@ -2179,6 +2275,8 @@ async fn live_cri_adapter_matrix(
             workload.runtime_handler,
             expected_cri_runtime_type(runtime)
         );
+        record_f4_runtime_adapter_evidence(&workload, f4_live_adapter_evidence_id(&workload))
+            .expect("write live CRI F4 runtime adapter evidence");
         drop(cleanup);
     }
 }
@@ -2254,6 +2352,8 @@ async fn live_k3s_cri_adapter_matrix() {
             workload.runtime_handler,
             expected_cri_runtime_type(expected_runtime)
         );
+        record_f4_runtime_adapter_evidence(&workload, f4_live_adapter_evidence_id(&workload))
+            .expect("write live k3s CRI F4 runtime adapter evidence");
         drop(cleanup);
         cleanup_cri_workloads_for_session(
             std::path::Path::new("crictl"),

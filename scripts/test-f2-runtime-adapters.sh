@@ -31,7 +31,15 @@ run_live_adapter_test() {
             "$test_name" \
             -- --ignored --exact --nocapture
     else
+        local docker_env=()
+        if [[ -n "${APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT:-}" ]]; then
+            docker_env=(
+                -e
+                "APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT=$APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT"
+            )
+        fi
         docker run --rm \
+            "${docker_env[@]}" \
             --privileged \
             --pid=host \
             --cgroupns=host \
