@@ -653,6 +653,80 @@ pub struct F5SigningProfileReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum F5SigningExecutionSource {
+    Fixture,
+    LiveProvider,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5SigningExecutionProvider {
+    EphemeralLocalValidation,
+    LocalFile,
+    Pkcs11Hsm,
+    CloudKms,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5SigningExecutionAlgorithm {
+    RsaPkcs1Sha256,
+    EcdsaP256Sha256,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5SigningExecutionEvidence {
+    pub evidence_id: String,
+    pub source: F5SigningExecutionSource,
+    pub provider: F5SigningExecutionProvider,
+    pub key_uri: String,
+    pub token_label: String,
+    pub key_label: String,
+    pub key_id: String,
+    pub algorithm: F5SigningExecutionAlgorithm,
+    pub release_manifest_sha256: String,
+    pub signature_sha256: String,
+    pub public_key_sha256: String,
+    pub signature_verified: bool,
+    pub private_key_non_extractable: bool,
+    pub private_key_sensitive: bool,
+    pub key_generated_in_provider: bool,
+    pub token_initialized: bool,
+    pub signer_tool: String,
+    pub verifier_tool: String,
+    pub operator_approved: bool,
+    pub cleanup_confirmed: bool,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5SigningExecutionApproval {
+    pub evidence_id: String,
+    pub provider: F5SigningExecutionProvider,
+    pub key_uri: String,
+    pub algorithm: F5SigningExecutionAlgorithm,
+    pub release_manifest_sha256: String,
+    pub signature_sha256: String,
+    pub public_key_sha256: String,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5SigningExecutionFailure {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5SigningExecutionReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approval: Option<F5SigningExecutionApproval>,
+    pub failures: Vec<F5SigningExecutionFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum F5WormProvider {
     LocalFilesystem,
     S3ObjectLock,
@@ -1592,6 +1666,160 @@ pub fn evaluate_f5_signing_profile(profile: F5SigningProfile) -> F5SigningProfil
     };
 
     F5SigningProfileReport {
+        schema_version: 1,
+        passed: approval.is_some(),
+        approval,
+        failures,
+    }
+}
+
+pub fn evaluate_f5_signing_execution_evidence(
+    evidence: F5SigningExecutionEvidence,
+) -> F5SigningExecutionReport {
+    let mut failures = Vec::new();
+
+    if evidence.evidence_id.trim().is_empty() {
+        f5_signing_execution_failure(&mut failures, "evidence_id", "evidence id is required");
+    }
+    if evidence.source != F5SigningExecutionSource::LiveProvider {
+        f5_signing_execution_failure(
+            &mut failures,
+            "source",
+            "live provider signing evidence is required",
+        );
+    }
+    if !matches!(
+        evidence.provider,
+        F5SigningExecutionProvider::Pkcs11Hsm | F5SigningExecutionProvider::CloudKms
+    ) {
+        f5_signing_execution_failure(
+            &mut failures,
+            "provider",
+            "signing execution requires PKCS#11 HSM or cloud KMS provider",
+        );
+    }
+    if f5_is_file_key_uri(&evidence.key_uri) {
+        f5_signing_execution_failure(
+            &mut failures,
+            "key_uri",
+            "file paths are not valid production signing key URIs",
+        );
+    } else if !f5_signing_execution_uri_matches_provider(evidence.provider, &evidence.key_uri) {
+        f5_signing_execution_failure(
+            &mut failures,
+            "key_uri",
+            "signing key URI must match the selected execution provider",
+        );
+    }
+    if evidence.token_label.trim().is_empty() {
+        f5_signing_execution_failure(&mut failures, "token_label", "token label is required");
+    }
+    if evidence.key_label.trim().is_empty() {
+        f5_signing_execution_failure(&mut failures, "key_label", "key label is required");
+    }
+    if evidence.key_id.trim().is_empty() {
+        f5_signing_execution_failure(&mut failures, "key_id", "key id is required");
+    }
+    if !f5_is_sha256_hex(&evidence.release_manifest_sha256) {
+        f5_signing_execution_failure(
+            &mut failures,
+            "release_manifest_sha256",
+            "release manifest sha256 must be 64 hex characters",
+        );
+    }
+    if !f5_is_sha256_hex(&evidence.signature_sha256) {
+        f5_signing_execution_failure(
+            &mut failures,
+            "signature_sha256",
+            "signature sha256 must be 64 hex characters",
+        );
+    }
+    if !f5_is_sha256_hex(&evidence.public_key_sha256) {
+        f5_signing_execution_failure(
+            &mut failures,
+            "public_key_sha256",
+            "public key sha256 must be 64 hex characters",
+        );
+    }
+    if !evidence.signature_verified {
+        f5_signing_execution_failure(
+            &mut failures,
+            "signature_verified",
+            "signature verification evidence is required",
+        );
+    }
+    if !evidence.private_key_non_extractable {
+        f5_signing_execution_failure(
+            &mut failures,
+            "private_key_non_extractable",
+            "private key must be non-extractable",
+        );
+    }
+    if !evidence.private_key_sensitive {
+        f5_signing_execution_failure(
+            &mut failures,
+            "private_key_sensitive",
+            "private key must be sensitive",
+        );
+    }
+    if !evidence.key_generated_in_provider {
+        f5_signing_execution_failure(
+            &mut failures,
+            "key_generated_in_provider",
+            "key must be generated inside the signing provider",
+        );
+    }
+    if !evidence.token_initialized {
+        f5_signing_execution_failure(
+            &mut failures,
+            "token_initialized",
+            "token initialization evidence is required",
+        );
+    }
+    if evidence.signer_tool.trim().is_empty() {
+        f5_signing_execution_failure(&mut failures, "signer_tool", "signer tool is required");
+    }
+    if evidence.verifier_tool.trim().is_empty() {
+        f5_signing_execution_failure(&mut failures, "verifier_tool", "verifier tool is required");
+    }
+    if !evidence.operator_approved {
+        f5_signing_execution_failure(
+            &mut failures,
+            "operator_approved",
+            "operator approval is required",
+        );
+    }
+    if !evidence.cleanup_confirmed {
+        f5_signing_execution_failure(
+            &mut failures,
+            "cleanup_confirmed",
+            "cleanup confirmation is required",
+        );
+    }
+    if evidence.observed_at_unix_ms == 0 {
+        f5_signing_execution_failure(
+            &mut failures,
+            "observed_at_unix_ms",
+            "observed timestamp is required",
+        );
+    }
+
+    let approval = if failures.is_empty() {
+        Some(F5SigningExecutionApproval {
+            evidence_id: evidence.evidence_id,
+            provider: evidence.provider,
+            key_uri: evidence.key_uri,
+            algorithm: evidence.algorithm,
+            release_manifest_sha256: evidence.release_manifest_sha256,
+            signature_sha256: evidence.signature_sha256,
+            public_key_sha256: evidence.public_key_sha256,
+            observed_at_unix_ms: evidence.observed_at_unix_ms,
+        })
+    } else {
+        None
+    };
+
+    F5SigningExecutionReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -5017,6 +5245,37 @@ fn f5_signing_uri_matches_provider(provider: F5SigningKeyProvider, value: &str) 
         }
         F5SigningKeyProvider::Hsm => value.starts_with("pkcs11:") || value.starts_with("pkcs11://"),
         F5SigningKeyProvider::EphemeralLocalValidation | F5SigningKeyProvider::LocalFile => false,
+    }
+}
+
+fn f5_signing_execution_failure(
+    failures: &mut Vec<F5SigningExecutionFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(F5SigningExecutionFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
+fn f5_signing_execution_uri_matches_provider(
+    provider: F5SigningExecutionProvider,
+    value: &str,
+) -> bool {
+    match provider {
+        F5SigningExecutionProvider::Pkcs11Hsm => {
+            value.starts_with("pkcs11:") || value.starts_with("pkcs11://")
+        }
+        F5SigningExecutionProvider::CloudKms => {
+            value.starts_with("awskms://")
+                || value.starts_with("azurekms://")
+                || value.starts_with("gcpkms://")
+                || value.starts_with("hashivault://")
+                || value.starts_with("kms://")
+        }
+        F5SigningExecutionProvider::EphemeralLocalValidation
+        | F5SigningExecutionProvider::LocalFile => false,
     }
 }
 

@@ -14,6 +14,7 @@ tenant_query_gate="$repo_root/scripts/test-f5-tenant-query-retention.sh"
 retention_enforcement_gate="$repo_root/scripts/test-f5-retention-enforcement.sh"
 promotion_policy_gate="$repo_root/scripts/test-f5-release-promotion-policy.sh"
 signing_profile_gate="$repo_root/scripts/test-f5-signing-profile.sh"
+signing_execution_gate="$repo_root/scripts/test-f5-signing-execution.sh"
 worm_archive_policy_gate="$repo_root/scripts/test-f5-worm-archive-policy.sh"
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
 service_mesh_live_istio_gate="$repo_root/scripts/test-f5-service-mesh-live-istio.sh"
@@ -147,6 +148,11 @@ if [[ ! -s "$signing_profile_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$signing_execution_gate" ]]; then
+    echo "missing F5.16 signing execution artifact: $signing_execution_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$worm_archive_policy_gate" ]]; then
     echo "missing F5.14 WORM archive policy artifact: $worm_archive_policy_gate" >&2
     exit 1
@@ -199,6 +205,11 @@ grep -q '^test-f5-release-promotion-policy:' "$makefile" || {
 
 grep -q '^test-f5-signing-profile:' "$makefile" || {
     echo "missing Makefile target: test-f5-signing-profile" >&2
+    exit 1
+}
+
+grep -q '^test-f5-signing-execution:' "$makefile" || {
+    echo "missing Makefile target: test-f5-signing-execution" >&2
     exit 1
 }
 
@@ -589,6 +600,61 @@ grep -q 'production signing key must be non-exportable' "$repo_root/crates/apoly
 
 grep -q 'rotation period must be 180 days or less' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
     echo "F5.13 signing profile policy must enforce key rotation bounds" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-signing-execution-evidence' "$signing_execution_gate" || {
+    echo "F5.16 signing execution gate must run the signing execution CLI" >&2
+    exit 1
+}
+
+grep -q 'softhsm2-util --init-token' "$signing_execution_gate" || {
+    echo "F5.16 signing execution gate must initialize a live PKCS#11 token" >&2
+    exit 1
+}
+
+grep -q 'pkcs11-tool' "$signing_execution_gate" || {
+    echo "F5.16 signing execution gate must use pkcs11-tool" >&2
+    exit 1
+}
+
+grep -q -- '--keypairgen' "$signing_execution_gate" || {
+    echo "F5.16 signing execution gate must generate a provider-backed key" >&2
+    exit 1
+}
+
+grep -q 'never extractable' "$signing_execution_gate" || {
+    echo "F5.16 signing execution gate must require non-extractable key evidence" >&2
+    exit 1
+}
+
+grep -q 'openssl dgst -sha256' "$signing_execution_gate" || {
+    echo "F5.16 signing execution gate must verify the PKCS#11 signature" >&2
+    exit 1
+}
+
+grep -q 'evaluate_f5_signing_execution_evidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.16 validation library must expose signing execution evidence evaluation" >&2
+    exit 1
+}
+
+grep -q 'F5SigningExecutionEvidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.16 validation library must expose signing execution evidence data" >&2
+    exit 1
+}
+
+grep -q 'live provider signing evidence is required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.16 signing execution evidence must reject fixture evidence" >&2
+    exit 1
+}
+
+grep -q 'private key must be non-extractable' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.16 signing execution evidence must require non-extractable keys" >&2
+    exit 1
+}
+
+grep -q 'key must be generated inside the signing provider' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.16 signing execution evidence must require provider-generated keys" >&2
     exit 1
 }
 

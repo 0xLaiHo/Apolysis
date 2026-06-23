@@ -74,8 +74,9 @@ purge dry-run/apply enforcement for retained daemon state. F5 now also includes
 a release promotion policy gate for digest-locked production promotion,
 retention windows, rollback tags, and bounded registry access principals, plus
 a KMS/HSM signing profile gate for production signer eligibility and an
-external WORM/object-lock archive policy gate, and a live Istio service-mesh
-admission/handshake evidence gate.
+HSM-compatible PKCS#11 signing execution gate, an external WORM/object-lock
+archive policy gate, and a live Istio service-mesh admission/handshake
+evidence gate.
 
 ## 🚀 Runtime Scenarios
 
@@ -308,8 +309,9 @@ artifacts, plus rendered service-mesh identity policy validation for metrics
 access, tenant-scoped query/retention metadata, and local retention purge
 enforcement in the daemon API, plus release promotion policy validation for
 production registry retention and access controls, and KMS/HSM signing profile
-validation, plus external WORM/object-lock archive policy validation and live
-Istio service-mesh admission/handshake validation.
+validation plus HSM-compatible PKCS#11 signing execution, external
+WORM/object-lock archive policy validation, and live Istio service-mesh
+admission/handshake validation.
 
 Implementation milestones:
 
@@ -332,7 +334,7 @@ Focused roadmap:
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
-| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, KMS/HSM signing profile validation, Helm, registry/archive/promotion/WORM policy validation, service-mesh identity/live handshake validation, operator, large-scale chaos and performance testing | 🚧 **In Progress** |
+| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, KMS/HSM signing profile validation and PKCS#11 signing execution, Helm, registry/archive/promotion/WORM policy validation, service-mesh identity/live handshake validation, operator, large-scale chaos and performance testing | 🚧 **In Progress** |
 
 ## 📜 License
 

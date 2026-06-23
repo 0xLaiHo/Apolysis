@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery test-f2-performance test-f2-visibility-reports test-f2-production-qualification test-f3-guardrails test-f3-bpf-lsm-live test-f4-runtime-guardrails test-f5-production-hardening test-f5-live-deployment test-f5-supply-chain test-f5-helm-production test-f5-release-registry test-f5-tenant-query-retention test-f5-retention-enforcement test-f5-release-promotion-policy test-f5-signing-profile test-f5-worm-archive-policy test-f5-service-mesh-live-evidence test-f5-service-mesh-live-istio
+.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery test-f2-performance test-f2-visibility-reports test-f2-production-qualification test-f3-guardrails test-f3-bpf-lsm-live test-f4-runtime-guardrails test-f5-production-hardening test-f5-live-deployment test-f5-supply-chain test-f5-helm-production test-f5-release-registry test-f5-tenant-query-retention test-f5-retention-enforcement test-f5-release-promotion-policy test-f5-signing-profile test-f5-signing-execution test-f5-worm-archive-policy test-f5-service-mesh-live-evidence test-f5-service-mesh-live-istio
 
 build: build-ebpf
 	cargo build --workspace
@@ -83,6 +83,9 @@ test-f5-release-promotion-policy:
 
 test-f5-signing-profile:
 	./scripts/test-f5-signing-profile.sh
+
+test-f5-signing-execution:
+	./scripts/test-f5-signing-execution.sh
 
 test-f5-worm-archive-policy:
 	./scripts/test-f5-worm-archive-policy.sh
