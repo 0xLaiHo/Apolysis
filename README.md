@@ -70,7 +70,9 @@ Helm packaging now also renders optional Istio strict mTLS and metrics
 AuthorizationPolicy resources for service-account-scoped metrics access. The
 daemon API now also carries tenant IDs and retention tiers on session intents
 and supports tenant-scoped session query/list responses plus local retention
-purge dry-run/apply enforcement for retained daemon state.
+purge dry-run/apply enforcement for retained daemon state. F5 now also includes
+a release promotion policy gate for digest-locked production promotion,
+retention windows, rollback tags, and bounded registry access principals.
 
 ## 🚀 Runtime Scenarios
 
@@ -301,7 +303,8 @@ supply-chain validation, plus Helm production packaging for tenant-isolated
 node-local deployments and local OCI registry/archive validation for release
 artifacts, plus rendered service-mesh identity policy validation for metrics
 access, tenant-scoped query/retention metadata, and local retention purge
-enforcement in the daemon API.
+enforcement in the daemon API, plus release promotion policy validation for
+production registry retention and access controls.
 
 Implementation milestones:
 
@@ -324,7 +327,7 @@ Focused roadmap:
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
-| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, Helm, registry/archive validation, service-mesh identity policy, operator, large-scale chaos and performance testing | 🚧 **In Progress** |
+| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, Helm, registry/archive/promotion policy validation, service-mesh identity policy, operator, large-scale chaos and performance testing | 🚧 **In Progress** |
 
 ## 📜 License
 

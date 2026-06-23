@@ -12,6 +12,7 @@ supply_chain_gate="$repo_root/scripts/test-f5-supply-chain.sh"
 release_registry_gate="$repo_root/scripts/test-f5-release-registry.sh"
 tenant_query_gate="$repo_root/scripts/test-f5-tenant-query-retention.sh"
 retention_enforcement_gate="$repo_root/scripts/test-f5-retention-enforcement.sh"
+promotion_policy_gate="$repo_root/scripts/test-f5-release-promotion-policy.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -132,6 +133,11 @@ if [[ ! -s "$retention_enforcement_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$promotion_policy_gate" ]]; then
+    echo "missing F5.12 release promotion policy artifact: $promotion_policy_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -159,6 +165,11 @@ grep -q '^test-f5-tenant-query-retention:' "$makefile" || {
 
 grep -q '^test-f5-retention-enforcement:' "$makefile" || {
     echo "missing Makefile target: test-f5-retention-enforcement" >&2
+    exit 1
+}
+
+grep -q '^test-f5-release-promotion-policy:' "$makefile" || {
+    echo "missing Makefile target: test-f5-release-promotion-policy" >&2
     exit 1
 }
 
@@ -469,5 +480,40 @@ grep -q 'apply_retention' "$repo_root/crates/apolysis-daemon/src/state.rs" || {
 
 grep -q 'RetentionPurge' "$repo_root/crates/apolysis-daemon/src/server.rs" || {
     echo "F5.11 daemon response API must return retention purge reports" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-release-promotion-policy' "$promotion_policy_gate" || {
+    echo "F5.12 promotion policy gate must run the release promotion policy CLI" >&2
+    exit 1
+}
+
+grep -q 'evaluate_f5_release_promotion_policy' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.12 validation library must expose release promotion policy evaluation" >&2
+    exit 1
+}
+
+grep -q 'F5ReleasePromotionRequest' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.12 validation library must expose release promotion requests" >&2
+    exit 1
+}
+
+grep -q 'F5ReleasePromotionPolicyEvidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.12 validation library must expose release promotion evidence" >&2
+    exit 1
+}
+
+grep -q 'external or KMS/HSM-backed signing is required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.12 promotion policy must reject ephemeral production signing" >&2
+    exit 1
+}
+
+grep -q 'minimum production retention is 90 days' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.12 promotion policy must enforce production retention" >&2
+    exit 1
+}
+
+grep -q 'anonymous registry pull access is forbidden' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.12 promotion policy must reject anonymous registry pull access" >&2
     exit 1
 }

@@ -49,3 +49,7 @@ path = "src/bin/apolysis-f3-block-operator-audit.rs"
 [[bin]]
 name = "apolysis-f4-runtime-guardrail-matrix"
 path = "src/bin/apolysis-f4-runtime-guardrail-matrix.rs"
+
+[[bin]]
+name = "apolysis-f5-release-promotion-policy"
+path = "src/bin/apolysis-f5-release-promotion-policy.rs"

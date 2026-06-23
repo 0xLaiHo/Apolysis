@@ -531,6 +531,72 @@ pub struct F4LiveRuntimeEvidenceBundleReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum F5ReleasePromotionChannel {
+    Staging,
+    Production,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ReleasePromotionRequest {
+    pub promotion_id: String,
+    pub channel: F5ReleasePromotionChannel,
+    pub source_tag: String,
+    pub target_tag: String,
+    pub image_digest: String,
+    pub sbom_attachment_digest: String,
+    pub release_manifest_sha256: String,
+    pub retention_days: u32,
+    pub requested_at_unix_ms: u64,
+    pub retain_until_unix_ms: u64,
+    pub promotion_approved: bool,
+    pub require_digest_pulls: bool,
+    pub allow_anonymous_pull: bool,
+    pub allowed_pull_principals: Vec<String>,
+    pub allowed_push_principals: Vec<String>,
+    pub rollback_tag: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct F5ReleasePromotionPolicyEvidence {
+    pub release_manifest_sha256: String,
+    pub registry_attachment_sha256: String,
+    pub release_manifest: serde_json::Value,
+    pub registry_attachment: serde_json::Value,
+    pub archive_manifest: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ReleasePromotionApproval {
+    pub promotion_id: String,
+    pub channel: F5ReleasePromotionChannel,
+    pub source_tag: String,
+    pub target_tag: String,
+    pub image_digest: String,
+    pub release_manifest_sha256: String,
+    pub sbom_attachment_digest: String,
+    pub retention_days: u32,
+    pub retain_until_unix_ms: u64,
+    pub allowed_pull_principals: Vec<String>,
+    pub allowed_push_principals: Vec<String>,
+    pub rollback_tag: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ReleasePromotionPolicyFailure {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ReleasePromotionPolicyReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approval: Option<F5ReleasePromotionApproval>,
+    pub failures: Vec<F5ReleasePromotionPolicyFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum F4RuntimeAdapterEvidenceSource {
     Fixture,
     LiveHost,
@@ -1039,6 +1105,183 @@ pub fn required_f2_visibility_targets() -> Vec<VisibilityTarget> {
         VisibilityTarget::K3sGvisor,
         VisibilityTarget::K3sKata,
     ]
+}
+
+pub fn evaluate_f5_release_promotion_policy(
+    request: F5ReleasePromotionRequest,
+    evidence: F5ReleasePromotionPolicyEvidence,
+) -> F5ReleasePromotionPolicyReport {
+    const MIN_PRODUCTION_RETENTION_DAYS: u32 = 90;
+    const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+
+    let mut failures = Vec::new();
+
+    if request.promotion_id.trim().is_empty() {
+        f5_push_failure(&mut failures, "promotion_id", "promotion id is required");
+    }
+    if !f5_is_sha256_digest(&request.image_digest) {
+        f5_push_failure(
+            &mut failures,
+            "image_digest",
+            "image digest must be a sha256 digest",
+        );
+    }
+    if !f5_is_sha256_digest(&request.sbom_attachment_digest) {
+        f5_push_failure(
+            &mut failures,
+            "sbom_attachment_digest",
+            "SBOM attachment digest must be a sha256 digest",
+        );
+    }
+    if !f5_is_sha256_hex(&request.release_manifest_sha256) {
+        f5_push_failure(
+            &mut failures,
+            "release_manifest_sha256",
+            "release manifest sha256 must be 64 hex characters",
+        );
+    }
+    if request.release_manifest_sha256 != evidence.release_manifest_sha256 {
+        f5_push_failure(
+            &mut failures,
+            "release_manifest_sha256",
+            "request release manifest digest does not match evidence",
+        );
+    }
+    if !f5_is_sha256_hex(&evidence.registry_attachment_sha256) {
+        f5_push_failure(
+            &mut failures,
+            "registry_attachment_sha256",
+            "registry attachment sha256 must be 64 hex characters",
+        );
+    }
+
+    f5_validate_release_manifest(&evidence, &mut failures);
+    f5_validate_registry_attachment(&request, &evidence, &mut failures);
+    f5_validate_archive_manifest(&request, &evidence, &mut failures);
+
+    if request.target_tag == "latest" || !request.target_tag.starts_with("prod-") {
+        f5_push_failure(
+            &mut failures,
+            "target_tag",
+            "target tag must be immutable and start with prod-",
+        );
+    }
+    if request.source_tag.trim().is_empty() {
+        f5_push_failure(&mut failures, "source_tag", "source tag is required");
+    }
+    if request.retention_days < MIN_PRODUCTION_RETENTION_DAYS {
+        f5_push_failure(
+            &mut failures,
+            "retention_days",
+            "minimum production retention is 90 days",
+        );
+    }
+    let required_retain_until = request
+        .requested_at_unix_ms
+        .saturating_add(u64::from(request.retention_days).saturating_mul(DAY_MS));
+    if request.retain_until_unix_ms < required_retain_until {
+        f5_push_failure(
+            &mut failures,
+            "retain_until_unix_ms",
+            "retain-until timestamp must cover the requested retention window",
+        );
+    }
+    if !request.promotion_approved {
+        f5_push_failure(
+            &mut failures,
+            "promotion_approved",
+            "operator approval is required",
+        );
+    }
+    if !request.require_digest_pulls {
+        f5_push_failure(
+            &mut failures,
+            "require_digest_pulls",
+            "digest-only pulls are required",
+        );
+    }
+    if request.allow_anonymous_pull {
+        f5_push_failure(
+            &mut failures,
+            "allow_anonymous_pull",
+            "anonymous registry pull access is forbidden",
+        );
+    }
+    if request.allowed_pull_principals.is_empty() {
+        f5_push_failure(
+            &mut failures,
+            "allowed_pull_principals",
+            "at least one pull principal is required",
+        );
+    }
+    if request.allowed_push_principals.is_empty() {
+        f5_push_failure(
+            &mut failures,
+            "allowed_push_principals",
+            "at least one push principal is required",
+        );
+    }
+    for principal in &request.allowed_pull_principals {
+        if principal == "*" {
+            f5_push_failure(
+                &mut failures,
+                "allowed_pull_principals",
+                "wildcard pull principals are forbidden",
+            );
+        }
+        if f5_is_anonymous_principal(principal) {
+            f5_push_failure(
+                &mut failures,
+                "allowed_pull_principals",
+                "anonymous pull principals are forbidden",
+            );
+        }
+    }
+    for principal in &request.allowed_push_principals {
+        if principal == "*" {
+            f5_push_failure(
+                &mut failures,
+                "allowed_push_principals",
+                "wildcard push principals are forbidden",
+            );
+        }
+        if f5_is_anonymous_principal(principal) {
+            f5_push_failure(
+                &mut failures,
+                "allowed_push_principals",
+                "anonymous push principals are forbidden",
+            );
+        }
+    }
+    if request.rollback_tag.trim().is_empty() {
+        f5_push_failure(&mut failures, "rollback_tag", "rollback tag is required");
+    }
+
+    let approval = if failures.is_empty() {
+        Some(F5ReleasePromotionApproval {
+            promotion_id: request.promotion_id,
+            channel: request.channel,
+            source_tag: request.source_tag,
+            target_tag: request.target_tag,
+            image_digest: request.image_digest,
+            release_manifest_sha256: request.release_manifest_sha256,
+            sbom_attachment_digest: request.sbom_attachment_digest,
+            retention_days: request.retention_days,
+            retain_until_unix_ms: request.retain_until_unix_ms,
+            allowed_pull_principals: request.allowed_pull_principals,
+            allowed_push_principals: request.allowed_push_principals,
+            rollback_tag: request.rollback_tag,
+        })
+    } else {
+        None
+    };
+
+    F5ReleasePromotionPolicyReport {
+        schema_version: 1,
+        passed: approval.is_some(),
+        approval,
+        failures,
+    }
 }
 
 pub fn evaluate_visibility_report_gate(
@@ -3767,6 +4010,312 @@ fn f4_kata_boundary_evidence_ids(gate: &F4KataBoundaryEvidenceGateReport) -> Vec
         .iter()
         .map(|report| report.evidence_id.clone())
         .collect()
+}
+
+fn f5_validate_release_manifest(
+    evidence: &F5ReleasePromotionPolicyEvidence,
+    failures: &mut Vec<F5ReleasePromotionPolicyFailure>,
+) {
+    let manifest = &evidence.release_manifest;
+    f5_expect_json_string(
+        failures,
+        manifest,
+        "/schema",
+        "apolysis.dev/f5-release-manifest/v1",
+        "release manifest schema must be F5 release manifest v1",
+    );
+    f5_expect_json_string(
+        failures,
+        manifest,
+        "/phase",
+        "F5.6",
+        "release manifest phase must be F5.6",
+    );
+    let key_mode = f5_json_str(manifest, "/signing/keyMode").unwrap_or_default();
+    if !f5_is_production_signing_mode(key_mode) {
+        f5_push_failure(
+            failures,
+            "release_manifest.signing.keyMode",
+            "external or KMS/HSM-backed signing is required",
+        );
+    }
+    for (pointer, message) in [
+        (
+            "/signing/publicKey",
+            "release signing public key evidence is required",
+        ),
+        (
+            "/signing/manifestBundle",
+            "release manifest signature bundle is required",
+        ),
+        (
+            "/signing/provenanceBundle",
+            "release provenance signature bundle is required",
+        ),
+    ] {
+        if f5_json_str(manifest, pointer)
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            f5_push_failure(failures, pointer, message);
+        }
+    }
+    for artifact in [
+        "apolysis-f5-release-payload.tar.gz",
+        "apolysis-f5-apolysisd-image.tar",
+        "apolysis-f5-sbom.cdx.json",
+        "apolysis-f5-provenance.intoto.json",
+    ] {
+        if !f5_json_array_contains_path(manifest, "/files", artifact) {
+            f5_push_failure(
+                failures,
+                "release_manifest.files",
+                format!("release manifest must include {artifact}"),
+            );
+        }
+    }
+}
+
+fn f5_validate_registry_attachment(
+    request: &F5ReleasePromotionRequest,
+    evidence: &F5ReleasePromotionPolicyEvidence,
+    failures: &mut Vec<F5ReleasePromotionPolicyFailure>,
+) {
+    let attachment = &evidence.registry_attachment;
+    f5_expect_json_string(
+        failures,
+        attachment,
+        "/schema",
+        "apolysis.dev/f5-registry-attachment/v1",
+        "registry attachment schema must be F5 registry attachment v1",
+    );
+    f5_expect_json_string(
+        failures,
+        attachment,
+        "/phase",
+        "F5.8",
+        "registry attachment phase must be F5.8",
+    );
+    if f5_json_str(attachment, "/registry/imageDigest") != Some(request.image_digest.as_str()) {
+        f5_push_failure(
+            failures,
+            "registry.imageDigest",
+            "image digest does not match registry attachment",
+        );
+    }
+    if f5_json_str(attachment, "/registry/sbomAttachmentDigest")
+        != Some(request.sbom_attachment_digest.as_str())
+    {
+        f5_push_failure(
+            failures,
+            "registry.sbomAttachmentDigest",
+            "SBOM attachment digest does not match registry attachment",
+        );
+    }
+    if f5_json_str(attachment, "/registry/tag") != Some(request.source_tag.as_str()) {
+        f5_push_failure(
+            failures,
+            "registry.tag",
+            "source tag does not match registry attachment",
+        );
+    }
+    if f5_json_str(attachment, "/releaseArtifacts/manifest/sha256")
+        != Some(evidence.release_manifest_sha256.as_str())
+    {
+        f5_push_failure(
+            failures,
+            "registry.releaseArtifacts.manifest.sha256",
+            "registry attachment release manifest digest does not match evidence",
+        );
+    }
+    if !f5_json_array_contains_string(
+        attachment,
+        "/registryObservedState/tagsAfterSbom/tags",
+        &request.source_tag,
+    ) {
+        f5_push_failure(
+            failures,
+            "registryObservedState.tagsAfterSbom",
+            "registry observed tags must include the source image tag",
+        );
+    }
+    if let Some(sbom_tag) = f5_json_str(attachment, "/registry/sbomAttachmentTag") {
+        if !f5_json_array_contains_string(
+            attachment,
+            "/registryObservedState/tagsAfterSbom/tags",
+            sbom_tag,
+        ) {
+            f5_push_failure(
+                failures,
+                "registryObservedState.tagsAfterSbom",
+                "registry observed tags must include the SBOM attachment tag",
+            );
+        }
+    }
+}
+
+fn f5_validate_archive_manifest(
+    request: &F5ReleasePromotionRequest,
+    evidence: &F5ReleasePromotionPolicyEvidence,
+    failures: &mut Vec<F5ReleasePromotionPolicyFailure>,
+) {
+    let archive = &evidence.archive_manifest;
+    f5_expect_json_string(
+        failures,
+        archive,
+        "/schema",
+        "apolysis.dev/f5-immutable-archive-manifest/v1",
+        "archive manifest schema must be F5 immutable archive manifest v1",
+    );
+    f5_expect_json_string(
+        failures,
+        archive,
+        "/phase",
+        "F5.8",
+        "archive manifest phase must be F5.8",
+    );
+    if f5_json_str(archive, "/archive/releaseManifestSha256")
+        != Some(request.release_manifest_sha256.as_str())
+    {
+        f5_push_failure(
+            failures,
+            "archive.releaseManifestSha256",
+            "archive release manifest digest does not match request",
+        );
+    }
+    if f5_json_str(archive, "/archive/registryAttachmentSha256")
+        != Some(evidence.registry_attachment_sha256.as_str())
+    {
+        f5_push_failure(
+            failures,
+            "archive.registryAttachmentSha256",
+            "archive registry attachment digest does not match evidence",
+        );
+    }
+    f5_expect_json_string(
+        failures,
+        archive,
+        "/immutability/directoryMode",
+        "0555",
+        "archive directory mode must be read-only",
+    );
+    f5_expect_json_string(
+        failures,
+        archive,
+        "/immutability/fileMode",
+        "0444",
+        "archive file mode must be read-only",
+    );
+    if f5_json_str(archive, "/immutability/mutationProbe") != Some("denied") {
+        f5_push_failure(
+            failures,
+            "archive.immutability.mutationProbe",
+            "archive mutation probe must be denied",
+        );
+    }
+    for artifact in [
+        "apolysis-f5-release-manifest.json",
+        "apolysis-f5-registry-attachment.json",
+        "apolysis-f5-apolysisd-image.tar",
+    ] {
+        if !f5_json_array_contains_path(archive, "/artifacts", artifact) {
+            f5_push_failure(
+                failures,
+                "archive.artifacts",
+                format!("archive manifest must include {artifact}"),
+            );
+        }
+    }
+    if let Some(artifacts) = archive
+        .pointer("/artifacts")
+        .and_then(serde_json::Value::as_array)
+    {
+        for artifact in artifacts {
+            if artifact.get("mode").and_then(serde_json::Value::as_str) != Some("0444") {
+                let path = artifact
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<unknown>");
+                f5_push_failure(
+                    failures,
+                    "archive.artifacts.mode",
+                    format!("archive artifact {path} must be read-only"),
+                );
+            }
+        }
+    }
+}
+
+fn f5_expect_json_string(
+    failures: &mut Vec<F5ReleasePromotionPolicyFailure>,
+    value: &serde_json::Value,
+    pointer: &str,
+    expected: &str,
+    message: impl Into<String>,
+) {
+    if f5_json_str(value, pointer) != Some(expected) {
+        f5_push_failure(failures, pointer, message);
+    }
+}
+
+fn f5_json_str<'a>(value: &'a serde_json::Value, pointer: &str) -> Option<&'a str> {
+    value.pointer(pointer)?.as_str()
+}
+
+fn f5_json_array_contains_path(value: &serde_json::Value, pointer: &str, path: &str) -> bool {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|candidate| candidate == path || candidate.ends_with(&format!("/{path}")))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn f5_json_array_contains_string(value: &serde_json::Value, pointer: &str, expected: &str) -> bool {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| entries.iter().any(|entry| entry.as_str() == Some(expected)))
+        .unwrap_or(false)
+}
+
+fn f5_push_failure(
+    failures: &mut Vec<F5ReleasePromotionPolicyFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(F5ReleasePromotionPolicyFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
+fn f5_is_sha256_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .map(f5_is_sha256_hex)
+        .unwrap_or(false)
+}
+
+fn f5_is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn f5_is_production_signing_mode(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    normalized == "external" || normalized.contains("kms") || normalized.contains("hsm")
+}
+
+fn f5_is_anonymous_principal(value: &str) -> bool {
+    matches!(value, "anonymous" | "system:anonymous")
 }
 
 fn f4_merge_evidence_ids(left: Vec<String>, right: Vec<String>) -> Vec<String> {
