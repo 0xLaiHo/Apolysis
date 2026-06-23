@@ -597,6 +597,62 @@ pub struct F5ReleasePromotionPolicyReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum F5SigningKeyProvider {
+    EphemeralLocalValidation,
+    LocalFile,
+    Kms,
+    Hsm,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5SigningReleaseChannel {
+    Staging,
+    Production,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5SigningProfile {
+    pub profile_id: String,
+    pub provider: F5SigningKeyProvider,
+    pub key_uri: String,
+    pub public_key_ref: String,
+    pub certificate_chain_ref: String,
+    pub attestation_ref: String,
+    pub non_exportable: bool,
+    pub hardware_or_service_backed: bool,
+    pub operator_approved: bool,
+    pub rotation_period_days: u32,
+    pub allowed_release_channels: Vec<F5SigningReleaseChannel>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5SigningProfileApproval {
+    pub profile_id: String,
+    pub provider: F5SigningKeyProvider,
+    pub key_uri: String,
+    pub public_key_ref: String,
+    pub certificate_chain_ref: String,
+    pub attestation_ref: String,
+    pub max_rotation_period_days: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5SigningProfileFailure {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5SigningProfileReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approval: Option<F5SigningProfileApproval>,
+    pub failures: Vec<F5SigningProfileFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum F4RuntimeAdapterEvidenceSource {
     Fixture,
     LiveHost,
@@ -1277,6 +1333,118 @@ pub fn evaluate_f5_release_promotion_policy(
     };
 
     F5ReleasePromotionPolicyReport {
+        schema_version: 1,
+        passed: approval.is_some(),
+        approval,
+        failures,
+    }
+}
+
+pub fn evaluate_f5_signing_profile(profile: F5SigningProfile) -> F5SigningProfileReport {
+    const MAX_ROTATION_DAYS: u32 = 180;
+    let mut failures = Vec::new();
+
+    if profile.profile_id.trim().is_empty() {
+        f5_signing_failure(&mut failures, "profile_id", "profile id is required");
+    }
+    if !matches!(
+        profile.provider,
+        F5SigningKeyProvider::Kms | F5SigningKeyProvider::Hsm
+    ) {
+        f5_signing_failure(
+            &mut failures,
+            "provider",
+            "production release signing requires KMS or HSM provider",
+        );
+    }
+    if !profile.non_exportable {
+        f5_signing_failure(
+            &mut failures,
+            "non_exportable",
+            "production signing key must be non-exportable",
+        );
+    }
+    if !profile.hardware_or_service_backed {
+        f5_signing_failure(
+            &mut failures,
+            "hardware_or_service_backed",
+            "production signing key must be hardware-backed or managed by a KMS service",
+        );
+    }
+    if !profile.operator_approved {
+        f5_signing_failure(
+            &mut failures,
+            "operator_approved",
+            "operator approval is required",
+        );
+    }
+    if profile.public_key_ref.trim().is_empty() {
+        f5_signing_failure(
+            &mut failures,
+            "public_key_ref",
+            "public key reference is required",
+        );
+    }
+    if profile.certificate_chain_ref.trim().is_empty() {
+        f5_signing_failure(
+            &mut failures,
+            "certificate_chain_ref",
+            "certificate chain or verification bundle reference is required",
+        );
+    }
+    if profile.attestation_ref.trim().is_empty() {
+        f5_signing_failure(
+            &mut failures,
+            "attestation_ref",
+            "attestation or key policy evidence is required",
+        );
+    }
+    if profile.rotation_period_days == 0 || profile.rotation_period_days > MAX_ROTATION_DAYS {
+        f5_signing_failure(
+            &mut failures,
+            "rotation_period_days",
+            "rotation period must be 180 days or less",
+        );
+    }
+    if !profile
+        .allowed_release_channels
+        .contains(&F5SigningReleaseChannel::Production)
+    {
+        f5_signing_failure(
+            &mut failures,
+            "allowed_release_channels",
+            "production release channel must be allowed",
+        );
+    }
+    if f5_is_file_key_uri(&profile.key_uri) {
+        f5_signing_failure(
+            &mut failures,
+            "key_uri",
+            "file paths are not valid production signing key URIs",
+        );
+    } else if !f5_signing_uri_matches_provider(profile.provider, &profile.key_uri) {
+        f5_signing_failure(
+            &mut failures,
+            "key_uri",
+            "signing key URI must match the selected KMS or HSM provider",
+        );
+    }
+
+    let approval = if failures.is_empty() {
+        Some(F5SigningProfileApproval {
+            profile_id: profile.profile_id,
+            provider: profile.provider,
+            key_uri: profile.key_uri,
+            public_key_ref: profile.public_key_ref,
+            certificate_chain_ref: profile.certificate_chain_ref,
+            attestation_ref: profile.attestation_ref,
+            max_rotation_period_days: profile.rotation_period_days,
+        })
+    } else {
+        None
+    };
+
+    F5SigningProfileReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -4316,6 +4484,38 @@ fn f5_is_production_signing_mode(value: &str) -> bool {
 
 fn f5_is_anonymous_principal(value: &str) -> bool {
     matches!(value, "anonymous" | "system:anonymous")
+}
+
+fn f5_signing_failure(
+    failures: &mut Vec<F5SigningProfileFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(F5SigningProfileFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
+fn f5_is_file_key_uri(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("file:")
+}
+
+fn f5_signing_uri_matches_provider(provider: F5SigningKeyProvider, value: &str) -> bool {
+    match provider {
+        F5SigningKeyProvider::Kms => {
+            value.starts_with("awskms://")
+                || value.starts_with("azurekms://")
+                || value.starts_with("gcpkms://")
+                || value.starts_with("hashivault://")
+                || value.starts_with("kms://")
+        }
+        F5SigningKeyProvider::Hsm => value.starts_with("pkcs11:") || value.starts_with("pkcs11://"),
+        F5SigningKeyProvider::EphemeralLocalValidation | F5SigningKeyProvider::LocalFile => false,
+    }
 }
 
 fn f4_merge_evidence_ids(left: Vec<String>, right: Vec<String>) -> Vec<String> {

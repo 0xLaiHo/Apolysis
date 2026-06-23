@@ -13,6 +13,7 @@ release_registry_gate="$repo_root/scripts/test-f5-release-registry.sh"
 tenant_query_gate="$repo_root/scripts/test-f5-tenant-query-retention.sh"
 retention_enforcement_gate="$repo_root/scripts/test-f5-retention-enforcement.sh"
 promotion_policy_gate="$repo_root/scripts/test-f5-release-promotion-policy.sh"
+signing_profile_gate="$repo_root/scripts/test-f5-signing-profile.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -138,6 +139,11 @@ if [[ ! -s "$promotion_policy_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$signing_profile_gate" ]]; then
+    echo "missing F5.13 signing profile artifact: $signing_profile_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -170,6 +176,11 @@ grep -q '^test-f5-retention-enforcement:' "$makefile" || {
 
 grep -q '^test-f5-release-promotion-policy:' "$makefile" || {
     echo "missing Makefile target: test-f5-release-promotion-policy" >&2
+    exit 1
+}
+
+grep -q '^test-f5-signing-profile:' "$makefile" || {
+    echo "missing Makefile target: test-f5-signing-profile" >&2
     exit 1
 }
 
@@ -515,5 +526,35 @@ grep -q 'minimum production retention is 90 days' "$repo_root/crates/apolysis-va
 
 grep -q 'anonymous registry pull access is forbidden' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
     echo "F5.12 promotion policy must reject anonymous registry pull access" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-signing-profile' "$signing_profile_gate" || {
+    echo "F5.13 signing profile gate must run the signing profile CLI" >&2
+    exit 1
+}
+
+grep -q 'evaluate_f5_signing_profile' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.13 validation library must expose signing profile evaluation" >&2
+    exit 1
+}
+
+grep -q 'F5SigningProfile' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.13 validation library must expose signing profile data" >&2
+    exit 1
+}
+
+grep -q 'production release signing requires KMS or HSM provider' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.13 signing profile policy must reject non-KMS/HSM providers" >&2
+    exit 1
+}
+
+grep -q 'production signing key must be non-exportable' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.13 signing profile policy must reject exportable production keys" >&2
+    exit 1
+}
+
+grep -q 'rotation period must be 180 days or less' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.13 signing profile policy must enforce key rotation bounds" >&2
     exit 1
 }
