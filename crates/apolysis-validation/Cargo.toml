@@ -77,3 +77,7 @@ path = "src/bin/apolysis-f5-worm-archive-execution-evidence.rs"
 [[bin]]
 name = "apolysis-f5-service-mesh-live-evidence"
 path = "src/bin/apolysis-f5-service-mesh-live-evidence.rs"
+
+[[bin]]
+name = "apolysis-f5-operator-controller-evidence"
+path = "src/bin/apolysis-f5-operator-controller-evidence.rs"

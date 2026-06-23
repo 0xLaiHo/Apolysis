@@ -20,6 +20,7 @@ worm_archive_policy_gate="$repo_root/scripts/test-f5-worm-archive-policy.sh"
 worm_archive_execution_gate="$repo_root/scripts/test-f5-worm-archive-execution.sh"
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
 service_mesh_live_istio_gate="$repo_root/scripts/test-f5-service-mesh-live-istio.sh"
+operator_controller_gate="$repo_root/scripts/test-f5-operator-controller.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -180,6 +181,11 @@ if [[ ! -s "$service_mesh_live_istio_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$operator_controller_gate" ]]; then
+    echo "missing F5.19 operator/controller artifact: $operator_controller_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -247,6 +253,11 @@ grep -q '^test-f5-service-mesh-live-evidence:' "$makefile" || {
 
 grep -q '^test-f5-service-mesh-live-istio:' "$makefile" || {
     echo "missing Makefile target: test-f5-service-mesh-live-istio" >&2
+    exit 1
+}
+
+grep -q '^test-f5-operator-controller:' "$makefile" || {
+    echo "missing Makefile target: test-f5-operator-controller" >&2
     exit 1
 }
 
@@ -877,5 +888,75 @@ grep -q 'plaintext client unexpectedly reached the strict-mTLS server' "$service
 
 grep -q 'apolysis-f5-service-mesh-live-evidence' "$service_mesh_live_istio_gate" || {
     echo "F5.15 live Istio gate must validate collected evidence with the CLI" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_OPERATOR_CONTROLLER' "$operator_controller_gate" || {
+    echo "F5.19 operator/controller gate must require explicit live confirmation" >&2
+    exit 1
+}
+
+grep -q 'ApolysisProductionConfig' "$operator_controller_gate" || {
+    echo "F5.19 operator/controller gate must create an ApolysisProductionConfig CRD" >&2
+    exit 1
+}
+
+grep -q 'kind: Lease' "$operator_controller_gate" || {
+    echo "F5.19 operator/controller gate must record leader-election Lease evidence" >&2
+    exit 1
+}
+
+grep -q 'replicas: 2' "$operator_controller_gate" || {
+    echo "F5.19 operator/controller gate must run an HA controller Deployment" >&2
+    exit 1
+}
+
+grep -q 'kubectl auth can-i' "$operator_controller_gate" || {
+    echo "F5.19 operator/controller gate must verify bounded controller RBAC" >&2
+    exit 1
+}
+
+grep -q 'ownerReferences' "$operator_controller_gate" || {
+    echo "F5.19 operator/controller gate must verify managed resource ownerReferences" >&2
+    exit 1
+}
+
+grep -q 'rollback_or_delete_cleanup_verified' "$operator_controller_gate" || {
+    echo "F5.19 operator/controller gate must prove cleanup after custom resource deletion" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-operator-controller-evidence' "$operator_controller_gate" || {
+    echo "F5.19 operator/controller gate must validate collected evidence with the CLI" >&2
+    exit 1
+}
+
+grep -q 'evaluate_f5_operator_controller_evidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.19 validation library must expose operator/controller evidence evaluation" >&2
+    exit 1
+}
+
+grep -q 'F5OperatorControllerEvidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.19 validation library must expose operator/controller evidence data" >&2
+    exit 1
+}
+
+grep -q 'live Kubernetes cluster evidence is required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.19 operator/controller evidence must reject fixture evidence" >&2
+    exit 1
+}
+
+grep -q 'controller RBAC must be namespace-scoped' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.19 operator/controller evidence must reject broad RBAC" >&2
+    exit 1
+}
+
+grep -q 'controller CPU limit must be between request and 250m' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.19 operator/controller evidence must enforce controller CPU bounds" >&2
+    exit 1
+}
+
+grep -q 'managed resource ownerReferences must point to the custom resource' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.19 operator/controller evidence must require owner reference validation" >&2
     exit 1
 }

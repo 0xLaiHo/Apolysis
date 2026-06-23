@@ -1009,6 +1009,94 @@ pub struct F5ServiceMeshLiveEvidenceReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum F5OperatorControllerEvidenceSource {
+    Fixture,
+    LiveCluster,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5OperatorControllerProvider {
+    StaticManifest,
+    KubernetesController,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5OperatorControllerRbacScope {
+    ClusterAdmin,
+    ClusterWide,
+    NamespaceScoped,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5OperatorControllerEvidence {
+    pub evidence_id: String,
+    pub source: F5OperatorControllerEvidenceSource,
+    pub provider: F5OperatorControllerProvider,
+    pub cluster_name: String,
+    pub namespace: String,
+    pub crd_name: String,
+    pub custom_resource_name: String,
+    pub controller_deployment: String,
+    pub controller_service_account: String,
+    pub controller_desired_replicas: u32,
+    pub controller_ready_replicas: u32,
+    pub leader_election_lease: String,
+    pub lease_holder_identity: String,
+    pub rbac_scope: F5OperatorControllerRbacScope,
+    pub controller_cpu_request_millicores: u32,
+    pub controller_cpu_limit_millicores: u32,
+    pub controller_memory_request_mib: u32,
+    pub controller_memory_limit_mib: u32,
+    pub crd_established: bool,
+    pub crd_served: bool,
+    pub custom_resource_admitted: bool,
+    pub reconciliation_observed: bool,
+    pub observed_generation: u64,
+    pub reconciled_generation: u64,
+    pub managed_daemonset_name: String,
+    pub managed_daemonset_ready: bool,
+    pub managed_configmap_name: String,
+    pub owner_references_verified: bool,
+    pub status_condition_ready: bool,
+    pub status_observed_generation_matches: bool,
+    pub rollback_or_delete_cleanup_verified: bool,
+    pub cleanup_confirmed: bool,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5OperatorControllerApproval {
+    pub evidence_id: String,
+    pub provider: F5OperatorControllerProvider,
+    pub cluster_name: String,
+    pub namespace: String,
+    pub crd_name: String,
+    pub custom_resource_name: String,
+    pub controller_deployment: String,
+    pub controller_ready_replicas: u32,
+    pub managed_daemonset_name: String,
+    pub managed_configmap_name: String,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5OperatorControllerFailure {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5OperatorControllerReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approval: Option<F5OperatorControllerApproval>,
+    pub failures: Vec<F5OperatorControllerFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum F4RuntimeAdapterEvidenceSource {
     Fixture,
     LiveHost,
@@ -2741,6 +2829,274 @@ pub fn evaluate_f5_service_mesh_live_evidence(
     };
 
     F5ServiceMeshLiveEvidenceReport {
+        schema_version: 1,
+        passed: approval.is_some(),
+        approval,
+        failures,
+    }
+}
+
+pub fn evaluate_f5_operator_controller_evidence(
+    evidence: F5OperatorControllerEvidence,
+) -> F5OperatorControllerReport {
+    const MAX_CONTROLLER_CPU_REQUEST_MILLICORES: u32 = 100;
+    const MAX_CONTROLLER_CPU_LIMIT_MILLICORES: u32 = 250;
+    const MAX_CONTROLLER_MEMORY_REQUEST_MIB: u32 = 128;
+    const MAX_CONTROLLER_MEMORY_LIMIT_MIB: u32 = 256;
+
+    let mut failures = Vec::new();
+
+    if evidence.evidence_id.trim().is_empty() {
+        f5_operator_controller_failure(&mut failures, "evidence_id", "evidence id is required");
+    }
+    if evidence.source != F5OperatorControllerEvidenceSource::LiveCluster {
+        f5_operator_controller_failure(
+            &mut failures,
+            "source",
+            "live Kubernetes cluster evidence is required",
+        );
+    }
+    if evidence.provider != F5OperatorControllerProvider::KubernetesController {
+        f5_operator_controller_failure(
+            &mut failures,
+            "provider",
+            "Kubernetes controller execution evidence is required",
+        );
+    }
+    if evidence.cluster_name.trim().is_empty() {
+        f5_operator_controller_failure(&mut failures, "cluster_name", "cluster name is required");
+    }
+    if evidence.namespace.trim().is_empty() {
+        f5_operator_controller_failure(&mut failures, "namespace", "namespace is required");
+    }
+    if evidence.crd_name.trim().is_empty()
+        || evidence.crd_name != "apolysisproductionconfigs.apolysis.dev"
+    {
+        f5_operator_controller_failure(
+            &mut failures,
+            "crd_name",
+            "ApolysisProductionConfig CRD name is required",
+        );
+    }
+    if evidence.custom_resource_name.trim().is_empty() {
+        f5_operator_controller_failure(
+            &mut failures,
+            "custom_resource_name",
+            "custom resource name is required",
+        );
+    }
+    if evidence.controller_deployment.trim().is_empty() {
+        f5_operator_controller_failure(
+            &mut failures,
+            "controller_deployment",
+            "controller deployment name is required",
+        );
+    }
+    if evidence.controller_service_account.trim().is_empty() {
+        f5_operator_controller_failure(
+            &mut failures,
+            "controller_service_account",
+            "controller service account is required",
+        );
+    }
+    if evidence.controller_desired_replicas < 2 {
+        f5_operator_controller_failure(
+            &mut failures,
+            "controller_desired_replicas",
+            "controller must run at least two desired replicas",
+        );
+    }
+    if evidence.controller_ready_replicas < evidence.controller_desired_replicas
+        || evidence.controller_ready_replicas < 2
+    {
+        f5_operator_controller_failure(
+            &mut failures,
+            "controller_ready_replicas",
+            "all controller replicas must be ready",
+        );
+    }
+    if evidence.leader_election_lease.trim().is_empty() {
+        f5_operator_controller_failure(
+            &mut failures,
+            "leader_election_lease",
+            "leader-election Lease evidence is required",
+        );
+    }
+    if evidence.lease_holder_identity.trim().is_empty() {
+        f5_operator_controller_failure(
+            &mut failures,
+            "lease_holder_identity",
+            "leader holder identity is required",
+        );
+    }
+    if evidence.rbac_scope != F5OperatorControllerRbacScope::NamespaceScoped {
+        f5_operator_controller_failure(
+            &mut failures,
+            "rbac_scope",
+            "controller RBAC must be namespace-scoped",
+        );
+    }
+    if evidence.controller_cpu_request_millicores == 0
+        || evidence.controller_cpu_request_millicores > MAX_CONTROLLER_CPU_REQUEST_MILLICORES
+    {
+        f5_operator_controller_failure(
+            &mut failures,
+            "controller_cpu_request_millicores",
+            "controller CPU request must be between 1m and 100m",
+        );
+    }
+    if evidence.controller_cpu_limit_millicores < evidence.controller_cpu_request_millicores
+        || evidence.controller_cpu_limit_millicores > MAX_CONTROLLER_CPU_LIMIT_MILLICORES
+    {
+        f5_operator_controller_failure(
+            &mut failures,
+            "controller_cpu_limit_millicores",
+            "controller CPU limit must be between request and 250m",
+        );
+    }
+    if evidence.controller_memory_request_mib == 0
+        || evidence.controller_memory_request_mib > MAX_CONTROLLER_MEMORY_REQUEST_MIB
+    {
+        f5_operator_controller_failure(
+            &mut failures,
+            "controller_memory_request_mib",
+            "controller memory request must be between 1Mi and 128Mi",
+        );
+    }
+    if evidence.controller_memory_limit_mib < evidence.controller_memory_request_mib
+        || evidence.controller_memory_limit_mib > MAX_CONTROLLER_MEMORY_LIMIT_MIB
+    {
+        f5_operator_controller_failure(
+            &mut failures,
+            "controller_memory_limit_mib",
+            "controller memory limit must be between request and 256Mi",
+        );
+    }
+    if !evidence.crd_established {
+        f5_operator_controller_failure(
+            &mut failures,
+            "crd_established",
+            "CRD Established condition evidence is required",
+        );
+    }
+    if !evidence.crd_served {
+        f5_operator_controller_failure(
+            &mut failures,
+            "crd_served",
+            "CRD served version evidence is required",
+        );
+    }
+    if !evidence.custom_resource_admitted {
+        f5_operator_controller_failure(
+            &mut failures,
+            "custom_resource_admitted",
+            "custom resource admission evidence is required",
+        );
+    }
+    if !evidence.reconciliation_observed {
+        f5_operator_controller_failure(
+            &mut failures,
+            "reconciliation_observed",
+            "controller reconciliation evidence is required",
+        );
+    }
+    if evidence.observed_generation == 0 {
+        f5_operator_controller_failure(
+            &mut failures,
+            "observed_generation",
+            "observed generation is required",
+        );
+    }
+    if evidence.reconciled_generation < evidence.observed_generation {
+        f5_operator_controller_failure(
+            &mut failures,
+            "reconciled_generation",
+            "reconciled generation must cover the observed custom resource generation",
+        );
+    }
+    if evidence.managed_daemonset_name.trim().is_empty() {
+        f5_operator_controller_failure(
+            &mut failures,
+            "managed_daemonset_name",
+            "managed DaemonSet name is required",
+        );
+    }
+    if !evidence.managed_daemonset_ready {
+        f5_operator_controller_failure(
+            &mut failures,
+            "managed_daemonset_ready",
+            "managed DaemonSet readiness evidence is required",
+        );
+    }
+    if evidence.managed_configmap_name.trim().is_empty() {
+        f5_operator_controller_failure(
+            &mut failures,
+            "managed_configmap_name",
+            "managed ConfigMap name is required",
+        );
+    }
+    if !evidence.owner_references_verified {
+        f5_operator_controller_failure(
+            &mut failures,
+            "owner_references_verified",
+            "managed resource ownerReferences must point to the custom resource",
+        );
+    }
+    if !evidence.status_condition_ready {
+        f5_operator_controller_failure(
+            &mut failures,
+            "status_condition_ready",
+            "Ready status condition evidence is required",
+        );
+    }
+    if !evidence.status_observed_generation_matches {
+        f5_operator_controller_failure(
+            &mut failures,
+            "status_observed_generation_matches",
+            "status observedGeneration must match the reconciled generation",
+        );
+    }
+    if !evidence.rollback_or_delete_cleanup_verified {
+        f5_operator_controller_failure(
+            &mut failures,
+            "rollback_or_delete_cleanup_verified",
+            "delete or rollback cleanup evidence is required",
+        );
+    }
+    if !evidence.cleanup_confirmed {
+        f5_operator_controller_failure(
+            &mut failures,
+            "cleanup_confirmed",
+            "cleanup confirmation is required",
+        );
+    }
+    if evidence.observed_at_unix_ms == 0 {
+        f5_operator_controller_failure(
+            &mut failures,
+            "observed_at_unix_ms",
+            "observed timestamp is required",
+        );
+    }
+
+    let approval = if failures.is_empty() {
+        Some(F5OperatorControllerApproval {
+            evidence_id: evidence.evidence_id,
+            provider: evidence.provider,
+            cluster_name: evidence.cluster_name,
+            namespace: evidence.namespace,
+            crd_name: evidence.crd_name,
+            custom_resource_name: evidence.custom_resource_name,
+            controller_deployment: evidence.controller_deployment,
+            controller_ready_replicas: evidence.controller_ready_replicas,
+            managed_daemonset_name: evidence.managed_daemonset_name,
+            managed_configmap_name: evidence.managed_configmap_name,
+            observed_at_unix_ms: evidence.observed_at_unix_ms,
+        })
+    } else {
+        None
+    };
+
+    F5OperatorControllerReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -5933,6 +6289,17 @@ fn f5_service_mesh_failure(
     message: impl Into<String>,
 ) {
     failures.push(F5ServiceMeshLiveEvidenceFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
+fn f5_operator_controller_failure(
+    failures: &mut Vec<F5OperatorControllerFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(F5OperatorControllerFailure {
         field: field.into(),
         message: message.into(),
     });
