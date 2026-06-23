@@ -47,11 +47,11 @@ cat >"$contract_bundle" <<'JSON'
     },
     {
       "requirement": "cloud_worm_object_lock_archive",
-      "provider": "aws_s3_object_lock",
-      "provider_control_plane": "aws-s3:us-west-2:apolysis-release-archive",
-      "evidence_ref": "evidence/aws-s3-object-lock.json",
+      "provider": "cloudflare_r2_bucket_lock",
+      "provider_control_plane": "cloudflare-r2:e85b6fa3634dc882cfbd2188361fb37e:apolysis-f5-worm-1782254413912",
+      "evidence_ref": "evidence/cloudflare-r2-bucket-lock.json",
       "evidence_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "report_ref": "reports/aws-s3-object-lock.json",
+      "report_ref": "reports/cloudflare-r2-bucket-lock.json",
       "report_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "live_provider": true,
       "external_provider": true,
@@ -93,7 +93,7 @@ jq -e '
   and .passed == true
   and (.approval.qualified_requirements | length) == 4
   and (.approval.providers | index("aws_kms"))
-  and (.approval.providers | index("aws_s3_object_lock"))
+  and (.approval.providers | index("cloudflare_r2_bucket_lock"))
   and (.approval.providers | index("aws_ecr"))
   and (.approval.providers | index("gke_anthos_service_mesh"))
 ' "$contract_report" >/dev/null

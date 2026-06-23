@@ -1112,3 +1112,13 @@ grep -q 'provider must be an accepted external provider for this requirement' "$
     echo "F5.21 external provider qualification must reject local provider substitutions" >&2
     exit 1
 }
+
+grep -q 'CloudflareR2BucketLock' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.22 WORM archive execution must support Cloudflare R2 Bucket Lock evidence" >&2
+    exit 1
+}
+
+grep -q 'cloudflare_r2_bucket_lock' "$external_provider_qualification_gate" || {
+    echo "F5.22 external provider qualification contract must include Cloudflare R2 Bucket Lock evidence" >&2
+    exit 1
+}

@@ -805,6 +805,7 @@ pub enum F5WormProvider {
     S3ObjectLock,
     GcsBucketLock,
     AzureImmutableBlob,
+    CloudflareR2BucketLock,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -2656,11 +2657,12 @@ pub fn evaluate_f5_worm_archive_execution_evidence(
         F5WormProvider::S3ObjectLock
             | F5WormProvider::GcsBucketLock
             | F5WormProvider::AzureImmutableBlob
+            | F5WormProvider::CloudflareR2BucketLock
     ) {
         f5_worm_execution_failure(
             &mut failures,
             "provider",
-            "WORM archive execution requires S3 Object Lock, GCS Bucket Lock, or Azure Immutable Blob",
+            "WORM archive execution requires S3 Object Lock, GCS Bucket Lock, Azure Immutable Blob, or Cloudflare R2 Bucket Lock",
         );
     }
     if !f5_worm_endpoint_matches_provider(evidence.provider, &evidence.endpoint_uri) {
@@ -2746,7 +2748,7 @@ pub fn evaluate_f5_worm_archive_execution_evidence(
             "object lock must be enabled by the provider",
         );
     }
-    if !evidence.versioning_enabled {
+    if evidence.provider != F5WormProvider::CloudflareR2BucketLock && !evidence.versioning_enabled {
         f5_worm_execution_failure(
             &mut failures,
             "versioning_enabled",
@@ -2767,7 +2769,7 @@ pub fn evaluate_f5_worm_archive_execution_evidence(
             "retention must be applied through the provider API",
         );
     }
-    if !evidence.legal_hold_applied {
+    if evidence.provider != F5WormProvider::CloudflareR2BucketLock && !evidence.legal_hold_applied {
         f5_worm_execution_failure(
             &mut failures,
             "legal_hold_applied",
@@ -6809,6 +6811,7 @@ fn f5_worm_uri_matches_provider(provider: F5WormProvider, value: &str) -> bool {
         F5WormProvider::S3ObjectLock => value.starts_with("s3://"),
         F5WormProvider::GcsBucketLock => value.starts_with("gs://"),
         F5WormProvider::AzureImmutableBlob => value.starts_with("azblob://"),
+        F5WormProvider::CloudflareR2BucketLock => value.starts_with("cloudflare-r2://"),
         F5WormProvider::LocalFilesystem => false,
     }
 }
@@ -6825,6 +6828,9 @@ fn f5_worm_endpoint_matches_provider(provider: F5WormProvider, value: &str) -> b
         }
         F5WormProvider::AzureImmutableBlob => {
             value.starts_with("azblob://") || value.starts_with("https://")
+        }
+        F5WormProvider::CloudflareR2BucketLock => {
+            value.starts_with("cloudflare-r2://") || value.starts_with("https://")
         }
         F5WormProvider::LocalFilesystem => false,
     }
@@ -6928,6 +6934,8 @@ fn f5_is_accepted_external_provider(
             provider.as_str(),
             "aws_s3_object_lock"
                 | "s3_object_lock"
+                | "cloudflare_r2_bucket_lock"
+                | "r2_bucket_lock"
                 | "gcs_bucket_lock"
                 | "google_cloud_storage_bucket_lock"
                 | "azure_immutable_blob"

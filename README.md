@@ -79,7 +79,8 @@ gate, an external WORM/object-lock archive policy gate with live
 S3-compatible Object Lock API execution, and a live Istio service-mesh
 admission/handshake evidence gate, plus live operator/controller
 reconciliation validation, live k3s chaos/performance validation, and a
-fail-closed external provider qualification bundle gate.
+fail-closed external provider qualification bundle gate with live Cloudflare
+R2 Bucket Lock WORM evidence.
 
 ## 🚀 Runtime Scenarios
 
@@ -317,7 +318,8 @@ HSM-compatible PKCS#11 signing execution, external WORM/object-lock archive
 policy validation plus live S3-compatible Object Lock API execution
 validation, live Istio service-mesh admission/handshake validation, and live
 operator/controller reconciliation validation plus live k3s chaos/performance
-validation and fail-closed external provider qualification bundle validation.
+validation, fail-closed external provider qualification bundle validation, and
+live Cloudflare R2 Bucket Lock WORM evidence.
 
 Implementation milestones:
 
@@ -340,7 +342,7 @@ Focused roadmap:
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
-| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, KMS/HSM signing profile validation and PKCS#11 signing execution, Helm, registry/archive/promotion/WORM policy and API execution validation including live OCI promotion, service-mesh identity/live handshake validation, live operator/controller reconciliation validation, live k3s chaos/performance validation, fail-closed external provider qualification bundle validation, and real external provider qualification | 🚧 **In Progress** |
+| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, KMS/HSM signing profile validation and PKCS#11 signing execution, Helm, registry/archive/promotion/WORM policy and API execution validation including live OCI promotion, service-mesh identity/live handshake validation, live operator/controller reconciliation validation, live k3s chaos/performance validation, fail-closed external provider qualification bundle validation, live Cloudflare R2 Bucket Lock WORM evidence, and remaining real external provider qualification | 🚧 **In Progress** |
 
 ## 📜 License
 

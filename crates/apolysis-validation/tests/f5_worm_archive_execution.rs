@@ -28,6 +28,37 @@ fn f5_worm_archive_execution_accepts_live_s3_object_lock_api_evidence() {
 }
 
 #[test]
+fn f5_worm_archive_execution_accepts_live_cloudflare_r2_bucket_lock_evidence() {
+    let mut evidence = worm_api_execution_evidence();
+    evidence.evidence_id = "f5-cloudflare-r2-bucket-lock-20260624".to_string();
+    evidence.provider = F5WormProvider::CloudflareR2BucketLock;
+    evidence.endpoint_uri = "cloudflare-r2://e85b6fa3634dc882cfbd2188361fb37e".to_string();
+    evidence.bucket_uri = "cloudflare-r2://apolysis-f5-worm-20260624".to_string();
+    evidence.object_key = "releases/apolysis/f5.22/release-manifest.json".to_string();
+    evidence.object_version_id = "cloudflare-r2-etag-0001".to_string();
+    evidence.audit_log_ref = "cloudflare-r2://apolysis-f5-worm-20260624/.audit/f5.22".to_string();
+    evidence.api_tool = "cloudflare-api r2 bucket locks".to_string();
+    evidence.versioning_enabled = false;
+    evidence.legal_hold_applied = false;
+
+    let report = evaluate_f5_worm_archive_execution_evidence(evidence);
+
+    assert!(report.passed, "{:#?}", report.failures);
+    let approval = report
+        .approval
+        .expect("Cloudflare R2 WORM archive execution approval");
+    assert_eq!(approval.provider, F5WormProvider::CloudflareR2BucketLock);
+    assert_eq!(
+        approval.bucket_uri,
+        "cloudflare-r2://apolysis-f5-worm-20260624"
+    );
+    assert_eq!(
+        approval.object_key,
+        "releases/apolysis/f5.22/release-manifest.json"
+    );
+}
+
+#[test]
 fn f5_worm_archive_execution_rejects_fixture_or_mutable_api_evidence() {
     let mut evidence = worm_api_execution_evidence();
     evidence.source = F5WormArchiveExecutionSource::Fixture;
@@ -59,7 +90,7 @@ fn f5_worm_archive_execution_rejects_fixture_or_mutable_api_evidence() {
     let failure_text = serde_json::to_string(&report.failures).expect("serialize failures");
     for expected in [
         "live WORM archive API execution evidence is required",
-        "WORM archive execution requires S3 Object Lock, GCS Bucket Lock, or Azure Immutable Blob",
+        "WORM archive execution requires S3 Object Lock, GCS Bucket Lock, Azure Immutable Blob, or Cloudflare R2 Bucket Lock",
         "archive endpoint must be provider-backed object storage",
         "archive bucket URI must be provider-backed object storage",
         "object key must be a bounded relative object key",

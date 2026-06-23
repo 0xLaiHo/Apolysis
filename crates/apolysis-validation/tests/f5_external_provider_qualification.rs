@@ -7,7 +7,7 @@ use apolysis_validation::{
 };
 
 #[test]
-fn f5_external_provider_qualification_accepts_all_remaining_provider_classes() {
+fn f5_external_provider_qualification_accepts_bundle_with_cloudflare_r2_worm_evidence() {
     let report = evaluate_f5_external_provider_qualification_bundle(qualification_bundle());
 
     assert!(report.passed, "{:#?}", report.failures);
@@ -20,7 +20,7 @@ fn f5_external_provider_qualification_accepts_all_remaining_provider_classes() {
     assert!(approval.providers.contains(&"aws_kms".to_string()));
     assert!(approval
         .providers
-        .contains(&"aws_s3_object_lock".to_string()));
+        .contains(&"cloudflare_r2_bucket_lock".to_string()));
     assert!(approval.providers.contains(&"aws_ecr".to_string()));
     assert!(approval
         .providers
@@ -84,8 +84,8 @@ fn qualification_bundle() -> F5ExternalProviderQualificationBundle {
             ),
             qualification_entry(
                 F5ExternalProviderQualificationRequirement::CloudWormObjectLockArchive,
-                "aws_s3_object_lock",
-                "aws-s3:us-west-2:apolysis-release-archive",
+                "cloudflare_r2_bucket_lock",
+                "cloudflare-r2:e85b6fa3634dc882cfbd2188361fb37e:apolysis-f5-worm-1782254413912",
             ),
             qualification_entry(
                 F5ExternalProviderQualificationRequirement::CloudRegistryPromotionRetention,
