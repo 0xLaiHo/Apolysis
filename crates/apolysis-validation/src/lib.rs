@@ -792,6 +792,68 @@ pub struct F5WormArchivePolicyReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum F5WormArchiveExecutionSource {
+    Fixture,
+    LiveProvider,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5WormArchiveExecutionEvidence {
+    pub evidence_id: String,
+    pub source: F5WormArchiveExecutionSource,
+    pub provider: F5WormProvider,
+    pub endpoint_uri: String,
+    pub bucket_uri: String,
+    pub object_key: String,
+    pub object_version_id: String,
+    pub release_manifest_sha256: String,
+    pub object_sha256: String,
+    pub observed_at_unix_ms: u64,
+    pub retention_days: u32,
+    pub retain_until_unix_ms: u64,
+    pub retention_mode: F5WormRetentionMode,
+    pub object_lock_enabled: bool,
+    pub versioning_enabled: bool,
+    pub put_object_succeeded: bool,
+    pub retention_applied: bool,
+    pub legal_hold_applied: bool,
+    pub head_object_verified: bool,
+    pub delete_without_bypass_denied: bool,
+    pub audit_log_ref: String,
+    pub operator_approved: bool,
+    pub api_tool: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5WormArchiveExecutionApproval {
+    pub evidence_id: String,
+    pub provider: F5WormProvider,
+    pub bucket_uri: String,
+    pub object_key: String,
+    pub object_version_id: String,
+    pub release_manifest_sha256: String,
+    pub object_sha256: String,
+    pub retention_days: u32,
+    pub retain_until_unix_ms: u64,
+    pub retention_mode: F5WormRetentionMode,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5WormArchiveExecutionFailure {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5WormArchiveExecutionReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approval: Option<F5WormArchiveExecutionApproval>,
+    pub failures: Vec<F5WormArchiveExecutionFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum F5ServiceMeshEvidenceSource {
     Fixture,
     LiveCluster,
@@ -2026,6 +2088,203 @@ pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArc
     };
 
     F5WormArchivePolicyReport {
+        schema_version: 1,
+        passed: approval.is_some(),
+        approval,
+        failures,
+    }
+}
+
+pub fn evaluate_f5_worm_archive_execution_evidence(
+    evidence: F5WormArchiveExecutionEvidence,
+) -> F5WormArchiveExecutionReport {
+    const MIN_WORM_RETENTION_DAYS: u32 = 180;
+    const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+    let mut failures = Vec::new();
+
+    if evidence.evidence_id.trim().is_empty() {
+        f5_worm_execution_failure(&mut failures, "evidence_id", "evidence id is required");
+    }
+    if evidence.source != F5WormArchiveExecutionSource::LiveProvider {
+        f5_worm_execution_failure(
+            &mut failures,
+            "source",
+            "live WORM archive API execution evidence is required",
+        );
+    }
+    if !matches!(
+        evidence.provider,
+        F5WormProvider::S3ObjectLock
+            | F5WormProvider::GcsBucketLock
+            | F5WormProvider::AzureImmutableBlob
+    ) {
+        f5_worm_execution_failure(
+            &mut failures,
+            "provider",
+            "WORM archive execution requires S3 Object Lock, GCS Bucket Lock, or Azure Immutable Blob",
+        );
+    }
+    if !f5_worm_endpoint_matches_provider(evidence.provider, &evidence.endpoint_uri) {
+        f5_worm_execution_failure(
+            &mut failures,
+            "endpoint_uri",
+            "archive endpoint must be provider-backed object storage",
+        );
+    }
+    if !f5_worm_uri_matches_provider(evidence.provider, &evidence.bucket_uri) {
+        f5_worm_execution_failure(
+            &mut failures,
+            "bucket_uri",
+            "archive bucket URI must be provider-backed object storage",
+        );
+    }
+    if evidence.object_key.trim().is_empty()
+        || evidence.object_key.starts_with('/')
+        || evidence.object_key.contains("..")
+    {
+        f5_worm_execution_failure(
+            &mut failures,
+            "object_key",
+            "object key must be a bounded relative object key",
+        );
+    }
+    if evidence.object_version_id.trim().is_empty() {
+        f5_worm_execution_failure(
+            &mut failures,
+            "object_version_id",
+            "object version id is required",
+        );
+    }
+    if !f5_is_sha256_hex(&evidence.release_manifest_sha256) {
+        f5_worm_execution_failure(
+            &mut failures,
+            "release_manifest_sha256",
+            "release manifest sha256 must be 64 hex characters",
+        );
+    }
+    if !f5_is_sha256_hex(&evidence.object_sha256) {
+        f5_worm_execution_failure(
+            &mut failures,
+            "object_sha256",
+            "object sha256 must be 64 hex characters",
+        );
+    }
+    if evidence.observed_at_unix_ms == 0 {
+        f5_worm_execution_failure(
+            &mut failures,
+            "observed_at_unix_ms",
+            "live observation timestamp is required",
+        );
+    }
+    if evidence.retention_mode != F5WormRetentionMode::Compliance {
+        f5_worm_execution_failure(
+            &mut failures,
+            "retention_mode",
+            "retention mode must be compliance",
+        );
+    }
+    if evidence.retention_days < MIN_WORM_RETENTION_DAYS {
+        f5_worm_execution_failure(
+            &mut failures,
+            "retention_days",
+            "minimum WORM retention is 180 days",
+        );
+    }
+    let required_retain_until = evidence
+        .observed_at_unix_ms
+        .saturating_add(u64::from(evidence.retention_days).saturating_mul(DAY_MS));
+    if evidence.retain_until_unix_ms < required_retain_until {
+        f5_worm_execution_failure(
+            &mut failures,
+            "retain_until_unix_ms",
+            "retain-until timestamp must cover the WORM retention window",
+        );
+    }
+    if !evidence.object_lock_enabled {
+        f5_worm_execution_failure(
+            &mut failures,
+            "object_lock_enabled",
+            "object lock must be enabled by the provider",
+        );
+    }
+    if !evidence.versioning_enabled {
+        f5_worm_execution_failure(
+            &mut failures,
+            "versioning_enabled",
+            "object versioning must be enabled by the provider",
+        );
+    }
+    if !evidence.put_object_succeeded {
+        f5_worm_execution_failure(
+            &mut failures,
+            "put_object_succeeded",
+            "archive object write must succeed through the provider API",
+        );
+    }
+    if !evidence.retention_applied {
+        f5_worm_execution_failure(
+            &mut failures,
+            "retention_applied",
+            "retention must be applied through the provider API",
+        );
+    }
+    if !evidence.legal_hold_applied {
+        f5_worm_execution_failure(
+            &mut failures,
+            "legal_hold_applied",
+            "legal hold must be applied through the provider API",
+        );
+    }
+    if !evidence.head_object_verified {
+        f5_worm_execution_failure(
+            &mut failures,
+            "head_object_verified",
+            "retained object metadata must be verified through the provider API",
+        );
+    }
+    if !evidence.delete_without_bypass_denied {
+        f5_worm_execution_failure(
+            &mut failures,
+            "delete_without_bypass_denied",
+            "delete without bypass must be denied by the provider API",
+        );
+    }
+    if evidence.audit_log_ref.trim().is_empty() {
+        f5_worm_execution_failure(
+            &mut failures,
+            "audit_log_ref",
+            "audit log reference is required",
+        );
+    }
+    if !evidence.operator_approved {
+        f5_worm_execution_failure(
+            &mut failures,
+            "operator_approved",
+            "operator approval is required",
+        );
+    }
+    if evidence.api_tool.trim().is_empty() {
+        f5_worm_execution_failure(&mut failures, "api_tool", "API tool evidence is required");
+    }
+
+    let approval = if failures.is_empty() {
+        Some(F5WormArchiveExecutionApproval {
+            evidence_id: evidence.evidence_id,
+            provider: evidence.provider,
+            bucket_uri: evidence.bucket_uri,
+            object_key: evidence.object_key,
+            object_version_id: evidence.object_version_id,
+            release_manifest_sha256: evidence.release_manifest_sha256,
+            object_sha256: evidence.object_sha256,
+            retention_days: evidence.retention_days,
+            retain_until_unix_ms: evidence.retain_until_unix_ms,
+            retention_mode: evidence.retention_mode,
+        })
+    } else {
+        None
+    };
+
+    F5WormArchiveExecutionReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -5290,11 +5549,39 @@ fn f5_worm_failure(
     });
 }
 
+fn f5_worm_execution_failure(
+    failures: &mut Vec<F5WormArchiveExecutionFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(F5WormArchiveExecutionFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
 fn f5_worm_uri_matches_provider(provider: F5WormProvider, value: &str) -> bool {
     match provider {
         F5WormProvider::S3ObjectLock => value.starts_with("s3://"),
         F5WormProvider::GcsBucketLock => value.starts_with("gs://"),
         F5WormProvider::AzureImmutableBlob => value.starts_with("azblob://"),
+        F5WormProvider::LocalFilesystem => false,
+    }
+}
+
+fn f5_worm_endpoint_matches_provider(provider: F5WormProvider, value: &str) -> bool {
+    match provider {
+        F5WormProvider::S3ObjectLock => {
+            value.starts_with("s3://")
+                || value.starts_with("https://")
+                || value.starts_with("http://")
+        }
+        F5WormProvider::GcsBucketLock => {
+            value.starts_with("gs://") || value.starts_with("https://")
+        }
+        F5WormProvider::AzureImmutableBlob => {
+            value.starts_with("azblob://") || value.starts_with("https://")
+        }
         F5WormProvider::LocalFilesystem => false,
     }
 }

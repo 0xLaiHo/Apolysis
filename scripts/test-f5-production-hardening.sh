@@ -16,6 +16,7 @@ promotion_policy_gate="$repo_root/scripts/test-f5-release-promotion-policy.sh"
 signing_profile_gate="$repo_root/scripts/test-f5-signing-profile.sh"
 signing_execution_gate="$repo_root/scripts/test-f5-signing-execution.sh"
 worm_archive_policy_gate="$repo_root/scripts/test-f5-worm-archive-policy.sh"
+worm_archive_execution_gate="$repo_root/scripts/test-f5-worm-archive-execution.sh"
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
 service_mesh_live_istio_gate="$repo_root/scripts/test-f5-service-mesh-live-istio.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
@@ -158,6 +159,11 @@ if [[ ! -s "$worm_archive_policy_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$worm_archive_execution_gate" ]]; then
+    echo "missing F5.17 WORM archive execution artifact: $worm_archive_execution_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$service_mesh_live_evidence_gate" ]]; then
     echo "missing F5.15 service-mesh live evidence artifact: $service_mesh_live_evidence_gate" >&2
     exit 1
@@ -215,6 +221,11 @@ grep -q '^test-f5-signing-execution:' "$makefile" || {
 
 grep -q '^test-f5-worm-archive-policy:' "$makefile" || {
     echo "missing Makefile target: test-f5-worm-archive-policy" >&2
+    exit 1
+}
+
+grep -q '^test-f5-worm-archive-execution:' "$makefile" || {
+    echo "missing Makefile target: test-f5-worm-archive-execution" >&2
     exit 1
 }
 
@@ -685,6 +696,56 @@ grep -q 'retention mode must be compliance' "$repo_root/crates/apolysis-validati
 
 grep -q 'delete-deny principals are required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
     echo "F5.14 WORM archive policy must require delete-deny principals" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-worm-archive-execution-evidence' "$worm_archive_execution_gate" || {
+    echo "F5.17 WORM archive execution gate must run the WORM archive execution CLI" >&2
+    exit 1
+}
+
+grep -q 'x-amz-bucket-object-lock-enabled' "$worm_archive_execution_gate" || {
+    echo "F5.17 WORM archive execution gate must create an object-lock-enabled bucket" >&2
+    exit 1
+}
+
+grep -q 'x-amz-object-lock-mode' "$worm_archive_execution_gate" || {
+    echo "F5.17 WORM archive execution gate must apply object retention through the provider API" >&2
+    exit 1
+}
+
+grep -q 'x-amz-object-lock-legal-hold' "$worm_archive_execution_gate" || {
+    echo "F5.17 WORM archive execution gate must apply legal hold through the provider API" >&2
+    exit 1
+}
+
+grep -q 'delete_without_bypass_denied' "$worm_archive_execution_gate" || {
+    echo "F5.17 WORM archive execution gate must prove delete without bypass is denied" >&2
+    exit 1
+}
+
+grep -q 'evaluate_f5_worm_archive_execution_evidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.17 validation library must expose WORM archive execution evaluation" >&2
+    exit 1
+}
+
+grep -q 'F5WormArchiveExecutionEvidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.17 validation library must expose WORM archive execution evidence data" >&2
+    exit 1
+}
+
+grep -q 'live WORM archive API execution evidence is required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.17 WORM archive execution evidence must reject fixture evidence" >&2
+    exit 1
+}
+
+grep -q 'retention must be applied through the provider API' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.17 WORM archive execution evidence must require provider retention application" >&2
+    exit 1
+}
+
+grep -q 'delete without bypass must be denied by the provider API' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.17 WORM archive execution evidence must require provider delete denial" >&2
     exit 1
 }
 
