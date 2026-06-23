@@ -14,6 +14,7 @@ tenant_query_gate="$repo_root/scripts/test-f5-tenant-query-retention.sh"
 retention_enforcement_gate="$repo_root/scripts/test-f5-retention-enforcement.sh"
 promotion_policy_gate="$repo_root/scripts/test-f5-release-promotion-policy.sh"
 signing_profile_gate="$repo_root/scripts/test-f5-signing-profile.sh"
+worm_archive_policy_gate="$repo_root/scripts/test-f5-worm-archive-policy.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -144,6 +145,11 @@ if [[ ! -s "$signing_profile_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$worm_archive_policy_gate" ]]; then
+    echo "missing F5.14 WORM archive policy artifact: $worm_archive_policy_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -181,6 +187,11 @@ grep -q '^test-f5-release-promotion-policy:' "$makefile" || {
 
 grep -q '^test-f5-signing-profile:' "$makefile" || {
     echo "missing Makefile target: test-f5-signing-profile" >&2
+    exit 1
+}
+
+grep -q '^test-f5-worm-archive-policy:' "$makefile" || {
+    echo "missing Makefile target: test-f5-worm-archive-policy" >&2
     exit 1
 }
 
@@ -556,5 +567,35 @@ grep -q 'production signing key must be non-exportable' "$repo_root/crates/apoly
 
 grep -q 'rotation period must be 180 days or less' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
     echo "F5.13 signing profile policy must enforce key rotation bounds" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-worm-archive-policy' "$worm_archive_policy_gate" || {
+    echo "F5.14 WORM archive policy gate must run the WORM archive policy CLI" >&2
+    exit 1
+}
+
+grep -q 'evaluate_f5_worm_archive_policy' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.14 validation library must expose WORM archive policy evaluation" >&2
+    exit 1
+}
+
+grep -q 'F5WormArchivePolicy' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.14 validation library must expose WORM archive policy data" >&2
+    exit 1
+}
+
+grep -q 'external WORM archive requires S3 Object Lock, GCS Bucket Lock, or Azure Immutable Blob' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.14 WORM archive policy must reject local mutable archives" >&2
+    exit 1
+}
+
+grep -q 'retention mode must be compliance' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.14 WORM archive policy must require compliance retention" >&2
+    exit 1
+}
+
+grep -q 'delete-deny principals are required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.14 WORM archive policy must require delete-deny principals" >&2
     exit 1
 }

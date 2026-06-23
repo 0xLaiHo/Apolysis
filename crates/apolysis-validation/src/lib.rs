@@ -653,6 +653,71 @@ pub struct F5SigningProfileReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum F5WormProvider {
+    LocalFilesystem,
+    S3ObjectLock,
+    GcsBucketLock,
+    AzureImmutableBlob,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5WormRetentionMode {
+    Governance,
+    Compliance,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5WormArchivePolicy {
+    pub policy_id: String,
+    pub provider: F5WormProvider,
+    pub bucket_uri: String,
+    pub object_prefix: String,
+    pub release_manifest_sha256: String,
+    pub requested_at_unix_ms: u64,
+    pub retention_days: u32,
+    pub retain_until_unix_ms: u64,
+    pub retention_mode: F5WormRetentionMode,
+    pub object_lock_enabled: bool,
+    pub versioning_enabled: bool,
+    pub legal_hold_supported: bool,
+    pub delete_protection_enabled: bool,
+    pub audit_log_ref: String,
+    pub operator_approved: bool,
+    pub allowed_writer_principals: Vec<String>,
+    pub allowed_reader_principals: Vec<String>,
+    pub deny_delete_principals: Vec<String>,
+    pub replication_target_uri: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5WormArchiveApproval {
+    pub policy_id: String,
+    pub provider: F5WormProvider,
+    pub bucket_uri: String,
+    pub object_prefix: String,
+    pub release_manifest_sha256: String,
+    pub retention_days: u32,
+    pub retain_until_unix_ms: u64,
+    pub replication_target_uri: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5WormArchivePolicyFailure {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5WormArchivePolicyReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approval: Option<F5WormArchiveApproval>,
+    pub failures: Vec<F5WormArchivePolicyFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum F4RuntimeAdapterEvidenceSource {
     Fixture,
     LiveHost,
@@ -1445,6 +1510,212 @@ pub fn evaluate_f5_signing_profile(profile: F5SigningProfile) -> F5SigningProfil
     };
 
     F5SigningProfileReport {
+        schema_version: 1,
+        passed: approval.is_some(),
+        approval,
+        failures,
+    }
+}
+
+pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArchivePolicyReport {
+    const MIN_WORM_RETENTION_DAYS: u32 = 180;
+    const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+    let mut failures = Vec::new();
+
+    if policy.policy_id.trim().is_empty() {
+        f5_worm_failure(&mut failures, "policy_id", "policy id is required");
+    }
+    if !matches!(
+        policy.provider,
+        F5WormProvider::S3ObjectLock
+            | F5WormProvider::GcsBucketLock
+            | F5WormProvider::AzureImmutableBlob
+    ) {
+        f5_worm_failure(
+            &mut failures,
+            "provider",
+            "external WORM archive requires S3 Object Lock, GCS Bucket Lock, or Azure Immutable Blob",
+        );
+    }
+    if !f5_worm_uri_matches_provider(policy.provider, &policy.bucket_uri) {
+        f5_worm_failure(
+            &mut failures,
+            "bucket_uri",
+            "production archive URI must be provider-backed object storage",
+        );
+    }
+    if policy.object_prefix.trim().is_empty()
+        || policy.object_prefix.starts_with('/')
+        || policy.object_prefix.contains("..")
+    {
+        f5_worm_failure(
+            &mut failures,
+            "object_prefix",
+            "object prefix must be a bounded relative object prefix",
+        );
+    }
+    if !f5_is_sha256_hex(&policy.release_manifest_sha256) {
+        f5_worm_failure(
+            &mut failures,
+            "release_manifest_sha256",
+            "release manifest sha256 must be 64 hex characters",
+        );
+    }
+    if !policy.object_lock_enabled {
+        f5_worm_failure(
+            &mut failures,
+            "object_lock_enabled",
+            "object lock must be enabled",
+        );
+    }
+    if !policy.versioning_enabled {
+        f5_worm_failure(
+            &mut failures,
+            "versioning_enabled",
+            "object versioning must be enabled",
+        );
+    }
+    if policy.retention_mode != F5WormRetentionMode::Compliance {
+        f5_worm_failure(
+            &mut failures,
+            "retention_mode",
+            "retention mode must be compliance",
+        );
+    }
+    if policy.retention_days < MIN_WORM_RETENTION_DAYS {
+        f5_worm_failure(
+            &mut failures,
+            "retention_days",
+            "minimum WORM retention is 180 days",
+        );
+    }
+    let required_retain_until = policy
+        .requested_at_unix_ms
+        .saturating_add(u64::from(policy.retention_days).saturating_mul(DAY_MS));
+    if policy.retain_until_unix_ms < required_retain_until {
+        f5_worm_failure(
+            &mut failures,
+            "retain_until_unix_ms",
+            "retain-until timestamp must cover the WORM retention window",
+        );
+    }
+    if !policy.legal_hold_supported {
+        f5_worm_failure(
+            &mut failures,
+            "legal_hold_supported",
+            "legal hold support is required",
+        );
+    }
+    if !policy.delete_protection_enabled {
+        f5_worm_failure(
+            &mut failures,
+            "delete_protection_enabled",
+            "delete protection must be enabled",
+        );
+    }
+    if policy.audit_log_ref.trim().is_empty() {
+        f5_worm_failure(
+            &mut failures,
+            "audit_log_ref",
+            "audit log reference is required",
+        );
+    }
+    if !policy.operator_approved {
+        f5_worm_failure(
+            &mut failures,
+            "operator_approved",
+            "operator approval is required",
+        );
+    }
+    if policy.allowed_writer_principals.is_empty() {
+        f5_worm_failure(
+            &mut failures,
+            "allowed_writer_principals",
+            "writer principals are required",
+        );
+    }
+    if policy.allowed_reader_principals.is_empty() {
+        f5_worm_failure(
+            &mut failures,
+            "allowed_reader_principals",
+            "reader principals are required",
+        );
+    }
+    for principal in &policy.allowed_writer_principals {
+        if principal == "*" {
+            f5_worm_failure(
+                &mut failures,
+                "allowed_writer_principals",
+                "wildcard writer principals are forbidden",
+            );
+        }
+        if f5_is_anonymous_principal(principal) {
+            f5_worm_failure(
+                &mut failures,
+                "allowed_writer_principals",
+                "anonymous writer principals are forbidden",
+            );
+        }
+    }
+    for principal in &policy.allowed_reader_principals {
+        if principal == "*" {
+            f5_worm_failure(
+                &mut failures,
+                "allowed_reader_principals",
+                "wildcard reader principals are forbidden",
+            );
+        }
+        if f5_is_anonymous_principal(principal) {
+            f5_worm_failure(
+                &mut failures,
+                "allowed_reader_principals",
+                "anonymous reader principals are forbidden",
+            );
+        }
+    }
+    if policy.deny_delete_principals.is_empty() {
+        f5_worm_failure(
+            &mut failures,
+            "deny_delete_principals",
+            "delete-deny principals are required",
+        );
+    }
+    if policy.replication_target_uri.trim().is_empty() {
+        f5_worm_failure(
+            &mut failures,
+            "replication_target_uri",
+            "replication target URI is required",
+        );
+    } else if !f5_worm_uri_matches_provider(policy.provider, &policy.replication_target_uri) {
+        f5_worm_failure(
+            &mut failures,
+            "replication_target_uri",
+            "replication target URI must use the same provider-backed storage type",
+        );
+    } else if policy.replication_target_uri == policy.bucket_uri {
+        f5_worm_failure(
+            &mut failures,
+            "replication_target_uri",
+            "replication target URI must differ from the primary archive URI",
+        );
+    }
+
+    let approval = if failures.is_empty() {
+        Some(F5WormArchiveApproval {
+            policy_id: policy.policy_id,
+            provider: policy.provider,
+            bucket_uri: policy.bucket_uri,
+            object_prefix: policy.object_prefix,
+            release_manifest_sha256: policy.release_manifest_sha256,
+            retention_days: policy.retention_days,
+            retain_until_unix_ms: policy.retain_until_unix_ms,
+            replication_target_uri: policy.replication_target_uri,
+        })
+    } else {
+        None
+    };
+
+    F5WormArchivePolicyReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -4515,6 +4786,26 @@ fn f5_signing_uri_matches_provider(provider: F5SigningKeyProvider, value: &str) 
         }
         F5SigningKeyProvider::Hsm => value.starts_with("pkcs11:") || value.starts_with("pkcs11://"),
         F5SigningKeyProvider::EphemeralLocalValidation | F5SigningKeyProvider::LocalFile => false,
+    }
+}
+
+fn f5_worm_failure(
+    failures: &mut Vec<F5WormArchivePolicyFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(F5WormArchivePolicyFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
+fn f5_worm_uri_matches_provider(provider: F5WormProvider, value: &str) -> bool {
+    match provider {
+        F5WormProvider::S3ObjectLock => value.starts_with("s3://"),
+        F5WormProvider::GcsBucketLock => value.starts_with("gs://"),
+        F5WormProvider::AzureImmutableBlob => value.starts_with("azblob://"),
+        F5WormProvider::LocalFilesystem => false,
     }
 }
 
