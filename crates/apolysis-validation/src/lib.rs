@@ -597,6 +597,79 @@ pub struct F5ReleasePromotionPolicyReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum F5RegistryPromotionExecutionSource {
+    Fixture,
+    LiveProvider,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5RegistryPromotionExecutionProvider {
+    LocalFilesystem,
+    OciDistributionRegistry,
+    AwsEcr,
+    GcpArtifactRegistry,
+    AzureContainerRegistry,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5RegistryPromotionExecutionEvidence {
+    pub evidence_id: String,
+    pub source: F5RegistryPromotionExecutionSource,
+    pub provider: F5RegistryPromotionExecutionProvider,
+    pub registry_uri: String,
+    pub repository: String,
+    pub source_tag: String,
+    pub target_tag: String,
+    pub rollback_tag: String,
+    pub image_digest: String,
+    pub promoted_digest: String,
+    pub production_tag_digest: String,
+    pub rollback_tag_digest: String,
+    pub manifest_media_type: String,
+    pub staging_manifest_verified: bool,
+    pub production_manifest_verified: bool,
+    pub rollback_manifest_verified: bool,
+    pub digest_promotion_performed: bool,
+    pub digest_pulls_verified: bool,
+    pub production_delete_without_retention_denied: bool,
+    pub retention_days: u32,
+    pub retain_until_unix_ms: u64,
+    pub promotion_approved: bool,
+    pub api_tool: String,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5RegistryPromotionExecutionApproval {
+    pub evidence_id: String,
+    pub provider: F5RegistryPromotionExecutionProvider,
+    pub registry_uri: String,
+    pub repository: String,
+    pub source_tag: String,
+    pub target_tag: String,
+    pub rollback_tag: String,
+    pub image_digest: String,
+    pub retention_days: u32,
+    pub retain_until_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5RegistryPromotionExecutionFailure {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5RegistryPromotionExecutionReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approval: Option<F5RegistryPromotionExecutionApproval>,
+    pub failures: Vec<F5RegistryPromotionExecutionFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum F5SigningKeyProvider {
     EphemeralLocalValidation,
     LocalFile,
@@ -1616,6 +1689,240 @@ pub fn evaluate_f5_release_promotion_policy(
     };
 
     F5ReleasePromotionPolicyReport {
+        schema_version: 1,
+        passed: approval.is_some(),
+        approval,
+        failures,
+    }
+}
+
+pub fn evaluate_f5_registry_promotion_execution_evidence(
+    evidence: F5RegistryPromotionExecutionEvidence,
+) -> F5RegistryPromotionExecutionReport {
+    const MIN_PRODUCTION_RETENTION_DAYS: u32 = 90;
+    const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+    let mut failures = Vec::new();
+
+    if evidence.evidence_id.trim().is_empty() {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "evidence_id",
+            "evidence id is required",
+        );
+    }
+    if evidence.source != F5RegistryPromotionExecutionSource::LiveProvider {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "source",
+            "live registry promotion execution evidence is required",
+        );
+    }
+    if !matches!(
+        evidence.provider,
+        F5RegistryPromotionExecutionProvider::OciDistributionRegistry
+            | F5RegistryPromotionExecutionProvider::AwsEcr
+            | F5RegistryPromotionExecutionProvider::GcpArtifactRegistry
+            | F5RegistryPromotionExecutionProvider::AzureContainerRegistry
+    ) {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "provider",
+            "registry promotion execution requires an OCI registry provider",
+        );
+    }
+    if !f5_registry_promotion_uri_matches_provider(evidence.provider, &evidence.registry_uri) {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "registry_uri",
+            "registry URI must be provider-backed",
+        );
+    }
+    if evidence.repository.trim().is_empty() {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "repository",
+            "repository is required",
+        );
+    }
+    if evidence.source_tag.trim().is_empty() {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "source_tag",
+            "source tag is required",
+        );
+    }
+    if evidence.target_tag == "latest" || !evidence.target_tag.starts_with("prod-") {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "target_tag",
+            "target tag must be immutable and start with prod-",
+        );
+    }
+    if evidence.rollback_tag.trim().is_empty() {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "rollback_tag",
+            "rollback tag is required",
+        );
+    }
+    if !f5_is_sha256_digest(&evidence.image_digest) {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "image_digest",
+            "image digest must be a sha256 digest",
+        );
+    }
+    if !f5_is_sha256_digest(&evidence.promoted_digest) {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "promoted_digest",
+            "promoted digest must be a sha256 digest",
+        );
+    } else if evidence.promoted_digest != evidence.image_digest {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "promoted_digest",
+            "promoted digest must match image digest",
+        );
+    }
+    if !f5_is_sha256_digest(&evidence.production_tag_digest) {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "production_tag_digest",
+            "production tag digest must be a sha256 digest",
+        );
+    } else if evidence.production_tag_digest != evidence.image_digest {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "production_tag_digest",
+            "production tag digest must match image digest",
+        );
+    }
+    if evidence.rollback_tag_digest.trim().is_empty() {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "rollback_tag_digest",
+            "rollback tag digest is required",
+        );
+    } else if !f5_is_sha256_digest(&evidence.rollback_tag_digest) {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "rollback_tag_digest",
+            "rollback tag digest must be a sha256 digest",
+        );
+    } else if evidence.rollback_tag_digest != evidence.image_digest {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "rollback_tag_digest",
+            "rollback tag digest must match image digest",
+        );
+    }
+    if evidence.manifest_media_type.trim().is_empty() {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "manifest_media_type",
+            "manifest media type is required",
+        );
+    }
+    if !evidence.staging_manifest_verified {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "staging_manifest_verified",
+            "staging manifest must be verified through the registry API",
+        );
+    }
+    if !evidence.production_manifest_verified {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "production_manifest_verified",
+            "production manifest must be verified through the registry API",
+        );
+    }
+    if !evidence.rollback_manifest_verified {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "rollback_manifest_verified",
+            "rollback manifest must be verified through the registry API",
+        );
+    }
+    if !evidence.digest_promotion_performed {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "digest_promotion_performed",
+            "promotion must be performed by digest through the registry API",
+        );
+    }
+    if !evidence.digest_pulls_verified {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "digest_pulls_verified",
+            "digest pulls must be verified through the registry API",
+        );
+    }
+    if !evidence.production_delete_without_retention_denied {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "production_delete_without_retention_denied",
+            "production delete without retention bypass must be denied by the registry API",
+        );
+    }
+    if evidence.retention_days < MIN_PRODUCTION_RETENTION_DAYS {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "retention_days",
+            "minimum production retention is 90 days",
+        );
+    }
+    if evidence.observed_at_unix_ms == 0 {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "observed_at_unix_ms",
+            "live observation timestamp is required",
+        );
+    }
+    let required_retain_until = evidence
+        .observed_at_unix_ms
+        .saturating_add(u64::from(evidence.retention_days).saturating_mul(DAY_MS));
+    if evidence.retain_until_unix_ms < required_retain_until {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "retain_until_unix_ms",
+            "retain-until timestamp must cover the requested retention window",
+        );
+    }
+    if !evidence.promotion_approved {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "promotion_approved",
+            "operator approval is required",
+        );
+    }
+    if evidence.api_tool.trim().is_empty() {
+        f5_registry_promotion_execution_failure(
+            &mut failures,
+            "api_tool",
+            "API tool evidence is required",
+        );
+    }
+
+    let approval = if failures.is_empty() {
+        Some(F5RegistryPromotionExecutionApproval {
+            evidence_id: evidence.evidence_id,
+            provider: evidence.provider,
+            registry_uri: evidence.registry_uri,
+            repository: evidence.repository,
+            source_tag: evidence.source_tag,
+            target_tag: evidence.target_tag,
+            rollback_tag: evidence.rollback_tag,
+            image_digest: evidence.image_digest,
+            retention_days: evidence.retention_days,
+            retain_until_unix_ms: evidence.retain_until_unix_ms,
+        })
+    } else {
+        None
+    };
+
+    F5RegistryPromotionExecutionReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -5453,6 +5760,40 @@ fn f5_push_failure(
         field: field.into(),
         message: message.into(),
     });
+}
+
+fn f5_registry_promotion_execution_failure(
+    failures: &mut Vec<F5RegistryPromotionExecutionFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(F5RegistryPromotionExecutionFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
+fn f5_registry_promotion_uri_matches_provider(
+    provider: F5RegistryPromotionExecutionProvider,
+    value: &str,
+) -> bool {
+    match provider {
+        F5RegistryPromotionExecutionProvider::OciDistributionRegistry => {
+            value.starts_with("https://")
+                || value.starts_with("http://")
+                || value.starts_with("oci://")
+        }
+        F5RegistryPromotionExecutionProvider::AwsEcr => {
+            value.starts_with("https://") || value.starts_with("ecr://")
+        }
+        F5RegistryPromotionExecutionProvider::GcpArtifactRegistry => {
+            value.starts_with("https://") || value.starts_with("artifactregistry://")
+        }
+        F5RegistryPromotionExecutionProvider::AzureContainerRegistry => {
+            value.starts_with("https://") || value.starts_with("acr://")
+        }
+        F5RegistryPromotionExecutionProvider::LocalFilesystem => false,
+    }
 }
 
 fn f5_is_sha256_digest(value: &str) -> bool {

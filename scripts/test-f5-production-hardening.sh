@@ -13,6 +13,7 @@ release_registry_gate="$repo_root/scripts/test-f5-release-registry.sh"
 tenant_query_gate="$repo_root/scripts/test-f5-tenant-query-retention.sh"
 retention_enforcement_gate="$repo_root/scripts/test-f5-retention-enforcement.sh"
 promotion_policy_gate="$repo_root/scripts/test-f5-release-promotion-policy.sh"
+registry_promotion_execution_gate="$repo_root/scripts/test-f5-registry-promotion-execution.sh"
 signing_profile_gate="$repo_root/scripts/test-f5-signing-profile.sh"
 signing_execution_gate="$repo_root/scripts/test-f5-signing-execution.sh"
 worm_archive_policy_gate="$repo_root/scripts/test-f5-worm-archive-policy.sh"
@@ -144,6 +145,11 @@ if [[ ! -s "$promotion_policy_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$registry_promotion_execution_gate" ]]; then
+    echo "missing F5.18 registry promotion execution artifact: $registry_promotion_execution_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$signing_profile_gate" ]]; then
     echo "missing F5.13 signing profile artifact: $signing_profile_gate" >&2
     exit 1
@@ -206,6 +212,11 @@ grep -q '^test-f5-retention-enforcement:' "$makefile" || {
 
 grep -q '^test-f5-release-promotion-policy:' "$makefile" || {
     echo "missing Makefile target: test-f5-release-promotion-policy" >&2
+    exit 1
+}
+
+grep -q '^test-f5-registry-promotion-execution:' "$makefile" || {
+    echo "missing Makefile target: test-f5-registry-promotion-execution" >&2
     exit 1
 }
 
@@ -581,6 +592,56 @@ grep -q 'minimum production retention is 90 days' "$repo_root/crates/apolysis-va
 
 grep -q 'anonymous registry pull access is forbidden' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
     echo "F5.12 promotion policy must reject anonymous registry pull access" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-registry-promotion-execution-evidence' "$registry_promotion_execution_gate" || {
+    echo "F5.18 registry promotion execution gate must run the registry execution CLI" >&2
+    exit 1
+}
+
+grep -q 'Docker Registry HTTP API V2' "$registry_promotion_execution_gate" || {
+    echo "F5.18 registry promotion execution gate must use the registry HTTP API" >&2
+    exit 1
+}
+
+grep -q 'manifests/$target_tag' "$registry_promotion_execution_gate" || {
+    echo "F5.18 registry promotion execution gate must promote the production manifest tag" >&2
+    exit 1
+}
+
+grep -q 'manifests/$rollback_tag' "$registry_promotion_execution_gate" || {
+    echo "F5.18 registry promotion execution gate must publish a rollback tag" >&2
+    exit 1
+}
+
+grep -q 'production_delete_without_retention_denied' "$registry_promotion_execution_gate" || {
+    echo "F5.18 registry promotion execution gate must prove production delete denial" >&2
+    exit 1
+}
+
+grep -q 'evaluate_f5_registry_promotion_execution_evidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.18 validation library must expose registry promotion execution evaluation" >&2
+    exit 1
+}
+
+grep -q 'F5RegistryPromotionExecutionEvidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.18 validation library must expose registry promotion execution evidence data" >&2
+    exit 1
+}
+
+grep -q 'live registry promotion execution evidence is required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.18 registry promotion execution evidence must reject fixture evidence" >&2
+    exit 1
+}
+
+grep -q 'promotion must be performed by digest through the registry API' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.18 registry promotion execution evidence must require digest API promotion" >&2
+    exit 1
+}
+
+grep -q 'production delete without retention bypass must be denied by the registry API' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.18 registry promotion execution evidence must require registry delete denial" >&2
     exit 1
 }
 

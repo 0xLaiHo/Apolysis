@@ -55,6 +55,10 @@ name = "apolysis-f5-release-promotion-policy"
 path = "src/bin/apolysis-f5-release-promotion-policy.rs"
 
 [[bin]]
+name = "apolysis-f5-registry-promotion-execution-evidence"
+path = "src/bin/apolysis-f5-registry-promotion-execution-evidence.rs"
+
+[[bin]]
 name = "apolysis-f5-signing-profile"
 path = "src/bin/apolysis-f5-signing-profile.rs"
 
