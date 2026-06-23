@@ -718,6 +718,88 @@ pub struct F5WormArchivePolicyReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum F5ServiceMeshEvidenceSource {
+    Fixture,
+    LiveCluster,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5ServiceMeshProvider {
+    None,
+    Istio,
+    Linkerd,
+    Consul,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5ServiceMeshMtlsMode {
+    Disable,
+    Permissive,
+    Strict,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5ServiceMeshTrafficSecurity {
+    Plaintext,
+    Tls,
+    MutualTls,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ServiceMeshLiveEvidence {
+    pub evidence_id: String,
+    pub source: F5ServiceMeshEvidenceSource,
+    pub provider: F5ServiceMeshProvider,
+    pub cluster_name: String,
+    pub namespace: String,
+    pub workload_service_account: String,
+    pub metrics_service_name: String,
+    pub peer_authentication_name: String,
+    pub authorization_policy_name: String,
+    pub mtls_mode: F5ServiceMeshMtlsMode,
+    pub peer_authentication_admitted: bool,
+    pub authorization_policy_admitted: bool,
+    pub authorized_principal: String,
+    pub server_principal: String,
+    pub authorized_handshake_succeeded: bool,
+    pub unauthorized_handshake_denied: bool,
+    pub plaintext_handshake_denied: bool,
+    pub observed_traffic_security: F5ServiceMeshTrafficSecurity,
+    pub cleanup_confirmed: bool,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ServiceMeshLiveApproval {
+    pub evidence_id: String,
+    pub provider: F5ServiceMeshProvider,
+    pub cluster_name: String,
+    pub namespace: String,
+    pub metrics_service_name: String,
+    pub authorized_principal: String,
+    pub server_principal: String,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ServiceMeshLiveEvidenceFailure {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ServiceMeshLiveEvidenceReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approval: Option<F5ServiceMeshLiveApproval>,
+    pub failures: Vec<F5ServiceMeshLiveEvidenceFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum F4RuntimeAdapterEvidenceSource {
     Fixture,
     LiveHost,
@@ -1716,6 +1798,155 @@ pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArc
     };
 
     F5WormArchivePolicyReport {
+        schema_version: 1,
+        passed: approval.is_some(),
+        approval,
+        failures,
+    }
+}
+
+pub fn evaluate_f5_service_mesh_live_evidence(
+    evidence: F5ServiceMeshLiveEvidence,
+) -> F5ServiceMeshLiveEvidenceReport {
+    let mut failures = Vec::new();
+
+    if evidence.evidence_id.trim().is_empty() {
+        f5_service_mesh_failure(&mut failures, "evidence_id", "evidence id is required");
+    }
+    if evidence.source != F5ServiceMeshEvidenceSource::LiveCluster {
+        f5_service_mesh_failure(&mut failures, "source", "live cluster evidence is required");
+    }
+    if evidence.provider != F5ServiceMeshProvider::Istio {
+        f5_service_mesh_failure(
+            &mut failures,
+            "provider",
+            "Istio is required for this F5 service-mesh live gate",
+        );
+    }
+    if evidence.cluster_name.trim().is_empty() {
+        f5_service_mesh_failure(&mut failures, "cluster_name", "cluster name is required");
+    }
+    if evidence.namespace.trim().is_empty() {
+        f5_service_mesh_failure(&mut failures, "namespace", "namespace is required");
+    }
+    if evidence.workload_service_account.trim().is_empty() {
+        f5_service_mesh_failure(
+            &mut failures,
+            "workload_service_account",
+            "workload service account is required",
+        );
+    }
+    if evidence.metrics_service_name.trim().is_empty() {
+        f5_service_mesh_failure(
+            &mut failures,
+            "metrics_service_name",
+            "metrics service name is required",
+        );
+    }
+    if evidence.peer_authentication_name.trim().is_empty() {
+        f5_service_mesh_failure(
+            &mut failures,
+            "peer_authentication_name",
+            "PeerAuthentication name is required",
+        );
+    }
+    if evidence.authorization_policy_name.trim().is_empty() {
+        f5_service_mesh_failure(
+            &mut failures,
+            "authorization_policy_name",
+            "AuthorizationPolicy name is required",
+        );
+    }
+    if evidence.mtls_mode != F5ServiceMeshMtlsMode::Strict {
+        f5_service_mesh_failure(&mut failures, "mtls_mode", "strict mTLS mode is required");
+    }
+    if !evidence.peer_authentication_admitted {
+        f5_service_mesh_failure(
+            &mut failures,
+            "peer_authentication_admitted",
+            "PeerAuthentication admission evidence is required",
+        );
+    }
+    if !evidence.authorization_policy_admitted {
+        f5_service_mesh_failure(
+            &mut failures,
+            "authorization_policy_admitted",
+            "AuthorizationPolicy admission evidence is required",
+        );
+    }
+    if !f5_is_service_account_principal(&evidence.authorized_principal) {
+        f5_service_mesh_failure(
+            &mut failures,
+            "authorized_principal",
+            "authorized service-account principal is required",
+        );
+    }
+    if !f5_is_service_account_principal(&evidence.server_principal) {
+        f5_service_mesh_failure(
+            &mut failures,
+            "server_principal",
+            "server service-account principal is required",
+        );
+    }
+    if !evidence.authorized_handshake_succeeded {
+        f5_service_mesh_failure(
+            &mut failures,
+            "authorized_handshake_succeeded",
+            "authorized mTLS handshake must succeed",
+        );
+    }
+    if !evidence.unauthorized_handshake_denied {
+        f5_service_mesh_failure(
+            &mut failures,
+            "unauthorized_handshake_denied",
+            "unauthorized principal must be denied",
+        );
+    }
+    if !evidence.plaintext_handshake_denied {
+        f5_service_mesh_failure(
+            &mut failures,
+            "plaintext_handshake_denied",
+            "plaintext traffic must be denied",
+        );
+    }
+    if evidence.observed_traffic_security != F5ServiceMeshTrafficSecurity::MutualTls {
+        f5_service_mesh_failure(
+            &mut failures,
+            "observed_traffic_security",
+            "traffic telemetry must report mutual TLS",
+        );
+    }
+    if !evidence.cleanup_confirmed {
+        f5_service_mesh_failure(
+            &mut failures,
+            "cleanup_confirmed",
+            "cleanup confirmation is required",
+        );
+    }
+    if evidence.observed_at_unix_ms == 0 {
+        f5_service_mesh_failure(
+            &mut failures,
+            "observed_at_unix_ms",
+            "observed timestamp is required",
+        );
+    }
+
+    let approval = if failures.is_empty() {
+        Some(F5ServiceMeshLiveApproval {
+            evidence_id: evidence.evidence_id,
+            provider: evidence.provider,
+            cluster_name: evidence.cluster_name,
+            namespace: evidence.namespace,
+            metrics_service_name: evidence.metrics_service_name,
+            authorized_principal: evidence.authorized_principal,
+            server_principal: evidence.server_principal,
+            observed_at_unix_ms: evidence.observed_at_unix_ms,
+        })
+    } else {
+        None
+    };
+
+    F5ServiceMeshLiveEvidenceReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -4807,6 +5038,42 @@ fn f5_worm_uri_matches_provider(provider: F5WormProvider, value: &str) -> bool {
         F5WormProvider::AzureImmutableBlob => value.starts_with("azblob://"),
         F5WormProvider::LocalFilesystem => false,
     }
+}
+
+fn f5_service_mesh_failure(
+    failures: &mut Vec<F5ServiceMeshLiveEvidenceFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(F5ServiceMeshLiveEvidenceFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
+fn f5_is_service_account_principal(value: &str) -> bool {
+    let value = value.trim();
+    if value == "*" || f5_is_anonymous_principal(value) {
+        return false;
+    }
+
+    let mut parts = value.split('/');
+    matches!(
+        (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ),
+        (Some(trust_domain), Some("ns"), Some(namespace), Some("sa"), Some(service_account), None)
+            if !trust_domain.is_empty()
+                && !namespace.is_empty()
+                && !service_account.is_empty()
+                && !namespace.contains('*')
+                && !service_account.contains('*')
+    )
 }
 
 fn f4_merge_evidence_ids(left: Vec<String>, right: Vec<String>) -> Vec<String> {

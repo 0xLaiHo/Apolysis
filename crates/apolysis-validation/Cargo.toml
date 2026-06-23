@@ -61,3 +61,7 @@ path = "src/bin/apolysis-f5-signing-profile.rs"
 [[bin]]
 name = "apolysis-f5-worm-archive-policy"
 path = "src/bin/apolysis-f5-worm-archive-policy.rs"
+
+[[bin]]
+name = "apolysis-f5-service-mesh-live-evidence"
+path = "src/bin/apolysis-f5-service-mesh-live-evidence.rs"
