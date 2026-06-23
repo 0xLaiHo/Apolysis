@@ -49,16 +49,13 @@ events, loss diagnostics, and persistence-time redaction. Its privileged
 live-host validation is complete. F3 keeps production-facing kernel blocking
 disabled by default while validating narrow local seccomp and BPF-LSM
 pre-operation block prototypes with operator-approved enablement and rollback
-audit records. F4 has started with a runtime guardrail support matrix that
-separates supported audit/review/kill paths, local-only block prototypes,
-metadata-only strong-isolation claims, boundary-only VM-backed runtimes, and
-validated Docker/containerd/Kubernetes adapter evidence. It now also adds
-gVisor-specific runsc/sentry/gofer metadata evidence, Kubernetes Agent Sandbox
-metadata evidence, and Kata boundary-only evidence for runtime-boundary
-visibility. F4 also includes a live-runtime evidence bundle gate that binds F4
-claims to retained F2 runtime adapter matrix artifacts, and the full live
-runtime adapter matrix now emits retained F4 adapter evidence and bundle
-request/report artifacts.
+audit records. F4 is complete for runtime adapter depth: it separates supported
+audit/review/kill paths, local-only block prototypes, metadata-only
+strong-isolation claims, boundary-only VM-backed runtimes, and validated
+Docker/containerd/Kubernetes adapter evidence. It also adds live gVisor
+runsc/sentry/gofer metadata evidence, Kubernetes Agent Sandbox metadata
+evidence, Kata boundary-only evidence, and a live-runtime evidence bundle gate
+that binds F4 claims to retained F2 runtime adapter matrix artifacts.
 
 ## 🚀 Runtime Scenarios
 
@@ -280,12 +277,11 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 ## 🗺️ Feature Plan And Progress
 
 Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
-Independent Observability MVP, F2 Accountability Beta, and F3 Limited
-Guardrails are complete. F4 Runtime Adapter Depth is in progress, starting with
-the runtime guardrail support matrix, runtime adapter evidence correlation, and
-gVisor, Kubernetes Agent Sandbox, Kata boundary, and live-runtime evidence
-bundle gates, plus retained F4 adapter evidence and bundle artifacts from the
-live runtime adapter matrix.
+Independent Observability MVP, F2 Accountability Beta, F3 Limited Guardrails,
+and F4 Runtime Adapter Depth are complete. F4 covers the runtime guardrail
+support matrix, runtime adapter evidence correlation, gVisor metadata,
+Kubernetes Agent Sandbox metadata, Kata boundary-only evidence, and live-runtime
+evidence bundle artifacts from the full live runtime adapter matrix.
 
 Implementation milestones:
 
@@ -307,7 +303,7 @@ Focused roadmap:
 | F1 | Independent Observability MVP: live audit-only eBPF observer, CO-RE/Aya loader, process/file/network/credential timeline, loss accounting, redaction | ✅ **Completed** |
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
-| F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | 🚧 **In Progress** |
+| F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
 | F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM, operator, large-scale chaos and performance testing | ⏳ **Deferred** |
 
 ## 📜 License

@@ -20,6 +20,9 @@ output_dir="${APOLYSIS_F4_LIVE_RUNTIME_EVIDENCE_OUTPUT_DIR:-$matrix_artifacts}"
 visibility_output_dir="${APOLYSIS_F2_VISIBILITY_OUTPUT_DIR:-$output_dir/f2-visibility}"
 request_fixture="${APOLYSIS_F4_RUNTIME_GUARDRAIL_REQUEST:-$repo_root/tests/fixtures/validation/f4-runtime-guardrail-request.json}"
 adapter_evidence_output="${APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT:-$matrix_artifacts/f4-runtime-adapter-evidence.jsonl}"
+gvisor_metadata_evidence_output="${APOLYSIS_F4_GVISOR_METADATA_EVIDENCE_OUTPUT:-$matrix_artifacts/f4-gvisor-metadata-evidence.jsonl}"
+kubernetes_agent_sandbox_evidence_output="${APOLYSIS_F4_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT:-$matrix_artifacts/f4-kubernetes-agent-sandbox-evidence.jsonl}"
+kata_boundary_evidence_output="${APOLYSIS_F4_KATA_BOUNDARY_EVIDENCE_OUTPUT:-$matrix_artifacts/f4-kata-boundary-evidence.jsonl}"
 request_path="$output_dir/f4-live-runtime-evidence-request.json"
 report_path="$output_dir/f4-live-runtime-evidence-report.json"
 
@@ -31,7 +34,15 @@ APOLYSIS_F2_VISIBILITY_OUTPUT_DIR="$visibility_output_dir" \
 
 cargo build -p apolysis-validation --bin apolysis-f4-live-runtime-evidence
 
-python3 - "$request_fixture" "$matrix_artifacts" "$visibility_output_dir/visibility-reports.json" "$adapter_evidence_output" >"$request_path" <<'PY'
+python3 - \
+    "$request_fixture" \
+    "$matrix_artifacts" \
+    "$visibility_output_dir/visibility-reports.json" \
+    "$adapter_evidence_output" \
+    "$gvisor_metadata_evidence_output" \
+    "$kubernetes_agent_sandbox_evidence_output" \
+    "$kata_boundary_evidence_output" \
+    >"$request_path" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -39,13 +50,29 @@ from pathlib import Path
 request = json.loads(Path(sys.argv[1]).read_text())
 request["artifact_dir"] = sys.argv[2]
 request["visibility_reports"] = json.loads(Path(sys.argv[3]).read_text())
-adapter_evidence_path = Path(sys.argv[4])
-if adapter_evidence_path.exists() and adapter_evidence_path.stat().st_size > 0:
-    request["runtime_adapter_evidence_reports"] = [
+
+def read_jsonl(path):
+    evidence_path = Path(path)
+    if not evidence_path.exists() or evidence_path.stat().st_size == 0:
+        return None
+    return [
         json.loads(line)
-        for line in adapter_evidence_path.read_text().splitlines()
+        for line in evidence_path.read_text().splitlines()
         if line.strip()
     ]
+
+adapter_evidence = read_jsonl(sys.argv[4])
+if adapter_evidence is not None:
+    request["runtime_adapter_evidence_reports"] = adapter_evidence
+gvisor_metadata_evidence = read_jsonl(sys.argv[5])
+if gvisor_metadata_evidence is not None:
+    request["gvisor_metadata_evidence_reports"] = gvisor_metadata_evidence
+kubernetes_agent_sandbox_evidence = read_jsonl(sys.argv[6])
+if kubernetes_agent_sandbox_evidence is not None:
+    request["kubernetes_agent_sandbox_evidence_reports"] = kubernetes_agent_sandbox_evidence
+kata_boundary_evidence = read_jsonl(sys.argv[7])
+if kata_boundary_evidence is not None:
+    request["kata_boundary_evidence_reports"] = kata_boundary_evidence
 print(json.dumps(request, indent=2, sort_keys=True))
 PY
 

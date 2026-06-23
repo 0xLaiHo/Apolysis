@@ -32,12 +32,22 @@ run_live_adapter_test() {
             -- --ignored --exact --nocapture
     else
         local docker_env=()
-        if [[ -n "${APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT:-}" ]]; then
-            docker_env=(
+        local env_name
+        local env_value
+        for env_name in \
+            APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT \
+            APOLYSIS_F4_GVISOR_METADATA_EVIDENCE_OUTPUT \
+            APOLYSIS_F4_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT \
+            APOLYSIS_F4_KATA_BOUNDARY_EVIDENCE_OUTPUT
+        do
+            env_value="${!env_name:-}"
+            if [[ -n "$env_value" ]]; then
+                docker_env+=(
                 -e
-                "APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT=$APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT"
-            )
-        fi
+                "$env_name=$env_value"
+                )
+            fi
+        done
         docker run --rm \
             "${docker_env[@]}" \
             --privileged \

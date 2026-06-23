@@ -135,7 +135,13 @@ cargo test -p apolysis-validation
 cargo build -p apolysis-validation --bin apolysis-validate-host
 
 f4_runtime_adapter_evidence_output="$output_dir/f4-runtime-adapter-evidence.jsonl"
+f4_gvisor_metadata_evidence_output="$output_dir/f4-gvisor-metadata-evidence.jsonl"
+f4_kubernetes_agent_sandbox_evidence_output="$output_dir/f4-kubernetes-agent-sandbox-evidence.jsonl"
+f4_kata_boundary_evidence_output="$output_dir/f4-kata-boundary-evidence.jsonl"
 : >"$f4_runtime_adapter_evidence_output"
+: >"$f4_gvisor_metadata_evidence_output"
+: >"$f4_kubernetes_agent_sandbox_evidence_output"
+: >"$f4_kata_boundary_evidence_output"
 
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
     "$binary" --apply-runtime-registration --output "$output_dir"
@@ -152,6 +158,9 @@ host_bash 'crictl --config /dev/null --runtime-endpoint unix:///run/containerd/c
 host_bash 'crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock info | jq -e '\''.config.containerd.runtimes | has("runc") and has("runsc") and has("kata")'\'''
 
 APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT="$f4_runtime_adapter_evidence_output" \
+APOLYSIS_F4_GVISOR_METADATA_EVIDENCE_OUTPUT="$f4_gvisor_metadata_evidence_output" \
+APOLYSIS_F4_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT="$f4_kubernetes_agent_sandbox_evidence_output" \
+APOLYSIS_F4_KATA_BOUNDARY_EVIDENCE_OUTPUT="$f4_kata_boundary_evidence_output" \
 APOLYSIS_REQUIRE_FULL_RUNTIME_ADAPTERS=1 \
 APOLYSIS_REQUIRE_DOCKER_ADAPTER=1 \
 APOLYSIS_REQUIRE_CONTAINERD_ADAPTER=1 \
@@ -159,6 +168,9 @@ APOLYSIS_REQUIRE_K3S_CONTAINERD_ADAPTER=1 \
 APOLYSIS_REQUIRE_KUBERNETES_ADAPTER=1 \
     ./scripts/test-f2-runtime-adapters.sh
 test -s "$f4_runtime_adapter_evidence_output"
+test -s "$f4_gvisor_metadata_evidence_output"
+test -s "$f4_kubernetes_agent_sandbox_evidence_output"
+test -s "$f4_kata_boundary_evidence_output"
 
 restore_runtime_registration
 
@@ -174,6 +186,9 @@ host_bash 'crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock 
 
 APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR="$output_dir" \
 APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT="$f4_runtime_adapter_evidence_output" \
+APOLYSIS_F4_GVISOR_METADATA_EVIDENCE_OUTPUT="$f4_gvisor_metadata_evidence_output" \
+APOLYSIS_F4_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT="$f4_kubernetes_agent_sandbox_evidence_output" \
+APOLYSIS_F4_KATA_BOUNDARY_EVIDENCE_OUTPUT="$f4_kata_boundary_evidence_output" \
     ./scripts/write-f4-live-runtime-evidence-bundle.sh
 test -s "$output_dir/f4-live-runtime-evidence-request.json"
 test -s "$output_dir/f4-live-runtime-evidence-report.json"

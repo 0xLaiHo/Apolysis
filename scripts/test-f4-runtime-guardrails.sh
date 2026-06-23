@@ -54,6 +54,53 @@ Path(sys.argv[1]).write_text(json.dumps({
     "guest_semantics_claimed": False,
 }) + "\n")
 PY
+python - "$live_bundle_artifacts/f4-gvisor-metadata-evidence.jsonl" "$live_bundle_artifacts/f4-kubernetes-agent-sandbox-evidence.jsonl" "$live_bundle_artifacts/f4-kata-boundary-evidence.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(json.dumps({
+    "evidence_id": "live-gvisor-metadata-from-output",
+    "source": "live_host",
+    "runtime_adapter_evidence_id": "live-docker-runc-from-output",
+    "session_id": "session-from-live-output",
+    "runtime_handler": "runsc",
+    "host_event_subjects": ["runsc", "sentry", "gofer"],
+    "runsc_observed": True,
+    "sentry_observed": True,
+    "gofer_observed": True,
+    "host_semantics_collapsed": True,
+    "guest_semantics_claimed": False,
+}) + "\n")
+Path(sys.argv[2]).write_text(json.dumps({
+    "evidence_id": "live-kubernetes-agent-sandbox-from-output",
+    "source": "live_host",
+    "runtime_adapter_evidence_id": "live-docker-runc-from-output",
+    "session_id": "session-from-live-output",
+    "pod_name": "apolysis-live-gvisor",
+    "namespace": "apolysis-live",
+    "service_account": "default",
+    "runtime_class_name": "gvisor",
+    "sandbox_name": "apolysis-live-gvisor-sandbox",
+    "node_name": "node-a",
+    "pod_uid": "pod-uid-live",
+    "host_boundary_visibility": True,
+    "guest_semantics_claimed": False,
+}) + "\n")
+Path(sys.argv[3]).write_text(json.dumps({
+    "evidence_id": "live-kata-boundary-from-output",
+    "source": "live_host",
+    "runtime_adapter_evidence_id": "live-docker-runc-from-output",
+    "session_id": "session-from-live-output",
+    "runtime_handler": "kata",
+    "host_event_subjects": ["containerd-shim-kata-v2", "qemu-system-x86"],
+    "shim_observed": True,
+    "vmm_observed": True,
+    "host_boundary_visibility": True,
+    "guest_collector_required": True,
+    "guest_semantics_claimed": False,
+}) + "\n")
+PY
 
 APOLYSIS_RUNTIME_ADAPTER_MATRIX_OUTPUT_DIR="$live_bundle_artifacts" \
 APOLYSIS_F4_LIVE_RUNTIME_EVIDENCE_OUTPUT_DIR="$live_bundle_output" \
@@ -73,6 +120,12 @@ evidence_ids = {
 }
 assert "live-docker-runc-from-output" in evidence_ids
 assert "live-docker-runc-cgroup" not in evidence_ids
+assert request["gvisor_metadata_evidence_reports"][0]["evidence_id"] == "live-gvisor-metadata-from-output"
+assert request["kubernetes_agent_sandbox_evidence_reports"][0]["evidence_id"] == "live-kubernetes-agent-sandbox-from-output"
+assert request["kata_boundary_evidence_reports"][0]["evidence_id"] == "live-kata-boundary-from-output"
+assert request["gvisor_metadata_evidence_reports"][0]["evidence_id"] != "live-gvisor-runsc-sentry-gofer"
+assert request["kubernetes_agent_sandbox_evidence_reports"][0]["evidence_id"] != "live-kubernetes-agent-sandbox-gvisor"
+assert request["kata_boundary_evidence_reports"][0]["evidence_id"] != "live-kata-qemu-shim-boundary"
 PY
 
 restore_check_root="$(mktemp -d "${TMPDIR:-/tmp}/apolysis-f2-restore-check-root.XXXXXX")"
