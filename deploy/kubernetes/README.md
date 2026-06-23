@@ -59,5 +59,6 @@ The live gate builds a local image, imports it into k3s containerd, deploys the
 DaemonSet, creates a marked workload for runtime adapter evidence, captures
 health/metrics/log/Kubernetes artifacts, validates DaemonSet pod restart
 recovery, validates k3s CRI socket outage/recovery through a bad socket
-rollout and restore rollout, and removes the validation namespace and
-temporary state path before exiting.
+rollout and restore rollout, validates queue pressure and unwritable-store
+failure/recovery evidence, and removes the validation namespace and temporary
+state path before exiting.

@@ -66,6 +66,9 @@ bad_socket_manifest="$output_dir/apolysisd-production-baseline.bad-k3s-socket.ya
 workload_manifest="$output_dir/apolysis-f5-live-workload.apply.yaml"
 restart_workload_manifest="$output_dir/apolysis-f5-restart-workload.apply.yaml"
 socket_recovery_workload_manifest="$output_dir/apolysis-f5-socket-recovery-workload.apply.yaml"
+queue_pressure_workload_manifest="$output_dir/apolysis-f5-queue-pressure-workload.apply.yaml"
+unwritable_store_workload_manifest="$output_dir/apolysis-f5-unwritable-store-workload.apply.yaml"
+unwritable_store_recovery_workload_manifest="$output_dir/apolysis-f5-unwritable-store-recovery-workload.apply.yaml"
 state_path="/tmp/apolysis-f5-live-state-$stamp"
 session_id="apolysis-f5-live"
 applied=0
@@ -124,6 +127,7 @@ write_marked_workload_manifest() {
     local name="$1"
     local workload_session_id="$2"
     local target="$3"
+    local shell_command="${4:-sleep 120}"
 
     cat >"$target" <<EOF
 apiVersion: v1
@@ -147,7 +151,8 @@ spec:
       command:
         - /bin/sh
         - -c
-        - sleep 120
+        - |
+          $shell_command
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -243,6 +248,183 @@ PY
     done
 
     echo "apolysis-f5: daemon health did not reach $expected_adapter=$expected_state" >&2
+    cat "$health_output" >&2 || true
+    cat "$health_error" >&2 || true
+    return 1
+}
+
+scrape_metrics() {
+    local pod_name="$1"
+    local metrics_output="$2"
+    local artifact_prefix="$3"
+    local metrics_error="$output_dir/${artifact_prefix}.err"
+    local port_forward_log="$output_dir/${artifact_prefix}-port-forward.log"
+    local metrics_port=""
+    local metrics_ready=0
+
+    metrics_port="$(
+        python3 <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+    listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1])
+PY
+    )"
+    kubectl -n apolysis-system port-forward \
+        --address 127.0.0.1 \
+        "pod/$pod_name" \
+        "${metrics_port}:9909" \
+        >"$port_forward_log" \
+        2>&1 &
+    port_forward_pid="$!"
+
+    for _ in $(seq 1 60); do
+        if curl -fsS \
+            "http://127.0.0.1:${metrics_port}/metrics" \
+            -o "$metrics_output" \
+            2>"$metrics_error"; then
+            metrics_ready=1
+            break
+        fi
+        sleep 1
+    done
+    kill "$port_forward_pid" >/dev/null 2>&1 || true
+    wait "$port_forward_pid" >/dev/null 2>&1 || true
+    port_forward_pid=""
+
+    if [[ "$metrics_ready" != "1" ]]; then
+        echo "apolysis-f5: metrics scrape did not become ready for $artifact_prefix" >&2
+        cat "$metrics_error" >&2 || true
+        cat "$port_forward_log" >&2 || true
+        return 1
+    fi
+}
+
+wait_for_queue_pressure_metrics() {
+    local pod_name="$1"
+    local metrics_output="$2"
+    local min_accepted="$3"
+
+    for _ in $(seq 1 60); do
+        scrape_metrics "$pod_name" "$metrics_output" "apolysisd-queue-pressure-metrics"
+        if python3 - "$metrics_output" "$min_accepted" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+metrics = Path(sys.argv[1]).read_text(encoding="utf-8")
+minimum = int(sys.argv[2])
+
+def metric_value(name):
+    match = re.search(rf"^{re.escape(name)}\s+([0-9]+)$", metrics, re.MULTILINE)
+    if not match:
+        raise SystemExit(f"missing metric: {name}")
+    return int(match.group(1))
+
+accepted = metric_value("apolysis_queue_accepted_total")
+capacity = metric_value("apolysis_queue_capacity")
+if capacity != 16384:
+    raise SystemExit(f"unexpected production queue capacity: {capacity}")
+if accepted < minimum:
+    raise SystemExit(f"accepted queue events {accepted} < required {minimum}")
+for forbidden in ["session_id", "container_id", "workload_id"]:
+    if forbidden in metrics:
+        raise SystemExit(f"metrics contain forbidden high-cardinality label: {forbidden}")
+PY
+        then
+            return 0
+        fi
+        sleep 2
+    done
+
+    echo "apolysis-f5: queue pressure metrics did not reach accepted threshold" >&2
+    cat "$metrics_output" >&2 || true
+    return 1
+}
+
+wait_for_session_timeline_record() {
+    local session_id="$1"
+    local pattern="$2"
+    local artifact="$3"
+    local timeline="$state_path/sessions/$session_id/timeline.jsonl"
+
+    for _ in $(seq 1 60); do
+        if sudo_cmd test -f "$timeline" && sudo_cmd grep -q "$pattern" "$timeline"; then
+            sudo_cmd cp "$timeline" "$artifact"
+            sudo_cmd chmod 0644 "$artifact"
+            return 0
+        fi
+        sleep 2
+    done
+
+    echo "apolysis-f5: session timeline did not contain expected pattern '$pattern' for $session_id" >&2
+    sudo_cmd find "$state_path/sessions" -maxdepth 3 -type f -o -type d >&2 || true
+    return 1
+}
+
+wait_for_storage_health_state() {
+    local pod_name="$1"
+    local health_output="$2"
+    local expected_storage="$3"
+    local expected_readiness="$4"
+    local expected_adapter="$5"
+    local expected_adapter_state="$6"
+    local health_error="${health_output%.json}.err"
+
+    for _ in $(seq 1 60); do
+        kubectl -n apolysis-system exec "$pod_name" -- \
+            /usr/local/bin/apolysisd-health \
+            --socket /run/apolysis/apolysisd.sock \
+            --timeout-ms 1000 \
+            --require-liveness \
+            >"$health_output" \
+            2>"$health_error" || true
+
+        if python3 - "$health_output" "$expected_storage" "$expected_readiness" "$expected_adapter" "$expected_adapter_state" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+expected_storage = sys.argv[2]
+expected_readiness = sys.argv[3] == "true"
+expected_adapter = sys.argv[4]
+expected_adapter_state = sys.argv[5]
+
+try:
+    health = json.loads(path.read_text(encoding="utf-8"))
+except Exception as error:
+    raise SystemExit(f"health JSON is not ready: {error}")
+
+if health.get("type") != "health":
+    raise SystemExit(f"unexpected response type: {health}")
+if health.get("liveness") is not True:
+    raise SystemExit(f"daemon liveness is not true: {health}")
+if health.get("readiness") is not expected_readiness:
+    raise SystemExit(f"daemon readiness mismatch: {health}")
+
+components = health.get("health", {})
+if components.get("ebpf") != "ready":
+    raise SystemExit(f"daemon eBPF is not ready: {health}")
+if components.get("storage") != expected_storage:
+    raise SystemExit(f"daemon storage is not {expected_storage}: {health}")
+
+if expected_adapter != "-":
+    adapters = components.get("adapters", {})
+    if adapters.get(expected_adapter) != expected_adapter_state:
+        raise SystemExit(
+            f"{expected_adapter} adapter is {adapters.get(expected_adapter)}, "
+            f"expected {expected_adapter_state}: {health}"
+        )
+PY
+        then
+            return 0
+        fi
+        sleep 2
+    done
+
+    echo "apolysis-f5: daemon health did not reach storage=$expected_storage" >&2
     cat "$health_output" >&2 || true
     cat "$health_error" >&2 || true
     return 1
@@ -569,6 +751,92 @@ kubectl -n apolysis-system get pod apolysis-f5-socket-recovery-workload -o yaml 
     >"$output_dir/apolysis-f5-socket-recovery-workload.yaml"
 kubectl get events -n apolysis-system --sort-by=.lastTimestamp \
     >"$output_dir/kubernetes-events-after-resilience.txt"
+
+queue_pressure_session_id="apolysis-f5-queue-pressure-$stamp"
+write_marked_workload_manifest \
+    apolysis-f5-queue-pressure-workload \
+    "$queue_pressure_session_id" \
+    "$queue_pressure_workload_manifest" \
+    'sleep 20; i=0; while [ "$i" -lt 20000 ]; do : < /etc/hostname; i=$((i + 1)); done; sleep 120'
+kubectl apply -f "$queue_pressure_workload_manifest"
+kubectl -n apolysis-system wait \
+    --for=condition=Ready \
+    pod/apolysis-f5-queue-pressure-workload \
+    --timeout=120s
+
+wait_for_session_timeline_record \
+    "$queue_pressure_session_id" \
+    "cgroup_discovered" \
+    "$output_dir/apolysis-f5-queue-pressure-timeline.jsonl"
+wait_for_health_state "$pod" "$output_dir/apolysisd-queue-pressure-health.json" "k3s_containerd" "ready" "1"
+wait_for_queue_pressure_metrics \
+    "$pod" \
+    "$output_dir/apolysisd-queue-pressure-metrics.prom" \
+    100
+kubectl -n apolysis-system logs "$pod" >"$output_dir/apolysisd-queue-pressure.log"
+kubectl -n apolysis-system get pod apolysis-f5-queue-pressure-workload -o yaml \
+    >"$output_dir/apolysis-f5-queue-pressure-workload.yaml"
+
+unwritable_store_session_id="apolysis-f5-unwritable-store-$stamp"
+sudo_cmd rm -rf "$state_path/sessions/$unwritable_store_session_id"
+sudo_cmd mkdir -p "$state_path/sessions/$unwritable_store_session_id/timeline.jsonl"
+write_marked_workload_manifest \
+    apolysis-f5-unwritable-store-workload \
+    "$unwritable_store_session_id" \
+    "$unwritable_store_workload_manifest"
+kubectl apply -f "$unwritable_store_workload_manifest"
+kubectl -n apolysis-system wait \
+    --for=condition=Ready \
+    pod/apolysis-f5-unwritable-store-workload \
+    --timeout=120s
+
+wait_for_storage_health_state \
+    "$pod" \
+    "$output_dir/apolysisd-unwritable-store-health.json" \
+    "unavailable" \
+    "false" \
+    "k3s_containerd" \
+    "degraded"
+kubectl -n apolysis-system logs "$pod" >"$output_dir/apolysisd-unwritable-store.log"
+kubectl -n apolysis-system get pod "$pod" -o yaml \
+    >"$output_dir/apolysisd-unwritable-store-pod.yaml"
+kubectl -n apolysis-system get pod apolysis-f5-unwritable-store-workload -o yaml \
+    >"$output_dir/apolysis-f5-unwritable-store-workload.yaml"
+
+kubectl -n apolysis-system delete pod/apolysis-f5-unwritable-store-workload \
+    --ignore-not-found=true \
+    --wait=true
+sudo_cmd rm -rf "$state_path/sessions/$unwritable_store_session_id"
+unwritable_store_previous_pod="$pod"
+kubectl -n apolysis-system delete pod "$unwritable_store_previous_pod" --wait=true
+kubectl -n apolysis-system rollout status daemonset/apolysisd --timeout=180s
+kubectl -n apolysis-system wait \
+    --for=condition=Ready \
+    pod \
+    -l app.kubernetes.io/name=apolysisd \
+    --timeout=180s
+pod="$(wait_for_daemon_pod "$unwritable_store_previous_pod")"
+test -n "$pod"
+
+unwritable_store_recovery_session_id="apolysis-f5-unwritable-store-recovery-$stamp"
+write_marked_workload_manifest \
+    apolysis-f5-unwritable-store-recovery-workload \
+    "$unwritable_store_recovery_session_id" \
+    "$unwritable_store_recovery_workload_manifest"
+kubectl apply -f "$unwritable_store_recovery_workload_manifest"
+kubectl -n apolysis-system wait \
+    --for=condition=Ready \
+    pod/apolysis-f5-unwritable-store-recovery-workload \
+    --timeout=120s
+
+wait_for_health_state "$pod" "$output_dir/apolysisd-unwritable-store-recovery-health.json" "k3s_containerd" "ready" "1"
+kubectl -n apolysis-system logs "$pod" >"$output_dir/apolysisd-unwritable-store-recovery.log"
+kubectl -n apolysis-system get pod "$pod" -o yaml \
+    >"$output_dir/apolysisd-unwritable-store-recovery-pod.yaml"
+kubectl -n apolysis-system get pod apolysis-f5-unwritable-store-recovery-workload -o yaml \
+    >"$output_dir/apolysis-f5-unwritable-store-recovery-workload.yaml"
+kubectl get events -n apolysis-system --sort-by=.lastTimestamp \
+    >"$output_dir/kubernetes-events-after-storage-pressure.txt"
 
 kubectl delete -f "$live_manifest" --wait=true
 applied=0

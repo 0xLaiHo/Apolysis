@@ -185,3 +185,33 @@ grep -q '"k3s_containerd" "ready"' "$live_gate" || {
     echo "F5.4 live deployment gate must assert k3s adapter recovery to ready" >&2
     exit 1
 }
+
+grep -q 'apolysis-f5-queue-pressure-workload' "$live_gate" || {
+    echo "F5.5 live deployment gate must create a queue pressure workload" >&2
+    exit 1
+}
+
+grep -q 'apolysisd-queue-pressure-metrics.prom' "$live_gate" || {
+    echo "F5.5 live deployment gate must capture queue pressure metrics evidence" >&2
+    exit 1
+}
+
+grep -q 'apolysis_queue_accepted_total' "$live_gate" || {
+    echo "F5.5 live deployment gate must assert accepted queue event metrics" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-unwritable-store-workload' "$live_gate" || {
+    echo "F5.5 live deployment gate must create an unwritable-store workload" >&2
+    exit 1
+}
+
+grep -q 'apolysisd-unwritable-store-health.json' "$live_gate" || {
+    echo "F5.5 live deployment gate must capture unwritable-store health evidence" >&2
+    exit 1
+}
+
+grep -q '"unavailable"' "$live_gate" || {
+    echo "F5.5 live deployment gate must assert unavailable storage during unwritable-store injection" >&2
+    exit 1
+}
