@@ -1,0 +1,86 @@
+tenant:
+  id: platform
+
+namespace:
+  create: true
+  name: apolysis-system
+
+image:
+  repository: ghcr.io/0xlaiho/apolysis
+  tag: "0.1.0"
+  digest: ""
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  automountServiceAccountToken: false
+
+rbac:
+  create: true
+
+daemonset:
+  hostPID: true
+  productionFacingKernelBlocking: false
+  updateStrategy:
+    maxUnavailable: "10%"
+  terminationGracePeriodSeconds: 15
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations:
+    - operator: Exists
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - BPF
+      - PERFMON
+      - SYS_RESOURCE
+
+state:
+  baseHostPath: /var/lib/apolysis/tenants
+
+runtimeSockets:
+  docker: /run/docker.sock
+  containerd: /run/containerd/containerd.sock
+  k3sContainerd: /run/k3s/containerd/containerd.sock
+
+queue:
+  capacity: 16384
+  scopeCommandCapacity: 1024
+  shutdownDrainMs: 5000
+
+metrics:
+  enabled: true
+  listenHost: 0.0.0.0
+  port: 9909
+  service:
+    enabled: true
+    type: ClusterIP
+  networkPolicy:
+    enabled: true
+    allowedNamespaceLabels:
+      apolysis.dev/metrics-access: "true"
+    allowedPodLabels:
+      apolysis.dev/metrics-client: "true"
+
+mesh:
+  mtls:
+    required: true
+    mode: strict
+
+podAnnotations: {}
+podLabels: {}

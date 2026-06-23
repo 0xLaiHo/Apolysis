@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery test-f2-performance test-f2-visibility-reports test-f2-production-qualification test-f3-guardrails test-f3-bpf-lsm-live test-f4-runtime-guardrails test-f5-production-hardening test-f5-live-deployment test-f5-supply-chain
+.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery test-f2-performance test-f2-visibility-reports test-f2-production-qualification test-f3-guardrails test-f3-bpf-lsm-live test-f4-runtime-guardrails test-f5-production-hardening test-f5-live-deployment test-f5-supply-chain test-f5-helm-production
 
 build: build-ebpf
 	cargo build --workspace
@@ -65,3 +65,6 @@ test-f5-live-deployment:
 
 test-f5-supply-chain:
 	./scripts/test-f5-supply-chain.sh
+
+test-f5-helm-production:
+	./scripts/test-f5-helm-production.sh

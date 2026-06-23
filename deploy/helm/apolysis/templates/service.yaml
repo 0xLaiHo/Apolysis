@@ -1,0 +1,23 @@
+{{- if and .Values.metrics.enabled .Values.metrics.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "apolysis.fullname" . }}-metrics
+  namespace: {{ include "apolysis.namespace" . }}
+  labels:
+    {{- include "apolysis.labels" . | nindent 4 }}
+  annotations:
+    {{- if .Values.mesh.mtls.required }}
+    apolysis.dev/mtls-required: "true"
+    apolysis.dev/mtls-mode: {{ .Values.mesh.mtls.mode | quote }}
+    {{- end }}
+spec:
+  type: {{ .Values.metrics.service.type }}
+  selector:
+    {{- include "apolysis.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

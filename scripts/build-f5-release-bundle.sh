@@ -6,6 +6,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 stamp="$(date -u +%Y%m%d%H%M%S)-$$"
 output_dir="${APOLYSIS_F5_RELEASE_OUTPUT_DIR:-$repo_root/target/f5-release-bundle/$stamp}"
+mkdir -p "$output_dir"
+output_dir="$(cd "$output_dir" && pwd)"
 staging_dir="$output_dir/staging"
 image_context="$output_dir/image-context"
 image="${APOLYSIS_F5_RELEASE_IMAGE:-localhost/apolysisd:f5-release-$stamp}"
@@ -71,6 +73,7 @@ mkdir -p \
     "$staging_dir/bin" \
     "$staging_dir/lib/apolysis" \
     "$staging_dir/deploy/container" \
+    "$staging_dir/deploy/helm" \
     "$staging_dir/deploy/kubernetes" \
     "$staging_dir/licenses" \
     "$staging_dir/source/crates" \
@@ -89,6 +92,9 @@ install -m 0644 "$repo_root/deploy/container/apolysisd.Dockerfile" \
     "$staging_dir/deploy/container/apolysisd.Dockerfile"
 install -m 0644 "$repo_root/deploy/kubernetes/apolysisd-production-baseline.yaml" \
     "$staging_dir/deploy/kubernetes/apolysisd-production-baseline.yaml"
+cp -R "$repo_root/deploy/helm/apolysis" "$staging_dir/deploy/helm/apolysis"
+find "$staging_dir/deploy/helm/apolysis" -type d -exec chmod 0755 {} +
+find "$staging_dir/deploy/helm/apolysis" -type f -exec chmod 0644 {} +
 install -m 0644 "$repo_root/LICENSE" "$staging_dir/licenses/LICENSE"
 install -m 0644 "$repo_root/NOTICE" "$staging_dir/licenses/NOTICE"
 install -m 0644 "$repo_root/Cargo.lock" "$staging_dir/source/Cargo.lock"
@@ -239,6 +245,8 @@ statement = {
                 material("Cargo.lock"),
                 material("Cargo.toml"),
                 material("deploy/container/apolysisd.Dockerfile"),
+                material("deploy/helm/apolysis/Chart.yaml"),
+                material("deploy/helm/apolysis/values.yaml"),
                 material("deploy/kubernetes/apolysisd-production-baseline.yaml"),
                 material("scripts/build-f5-release-bundle.sh"),
                 material("scripts/test-f5-supply-chain.sh"),

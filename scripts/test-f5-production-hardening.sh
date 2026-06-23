@@ -9,6 +9,8 @@ containerfile="$repo_root/deploy/container/apolysisd.Dockerfile"
 live_gate="$repo_root/scripts/test-f5-live-deployment.sh"
 supply_chain_builder="$repo_root/scripts/build-f5-release-bundle.sh"
 supply_chain_gate="$repo_root/scripts/test-f5-supply-chain.sh"
+helm_chart="$repo_root/deploy/helm/apolysis"
+helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
 
 python3 - "$manifest" <<'PY'
@@ -105,6 +107,13 @@ for required_path in "$supply_chain_builder" "$supply_chain_gate"; do
     fi
 done
 
+for required_path in "$helm_chart/Chart.yaml" "$helm_chart/values.yaml" "$helm_gate"; do
+    if [[ ! -s "$required_path" ]]; then
+        echo "missing F5.7 Helm production artifact: $required_path" >&2
+        exit 1
+    fi
+done
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -112,6 +121,11 @@ grep -q '^test-f5-live-deployment:' "$makefile" || {
 
 grep -q '^test-f5-supply-chain:' "$makefile" || {
     echo "missing Makefile target: test-f5-supply-chain" >&2
+    exit 1
+}
+
+grep -q '^test-f5-helm-production:' "$makefile" || {
+    echo "missing Makefile target: test-f5-helm-production" >&2
     exit 1
 }
 
@@ -262,5 +276,40 @@ grep -q 'syft scan' "$supply_chain_gate" || {
 
 grep -q 'trivy fs' "$supply_chain_gate" || {
     echo "F5.6 supply-chain gate must run a real vulnerability scan" >&2
+    exit 1
+}
+
+grep -R -q 'apolysis.dev/tenant-id' "$helm_chart" || {
+    echo "F5.7 Helm chart must label rendered resources with a tenant id" >&2
+    exit 1
+}
+
+grep -R -q '/var/lib/apolysis/tenants' "$helm_chart" || {
+    echo "F5.7 Helm chart must use tenant-isolated hostPath storage" >&2
+    exit 1
+}
+
+grep -R -q 'apolysis.dev/mtls-required' "$helm_chart" || {
+    echo "F5.7 Helm chart must expose mTLS handoff annotations" >&2
+    exit 1
+}
+
+grep -R -q 'apolysisd-metrics-allow' "$helm_chart" || {
+    echo "F5.7 Helm chart must render a narrow metrics ingress allowlist" >&2
+    exit 1
+}
+
+grep -q 'helm lint' "$helm_gate" || {
+    echo "F5.7 Helm gate must lint the chart" >&2
+    exit 1
+}
+
+grep -q 'helm template' "$helm_gate" || {
+    echo "F5.7 Helm gate must render the chart" >&2
+    exit 1
+}
+
+grep -q 'kubectl apply --dry-run=client' "$helm_gate" || {
+    echo "F5.7 Helm gate must validate rendered Kubernetes manifests" >&2
     exit 1
 }

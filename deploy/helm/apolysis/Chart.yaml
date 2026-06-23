@@ -1,0 +1,11 @@
+apiVersion: v2
+name: apolysis
+description: Production-hardened Apolysis node-local accountability daemon
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/0xLaiHo/Apolysis
+sources:
+  - https://github.com/0xLaiHo/Apolysis
+annotations:
+  apolysis.dev/phase: "f5.7-helm-production-hardening"

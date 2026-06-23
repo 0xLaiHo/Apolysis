@@ -95,6 +95,7 @@ jq -e --arg expected_key_mode "$expected_key_mode" '
   and ([.stagingFiles[].path] | index("bin/apolysisd-health"))
   and ([.stagingFiles[].path] | index("lib/apolysis/apolysis_observer.bpf.o"))
   and ([.stagingFiles[].path] | index("deploy/kubernetes/apolysisd-production-baseline.yaml"))
+  and ([.stagingFiles[].path] | index("deploy/helm/apolysis/Chart.yaml"))
   and all(.files[]; (.sha256 | test("^[0-9a-f]{64}$")) and (.size > 0))
 ' "$manifest" >/dev/null
 

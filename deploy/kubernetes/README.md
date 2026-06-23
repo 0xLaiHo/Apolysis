@@ -72,3 +72,13 @@ checksums and signatures:
 ```bash
 make test-f5-supply-chain
 ```
+
+`deploy/helm/apolysis` packages the same node-local daemon shape as a
+tenant-isolated production chart. It renders tenant labels, tenant-specific
+state hostPaths under `/var/lib/apolysis/tenants/<tenant-id>`, read-only
+runtime metadata RBAC, a default-deny NetworkPolicy, a metrics Service with
+mTLS handoff annotations, and a narrow metrics ingress allowlist.
+
+```bash
+make test-f5-helm-production
+```

@@ -1,0 +1,157 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "apolysis.fullname" . }}
+  namespace: {{ include "apolysis.namespace" . }}
+  labels:
+    {{- include "apolysis.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "apolysis.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.daemonset.updateStrategy.maxUnavailable | quote }}
+  template:
+    metadata:
+      labels:
+        {{- include "apolysis.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        apolysis.dev/phase: "f5.7-helm-production-hardening"
+        apolysis.dev/production-facing-kernel-blocking: {{ ternary "enabled" "disabled" .Values.daemonset.productionFacingKernelBlocking | quote }}
+        apolysis.dev/tenant-id: {{ include "apolysis.tenantId" . | quote }}
+        {{- if .Values.mesh.mtls.required }}
+        apolysis.dev/mtls-required: "true"
+        apolysis.dev/mtls-mode: {{ .Values.mesh.mtls.mode | quote }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "apolysis.fullname" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      hostPID: {{ .Values.daemonset.hostPID }}
+      hostNetwork: false
+      nodeSelector:
+        {{- toYaml .Values.daemonset.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.daemonset.tolerations | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.daemonset.terminationGracePeriodSeconds }}
+      containers:
+        - name: apolysisd
+          image: {{ include "apolysis.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --socket
+            - /run/apolysis/apolysisd.sock
+            - --state-dir
+            - /var/lib/apolysis
+            - --bpf-object
+            - /usr/local/lib/apolysis/apolysis_observer.bpf.o
+            - --docker-socket
+            - /host{{ .Values.runtimeSockets.docker }}
+            - --containerd-socket
+            - /host{{ .Values.runtimeSockets.containerd }}
+            - --k3s-containerd-socket
+            - /host{{ .Values.runtimeSockets.k3sContainerd }}
+            - --queue-capacity
+            - {{ .Values.queue.capacity | quote }}
+            - --scope-command-capacity
+            - {{ .Values.queue.scopeCommandCapacity | quote }}
+            {{- if .Values.metrics.enabled }}
+            - --metrics-listen
+            - {{ printf "%s:%v" .Values.metrics.listenHost .Values.metrics.port | quote }}
+            {{- end }}
+            - --shutdown-drain-ms
+            - {{ .Values.queue.shutdownDrainMs | quote }}
+          {{- if .Values.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          {{- end }}
+          securityContext:
+            runAsUser: {{ .Values.securityContext.runAsUser }}
+            runAsGroup: {{ .Values.securityContext.runAsGroup }}
+            allowPrivilegeEscalation: {{ .Values.securityContext.allowPrivilegeEscalation }}
+            readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
+            capabilities:
+              drop:
+                {{- range .Values.securityContext.capabilities.drop }}
+                - {{ . }}
+                {{- end }}
+              add:
+                {{- range .Values.securityContext.capabilities.add }}
+                - {{ . }}
+                {{- end }}
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/apolysisd-health
+                - --socket
+                - /run/apolysis/apolysisd.sock
+                - --timeout-ms
+                - "1000"
+                - --require-readiness
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/apolysisd-health
+                - --socket
+                - /run/apolysis/apolysisd.sock
+                - --timeout-ms
+                - "1000"
+                - --require-liveness
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: run-apolysis
+              mountPath: /run/apolysis
+            - name: state
+              mountPath: /var/lib/apolysis
+            - name: host-run
+              mountPath: /host/run
+              readOnly: true
+            - name: host-cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+            - name: host-tracing
+              mountPath: /sys/kernel/tracing
+              readOnly: true
+      volumes:
+        - name: run-apolysis
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: state
+          hostPath:
+            path: {{ printf "%s/%s" .Values.state.baseHostPath (include "apolysis.tenantId" .) | quote }}
+            type: DirectoryOrCreate
+        - name: host-run
+          hostPath:
+            path: /run
+            type: Directory
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: host-tracing
+          hostPath:
+            path: /sys/kernel/tracing
+            type: Directory
