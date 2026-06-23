@@ -9,6 +9,7 @@ containerfile="$repo_root/deploy/container/apolysisd.Dockerfile"
 live_gate="$repo_root/scripts/test-f5-live-deployment.sh"
 supply_chain_builder="$repo_root/scripts/build-f5-release-bundle.sh"
 supply_chain_gate="$repo_root/scripts/test-f5-supply-chain.sh"
+release_registry_gate="$repo_root/scripts/test-f5-release-registry.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -114,6 +115,11 @@ for required_path in "$helm_chart/Chart.yaml" "$helm_chart/values.yaml" "$helm_g
     fi
 done
 
+if [[ ! -s "$release_registry_gate" ]]; then
+    echo "missing F5.8 release registry/archive artifact: $release_registry_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -126,6 +132,11 @@ grep -q '^test-f5-supply-chain:' "$makefile" || {
 
 grep -q '^test-f5-helm-production:' "$makefile" || {
     echo "missing Makefile target: test-f5-helm-production" >&2
+    exit 1
+}
+
+grep -q '^test-f5-release-registry:' "$makefile" || {
+    echo "missing Makefile target: test-f5-release-registry" >&2
     exit 1
 }
 
@@ -311,5 +322,30 @@ grep -q 'helm template' "$helm_gate" || {
 
 grep -q 'kubectl apply --dry-run=client' "$helm_gate" || {
     echo "F5.7 Helm gate must validate rendered Kubernetes manifests" >&2
+    exit 1
+}
+
+grep -q 'registry:2' "$release_registry_gate" || {
+    echo "F5.8 registry gate must use a real local OCI registry" >&2
+    exit 1
+}
+
+grep -q 'docker push' "$release_registry_gate" || {
+    echo "F5.8 registry gate must push the release image to the local registry" >&2
+    exit 1
+}
+
+grep -q 'cosign attach sbom' "$release_registry_gate" || {
+    echo "F5.8 registry gate must attach SBOM evidence to the registry image" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-immutable-archive-manifest.json' "$release_registry_gate" || {
+    echo "F5.8 registry gate must create immutable archive manifest evidence" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-registry-attachment.json' "$release_registry_gate" || {
+    echo "F5.8 registry gate must create registry attachment evidence" >&2
     exit 1
 }
