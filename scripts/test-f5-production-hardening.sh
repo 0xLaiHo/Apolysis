@@ -21,6 +21,7 @@ worm_archive_execution_gate="$repo_root/scripts/test-f5-worm-archive-execution.s
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
 service_mesh_live_istio_gate="$repo_root/scripts/test-f5-service-mesh-live-istio.sh"
 operator_controller_gate="$repo_root/scripts/test-f5-operator-controller.sh"
+chaos_performance_gate="$repo_root/scripts/test-f5-chaos-performance.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -186,6 +187,11 @@ if [[ ! -s "$operator_controller_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$chaos_performance_gate" ]]; then
+    echo "missing F5.20 chaos/performance artifact: $chaos_performance_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -258,6 +264,11 @@ grep -q '^test-f5-service-mesh-live-istio:' "$makefile" || {
 
 grep -q '^test-f5-operator-controller:' "$makefile" || {
     echo "missing Makefile target: test-f5-operator-controller" >&2
+    exit 1
+}
+
+grep -q '^test-f5-chaos-performance:' "$makefile" || {
+    echo "missing Makefile target: test-f5-chaos-performance" >&2
     exit 1
 }
 
@@ -958,5 +969,70 @@ grep -q 'controller CPU limit must be between request and 250m' "$repo_root/crat
 
 grep -q 'managed resource ownerReferences must point to the custom resource' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
     echo "F5.19 operator/controller evidence must require owner reference validation" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_CHAOS_PERFORMANCE' "$chaos_performance_gate" || {
+    echo "F5.20 chaos/performance gate must require explicit live confirmation" >&2
+    exit 1
+}
+
+grep -q 'kubectl top pods' "$chaos_performance_gate" || {
+    echo "F5.20 chaos/performance gate must collect pod resource metrics" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_CHAOS_DEPLOYMENTS:-3' "$chaos_performance_gate" || {
+    echo "F5.20 chaos/performance gate must default to at least three deployments" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_CHAOS_REPLICAS_PER_DEPLOYMENT:-10' "$chaos_performance_gate" || {
+    echo "F5.20 chaos/performance gate must default to at least thirty replicas" >&2
+    exit 1
+}
+
+grep -q 'delete "pod/' "$chaos_performance_gate" || {
+    echo "F5.20 chaos/performance gate must perform pod-delete chaos" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-chaos-performance-evidence' "$chaos_performance_gate" || {
+    echo "F5.20 chaos/performance gate must validate collected evidence with the CLI" >&2
+    exit 1
+}
+
+grep -q 'evaluate_f5_chaos_performance_evidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.20 validation library must expose chaos/performance evidence evaluation" >&2
+    exit 1
+}
+
+grep -q 'F5ChaosPerformanceEvidence' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.20 validation library must expose chaos/performance evidence data" >&2
+    exit 1
+}
+
+grep -q 'at least thirty workload replicas are required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.20 chaos/performance evidence must enforce workload scale" >&2
+    exit 1
+}
+
+grep -q 'pod-delete chaos must remove at least 20% of workload pods' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.20 chaos/performance evidence must enforce pod-delete chaos coverage" >&2
+    exit 1
+}
+
+grep -q 'metrics-server availability evidence is required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.20 chaos/performance evidence must require metrics-server evidence" >&2
+    exit 1
+}
+
+grep -q 'observed CPU must stay at or below 1000m' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.20 chaos/performance evidence must enforce CPU budget" >&2
+    exit 1
+}
+
+grep -q 'observed memory must stay at or below 1024Mi' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.20 chaos/performance evidence must enforce memory budget" >&2
     exit 1
 }

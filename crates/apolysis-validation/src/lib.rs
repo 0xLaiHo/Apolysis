@@ -1097,6 +1097,89 @@ pub struct F5OperatorControllerReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum F5ChaosPerformanceSource {
+    Fixture,
+    LiveCluster,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5ChaosPerformanceProvider {
+    Fixture,
+    K3s,
+    ManagedKubernetes,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5ChaosAction {
+    PodDelete,
+    DeploymentSelfHealing,
+    MetricsScrape,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ChaosPerformanceEvidence {
+    pub evidence_id: String,
+    pub source: F5ChaosPerformanceSource,
+    pub provider: F5ChaosPerformanceProvider,
+    pub cluster_name: String,
+    pub namespace: String,
+    pub workload_deployment_count: u32,
+    pub workload_replicas_total: u32,
+    pub workload_ready_replicas_before_chaos: u32,
+    pub workload_ready_replicas_after_chaos: u32,
+    pub pod_churn_deleted: u32,
+    pub chaos_actions: Vec<F5ChaosAction>,
+    pub p95_startup_latency_ms: u64,
+    pub p95_recovery_latency_ms: u64,
+    pub metrics_server_available: bool,
+    pub resource_metrics_collected: bool,
+    pub max_observed_cpu_millicores: u32,
+    pub max_observed_memory_mib: u32,
+    pub total_cpu_request_millicores: u32,
+    pub total_cpu_limit_millicores: u32,
+    pub total_memory_request_mib: u32,
+    pub total_memory_limit_mib: u32,
+    pub scheduling_failure_count: u32,
+    pub oom_kill_count: u32,
+    pub restart_count: u32,
+    pub cleanup_confirmed: bool,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ChaosPerformanceApproval {
+    pub evidence_id: String,
+    pub provider: F5ChaosPerformanceProvider,
+    pub cluster_name: String,
+    pub namespace: String,
+    pub workload_deployment_count: u32,
+    pub workload_replicas_total: u32,
+    pub pod_churn_deleted: u32,
+    pub p95_startup_latency_ms: u64,
+    pub p95_recovery_latency_ms: u64,
+    pub max_observed_cpu_millicores: u32,
+    pub max_observed_memory_mib: u32,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ChaosPerformanceFailure {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ChaosPerformanceReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approval: Option<F5ChaosPerformanceApproval>,
+    pub failures: Vec<F5ChaosPerformanceFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum F4RuntimeAdapterEvidenceSource {
     Fixture,
     LiveHost,
@@ -3097,6 +3180,236 @@ pub fn evaluate_f5_operator_controller_evidence(
     };
 
     F5OperatorControllerReport {
+        schema_version: 1,
+        passed: approval.is_some(),
+        approval,
+        failures,
+    }
+}
+
+pub fn evaluate_f5_chaos_performance_evidence(
+    evidence: F5ChaosPerformanceEvidence,
+) -> F5ChaosPerformanceReport {
+    const MIN_DEPLOYMENTS: u32 = 3;
+    const MIN_REPLICAS: u32 = 30;
+    const MAX_P95_LATENCY_MS: u64 = 180_000;
+    const MAX_OBSERVED_CPU_MILLICORES: u32 = 1_000;
+    const MAX_OBSERVED_MEMORY_MIB: u32 = 1_024;
+    const MAX_TOTAL_CPU_REQUEST_MILLICORES: u32 = 500;
+    const MAX_TOTAL_CPU_LIMIT_MILLICORES: u32 = 1_000;
+    const MAX_TOTAL_MEMORY_REQUEST_MIB: u32 = 512;
+    const MAX_TOTAL_MEMORY_LIMIT_MIB: u32 = 1_024;
+
+    let mut failures = Vec::new();
+
+    if evidence.evidence_id.trim().is_empty() {
+        f5_chaos_performance_failure(&mut failures, "evidence_id", "evidence id is required");
+    }
+    if evidence.source != F5ChaosPerformanceSource::LiveCluster {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "source",
+            "live Kubernetes cluster evidence is required",
+        );
+    }
+    if !matches!(
+        evidence.provider,
+        F5ChaosPerformanceProvider::K3s | F5ChaosPerformanceProvider::ManagedKubernetes
+    ) {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "provider",
+            "k3s or managed Kubernetes provider evidence is required",
+        );
+    }
+    if evidence.cluster_name.trim().is_empty() {
+        f5_chaos_performance_failure(&mut failures, "cluster_name", "cluster name is required");
+    }
+    if evidence.namespace.trim().is_empty() {
+        f5_chaos_performance_failure(&mut failures, "namespace", "namespace is required");
+    }
+    if evidence.workload_deployment_count < MIN_DEPLOYMENTS {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "workload_deployment_count",
+            "at least three workload deployments are required",
+        );
+    }
+    if evidence.workload_replicas_total < MIN_REPLICAS {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "workload_replicas_total",
+            "at least thirty workload replicas are required",
+        );
+    }
+    if evidence.workload_ready_replicas_before_chaos < evidence.workload_replicas_total {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "workload_ready_replicas_before_chaos",
+            "all replicas must be ready before chaos",
+        );
+    }
+    if evidence.workload_ready_replicas_after_chaos < evidence.workload_replicas_total {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "workload_ready_replicas_after_chaos",
+            "all replicas must recover after chaos",
+        );
+    }
+    if evidence.pod_churn_deleted.saturating_mul(5) < evidence.workload_replicas_total {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "pod_churn_deleted",
+            "pod-delete chaos must remove at least 20% of workload pods",
+        );
+    }
+    if !evidence.chaos_actions.contains(&F5ChaosAction::PodDelete) {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "chaos_actions",
+            "pod-delete chaos action evidence is required",
+        );
+    }
+    if !evidence
+        .chaos_actions
+        .contains(&F5ChaosAction::DeploymentSelfHealing)
+    {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "chaos_actions",
+            "deployment self-healing action evidence is required",
+        );
+    }
+    if evidence.p95_startup_latency_ms > MAX_P95_LATENCY_MS {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "p95_startup_latency_ms",
+            "startup p95 latency must be 180 seconds or less",
+        );
+    }
+    if evidence.p95_recovery_latency_ms > MAX_P95_LATENCY_MS {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "p95_recovery_latency_ms",
+            "recovery p95 latency must be 180 seconds or less",
+        );
+    }
+    if !evidence.metrics_server_available {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "metrics_server_available",
+            "metrics-server availability evidence is required",
+        );
+    }
+    if !evidence.resource_metrics_collected {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "resource_metrics_collected",
+            "resource metrics collection evidence is required",
+        );
+    }
+    if evidence.max_observed_cpu_millicores > MAX_OBSERVED_CPU_MILLICORES {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "max_observed_cpu_millicores",
+            "observed CPU must stay at or below 1000m",
+        );
+    }
+    if evidence.max_observed_memory_mib > MAX_OBSERVED_MEMORY_MIB {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "max_observed_memory_mib",
+            "observed memory must stay at or below 1024Mi",
+        );
+    }
+    if evidence.total_cpu_request_millicores == 0
+        || evidence.total_cpu_request_millicores > MAX_TOTAL_CPU_REQUEST_MILLICORES
+    {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "total_cpu_request_millicores",
+            "aggregate CPU request must stay at or below 500m",
+        );
+    }
+    if evidence.total_cpu_limit_millicores < evidence.total_cpu_request_millicores
+        || evidence.total_cpu_limit_millicores > MAX_TOTAL_CPU_LIMIT_MILLICORES
+    {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "total_cpu_limit_millicores",
+            "aggregate CPU limit must stay at or below 1000m",
+        );
+    }
+    if evidence.total_memory_request_mib == 0
+        || evidence.total_memory_request_mib > MAX_TOTAL_MEMORY_REQUEST_MIB
+    {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "total_memory_request_mib",
+            "aggregate memory request must stay at or below 512Mi",
+        );
+    }
+    if evidence.total_memory_limit_mib < evidence.total_memory_request_mib
+        || evidence.total_memory_limit_mib > MAX_TOTAL_MEMORY_LIMIT_MIB
+    {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "total_memory_limit_mib",
+            "aggregate memory limit must stay at or below 1024Mi",
+        );
+    }
+    if evidence.scheduling_failure_count > 0 {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "scheduling_failure_count",
+            "scheduling failures are not allowed",
+        );
+    }
+    if evidence.oom_kill_count > 0 {
+        f5_chaos_performance_failure(&mut failures, "oom_kill_count", "OOM kills are not allowed");
+    }
+    if evidence.restart_count > 0 {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "restart_count",
+            "container restarts are not allowed during the run",
+        );
+    }
+    if !evidence.cleanup_confirmed {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "cleanup_confirmed",
+            "cleanup confirmation is required",
+        );
+    }
+    if evidence.observed_at_unix_ms == 0 {
+        f5_chaos_performance_failure(
+            &mut failures,
+            "observed_at_unix_ms",
+            "observed timestamp is required",
+        );
+    }
+
+    let approval = if failures.is_empty() {
+        Some(F5ChaosPerformanceApproval {
+            evidence_id: evidence.evidence_id,
+            provider: evidence.provider,
+            cluster_name: evidence.cluster_name,
+            namespace: evidence.namespace,
+            workload_deployment_count: evidence.workload_deployment_count,
+            workload_replicas_total: evidence.workload_replicas_total,
+            pod_churn_deleted: evidence.pod_churn_deleted,
+            p95_startup_latency_ms: evidence.p95_startup_latency_ms,
+            p95_recovery_latency_ms: evidence.p95_recovery_latency_ms,
+            max_observed_cpu_millicores: evidence.max_observed_cpu_millicores,
+            max_observed_memory_mib: evidence.max_observed_memory_mib,
+            observed_at_unix_ms: evidence.observed_at_unix_ms,
+        })
+    } else {
+        None
+    };
+
+    F5ChaosPerformanceReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -6300,6 +6613,17 @@ fn f5_operator_controller_failure(
     message: impl Into<String>,
 ) {
     failures.push(F5OperatorControllerFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
+fn f5_chaos_performance_failure(
+    failures: &mut Vec<F5ChaosPerformanceFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(F5ChaosPerformanceFailure {
         field: field.into(),
         message: message.into(),
     });

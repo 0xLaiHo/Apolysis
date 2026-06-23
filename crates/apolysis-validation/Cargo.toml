@@ -81,3 +81,7 @@ path = "src/bin/apolysis-f5-service-mesh-live-evidence.rs"
 [[bin]]
 name = "apolysis-f5-operator-controller-evidence"
 path = "src/bin/apolysis-f5-operator-controller-evidence.rs"
+
+[[bin]]
+name = "apolysis-f5-chaos-performance-evidence"
+path = "src/bin/apolysis-f5-chaos-performance-evidence.rs"
