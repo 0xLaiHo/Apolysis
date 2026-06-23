@@ -1113,6 +1113,21 @@ grep -q 'provider must be an accepted external provider for this requirement' "$
     exit 1
 }
 
+grep -q -- '--bundle-root' "$external_provider_qualification_gate" || {
+    echo "F5.24 external provider qualification live bundle must verify retained artifact files" >&2
+    exit 1
+}
+
+grep -q 'retained evidence artifact' "$repo_root/crates/apolysis-validation/src/bin/apolysis-f5-external-provider-qualification.rs" || {
+    echo "F5.24 external provider qualification CLI must inspect retained evidence artifacts" >&2
+    exit 1
+}
+
+grep -q 'sha256 does not match' "$repo_root/crates/apolysis-validation/src/bin/apolysis-f5-external-provider-qualification.rs" || {
+    echo "F5.24 external provider qualification CLI must reject mismatched retained evidence artifacts" >&2
+    exit 1
+}
+
 grep -q 'CloudflareR2BucketLock' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
     echo "F5.22 WORM archive execution must support Cloudflare R2 Bucket Lock evidence" >&2
     exit 1

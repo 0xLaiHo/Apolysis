@@ -25,6 +25,7 @@ local_bundle="$output_dir/apolysis-f5-external-provider-qualification-local-reje
 local_report="$output_dir/apolysis-f5-external-provider-qualification-local-rejection-report.json"
 live_bundle="${APOLYSIS_F5_EXTERNAL_PROVIDER_BUNDLE:-}"
 live_report="$output_dir/apolysis-f5-external-provider-qualification-live-report.json"
+live_bundle_root="${APOLYSIS_F5_EXTERNAL_PROVIDER_BUNDLE_ROOT:-}"
 
 cat >"$contract_bundle" <<'JSON'
 {
@@ -184,8 +185,12 @@ if [[ -n "$live_bundle" ]]; then
         echo "apolysis-f5: refusing to validate external provider bundle without APOLYSIS_CONFIRM_F5_EXTERNAL_PROVIDER_QUALIFICATION=1" >&2
         exit 2
     fi
+    if [[ -z "$live_bundle_root" ]]; then
+        live_bundle_root="$(cd "$(dirname "$live_bundle")" && pwd)"
+    fi
     cargo run -q -p apolysis-validation --bin apolysis-f5-external-provider-qualification -- \
-        --bundle "$live_bundle" >"$live_report"
+        --bundle "$live_bundle" \
+        --bundle-root "$live_bundle_root" >"$live_report"
     jq -e '.passed == true and (.approval.qualified_requirements | length) == 4' "$live_report" >/dev/null
     printf 'apolysis-f5: external provider qualification live bundle passed (%s)\n' "$live_report"
 else
