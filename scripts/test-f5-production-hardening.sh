@@ -24,6 +24,8 @@ service_mesh_live_istio_gate="$repo_root/scripts/test-f5-service-mesh-live-istio
 operator_controller_gate="$repo_root/scripts/test-f5-operator-controller.sh"
 chaos_performance_gate="$repo_root/scripts/test-f5-chaos-performance.sh"
 external_provider_qualification_gate="$repo_root/scripts/test-f5-external-provider-qualification.sh"
+final_external_bundle_builder="$repo_root/scripts/build-f5-final-external-provider-bundle.sh"
+final_external_bundle_gate="$repo_root/scripts/test-f5-final-external-provider-bundle.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -204,6 +206,16 @@ if [[ ! -s "$external_provider_qualification_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$final_external_bundle_builder" ]]; then
+    echo "missing F5.26 final external provider bundle builder: $final_external_bundle_builder" >&2
+    exit 1
+fi
+
+if [[ ! -s "$final_external_bundle_gate" ]]; then
+    echo "missing F5.26 final external provider bundle gate: $final_external_bundle_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -291,6 +303,11 @@ grep -q '^test-f5-chaos-performance:' "$makefile" || {
 
 grep -q '^test-f5-external-provider-qualification:' "$makefile" || {
     echo "missing Makefile target: test-f5-external-provider-qualification" >&2
+    exit 1
+}
+
+grep -q '^test-f5-final-external-provider-bundle:' "$makefile" || {
+    echo "missing Makefile target: test-f5-final-external-provider-bundle" >&2
     exit 1
 }
 
@@ -1171,6 +1188,41 @@ grep -q 'retained evidence artifact' "$repo_root/crates/apolysis-validation/src/
 
 grep -q 'sha256 does not match' "$repo_root/crates/apolysis-validation/src/bin/apolysis-f5-external-provider-qualification.rs" || {
     echo "F5.24 external provider qualification CLI must reject mismatched retained evidence artifacts" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_SIGNING_EVIDENCE' "$final_external_bundle_builder" || {
+    echo "F5.26 final bundle builder must require retained signing evidence" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_WORM_EVIDENCE' "$final_external_bundle_builder" || {
+    echo "F5.26 final bundle builder must require retained WORM evidence" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_REGISTRY_EVIDENCE' "$final_external_bundle_builder" || {
+    echo "F5.26 final bundle builder must require retained registry evidence" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_MANAGED_MESH_EVIDENCE' "$final_external_bundle_builder" || {
+    echo "F5.26 final bundle builder must require retained managed mesh evidence" >&2
+    exit 1
+}
+
+grep -q -- '--bundle-root' "$final_external_bundle_builder" || {
+    echo "F5.26 final bundle builder must validate retained artifacts with bundle-root" >&2
+    exit 1
+}
+
+grep -q 'cloud_kms_or_external_hsm_signing' "$final_external_bundle_builder" || {
+    echo "F5.26 final bundle must include signing provider qualification" >&2
+    exit 1
+}
+
+grep -q 'managed_service_mesh' "$final_external_bundle_builder" || {
+    echo "F5.26 final bundle must include managed mesh provider qualification" >&2
     exit 1
 }
 
