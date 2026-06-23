@@ -121,6 +121,96 @@ async fn register_renew_query_and_close_update_session_state() {
 }
 
 #[tokio::test]
+async fn tenant_scoped_queries_and_session_lists_do_not_cross_tenant_boundaries() {
+    let server = TestServer::start("tenant-query-retention").await;
+    let tenant_a_register = br#"{
+        "type":"register",
+        "intent":{
+            "schema_version":1,
+            "tenant_id":"tenant-a",
+            "retention_tier":"short",
+            "session_id":"tenant-a-session",
+            "expires_at_unix_ms":4102444800000,
+            "declared_actions":["test"],
+            "allowed_resources":[],
+            "policy_ref":"policy.yaml",
+            "workload_selectors":[]
+        }
+    }"#;
+    let tenant_b_register = br#"{
+        "type":"register",
+        "intent":{
+            "schema_version":1,
+            "tenant_id":"tenant-b",
+            "retention_tier":"extended",
+            "session_id":"tenant-b-session",
+            "expires_at_unix_ms":4102444800000,
+            "declared_actions":["test"],
+            "allowed_resources":[],
+            "policy_ref":"policy.yaml",
+            "workload_selectors":[]
+        }
+    }"#;
+    assert!(matches!(
+        request(&server.config.socket_path, tenant_a_register).await,
+        DaemonResponse::Ack { operation, .. } if operation == "register"
+    ));
+    assert!(matches!(
+        request(&server.config.socket_path, tenant_b_register).await,
+        DaemonResponse::Ack { operation, .. } if operation == "register"
+    ));
+
+    assert!(matches!(
+        request(
+            &server.config.socket_path,
+            br#"{"type":"query","tenant_id":"tenant-b","session_id":"tenant-a-session"}"#,
+        )
+        .await,
+        DaemonResponse::Session { session: None, .. }
+    ));
+
+    let DaemonResponse::Session {
+        session: Some(session),
+        ..
+    } = request(
+        &server.config.socket_path,
+        br#"{"type":"query","tenant_id":"tenant-a","session_id":"tenant-a-session"}"#,
+    )
+    .await
+    else {
+        panic!("expected tenant-a session");
+    };
+    assert_eq!(session.intent.tenant_id, "tenant-a");
+    assert_eq!(
+        session.intent.retention_tier,
+        apolysis_accountability::RetentionTier::Short
+    );
+
+    let DaemonResponse::SessionList {
+        tenant_id,
+        retention_tier,
+        sessions,
+        ..
+    } = request(
+        &server.config.socket_path,
+        br#"{"type":"list_sessions","tenant_id":"tenant-b","retention_tier":"extended"}"#,
+    )
+    .await
+    else {
+        panic!("expected tenant-b session list");
+    };
+    assert_eq!(tenant_id, "tenant-b");
+    assert_eq!(
+        retention_tier,
+        Some(apolysis_accountability::RetentionTier::Extended)
+    );
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].intent.session_id, "tenant-b-session");
+
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn malformed_and_oversized_frames_return_errors_without_stopping_server() {
     let server = TestServer::start("invalid").await;
     assert!(matches!(

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{IntentError, SessionIntent};
+use crate::{IntentError, RetentionTier, SessionIntent};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -237,6 +237,29 @@ impl SessionRegistry {
 
     pub fn get(&self, session_id: &str) -> Option<&SessionState> {
         self.sessions.get(session_id)
+    }
+
+    pub fn get_for_tenant(&self, session_id: &str, tenant_id: &str) -> Option<&SessionState> {
+        self.sessions
+            .get(session_id)
+            .filter(|state| state.intent.tenant_id == tenant_id)
+    }
+
+    pub fn list_for_tenant(
+        &self,
+        tenant_id: &str,
+        retention_tier: Option<RetentionTier>,
+    ) -> Vec<SessionState> {
+        self.sessions
+            .values()
+            .filter(|state| {
+                state.intent.tenant_id == tenant_id
+                    && retention_tier
+                        .map(|tier| state.intent.retention_tier == tier)
+                        .unwrap_or(true)
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn session_for_cgroup(&self, cgroup_id: u64) -> Option<&str> {

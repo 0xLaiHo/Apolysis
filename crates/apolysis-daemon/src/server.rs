@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use apolysis_accountability::{
     decode_intent_frame, AdapterKind, ComponentState, HealthSnapshot, IntentError, IntentRequest,
-    SessionState, MAX_INTENT_FRAME_BYTES,
+    RetentionTier, SessionState, MAX_INTENT_FRAME_BYTES,
 };
 use apolysis_observer::{DaemonObserver, DaemonObserverConfig};
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,12 @@ pub enum DaemonResponse {
     Session {
         schema_version: u32,
         session: Option<SessionState>,
+    },
+    SessionList {
+        schema_version: u32,
+        tenant_id: String,
+        retention_tier: Option<RetentionTier>,
+        sessions: Vec<SessionState>,
     },
     Error {
         schema_version: u32,
@@ -544,9 +550,21 @@ async fn dispatch(request: IntentRequest, state: &DaemonState, now_unix_ms: u64)
             Ok(()) => ack("close", Some(session_id)),
             Err(error) => error_response("state_error", error),
         },
-        IntentRequest::Query { session_id } => DaemonResponse::Session {
+        IntentRequest::Query {
+            tenant_id,
+            session_id,
+        } => DaemonResponse::Session {
             schema_version: DAEMON_SCHEMA_V1,
-            session: state.query(&session_id).await,
+            session: state.query_for_tenant(&session_id, &tenant_id).await,
+        },
+        IntentRequest::ListSessions {
+            tenant_id,
+            retention_tier,
+        } => DaemonResponse::SessionList {
+            schema_version: DAEMON_SCHEMA_V1,
+            sessions: state.list_for_tenant(&tenant_id, retention_tier).await,
+            tenant_id,
+            retention_tier,
         },
         IntentRequest::Health => {
             let health = state.health().await;

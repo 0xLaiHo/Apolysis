@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use apolysis_accountability::{
     AccountabilityAnalyzer, AdapterKind, AssociationOutcome, ComponentState, EffectKind,
     EvidenceBoundary, HealthSnapshot, ObservedEffect, QueueStats, RegisterOutcome, RegistryError,
-    ResourceKind, RuntimeIdentity, SessionIntent, SessionRegistry, SessionState,
+    ResourceKind, RetentionTier, RuntimeIdentity, SessionIntent, SessionRegistry, SessionState,
 };
 use apolysis_feedback::FeedbackWriter;
 use apolysis_policy::Policy;
@@ -207,6 +207,29 @@ impl DaemonState {
 
     pub async fn query(&self, session_id: &str) -> Option<SessionState> {
         self.registry.read().await.get(session_id).cloned()
+    }
+
+    pub async fn query_for_tenant(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+    ) -> Option<SessionState> {
+        self.registry
+            .read()
+            .await
+            .get_for_tenant(session_id, tenant_id)
+            .cloned()
+    }
+
+    pub async fn list_for_tenant(
+        &self,
+        tenant_id: &str,
+        retention_tier: Option<RetentionTier>,
+    ) -> Vec<SessionState> {
+        self.registry
+            .read()
+            .await
+            .list_for_tenant(tenant_id, retention_tier)
     }
 
     pub async fn session_for_cgroup(&self, cgroup_id: u64) -> Option<String> {

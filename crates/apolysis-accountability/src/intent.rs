@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub const INTENT_SCHEMA_V1: u32 = 1;
 pub const MAX_INTENT_FRAME_BYTES: usize = 64 * 1024;
+pub const DEFAULT_TENANT_ID: &str = "default";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -19,7 +20,14 @@ pub enum IntentRequest {
         session_id: String,
     },
     Query {
+        #[serde(default = "default_tenant_id")]
+        tenant_id: String,
         session_id: String,
+    },
+    ListSessions {
+        tenant_id: String,
+        #[serde(default)]
+        retention_tier: Option<RetentionTier>,
     },
     Health,
 }
@@ -38,17 +46,36 @@ impl IntentRequest {
                 }
                 Ok(())
             }
-            Self::Close { session_id } | Self::Query { session_id } => {
+            Self::Close { session_id } => validate_session_id(session_id),
+            Self::Query {
+                tenant_id,
+                session_id,
+            } => {
+                validate_tenant_id(tenant_id)?;
                 validate_session_id(session_id)
             }
+            Self::ListSessions { tenant_id, .. } => validate_tenant_id(tenant_id),
             Self::Health => Ok(()),
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionTier {
+    Short,
+    #[default]
+    Standard,
+    Extended,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SessionIntent {
     pub schema_version: u32,
+    #[serde(default = "default_tenant_id")]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub retention_tier: RetentionTier,
     pub session_id: String,
     pub expires_at_unix_ms: u64,
     pub declared_actions: Vec<ActionClass>,
@@ -62,6 +89,7 @@ impl SessionIntent {
         if self.schema_version != INTENT_SCHEMA_V1 {
             return Err(IntentError::UnsupportedSchemaVersion(self.schema_version));
         }
+        validate_tenant_id(&self.tenant_id)?;
         validate_session_id(&self.session_id)?;
         if self.expires_at_unix_ms <= now_unix_ms {
             return Err(IntentError::Expired);
@@ -123,6 +151,8 @@ pub enum IntentError {
     FrameTooLarge(usize),
     InvalidJson(String),
     UnsupportedSchemaVersion(u32),
+    EmptyTenantId,
+    InvalidTenantId,
     EmptySessionId,
     InvalidSessionId,
     EmptyPolicyRef,
@@ -137,6 +167,10 @@ impl std::fmt::Display for IntentError {
             Self::UnsupportedSchemaVersion(version) => {
                 write!(formatter, "unsupported intent schema version: {version}")
             }
+            Self::EmptyTenantId => formatter.write_str("tenant id must not be empty"),
+            Self::InvalidTenantId => formatter.write_str(
+                "tenant id must be 1-63 ASCII letters, digits, dots, underscores, or hyphens",
+            ),
             Self::EmptySessionId => formatter.write_str("session id must not be empty"),
             Self::InvalidSessionId => formatter.write_str(
                 "session id must be 1-128 ASCII letters, digits, dots, underscores, or hyphens",
@@ -145,6 +179,10 @@ impl std::fmt::Display for IntentError {
             Self::Expired => formatter.write_str("intent is expired"),
         }
     }
+}
+
+fn default_tenant_id() -> String {
+    DEFAULT_TENANT_ID.to_string()
 }
 
 impl std::error::Error for IntentError {}
@@ -170,6 +208,20 @@ fn validate_session_id(session_id: &str) -> Result<(), IntentError> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
         return Err(IntentError::InvalidSessionId);
+    }
+    Ok(())
+}
+
+fn validate_tenant_id(tenant_id: &str) -> Result<(), IntentError> {
+    if tenant_id.trim().is_empty() {
+        return Err(IntentError::EmptyTenantId);
+    }
+    if tenant_id.len() > 63
+        || !tenant_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(IntentError::InvalidTenantId);
     }
     Ok(())
 }

@@ -138,6 +138,8 @@ fn timeline(config: &DaemonConfig, session_id: &str) -> String {
 fn intent(session_id: &str) -> SessionIntent {
     SessionIntent {
         schema_version: 1,
+        tenant_id: apolysis_accountability::DEFAULT_TENANT_ID.to_string(),
+        retention_tier: apolysis_accountability::RetentionTier::Standard,
         session_id: session_id.to_string(),
         expires_at_unix_ms: 4_102_444_800_000,
         declared_actions: vec![ActionClass::Execute],

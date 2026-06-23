@@ -10,6 +10,7 @@ live_gate="$repo_root/scripts/test-f5-live-deployment.sh"
 supply_chain_builder="$repo_root/scripts/build-f5-release-bundle.sh"
 supply_chain_gate="$repo_root/scripts/test-f5-supply-chain.sh"
 release_registry_gate="$repo_root/scripts/test-f5-release-registry.sh"
+tenant_query_gate="$repo_root/scripts/test-f5-tenant-query-retention.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -120,6 +121,11 @@ if [[ ! -s "$release_registry_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$tenant_query_gate" ]]; then
+    echo "missing F5.10 tenant query/retention artifact: $tenant_query_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -137,6 +143,11 @@ grep -q '^test-f5-helm-production:' "$makefile" || {
 
 grep -q '^test-f5-release-registry:' "$makefile" || {
     echo "missing Makefile target: test-f5-release-registry" >&2
+    exit 1
+}
+
+grep -q '^test-f5-tenant-query-retention:' "$makefile" || {
+    echo "missing Makefile target: test-f5-tenant-query-retention" >&2
     exit 1
 }
 
@@ -367,5 +378,45 @@ grep -q 'apolysis-f5-immutable-archive-manifest.json' "$release_registry_gate" |
 
 grep -q 'apolysis-f5-registry-attachment.json' "$release_registry_gate" || {
     echo "F5.8 registry gate must create registry attachment evidence" >&2
+    exit 1
+}
+
+grep -q 'cargo test -p apolysis-accountability --test intent' "$tenant_query_gate" || {
+    echo "F5.10 tenant query gate must run accountability intent API tests" >&2
+    exit 1
+}
+
+grep -q 'cargo test -p apolysis-accountability --test session' "$tenant_query_gate" || {
+    echo "F5.10 tenant query gate must run session registry retention tests" >&2
+    exit 1
+}
+
+grep -q 'cargo test -p apolysis-daemon --test socket_api' "$tenant_query_gate" || {
+    echo "F5.10 tenant query gate must run daemon socket API tenant tests" >&2
+    exit 1
+}
+
+grep -q 'ListSessions' "$repo_root/crates/apolysis-accountability/src/intent.rs" || {
+    echo "F5.10 intent API must expose tenant session listing" >&2
+    exit 1
+}
+
+grep -q 'RetentionTier' "$repo_root/crates/apolysis-accountability/src/intent.rs" || {
+    echo "F5.10 intent API must expose retention tiers" >&2
+    exit 1
+}
+
+grep -q 'list_for_tenant' "$repo_root/crates/apolysis-accountability/src/session.rs" || {
+    echo "F5.10 session registry must list sessions by tenant" >&2
+    exit 1
+}
+
+grep -q 'query_for_tenant' "$repo_root/crates/apolysis-daemon/src/state.rs" || {
+    echo "F5.10 daemon state must enforce tenant-scoped query" >&2
+    exit 1
+}
+
+grep -q 'SessionList' "$repo_root/crates/apolysis-daemon/src/server.rs" || {
+    echo "F5.10 daemon response API must return tenant session lists" >&2
     exit 1
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_accountability::{
-    ActionClass, AssociationOutcome, RegisterOutcome, RegistryError, SessionIntent,
+    ActionClass, AssociationOutcome, RegisterOutcome, RegistryError, RetentionTier, SessionIntent,
     SessionRegistry, SessionStatus,
 };
 
@@ -184,9 +184,80 @@ fn rejects_association_for_expired_or_unknown_sessions() {
     );
 }
 
+#[test]
+fn lists_sessions_by_tenant_and_retention_tier() {
+    let mut registry = SessionRegistry::new(4, 2);
+    registry
+        .register(
+            intent_for_tenant(
+                "tenant-a-short",
+                NOW_MS + 1_000,
+                "tenant-a",
+                RetentionTier::Short,
+            ),
+            NOW_MS,
+        )
+        .expect("tenant-a short session");
+    registry
+        .register(
+            intent_for_tenant(
+                "tenant-a-extended",
+                NOW_MS + 1_000,
+                "tenant-a",
+                RetentionTier::Extended,
+            ),
+            NOW_MS,
+        )
+        .expect("tenant-a extended session");
+    registry
+        .register(
+            intent_for_tenant(
+                "tenant-b-extended",
+                NOW_MS + 1_000,
+                "tenant-b",
+                RetentionTier::Extended,
+            ),
+            NOW_MS,
+        )
+        .expect("tenant-b extended session");
+
+    let tenant_a = registry.list_for_tenant("tenant-a", None);
+    let tenant_a_ids: Vec<_> = tenant_a
+        .iter()
+        .map(|state| state.intent.session_id.as_str())
+        .collect();
+    assert_eq!(tenant_a_ids, vec!["tenant-a-extended", "tenant-a-short"]);
+
+    let tenant_a_extended = registry.list_for_tenant("tenant-a", Some(RetentionTier::Extended));
+    assert_eq!(tenant_a_extended.len(), 1);
+    assert_eq!(tenant_a_extended[0].intent.session_id, "tenant-a-extended");
+    assert_eq!(
+        registry
+            .get_for_tenant("tenant-a-short", "tenant-b")
+            .map(|state| &state.intent.session_id),
+        None
+    );
+}
+
 fn intent(session_id: &str, expires_at_unix_ms: u64) -> SessionIntent {
+    intent_for_tenant(
+        session_id,
+        expires_at_unix_ms,
+        apolysis_accountability::DEFAULT_TENANT_ID,
+        RetentionTier::Standard,
+    )
+}
+
+fn intent_for_tenant(
+    session_id: &str,
+    expires_at_unix_ms: u64,
+    tenant_id: &str,
+    retention_tier: RetentionTier,
+) -> SessionIntent {
     SessionIntent {
         schema_version: 1,
+        tenant_id: tenant_id.to_string(),
+        retention_tier,
         session_id: session_id.to_string(),
         expires_at_unix_ms,
         declared_actions: vec![ActionClass::Test],

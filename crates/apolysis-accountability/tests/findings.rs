@@ -154,6 +154,8 @@ fn intent(
 ) -> SessionIntent {
     SessionIntent {
         schema_version: 1,
+        tenant_id: apolysis_accountability::DEFAULT_TENANT_ID.to_string(),
+        retention_tier: apolysis_accountability::RetentionTier::Standard,
         session_id: "session-f2".to_string(),
         expires_at_unix_ms: u64::MAX,
         declared_actions,

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_accountability::{
-    decode_intent_frame, ActionClass, IntentError, IntentRequest, RuntimeSelector,
-    MAX_INTENT_FRAME_BYTES,
+    decode_intent_frame, ActionClass, IntentError, IntentRequest, RetentionTier, RuntimeSelector,
+    DEFAULT_TENANT_ID, MAX_INTENT_FRAME_BYTES,
 };
 
 const NOW_MS: u64 = 1_780_000_000_000;
@@ -13,6 +13,8 @@ fn parses_a_v1_register_intent_request() {
         "type":"register",
         "intent":{
             "schema_version":1,
+            "tenant_id":"tenant-a",
+            "retention_tier":"extended",
             "session_id":"session-f2",
             "expires_at_unix_ms":1780000060000,
             "declared_actions":["test","read_file"],
@@ -37,6 +39,8 @@ fn parses_a_v1_register_intent_request() {
     };
 
     assert_eq!(intent.schema_version, 1);
+    assert_eq!(intent.tenant_id, "tenant-a");
+    assert_eq!(intent.retention_tier, RetentionTier::Extended);
     assert_eq!(intent.session_id, "session-f2");
     assert_eq!(
         intent.declared_actions,
@@ -77,7 +81,34 @@ fn parses_health_and_session_lifecycle_requests() {
         decode_intent_frame(br#"{"type":"query","session_id":"session-f2"}"#, NOW_MS)
             .expect("query"),
         IntentRequest::Query {
+            tenant_id: DEFAULT_TENANT_ID.to_string(),
             session_id: "session-f2".to_string(),
+        }
+    );
+}
+
+#[test]
+fn parses_tenant_scoped_query_and_session_list_requests() {
+    assert_eq!(
+        decode_intent_frame(
+            br#"{"type":"query","tenant_id":"tenant-a","session_id":"session-f2"}"#,
+            NOW_MS,
+        )
+        .expect("tenant query"),
+        IntentRequest::Query {
+            tenant_id: "tenant-a".to_string(),
+            session_id: "session-f2".to_string(),
+        }
+    );
+    assert_eq!(
+        decode_intent_frame(
+            br#"{"type":"list_sessions","tenant_id":"tenant-a","retention_tier":"short"}"#,
+            NOW_MS,
+        )
+        .expect("tenant session list"),
+        IntentRequest::ListSessions {
+            tenant_id: "tenant-a".to_string(),
+            retention_tier: Some(RetentionTier::Short),
         }
     );
 }
@@ -152,6 +183,29 @@ fn rejects_invalid_renew_and_query_session_ids() {
     assert_eq!(
         decode_intent_frame(br#"{"type":"query","session_id":" "}"#, NOW_MS),
         Err(IntentError::EmptySessionId)
+    );
+}
+
+#[test]
+fn rejects_tenant_ids_that_are_unsafe_for_state_or_query_scope() {
+    for tenant_id in ["", " ", "../escape", "nested/tenant", "tenant\nbreak"] {
+        let frame =
+            format!(r#"{{"type":"query","tenant_id":{tenant_id:?},"session_id":"session-f2"}}"#);
+        assert!(
+            matches!(
+                decode_intent_frame(frame.as_bytes(), NOW_MS),
+                Err(IntentError::EmptyTenantId | IntentError::InvalidTenantId)
+            ),
+            "tenant id {tenant_id:?} must be rejected"
+        );
+    }
+    let oversized = "a".repeat(64);
+    let frame = format!(
+        r#"{{"type":"list_sessions","tenant_id":"{oversized}","retention_tier":"standard"}}"#
+    );
+    assert_eq!(
+        decode_intent_frame(frame.as_bytes(), NOW_MS),
+        Err(IntentError::InvalidTenantId)
     );
 }
 
