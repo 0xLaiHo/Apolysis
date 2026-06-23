@@ -55,7 +55,9 @@ strong-isolation claims, boundary-only VM-backed runtimes, and validated
 Docker/containerd/Kubernetes adapter evidence. It also adds live gVisor
 runsc/sentry/gofer metadata evidence, Kubernetes Agent Sandbox metadata
 evidence, Kata boundary-only evidence, and a live-runtime evidence bundle gate
-that binds F4 claims to retained F2 runtime adapter matrix artifacts.
+that binds F4 claims to retained F2 runtime adapter matrix artifacts. F5 has
+started with a production-hardening baseline for a bounded Kubernetes
+DaemonSet/RBAC deployment surface.
 
 ## 🚀 Runtime Scenarios
 
@@ -278,10 +280,9 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 
 Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
 Independent Observability MVP, F2 Accountability Beta, F3 Limited Guardrails,
-and F4 Runtime Adapter Depth are complete. F4 covers the runtime guardrail
-support matrix, runtime adapter evidence correlation, gVisor metadata,
-Kubernetes Agent Sandbox metadata, Kata boundary-only evidence, and live-runtime
-evidence bundle artifacts from the full live runtime adapter matrix.
+and F4 Runtime Adapter Depth are complete. F5 Production Hardening is in
+progress, starting with a Kubernetes DaemonSet/RBAC deployment baseline and a
+local manifest hardening gate.
 
 Implementation milestones:
 
@@ -304,7 +305,7 @@ Focused roadmap:
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
-| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM, operator, large-scale chaos and performance testing | ⏳ **Deferred** |
+| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage, mTLS/RBAC, signed artifacts, SBOM, operator, large-scale chaos and performance testing | 🚧 **In Progress** |
 
 ## 📜 License
 

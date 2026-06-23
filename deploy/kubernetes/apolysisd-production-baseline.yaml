@@ -1,0 +1,200 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# F5.1 production-hardening baseline for running apolysisd as a node-local
+# accountability agent. This manifest keeps production-facing kernel blocking
+# disabled and focuses on the minimum auditable deployment surface: bounded
+# resources, read-only runtime socket access, explicit Linux capabilities, and
+# manifest-level network denial by default.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apolysis-system
+  labels:
+    app.kubernetes.io/name: apolysis
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: apolysisd
+  namespace: apolysis-system
+  labels:
+    app.kubernetes.io/name: apolysisd
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: apolysisd-runtime-reader
+  labels:
+    app.kubernetes.io/name: apolysisd
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: apolysisd-runtime-reader
+  labels:
+    app.kubernetes.io/name: apolysisd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: apolysisd-runtime-reader
+subjects:
+  - kind: ServiceAccount
+    name: apolysisd
+    namespace: apolysis-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: apolysisd
+  namespace: apolysis-system
+  labels:
+    app.kubernetes.io/name: apolysisd
+    app.kubernetes.io/part-of: apolysis
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: apolysisd
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: apolysisd
+        app.kubernetes.io/part-of: apolysis
+      annotations:
+        apolysis.dev/phase: "f5.1-production-hardening"
+        apolysis.dev/production-facing-kernel-blocking: "disabled"
+    spec:
+      serviceAccountName: apolysisd
+      automountServiceAccountToken: false
+      hostPID: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: apolysisd
+          image: ghcr.io/0xlaiho/apolysis:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --socket
+            - /run/apolysis/apolysisd.sock
+            - --state-dir
+            - /var/lib/apolysis
+            - --bpf-object
+            - /usr/local/lib/apolysis/apolysis_observer.bpf.o
+            - --docker-socket
+            - /host/run/docker.sock
+            - --containerd-socket
+            - /host/run/containerd/containerd.sock
+            - --k3s-containerd-socket
+            - /host/run/k3s/containerd/containerd.sock
+            - --queue-capacity
+            - "16384"
+            - --scope-command-capacity
+            - "1024"
+            - --shutdown-drain-ms
+            - "5000"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - BPF
+                - PERFMON
+                - SYS_RESOURCE
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - test -S /run/apolysis/apolysisd.sock
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - test -S /run/apolysis/apolysisd.sock
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: run-apolysis
+              mountPath: /run/apolysis
+            - name: state
+              mountPath: /var/lib/apolysis
+            - name: host-run
+              mountPath: /host/run
+              readOnly: true
+            - name: host-cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+      volumes:
+        - name: run-apolysis
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: state
+          hostPath:
+            path: /var/lib/apolysis
+            type: DirectoryOrCreate
+        - name: host-run
+          hostPath:
+            path: /run
+            type: Directory
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: apolysisd-default-deny
+  namespace: apolysis-system
+  labels:
+    app.kubernetes.io/name: apolysisd
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: apolysisd
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []

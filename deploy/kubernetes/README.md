@@ -30,3 +30,22 @@ Recommended baseline:
 - Attach a default-deny `NetworkPolicy` and add narrow allow rules per tool.
 - Label pods with the Agent Sandbox name so Apolysis can correlate timeline
   events to the higher-level sandbox identity.
+
+## F5 Production-Hardening Baseline
+
+`apolysisd-production-baseline.yaml` is the first F5 production-hardening
+deployment baseline for running `apolysisd` as a node-local DaemonSet. It keeps
+production-facing kernel blocking disabled, uses explicit Linux capabilities
+instead of `privileged: true`, mounts runtime sockets read-only, sets bounded
+CPU/memory requests and limits, and installs a default-deny `NetworkPolicy`.
+
+Validate the manifest before live deployment:
+
+```bash
+make test-f5-production-hardening
+kubectl apply --dry-run=client --validate=false \
+  -f deploy/kubernetes/apolysisd-production-baseline.yaml
+```
+
+Live k3s deployment, rollout recovery, and host restoration are part of the
+next F5 slice.
