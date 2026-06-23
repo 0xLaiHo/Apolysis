@@ -49,6 +49,15 @@ pub enum DaemonResponse {
         retention_tier: Option<RetentionTier>,
         sessions: Vec<SessionState>,
     },
+    RetentionPurge {
+        schema_version: u32,
+        tenant_id: String,
+        dry_run: bool,
+        now_unix_ms: u64,
+        eligible_session_ids: Vec<String>,
+        purged_session_ids: Vec<String>,
+        retained_session_ids: Vec<String>,
+    },
     Error {
         schema_version: u32,
         code: String,
@@ -566,6 +575,28 @@ async fn dispatch(request: IntentRequest, state: &DaemonState, now_unix_ms: u64)
             tenant_id,
             retention_tier,
         },
+        IntentRequest::ApplyRetention {
+            tenant_id,
+            dry_run,
+            now_unix_ms: requested_now_unix_ms,
+        } => {
+            let effective_now_unix_ms = requested_now_unix_ms.unwrap_or(now_unix_ms);
+            match state
+                .apply_retention(&tenant_id, effective_now_unix_ms, dry_run)
+                .await
+            {
+                Ok(report) => DaemonResponse::RetentionPurge {
+                    schema_version: DAEMON_SCHEMA_V1,
+                    tenant_id: report.tenant_id,
+                    dry_run: report.dry_run,
+                    now_unix_ms: report.now_unix_ms,
+                    eligible_session_ids: report.eligible_session_ids,
+                    purged_session_ids: report.purged_session_ids,
+                    retained_session_ids: report.retained_session_ids,
+                },
+                Err(error) => error_response("state_error", error),
+            }
+        }
         IntentRequest::Health => {
             let health = state.health().await;
             DaemonResponse::Health {

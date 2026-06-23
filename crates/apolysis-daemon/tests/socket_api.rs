@@ -211,6 +211,141 @@ async fn tenant_scoped_queries_and_session_lists_do_not_cross_tenant_boundaries(
 }
 
 #[tokio::test]
+async fn retention_purge_request_dry_runs_then_removes_only_matching_tenant_state() {
+    let server = TestServer::start("retention-purge").await;
+    let short_window = apolysis_accountability::RetentionTier::Short.retention_window_ms();
+    let expires_at = 4_102_444_800_000_u64;
+    let purge_now = expires_at + short_window + 1;
+    let tenant_a_register = format!(
+        r#"{{
+        "type":"register",
+        "intent":{{
+            "schema_version":1,
+            "tenant_id":"tenant-a",
+            "retention_tier":"short",
+            "session_id":"tenant-a-purge",
+            "expires_at_unix_ms":{expires_at},
+            "declared_actions":["test"],
+            "allowed_resources":[],
+            "policy_ref":"policy.yaml",
+            "workload_selectors":[]
+        }}
+    }}"#
+    );
+    let tenant_b_register = format!(
+        r#"{{
+        "type":"register",
+        "intent":{{
+            "schema_version":1,
+            "tenant_id":"tenant-b",
+            "retention_tier":"short",
+            "session_id":"tenant-b-keep",
+            "expires_at_unix_ms":{expires_at},
+            "declared_actions":["test"],
+            "allowed_resources":[],
+            "policy_ref":"policy.yaml",
+            "workload_selectors":[]
+        }}
+    }}"#
+    );
+    assert!(matches!(
+        request(&server.config.socket_path, tenant_a_register.as_bytes()).await,
+        DaemonResponse::Ack { operation, .. } if operation == "register"
+    ));
+    assert!(matches!(
+        request(&server.config.socket_path, tenant_b_register.as_bytes()).await,
+        DaemonResponse::Ack { operation, .. } if operation == "register"
+    ));
+    assert!(matches!(
+        request(
+            &server.config.socket_path,
+            br#"{"type":"close","session_id":"tenant-a-purge"}"#,
+        )
+        .await,
+        DaemonResponse::Ack { operation, .. } if operation == "close"
+    ));
+    assert!(matches!(
+        request(
+            &server.config.socket_path,
+            br#"{"type":"close","session_id":"tenant-b-keep"}"#,
+        )
+        .await,
+        DaemonResponse::Ack { operation, .. } if operation == "close"
+    ));
+
+    let timeline_path = server
+        .config
+        .state_dir
+        .join("sessions/tenant-a-purge/timeline.jsonl");
+    assert!(
+        timeline_path.exists(),
+        "registered session must have a timeline"
+    );
+
+    let dry_run_request =
+        format!(r#"{{"type":"apply_retention","tenant_id":"tenant-a","now_unix_ms":{purge_now}}}"#);
+    let DaemonResponse::RetentionPurge {
+        tenant_id,
+        dry_run,
+        eligible_session_ids,
+        purged_session_ids,
+        ..
+    } = request(&server.config.socket_path, dry_run_request.as_bytes()).await
+    else {
+        panic!("expected retention dry-run response");
+    };
+    assert_eq!(tenant_id, "tenant-a");
+    assert!(dry_run);
+    assert_eq!(eligible_session_ids, vec!["tenant-a-purge"]);
+    assert!(purged_session_ids.is_empty());
+    assert!(
+        timeline_path.exists(),
+        "dry-run must not remove timeline state"
+    );
+
+    let apply_request = format!(
+        r#"{{"type":"apply_retention","tenant_id":"tenant-a","dry_run":false,"now_unix_ms":{purge_now}}}"#
+    );
+    let DaemonResponse::RetentionPurge {
+        dry_run,
+        eligible_session_ids,
+        purged_session_ids,
+        ..
+    } = request(&server.config.socket_path, apply_request.as_bytes()).await
+    else {
+        panic!("expected retention apply response");
+    };
+    assert!(!dry_run);
+    assert_eq!(eligible_session_ids, vec!["tenant-a-purge"]);
+    assert_eq!(purged_session_ids, vec!["tenant-a-purge"]);
+    assert!(
+        !timeline_path.exists(),
+        "apply must remove purged session timeline state"
+    );
+    assert!(matches!(
+        request(
+            &server.config.socket_path,
+            br#"{"type":"query","tenant_id":"tenant-a","session_id":"tenant-a-purge"}"#,
+        )
+        .await,
+        DaemonResponse::Session { session: None, .. }
+    ));
+    assert!(matches!(
+        request(
+            &server.config.socket_path,
+            br#"{"type":"query","tenant_id":"tenant-b","session_id":"tenant-b-keep"}"#,
+        )
+        .await,
+        DaemonResponse::Session {
+            session: Some(_),
+            ..
+        }
+    ));
+
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn malformed_and_oversized_frames_return_errors_without_stopping_server() {
     let server = TestServer::start("invalid").await;
     assert!(matches!(

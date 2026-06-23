@@ -29,6 +29,13 @@ pub enum IntentRequest {
         #[serde(default)]
         retention_tier: Option<RetentionTier>,
     },
+    ApplyRetention {
+        tenant_id: String,
+        #[serde(default = "default_true")]
+        dry_run: bool,
+        #[serde(default)]
+        now_unix_ms: Option<u64>,
+    },
     Health,
 }
 
@@ -55,6 +62,7 @@ impl IntentRequest {
                 validate_session_id(session_id)
             }
             Self::ListSessions { tenant_id, .. } => validate_tenant_id(tenant_id),
+            Self::ApplyRetention { tenant_id, .. } => validate_tenant_id(tenant_id),
             Self::Health => Ok(()),
         }
     }
@@ -67,6 +75,17 @@ pub enum RetentionTier {
     #[default]
     Standard,
     Extended,
+}
+
+impl RetentionTier {
+    pub const fn retention_window_ms(self) -> u64 {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+        match self {
+            Self::Short => 7 * DAY_MS,
+            Self::Standard => 30 * DAY_MS,
+            Self::Extended => 365 * DAY_MS,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -183,6 +202,10 @@ impl std::fmt::Display for IntentError {
 
 fn default_tenant_id() -> String {
     DEFAULT_TENANT_ID.to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl std::error::Error for IntentError {}

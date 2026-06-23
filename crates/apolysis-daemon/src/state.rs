@@ -8,7 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use apolysis_accountability::{
     AccountabilityAnalyzer, AdapterKind, AssociationOutcome, ComponentState, EffectKind,
     EvidenceBoundary, HealthSnapshot, ObservedEffect, QueueStats, RegisterOutcome, RegistryError,
-    ResourceKind, RetentionTier, RuntimeIdentity, SessionIntent, SessionRegistry, SessionState,
+    ResourceKind, RetentionPurgeReport, RetentionTier, RuntimeIdentity, SessionIntent,
+    SessionRegistry, SessionState,
 };
 use apolysis_feedback::FeedbackWriter;
 use apolysis_policy::Policy;
@@ -230,6 +231,57 @@ impl DaemonState {
             .read()
             .await
             .list_for_tenant(tenant_id, retention_tier)
+    }
+
+    pub async fn apply_retention(
+        &self,
+        tenant_id: &str,
+        now_unix_ms: u64,
+        dry_run: bool,
+    ) -> Result<RetentionPurgeReport, String> {
+        let mut registry = self.registry.write().await;
+        if dry_run {
+            return Ok(registry.retention_purge_report_for_tenant(tenant_id, now_unix_ms, true));
+        }
+
+        let mut candidate = registry.clone();
+        let report = candidate.apply_retention_for_tenant(tenant_id, now_unix_ms);
+        let purged_session_ids = report.purged_session_ids.clone();
+        if !purged_session_ids.is_empty() {
+            {
+                let mut stores = self.stores.lock().await;
+                for session_id in &purged_session_ids {
+                    stores.remove(session_id);
+                }
+            }
+            for session_id in &purged_session_ids {
+                let session_dir = self.sessions_dir.join(session_id);
+                match std::fs::remove_dir_all(&session_dir) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "failed to remove retained session state {}: {error}",
+                            session_dir.display()
+                        ));
+                    }
+                }
+            }
+            {
+                let mut policies = self.redaction_policies.write().await;
+                for session_id in &purged_session_ids {
+                    policies.remove(session_id);
+                }
+            }
+            {
+                let mut paused = self.paused_sessions.write().await;
+                for session_id in &purged_session_ids {
+                    paused.remove(session_id);
+                }
+            }
+        }
+        *registry = candidate;
+        Ok(report)
     }
 
     pub async fn session_for_cgroup(&self, cgroup_id: u64) -> Option<String> {

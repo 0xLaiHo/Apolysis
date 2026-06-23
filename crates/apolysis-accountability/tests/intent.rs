@@ -114,6 +114,34 @@ fn parses_tenant_scoped_query_and_session_list_requests() {
 }
 
 #[test]
+fn parses_retention_purge_requests_as_dry_run_by_default() {
+    assert_eq!(
+        decode_intent_frame(
+            br#"{"type":"apply_retention","tenant_id":"tenant-a"}"#,
+            NOW_MS
+        )
+        .expect("default dry-run retention request"),
+        IntentRequest::ApplyRetention {
+            tenant_id: "tenant-a".to_string(),
+            dry_run: true,
+            now_unix_ms: None,
+        }
+    );
+    assert_eq!(
+        decode_intent_frame(
+            br#"{"type":"apply_retention","tenant_id":"tenant-a","dry_run":false,"now_unix_ms":1786048000000}"#,
+            NOW_MS,
+        )
+        .expect("retention apply request"),
+        IntentRequest::ApplyRetention {
+            tenant_id: "tenant-a".to_string(),
+            dry_run: false,
+            now_unix_ms: Some(1_786_048_000_000),
+        }
+    );
+}
+
+#[test]
 fn rejects_unknown_schema_versions() {
     let frame = br#"{
         "type":"register",
@@ -203,6 +231,12 @@ fn rejects_tenant_ids_that_are_unsafe_for_state_or_query_scope() {
     let frame = format!(
         r#"{{"type":"list_sessions","tenant_id":"{oversized}","retention_tier":"standard"}}"#
     );
+    assert_eq!(
+        decode_intent_frame(frame.as_bytes(), NOW_MS),
+        Err(IntentError::InvalidTenantId)
+    );
+
+    let frame = r#"{"type":"apply_retention","tenant_id":"nested/tenant"}"#;
     assert_eq!(
         decode_intent_frame(frame.as_bytes(), NOW_MS),
         Err(IntentError::InvalidTenantId)

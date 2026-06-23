@@ -11,6 +11,7 @@ supply_chain_builder="$repo_root/scripts/build-f5-release-bundle.sh"
 supply_chain_gate="$repo_root/scripts/test-f5-supply-chain.sh"
 release_registry_gate="$repo_root/scripts/test-f5-release-registry.sh"
 tenant_query_gate="$repo_root/scripts/test-f5-tenant-query-retention.sh"
+retention_enforcement_gate="$repo_root/scripts/test-f5-retention-enforcement.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -126,6 +127,11 @@ if [[ ! -s "$tenant_query_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$retention_enforcement_gate" ]]; then
+    echo "missing F5.11 retention enforcement artifact: $retention_enforcement_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -148,6 +154,11 @@ grep -q '^test-f5-release-registry:' "$makefile" || {
 
 grep -q '^test-f5-tenant-query-retention:' "$makefile" || {
     echo "missing Makefile target: test-f5-tenant-query-retention" >&2
+    exit 1
+}
+
+grep -q '^test-f5-retention-enforcement:' "$makefile" || {
+    echo "missing Makefile target: test-f5-retention-enforcement" >&2
     exit 1
 }
 
@@ -418,5 +429,45 @@ grep -q 'query_for_tenant' "$repo_root/crates/apolysis-daemon/src/state.rs" || {
 
 grep -q 'SessionList' "$repo_root/crates/apolysis-daemon/src/server.rs" || {
     echo "F5.10 daemon response API must return tenant session lists" >&2
+    exit 1
+}
+
+grep -q 'cargo test -p apolysis-accountability --test intent' "$retention_enforcement_gate" || {
+    echo "F5.11 retention enforcement gate must run accountability intent tests" >&2
+    exit 1
+}
+
+grep -q 'cargo test -p apolysis-accountability --test session' "$retention_enforcement_gate" || {
+    echo "F5.11 retention enforcement gate must run session retention purge tests" >&2
+    exit 1
+}
+
+grep -q 'cargo test -p apolysis-daemon --test socket_api' "$retention_enforcement_gate" || {
+    echo "F5.11 retention enforcement gate must run daemon socket API retention tests" >&2
+    exit 1
+}
+
+grep -q 'ApplyRetention' "$repo_root/crates/apolysis-accountability/src/intent.rs" || {
+    echo "F5.11 intent API must expose explicit retention application requests" >&2
+    exit 1
+}
+
+grep -q 'RetentionPurgeReport' "$repo_root/crates/apolysis-accountability/src/session.rs" || {
+    echo "F5.11 session registry must expose retention purge reports" >&2
+    exit 1
+}
+
+grep -q 'apply_retention_for_tenant' "$repo_root/crates/apolysis-accountability/src/session.rs" || {
+    echo "F5.11 session registry must apply tenant-scoped retention purge" >&2
+    exit 1
+}
+
+grep -q 'apply_retention' "$repo_root/crates/apolysis-daemon/src/state.rs" || {
+    echo "F5.11 daemon state must apply retention to registry and state directories" >&2
+    exit 1
+}
+
+grep -q 'RetentionPurge' "$repo_root/crates/apolysis-daemon/src/server.rs" || {
+    echo "F5.11 daemon response API must return retention purge reports" >&2
     exit 1
 }

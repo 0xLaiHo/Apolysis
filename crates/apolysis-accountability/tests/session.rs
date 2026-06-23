@@ -239,6 +239,64 @@ fn lists_sessions_by_tenant_and_retention_tier() {
     );
 }
 
+#[test]
+fn retention_purge_is_tenant_scoped_and_only_removes_inactive_expired_sessions() {
+    let mut registry = SessionRegistry::new(8, 2);
+    let short_window = RetentionTier::Short.retention_window_ms();
+    let purge_now = NOW_MS + short_window + 2_000;
+    registry
+        .register(
+            intent_for_tenant(
+                "tenant-a-purge",
+                NOW_MS + 1_000,
+                "tenant-a",
+                RetentionTier::Short,
+            ),
+            NOW_MS,
+        )
+        .expect("tenant-a purge session");
+    registry
+        .register(
+            intent_for_tenant(
+                "tenant-a-keep-active",
+                purge_now + 60_000,
+                "tenant-a",
+                RetentionTier::Short,
+            ),
+            NOW_MS,
+        )
+        .expect("tenant-a active session");
+    registry
+        .register(
+            intent_for_tenant(
+                "tenant-b-purge",
+                NOW_MS + 1_000,
+                "tenant-b",
+                RetentionTier::Short,
+            ),
+            NOW_MS,
+        )
+        .expect("tenant-b purge session");
+    registry
+        .associate_cgroup("tenant-a-purge", 41)
+        .expect("associate purged cgroup");
+    registry.close("tenant-a-purge").expect("close tenant-a");
+    registry.close("tenant-b-purge").expect("close tenant-b");
+
+    let dry_run = registry.retention_purge_report_for_tenant("tenant-a", purge_now, true);
+    assert_eq!(dry_run.eligible_session_ids, vec!["tenant-a-purge"]);
+    assert!(dry_run.purged_session_ids.is_empty());
+    assert!(registry.get("tenant-a-purge").is_some());
+
+    let applied = registry.apply_retention_for_tenant("tenant-a", purge_now);
+    assert_eq!(applied.eligible_session_ids, vec!["tenant-a-purge"]);
+    assert_eq!(applied.purged_session_ids, vec!["tenant-a-purge"]);
+    assert_eq!(registry.get("tenant-a-purge"), None);
+    assert_eq!(registry.session_for_cgroup(41), None);
+    assert!(registry.get("tenant-a-keep-active").is_some());
+    assert!(registry.get("tenant-b-purge").is_some());
+}
+
 fn intent(session_id: &str, expires_at_unix_ms: u64) -> SessionIntent {
     intent_for_tenant(
         session_id,

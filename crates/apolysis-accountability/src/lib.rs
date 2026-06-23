@@ -20,6 +20,6 @@ pub use intent::{
 };
 pub use queue::{BoundedPriorityQueue, PushOutcome, QueuePriority, QueueStats};
 pub use session::{
-    AssociationOutcome, RegisterOutcome, RegistryError, SessionRegistry, SessionState,
-    SessionStatus,
+    AssociationOutcome, RegisterOutcome, RegistryError, RetentionPurgeReport, SessionRegistry,
+    SessionState, SessionStatus,
 };

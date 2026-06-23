@@ -46,6 +46,16 @@ pub enum AssociationOutcome {
     MissingIntent,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RetentionPurgeReport {
+    pub tenant_id: String,
+    pub now_unix_ms: u64,
+    pub dry_run: bool,
+    pub eligible_session_ids: Vec<String>,
+    pub purged_session_ids: Vec<String>,
+    pub retained_session_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistryError {
     InvalidIntent(IntentError),
@@ -262,6 +272,51 @@ impl SessionRegistry {
             .collect()
     }
 
+    pub fn retention_purge_report_for_tenant(
+        &self,
+        tenant_id: &str,
+        now_unix_ms: u64,
+        dry_run: bool,
+    ) -> RetentionPurgeReport {
+        let mut eligible_session_ids = Vec::new();
+        let mut retained_session_ids = Vec::new();
+        for (session_id, state) in &self.sessions {
+            if state.intent.tenant_id != tenant_id {
+                continue;
+            }
+            if retention_eligible(state, now_unix_ms) {
+                eligible_session_ids.push(session_id.clone());
+            } else {
+                retained_session_ids.push(session_id.clone());
+            }
+        }
+        RetentionPurgeReport {
+            tenant_id: tenant_id.to_string(),
+            now_unix_ms,
+            dry_run,
+            eligible_session_ids,
+            purged_session_ids: Vec::new(),
+            retained_session_ids,
+        }
+    }
+
+    pub fn apply_retention_for_tenant(
+        &mut self,
+        tenant_id: &str,
+        now_unix_ms: u64,
+    ) -> RetentionPurgeReport {
+        let mut report = self.retention_purge_report_for_tenant(tenant_id, now_unix_ms, false);
+        for session_id in &report.eligible_session_ids {
+            if let Some(state) = self.sessions.remove(session_id) {
+                for cgroup_id in state.cgroup_ids {
+                    self.cgroup_index.remove(&cgroup_id);
+                }
+                report.purged_session_ids.push(session_id.clone());
+            }
+        }
+        report
+    }
+
     pub fn session_for_cgroup(&self, cgroup_id: u64) -> Option<&str> {
         self.cgroup_index.get(&cgroup_id).map(String::as_str)
     }
@@ -329,4 +384,14 @@ impl SessionRegistry {
         }
         Ok(())
     }
+}
+
+fn retention_eligible(state: &SessionState, now_unix_ms: u64) -> bool {
+    let terminal = matches!(state.status, SessionStatus::Closed | SessionStatus::Expired)
+        || (state.status == SessionStatus::Active && state.expires_at_unix_ms <= now_unix_ms);
+    terminal
+        && state
+            .expires_at_unix_ms
+            .saturating_add(state.intent.retention_tier.retention_window_ms())
+            <= now_unix_ms
 }
