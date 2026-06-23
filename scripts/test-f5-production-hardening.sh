@@ -22,6 +22,7 @@ service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-ev
 service_mesh_live_istio_gate="$repo_root/scripts/test-f5-service-mesh-live-istio.sh"
 operator_controller_gate="$repo_root/scripts/test-f5-operator-controller.sh"
 chaos_performance_gate="$repo_root/scripts/test-f5-chaos-performance.sh"
+external_provider_qualification_gate="$repo_root/scripts/test-f5-external-provider-qualification.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -192,6 +193,11 @@ if [[ ! -s "$chaos_performance_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$external_provider_qualification_gate" ]]; then
+    echo "missing F5.21 external provider qualification artifact: $external_provider_qualification_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -269,6 +275,11 @@ grep -q '^test-f5-operator-controller:' "$makefile" || {
 
 grep -q '^test-f5-chaos-performance:' "$makefile" || {
     echo "missing Makefile target: test-f5-chaos-performance" >&2
+    exit 1
+}
+
+grep -q '^test-f5-external-provider-qualification:' "$makefile" || {
+    echo "missing Makefile target: test-f5-external-provider-qualification" >&2
     exit 1
 }
 
@@ -1034,5 +1045,70 @@ grep -q 'observed CPU must stay at or below 1000m' "$repo_root/crates/apolysis-v
 
 grep -q 'observed memory must stay at or below 1024Mi' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
     echo "F5.20 chaos/performance evidence must enforce memory budget" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_EXTERNAL_PROVIDER_QUALIFICATION' "$external_provider_qualification_gate" || {
+    echo "F5.21 external provider qualification gate must require explicit confirmation for live bundles" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_EXTERNAL_PROVIDER_BUNDLE' "$external_provider_qualification_gate" || {
+    echo "F5.21 external provider qualification gate must accept retained external evidence bundles" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_EXTERNAL_PROVIDER_QUALIFICATION' "$external_provider_qualification_gate" || {
+    echo "F5.21 external provider qualification gate must be able to fail closed when external qualification is required" >&2
+    exit 1
+}
+
+grep -q 'softhsm' "$external_provider_qualification_gate" || {
+    echo "F5.21 external provider qualification gate must include local HSM rejection evidence" >&2
+    exit 1
+}
+
+grep -q 'minio' "$external_provider_qualification_gate" || {
+    echo "F5.21 external provider qualification gate must include local WORM rejection evidence" >&2
+    exit 1
+}
+
+grep -q 'oci_distribution_registry' "$external_provider_qualification_gate" || {
+    echo "F5.21 external provider qualification gate must include local registry rejection evidence" >&2
+    exit 1
+}
+
+grep -q 'evaluate_f5_external_provider_qualification_bundle' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.21 validation library must expose external provider qualification evaluation" >&2
+    exit 1
+}
+
+grep -q 'F5ExternalProviderQualificationBundle' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.21 validation library must expose external provider qualification data" >&2
+    exit 1
+}
+
+grep -q 'cloud KMS or external hardware HSM signing qualification is required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.21 external provider qualification must require cloud KMS or external HSM evidence" >&2
+    exit 1
+}
+
+grep -q 'real cloud WORM/object-lock provider qualification is required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.21 external provider qualification must require real cloud WORM evidence" >&2
+    exit 1
+}
+
+grep -q 'real cloud registry promotion/retention qualification is required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.21 external provider qualification must require real cloud registry evidence" >&2
+    exit 1
+}
+
+grep -q 'managed service-mesh provider qualification is required' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.21 external provider qualification must require managed service-mesh evidence" >&2
+    exit 1
+}
+
+grep -q 'provider must be an accepted external provider for this requirement' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.21 external provider qualification must reject local provider substitutions" >&2
     exit 1
 }

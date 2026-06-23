@@ -85,3 +85,7 @@ path = "src/bin/apolysis-f5-operator-controller-evidence.rs"
 [[bin]]
 name = "apolysis-f5-chaos-performance-evidence"
 path = "src/bin/apolysis-f5-chaos-performance-evidence.rs"
+
+[[bin]]
+name = "apolysis-f5-external-provider-qualification"
+path = "src/bin/apolysis-f5-external-provider-qualification.rs"

@@ -1180,6 +1180,67 @@ pub struct F5ChaosPerformanceReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum F5ExternalProviderQualificationSource {
+    Fixture,
+    EvidenceBundle,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum F5ExternalProviderQualificationRequirement {
+    CloudKmsOrExternalHsmSigning,
+    CloudWormObjectLockArchive,
+    CloudRegistryPromotionRetention,
+    ManagedServiceMesh,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ExternalProviderQualificationEntry {
+    pub requirement: F5ExternalProviderQualificationRequirement,
+    pub provider: String,
+    pub provider_control_plane: String,
+    pub evidence_ref: String,
+    pub evidence_sha256: String,
+    pub report_ref: String,
+    pub report_sha256: String,
+    pub live_provider: bool,
+    pub external_provider: bool,
+    pub observed_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ExternalProviderQualificationBundle {
+    pub bundle_id: String,
+    pub source: F5ExternalProviderQualificationSource,
+    pub entries: Vec<F5ExternalProviderQualificationEntry>,
+    pub operator_approved: bool,
+    pub generated_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ExternalProviderQualificationApproval {
+    pub bundle_id: String,
+    pub qualified_requirements: Vec<F5ExternalProviderQualificationRequirement>,
+    pub providers: Vec<String>,
+    pub generated_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ExternalProviderQualificationFailure {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct F5ExternalProviderQualificationReport {
+    pub schema_version: u32,
+    pub passed: bool,
+    pub approval: Option<F5ExternalProviderQualificationApproval>,
+    pub failures: Vec<F5ExternalProviderQualificationFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum F4RuntimeAdapterEvidenceSource {
     Fixture,
     LiveHost,
@@ -3410,6 +3471,179 @@ pub fn evaluate_f5_chaos_performance_evidence(
     };
 
     F5ChaosPerformanceReport {
+        schema_version: 1,
+        passed: approval.is_some(),
+        approval,
+        failures,
+    }
+}
+
+pub fn evaluate_f5_external_provider_qualification_bundle(
+    bundle: F5ExternalProviderQualificationBundle,
+) -> F5ExternalProviderQualificationReport {
+    const REQUIRED: [F5ExternalProviderQualificationRequirement; 4] = [
+        F5ExternalProviderQualificationRequirement::CloudKmsOrExternalHsmSigning,
+        F5ExternalProviderQualificationRequirement::CloudWormObjectLockArchive,
+        F5ExternalProviderQualificationRequirement::CloudRegistryPromotionRetention,
+        F5ExternalProviderQualificationRequirement::ManagedServiceMesh,
+    ];
+
+    let mut failures = Vec::new();
+    if bundle.bundle_id.trim().is_empty() {
+        f5_external_provider_qualification_failure(
+            &mut failures,
+            "bundle_id",
+            "bundle id is required",
+        );
+    }
+    if bundle.source != F5ExternalProviderQualificationSource::EvidenceBundle {
+        f5_external_provider_qualification_failure(
+            &mut failures,
+            "source",
+            "external provider qualification bundle evidence is required",
+        );
+    }
+    if !bundle.operator_approved {
+        f5_external_provider_qualification_failure(
+            &mut failures,
+            "operator_approved",
+            "operator approval is required",
+        );
+    }
+    if bundle.generated_at_unix_ms == 0 {
+        f5_external_provider_qualification_failure(
+            &mut failures,
+            "generated_at_unix_ms",
+            "bundle generation timestamp is required",
+        );
+    }
+
+    let mut requirement_counts: BTreeMap<F5ExternalProviderQualificationRequirement, usize> =
+        BTreeMap::new();
+    let mut qualified_requirements = BTreeSet::new();
+    let mut providers = BTreeSet::new();
+
+    for entry in &bundle.entries {
+        *requirement_counts.entry(entry.requirement).or_default() += 1;
+
+        if entry.provider.trim().is_empty() {
+            f5_external_provider_qualification_failure(
+                &mut failures,
+                "provider",
+                "provider is required",
+            );
+        }
+        if entry.provider_control_plane.trim().is_empty() {
+            f5_external_provider_qualification_failure(
+                &mut failures,
+                "provider_control_plane",
+                "provider control plane is required",
+            );
+        }
+        if entry.evidence_ref.trim().is_empty() {
+            f5_external_provider_qualification_failure(
+                &mut failures,
+                "evidence_ref",
+                "evidence artifact reference is required",
+            );
+        }
+        if !f5_is_sha256_digest(&entry.evidence_sha256) {
+            f5_external_provider_qualification_failure(
+                &mut failures,
+                "evidence_sha256",
+                "evidence artifact sha256 is required",
+            );
+        }
+        if entry.report_ref.trim().is_empty() {
+            f5_external_provider_qualification_failure(
+                &mut failures,
+                "report_ref",
+                "report artifact reference is required",
+            );
+        }
+        if !f5_is_sha256_digest(&entry.report_sha256) {
+            f5_external_provider_qualification_failure(
+                &mut failures,
+                "report_sha256",
+                "report artifact sha256 is required",
+            );
+        }
+        if !entry.live_provider {
+            f5_external_provider_qualification_failure(
+                &mut failures,
+                "live_provider",
+                "live provider evidence is required",
+            );
+        }
+        if !entry.external_provider {
+            f5_external_provider_qualification_failure(
+                &mut failures,
+                "external_provider",
+                "external provider evidence is required",
+            );
+        }
+        if !f5_is_accepted_external_provider(entry.requirement, &entry.provider) {
+            f5_external_provider_qualification_failure(
+                &mut failures,
+                "provider",
+                "provider must be an accepted external provider for this requirement",
+            );
+        }
+        if entry.observed_at_unix_ms == 0 {
+            f5_external_provider_qualification_failure(
+                &mut failures,
+                "observed_at_unix_ms",
+                "provider observation timestamp is required",
+            );
+        }
+
+        if entry.live_provider
+            && entry.external_provider
+            && f5_is_accepted_external_provider(entry.requirement, &entry.provider)
+            && f5_is_sha256_digest(&entry.evidence_sha256)
+            && f5_is_sha256_digest(&entry.report_sha256)
+            && !entry.provider_control_plane.trim().is_empty()
+            && !entry.evidence_ref.trim().is_empty()
+            && !entry.report_ref.trim().is_empty()
+            && entry.observed_at_unix_ms != 0
+        {
+            qualified_requirements.insert(entry.requirement);
+            providers.insert(entry.provider.clone());
+        }
+    }
+
+    for requirement in REQUIRED {
+        match requirement_counts
+            .get(&requirement)
+            .copied()
+            .unwrap_or_default()
+        {
+            0 => f5_external_provider_qualification_failure(
+                &mut failures,
+                "entries",
+                f5_external_provider_missing_requirement_message(requirement),
+            ),
+            1 => {}
+            _ => f5_external_provider_qualification_failure(
+                &mut failures,
+                "entries",
+                "duplicate external provider qualification entry is not allowed",
+            ),
+        }
+    }
+
+    let approval = if failures.is_empty() {
+        Some(F5ExternalProviderQualificationApproval {
+            bundle_id: bundle.bundle_id,
+            qualified_requirements: qualified_requirements.into_iter().collect(),
+            providers: providers.into_iter().collect(),
+            generated_at_unix_ms: bundle.generated_at_unix_ms,
+        })
+    } else {
+        None
+    };
+
+    F5ExternalProviderQualificationReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -6627,6 +6861,99 @@ fn f5_chaos_performance_failure(
         field: field.into(),
         message: message.into(),
     });
+}
+
+fn f5_external_provider_qualification_failure(
+    failures: &mut Vec<F5ExternalProviderQualificationFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(F5ExternalProviderQualificationFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
+fn f5_external_provider_missing_requirement_message(
+    requirement: F5ExternalProviderQualificationRequirement,
+) -> &'static str {
+    match requirement {
+        F5ExternalProviderQualificationRequirement::CloudKmsOrExternalHsmSigning => {
+            "cloud KMS or external hardware HSM signing qualification is required"
+        }
+        F5ExternalProviderQualificationRequirement::CloudWormObjectLockArchive => {
+            "real cloud WORM/object-lock provider qualification is required"
+        }
+        F5ExternalProviderQualificationRequirement::CloudRegistryPromotionRetention => {
+            "real cloud registry promotion/retention qualification is required"
+        }
+        F5ExternalProviderQualificationRequirement::ManagedServiceMesh => {
+            "managed service-mesh provider qualification is required"
+        }
+    }
+}
+
+fn f5_is_accepted_external_provider(
+    requirement: F5ExternalProviderQualificationRequirement,
+    provider: &str,
+) -> bool {
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider.is_empty()
+        || provider.contains("fixture")
+        || provider.contains("local")
+        || provider.contains("minio")
+        || provider.contains("softhsm")
+        || provider == "k3s"
+        || provider == "kind"
+        || provider == "oci_distribution_registry"
+    {
+        return false;
+    }
+
+    match requirement {
+        F5ExternalProviderQualificationRequirement::CloudKmsOrExternalHsmSigning => matches!(
+            provider.as_str(),
+            "aws_kms"
+                | "aws_cloudhsm"
+                | "gcp_cloud_kms"
+                | "google_cloud_kms"
+                | "azure_key_vault"
+                | "azure_keyvault"
+                | "external_hsm"
+                | "cloud_hsm"
+                | "thales_hsm"
+                | "yubihsm"
+        ),
+        F5ExternalProviderQualificationRequirement::CloudWormObjectLockArchive => matches!(
+            provider.as_str(),
+            "aws_s3_object_lock"
+                | "s3_object_lock"
+                | "gcs_bucket_lock"
+                | "google_cloud_storage_bucket_lock"
+                | "azure_immutable_blob"
+                | "azure_blob_immutability_policy"
+        ),
+        F5ExternalProviderQualificationRequirement::CloudRegistryPromotionRetention => matches!(
+            provider.as_str(),
+            "aws_ecr"
+                | "gcp_artifact_registry"
+                | "google_artifact_registry"
+                | "azure_container_registry"
+                | "docker_hub"
+                | "ghcr"
+                | "quay"
+        ),
+        F5ExternalProviderQualificationRequirement::ManagedServiceMesh => matches!(
+            provider.as_str(),
+            "gke_anthos_service_mesh"
+                | "anthos_service_mesh"
+                | "aks_istio_addon"
+                | "eks_app_mesh"
+                | "openshift_service_mesh"
+                | "linkerd_buoyant_cloud"
+                | "consul_cloud"
+        ),
+    }
 }
 
 fn f5_is_service_account_principal(value: &str) -> bool {
