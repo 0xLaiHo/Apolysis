@@ -150,3 +150,38 @@ grep -q 'apolysis_adapter_state{adapter="k3s_containerd"} 1' "$live_gate" || {
     echo "F5.3 live deployment gate must assert live k3s adapter metrics readiness" >&2
     exit 1
 }
+
+grep -q 'apolysisd-restart-health.json' "$live_gate" || {
+    echo "F5.4 live deployment gate must capture daemon restart health evidence" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-restart-workload' "$live_gate" || {
+    echo "F5.4 live deployment gate must create a marked workload after DaemonSet restart" >&2
+    exit 1
+}
+
+grep -q 'apolysisd-socket-outage-health.json' "$live_gate" || {
+    echo "F5.4 live deployment gate must capture k3s CRI socket outage health evidence" >&2
+    exit 1
+}
+
+grep -q 'apolysisd-socket-recovery-health.json' "$live_gate" || {
+    echo "F5.4 live deployment gate must capture k3s CRI socket recovery health evidence" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-missing-k3s-containerd.sock' "$live_gate" || {
+    echo "F5.4 live deployment gate must inject a missing k3s CRI socket path" >&2
+    exit 1
+}
+
+grep -q '"k3s_containerd" "degraded"' "$live_gate" || {
+    echo "F5.4 live deployment gate must assert k3s adapter degraded state during socket outage" >&2
+    exit 1
+}
+
+grep -q '"k3s_containerd" "ready"' "$live_gate" || {
+    echo "F5.4 live deployment gate must assert k3s adapter recovery to ready" >&2
+    exit 1
+}

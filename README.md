@@ -58,7 +58,8 @@ evidence, Kata boundary-only evidence, and a live-runtime evidence bundle gate
 that binds F4 claims to retained F2 runtime adapter matrix artifacts. F5 has
 started with a production-hardening baseline for a bounded Kubernetes
 DaemonSet/RBAC deployment surface and a live k3s rollout/restore validation
-gate for the node-local daemon, including live metrics scrape validation.
+gate for the node-local daemon, including live metrics scrape validation and
+live DaemonSet restart / k3s CRI socket outage recovery evidence.
 
 ## 🚀 Runtime Scenarios
 
@@ -284,7 +285,7 @@ Independent Observability MVP, F2 Accountability Beta, F3 Limited Guardrails,
 and F4 Runtime Adapter Depth are complete. F5 Production Hardening is in
 progress, with a Kubernetes DaemonSet/RBAC deployment baseline, local manifest
 hardening gate, live k3s deployment validation gate, and production DaemonSet
-metrics validation.
+metrics and resilience validation.
 
 Implementation milestones:
 

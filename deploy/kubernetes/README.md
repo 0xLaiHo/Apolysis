@@ -57,5 +57,7 @@ APOLYSIS_CONFIRM_F5_LIVE_DEPLOYMENT=1 make test-f5-live-deployment
 
 The live gate builds a local image, imports it into k3s containerd, deploys the
 DaemonSet, creates a marked workload for runtime adapter evidence, captures
-health/metrics/log/Kubernetes artifacts, and removes the validation namespace
-and temporary state path before exiting.
+health/metrics/log/Kubernetes artifacts, validates DaemonSet pod restart
+recovery, validates k3s CRI socket outage/recovery through a bad socket
+rollout and restore rollout, and removes the validation namespace and
+temporary state path before exiting.

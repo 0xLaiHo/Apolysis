@@ -62,11 +62,191 @@ image="localhost/apolysisd:f5-live-$stamp"
 image_tar="$output_dir/apolysisd-image.tar"
 image_context="$output_dir/image-context"
 live_manifest="$output_dir/apolysisd-production-baseline.live.yaml"
+bad_socket_manifest="$output_dir/apolysisd-production-baseline.bad-k3s-socket.yaml"
 workload_manifest="$output_dir/apolysis-f5-live-workload.apply.yaml"
+restart_workload_manifest="$output_dir/apolysis-f5-restart-workload.apply.yaml"
+socket_recovery_workload_manifest="$output_dir/apolysis-f5-socket-recovery-workload.apply.yaml"
 state_path="/tmp/apolysis-f5-live-state-$stamp"
 session_id="apolysis-f5-live"
 applied=0
 port_forward_pid=""
+
+current_ready_daemon_pod() {
+    kubectl -n apolysis-system get pod \
+        -l app.kubernetes.io/name=apolysisd \
+        -o json | python3 -c '
+import json
+import sys
+
+pods = json.load(sys.stdin).get("items", [])
+for pod in pods:
+    metadata = pod.get("metadata", {})
+    if metadata.get("deletionTimestamp"):
+        continue
+    status = pod.get("status", {})
+    if status.get("phase") != "Running":
+        continue
+    conditions = status.get("conditions", [])
+    ready = any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in conditions
+    )
+    if ready:
+        print(metadata.get("name", ""))
+        raise SystemExit(0)
+raise SystemExit("no ready apolysisd pod found")
+'
+}
+
+wait_for_daemon_pod() {
+    local previous="${1:-}"
+    local pod_name=""
+
+    for _ in $(seq 1 120); do
+        if pod_name="$(current_ready_daemon_pod 2>/dev/null)" && [[ -n "$pod_name" ]]; then
+            if [[ -z "$previous" || "$pod_name" != "$previous" ]]; then
+                printf '%s\n' "$pod_name"
+                return 0
+            fi
+        fi
+        sleep 2
+    done
+
+    echo "apolysis-f5: daemon pod did not become ready after rollout" >&2
+    if [[ -n "$previous" ]]; then
+        echo "apolysis-f5: previous daemon pod was $previous" >&2
+    fi
+    kubectl -n apolysis-system get pod -l app.kubernetes.io/name=apolysisd -o wide >&2 || true
+    return 1
+}
+
+write_marked_workload_manifest() {
+    local name="$1"
+    local workload_session_id="$2"
+    local target="$3"
+
+    cat >"$target" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $name
+  namespace: apolysis-system
+  labels:
+    apolysis.session_id: $workload_session_id
+  annotations:
+    apolysis.dev/session-id: $workload_session_id
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: workload
+      image: $image
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -c
+        - sleep 120
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 64Mi
+EOF
+}
+
+wait_for_health_state() {
+    local pod_name="$1"
+    local health_output="$2"
+    local expected_adapter="$3"
+    local expected_state="$4"
+    local require_readiness="${5:-1}"
+    local health_error="${health_output%.json}.err"
+    local health_args=(
+        --socket /run/apolysis/apolysisd.sock
+        --timeout-ms 1000
+        --require-liveness
+    )
+
+    if [[ "$require_readiness" == "1" ]]; then
+        health_args+=(--require-readiness)
+    fi
+
+    for _ in $(seq 1 60); do
+        kubectl -n apolysis-system exec "$pod_name" -- \
+            /usr/local/bin/apolysisd-health \
+            "${health_args[@]}" \
+            >"$health_output" \
+            2>"$health_error" || true
+
+        if python3 - "$health_output" "$expected_adapter" "$expected_state" "$require_readiness" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+expected_adapter = sys.argv[2]
+expected_state = sys.argv[3]
+require_readiness = sys.argv[4] == "1"
+
+try:
+    health = json.loads(path.read_text(encoding="utf-8"))
+except Exception as error:
+    raise SystemExit(f"health JSON is not ready: {error}")
+
+if health.get("type") != "health":
+    raise SystemExit(f"unexpected response type: {health}")
+if health.get("liveness") is not True:
+    raise SystemExit(f"daemon liveness is not true: {health}")
+if require_readiness and health.get("readiness") is not True:
+    raise SystemExit(f"daemon readiness is not true: {health}")
+
+components = health.get("health", {})
+if components.get("ebpf") != "ready":
+    raise SystemExit(f"daemon eBPF is not ready: {health}")
+if components.get("storage") != "ready":
+    raise SystemExit(f"daemon storage is not ready: {health}")
+
+adapters = components.get("adapters", {})
+actual_state = adapters.get(expected_adapter)
+if actual_state != expected_state:
+    raise SystemExit(
+        f"{expected_adapter} adapter is {actual_state}, expected {expected_state}: {health}"
+    )
+
+if expected_state == "ready":
+    degraded = sorted(name for name, state in adapters.items() if state == "degraded")
+    if degraded:
+        raise SystemExit(f"runtime adapters are degraded: {degraded}")
+else:
+    unexpected = sorted(
+        name
+        for name, state in adapters.items()
+        if state == "degraded" and name != expected_adapter
+    )
+    if unexpected:
+        raise SystemExit(f"unexpected degraded runtime adapters: {unexpected}")
+PY
+        then
+            return 0
+        fi
+        sleep 2
+    done
+
+    echo "apolysis-f5: daemon health did not reach $expected_adapter=$expected_state" >&2
+    cat "$health_output" >&2 || true
+    cat "$health_error" >&2 || true
+    return 1
+}
 
 cleanup() {
     if [[ -n "$port_forward_pid" ]]; then
@@ -140,50 +320,13 @@ kubectl -n apolysis-system wait \
     -l app.kubernetes.io/name=apolysisd \
     --timeout=180s
 
-pod="$(
-    kubectl -n apolysis-system get pod \
-        -l app.kubernetes.io/name=apolysisd \
-        -o jsonpath='{.items[0].metadata.name}'
-)"
+pod="$(wait_for_daemon_pod)"
 test -n "$pod"
 
-cat >"$workload_manifest" <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: apolysis-f5-live-workload
-  namespace: apolysis-system
-  labels:
-    apolysis.session_id: $session_id
-  annotations:
-    apolysis.dev/session-id: $session_id
-spec:
-  restartPolicy: Never
-  automountServiceAccountToken: false
-  tolerations:
-    - operator: Exists
-  containers:
-    - name: workload
-      image: $image
-      imagePullPolicy: IfNotPresent
-      command:
-        - /bin/sh
-        - -c
-        - sleep 120
-      securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        capabilities:
-          drop:
-            - ALL
-      resources:
-        requests:
-          cpu: 10m
-          memory: 16Mi
-        limits:
-          cpu: 50m
-          memory: 64Mi
-EOF
+write_marked_workload_manifest \
+    apolysis-f5-live-workload \
+    "$session_id" \
+    "$workload_manifest"
 
 kubectl apply -f "$workload_manifest"
 kubectl -n apolysis-system wait \
@@ -335,6 +478,97 @@ for forbidden in [
     if forbidden in logs:
         raise SystemExit(f"apolysis-f5: live deployment log contains forbidden text: {forbidden}")
 PY
+
+restart_session_id="apolysis-f5-restart"
+restart_previous_pod="$pod"
+kubectl -n apolysis-system delete pod "$restart_previous_pod" --wait=true
+kubectl -n apolysis-system rollout status daemonset/apolysisd --timeout=180s
+kubectl -n apolysis-system wait \
+    --for=condition=Ready \
+    pod \
+    -l app.kubernetes.io/name=apolysisd \
+    --timeout=180s
+pod="$(wait_for_daemon_pod "$restart_previous_pod")"
+test -n "$pod"
+
+write_marked_workload_manifest \
+    apolysis-f5-restart-workload \
+    "$restart_session_id" \
+    "$restart_workload_manifest"
+kubectl apply -f "$restart_workload_manifest"
+kubectl -n apolysis-system wait \
+    --for=condition=Ready \
+    pod/apolysis-f5-restart-workload \
+    --timeout=120s
+
+wait_for_health_state "$pod" "$output_dir/apolysisd-restart-health.json" "k3s_containerd" "ready" "1"
+kubectl -n apolysis-system logs "$pod" >"$output_dir/apolysisd-restart.log"
+kubectl -n apolysis-system get pod "$pod" -o yaml >"$output_dir/apolysisd-restart-pod.yaml"
+kubectl -n apolysis-system get pod apolysis-f5-restart-workload -o yaml \
+    >"$output_dir/apolysis-f5-restart-workload.yaml"
+
+python3 - "$live_manifest" "$bad_socket_manifest" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+text = source.read_text(encoding="utf-8")
+real_socket = "/host/run/k3s/containerd/containerd.sock"
+bad_socket = "/host/run/k3s/containerd/apolysis-f5-missing-k3s-containerd.sock"
+if real_socket not in text:
+    raise SystemExit(f"live manifest does not contain expected k3s socket path: {real_socket}")
+target.write_text(text.replace(real_socket, bad_socket), encoding="utf-8")
+PY
+
+socket_outage_previous_pod="$pod"
+kubectl apply -f "$bad_socket_manifest"
+kubectl -n apolysis-system rollout status daemonset/apolysisd --timeout=180s
+kubectl -n apolysis-system wait \
+    --for=condition=Ready \
+    pod \
+    -l app.kubernetes.io/name=apolysisd \
+    --timeout=180s
+pod="$(wait_for_daemon_pod "$socket_outage_previous_pod")"
+test -n "$pod"
+
+wait_for_health_state "$pod" "$output_dir/apolysisd-socket-outage-health.json" "k3s_containerd" "degraded" "1"
+kubectl -n apolysis-system logs "$pod" >"$output_dir/apolysisd-socket-outage.log"
+kubectl -n apolysis-system get daemonset apolysisd -o yaml \
+    >"$output_dir/apolysisd-socket-outage-daemonset.yaml"
+kubectl -n apolysis-system get pod "$pod" -o yaml \
+    >"$output_dir/apolysisd-socket-outage-pod.yaml"
+
+socket_recovery_session_id="apolysis-f5-socket-recovery"
+socket_recovery_previous_pod="$pod"
+kubectl apply -f "$live_manifest"
+kubectl -n apolysis-system rollout status daemonset/apolysisd --timeout=180s
+kubectl -n apolysis-system wait \
+    --for=condition=Ready \
+    pod \
+    -l app.kubernetes.io/name=apolysisd \
+    --timeout=180s
+pod="$(wait_for_daemon_pod "$socket_recovery_previous_pod")"
+test -n "$pod"
+
+write_marked_workload_manifest \
+    apolysis-f5-socket-recovery-workload \
+    "$socket_recovery_session_id" \
+    "$socket_recovery_workload_manifest"
+kubectl apply -f "$socket_recovery_workload_manifest"
+kubectl -n apolysis-system wait \
+    --for=condition=Ready \
+    pod/apolysis-f5-socket-recovery-workload \
+    --timeout=120s
+
+wait_for_health_state "$pod" "$output_dir/apolysisd-socket-recovery-health.json" "k3s_containerd" "ready" "1"
+kubectl -n apolysis-system logs "$pod" >"$output_dir/apolysisd-socket-recovery.log"
+kubectl -n apolysis-system get pod "$pod" -o yaml \
+    >"$output_dir/apolysisd-socket-recovery-pod.yaml"
+kubectl -n apolysis-system get pod apolysis-f5-socket-recovery-workload -o yaml \
+    >"$output_dir/apolysis-f5-socket-recovery-workload.yaml"
+kubectl get events -n apolysis-system --sort-by=.lastTimestamp \
+    >"$output_dir/kubernetes-events-after-resilience.txt"
 
 kubectl delete -f "$live_manifest" --wait=true
 applied=0
