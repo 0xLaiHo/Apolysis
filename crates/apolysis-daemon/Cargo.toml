@@ -32,5 +32,9 @@ name = "apolysisd"
 path = "src/main.rs"
 
 [[bin]]
+name = "apolysisd-health"
+path = "src/bin/apolysisd-health.rs"
+
+[[bin]]
 name = "apolysis-f2-pipeline-benchmark"
 path = "src/bin/apolysis-f2-pipeline-benchmark.rs"

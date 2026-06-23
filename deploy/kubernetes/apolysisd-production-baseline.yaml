@@ -125,18 +125,24 @@ spec:
           readinessProbe:
             exec:
               command:
-                - /bin/sh
-                - -ec
-                - test -S /run/apolysis/apolysisd.sock
+                - /usr/local/bin/apolysisd-health
+                - --socket
+                - /run/apolysis/apolysisd.sock
+                - --timeout-ms
+                - "1000"
+                - --require-readiness
             initialDelaySeconds: 2
             periodSeconds: 5
             failureThreshold: 3
           livenessProbe:
             exec:
               command:
-                - /bin/sh
-                - -ec
-                - test -S /run/apolysis/apolysisd.sock
+                - /usr/local/bin/apolysisd-health
+                - --socket
+                - /run/apolysis/apolysisd.sock
+                - --timeout-ms
+                - "1000"
+                - --require-liveness
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
@@ -160,6 +166,9 @@ spec:
               readOnly: true
             - name: bpf-fs
               mountPath: /sys/fs/bpf
+            - name: host-tracing
+              mountPath: /sys/kernel/tracing
+              readOnly: true
       volumes:
         - name: run-apolysis
           emptyDir:
@@ -181,6 +190,10 @@ spec:
           hostPath:
             path: /sys/fs/bpf
             type: DirectoryOrCreate
+        - name: host-tracing
+          hostPath:
+            path: /sys/kernel/tracing
+            type: Directory
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

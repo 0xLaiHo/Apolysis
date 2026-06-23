@@ -5,6 +5,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/deploy/kubernetes/apolysisd-production-baseline.yaml"
+containerfile="$repo_root/deploy/container/apolysisd.Dockerfile"
+live_gate="$repo_root/scripts/test-f5-live-deployment.sh"
+makefile="$repo_root/Makefile"
 
 python3 - "$manifest" <<'PY'
 import sys
@@ -42,6 +45,10 @@ required_snippets = [
     "apolysis.dev/production-facing-kernel-blocking: \"disabled\"",
     "readinessProbe:",
     "livenessProbe:",
+    "/usr/local/bin/apolysisd-health",
+    "--timeout-ms\n                - \"1000\"",
+    "--require-readiness",
+    "--require-liveness",
     "resources:\n            requests:\n              cpu: 100m\n              memory: 128Mi\n            limits:\n              cpu: 500m\n              memory: 512Mi",
     "name: host-run",
     "mountPath: /host/run",
@@ -54,6 +61,10 @@ required_snippets = [
     "name: bpf-fs",
     "mountPath: /sys/fs/bpf",
     "path: /sys/fs/bpf",
+    "name: host-tracing",
+    "mountPath: /sys/kernel/tracing",
+    "readOnly: true",
+    "path: /sys/kernel/tracing",
     "kind: NetworkPolicy\nmetadata:\n  name: apolysisd-default-deny\n  namespace: apolysis-system",
 ]
 
@@ -75,3 +86,50 @@ for forbidden in [
 
 print("apolysis-f5: production hardening manifest gate passed")
 PY
+
+for required_path in "$containerfile" "$live_gate"; do
+    if [[ ! -s "$required_path" ]]; then
+        echo "missing F5.2 live deployment artifact: $required_path" >&2
+        exit 1
+    fi
+done
+
+grep -q '^test-f5-live-deployment:' "$makefile" || {
+    echo "missing Makefile target: test-f5-live-deployment" >&2
+    exit 1
+}
+
+grep -q 'COPY crictl /usr/local/bin/crictl' "$containerfile" || {
+    echo "F5.2 live deployment image must include crictl for runtime adapter validation" >&2
+    exit 1
+}
+
+grep -q 'require_command crictl' "$live_gate" || {
+    echo "F5.2 live deployment gate must preflight crictl" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_CRICTL_VERSION:-v1.35.0' "$live_gate" || {
+    echo "F5.2 live deployment gate must pin the default cri-tools version" >&2
+    exit 1
+}
+
+grep -q 'kubernetes-sigs/cri-tools/releases/download' "$live_gate" || {
+    echo "F5.2 live deployment gate must download a real crictl when host crictl is a k3s wrapper" >&2
+    exit 1
+}
+
+grep -q 'readlink -f "$(command -v crictl)"' "$live_gate" || {
+    echo "F5.2 live deployment gate must copy the resolved crictl binary into the image context" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-live-workload' "$live_gate" || {
+    echo "F5.2 live deployment gate must create a live marked workload for adapter evidence" >&2
+    exit 1
+}
+
+grep -q 'k3s_containerd' "$live_gate" || {
+    echo "F5.2 live deployment gate must assert k3s containerd adapter readiness" >&2
+    exit 1
+}

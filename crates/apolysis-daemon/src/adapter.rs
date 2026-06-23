@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
@@ -799,10 +799,93 @@ pub fn cgroup_id_from_proc_cgroup(proc_cgroup: &str, cgroup_root: &Path) -> Resu
         .find_map(|line| line.strip_prefix("0::"))
         .ok_or_else(|| "process cgroup data does not contain a cgroup v2 entry".to_string())?
         .trim();
-    let path = cgroup_root.join(relative.trim_start_matches('/'));
+    let path = cgroup_root.join(normalized_cgroup_relative_path(relative));
     std::fs::metadata(&path)
         .map_err(|error| format!("failed to stat cgroup path {}: {error}", path.display()))
         .map(|metadata| metadata.ino())
+}
+
+pub fn cgroup_id_from_cri_inspect_cgroups_path(
+    inspect: &Value,
+    cgroup_root: &Path,
+) -> Result<Option<u64>, String> {
+    let Some(cgroups_path) =
+        string_field(inspect, &["info", "runtimeSpec", "linux", "cgroupsPath"])
+    else {
+        return Ok(None);
+    };
+    let relative = relative_cgroup_path_from_cri_cgroups_path(&cgroups_path)?;
+    let path = cgroup_root.join(relative);
+    std::fs::metadata(&path)
+        .map_err(|error| format!("failed to stat CRI cgroupsPath {}: {error}", path.display()))
+        .map(|metadata| Some(metadata.ino()))
+}
+
+fn relative_cgroup_path_from_cri_cgroups_path(cgroups_path: &str) -> Result<PathBuf, String> {
+    let cgroups_path = cgroups_path.trim();
+    if cgroups_path.is_empty() {
+        return Err("CRI runtimeSpec linux.cgroupsPath must not be empty".to_string());
+    }
+    if cgroups_path.contains('/') {
+        return Ok(normalized_cgroup_relative_path(cgroups_path));
+    }
+
+    let parts = cgroups_path.split(':').collect::<Vec<_>>();
+    if parts.len() == 3 && parts[0].ends_with(".slice") {
+        let mut relative = systemd_slice_cgroup_path(parts[0])?;
+        let scope_prefix = parts[1].trim();
+        let scope_name = parts[2].trim();
+        if scope_prefix.is_empty() || scope_name.is_empty() {
+            return Err(format!(
+                "CRI systemd cgroupsPath must include scope prefix and name: {cgroups_path}"
+            ));
+        }
+        relative.push(format!("{scope_prefix}-{scope_name}.scope"));
+        return Ok(relative);
+    }
+
+    Ok(normalized_cgroup_relative_path(cgroups_path))
+}
+
+fn systemd_slice_cgroup_path(slice: &str) -> Result<PathBuf, String> {
+    let Some(name) = slice.strip_suffix(".slice") else {
+        return Err(format!(
+            "systemd slice cgroup must end with .slice: {slice}"
+        ));
+    };
+    if name.is_empty() {
+        return Err("systemd slice cgroup name must not be empty".to_string());
+    }
+    let mut relative = PathBuf::new();
+    let mut current = String::new();
+    for part in name.split('-') {
+        if part.is_empty() {
+            return Err(format!(
+                "systemd slice cgroup has an empty component: {slice}"
+            ));
+        }
+        if !current.is_empty() {
+            current.push('-');
+        }
+        current.push_str(part);
+        relative.push(format!("{current}.slice"));
+    }
+    Ok(relative)
+}
+
+fn normalized_cgroup_relative_path(relative: &str) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir | Component::RootDir => {}
+            Component::Prefix(_) => {}
+        }
+    }
+    normalized
 }
 
 fn cgroup_id_from_pid(pid: u32, proc_root: &Path, cgroup_root: &Path) -> Result<u64, String> {
@@ -877,16 +960,18 @@ pub async fn run_runtime_adapter_with_policy<B: RuntimeAdapterBackend>(
                                         summary.backend_recoveries.saturating_add(1);
                                 }
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 summary.ingest_errors = summary.ingest_errors.saturating_add(1);
+                                eprintln!("apolysisd: runtime adapter {adapter:?} ingest error: {error}");
                                 state.set_adapter(adapter, ComponentState::Degraded).await;
                             }
                         }
                     }
                     Ok(None) => break,
-                    Err(_) => {
+                    Err(error) => {
                         consecutive_backend_errors = consecutive_backend_errors.saturating_add(1);
                         summary.backend_errors = summary.backend_errors.saturating_add(1);
+                        eprintln!("apolysisd: runtime adapter {adapter:?} backend error: {error}");
                         state.set_adapter(adapter, ComponentState::Degraded).await;
                         let delay = adapter_backoff_delay(
                             backoff_policy,
@@ -1048,8 +1133,26 @@ impl ContainerdCriRuntimeAdapter {
                     .client
                     .inspect_container(&candidate.container_id)
                     .await?;
-                let pid = containerd_pid_from_cri_inspect(&inspect)?;
-                let cgroup_id = cgroup_id_from_pid(pid, &self.proc_root, &self.cgroup_root)?;
+                let cgroup_id = match cgroup_id_from_cri_inspect_cgroups_path(
+                    &inspect,
+                    &self.cgroup_root,
+                ) {
+                    Ok(Some(cgroup_id)) => cgroup_id,
+                    Ok(None) => {
+                        let pid = containerd_pid_from_cri_inspect(&inspect)?;
+                        cgroup_id_from_pid(pid, &self.proc_root, &self.cgroup_root)?
+                    }
+                    Err(cgroups_path_error) => {
+                        let pid = containerd_pid_from_cri_inspect(&inspect)?;
+                        cgroup_id_from_pid(pid, &self.proc_root, &self.cgroup_root).map_err(
+                                |pid_error| {
+                                    format!(
+                                        "{cgroups_path_error}; fallback via CRI pid {pid} failed: {pid_error}"
+                                    )
+                                },
+                            )?
+                    }
+                };
                 let mut snapshot =
                     containerd_task_snapshot_from_cri_inspect(self.adapter, &inspect, cgroup_id)?;
                 for (key, value) in candidate.inherited_labels {

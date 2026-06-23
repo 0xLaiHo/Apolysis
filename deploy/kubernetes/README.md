@@ -37,7 +37,8 @@ Recommended baseline:
 deployment baseline for running `apolysisd` as a node-local DaemonSet. It keeps
 production-facing kernel blocking disabled, uses explicit Linux capabilities
 instead of `privileged: true`, mounts runtime sockets read-only, sets bounded
-CPU/memory requests and limits, and installs a default-deny `NetworkPolicy`.
+CPU/memory requests and limits, installs a default-deny `NetworkPolicy`, and
+uses semantic health probes for liveness and readiness.
 
 Validate the manifest before live deployment:
 
@@ -47,5 +48,13 @@ kubectl apply --dry-run=client --validate=false \
   -f deploy/kubernetes/apolysisd-production-baseline.yaml
 ```
 
-Live k3s deployment, rollout recovery, and host restoration are part of the
-next F5 slice.
+Run the live k3s deployment gate only on a validation host:
+
+```bash
+APOLYSIS_CONFIRM_F5_LIVE_DEPLOYMENT=1 make test-f5-live-deployment
+```
+
+The live gate builds a local image, imports it into k3s containerd, deploys the
+DaemonSet, creates a marked workload for runtime adapter evidence, captures
+health/log/Kubernetes artifacts, and removes the validation namespace and
+temporary state path before exiting.

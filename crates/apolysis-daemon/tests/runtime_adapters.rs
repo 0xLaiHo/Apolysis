@@ -20,17 +20,18 @@ use apolysis_accountability::{
     SessionIntent,
 };
 use apolysis_daemon::{
-    adapter_backoff_delay, cgroup_id_from_proc_cgroup, containerd_task_snapshot_from_cri_inspect,
-    containerd_task_snapshot_from_metadata, containerd_workload_from_snapshot,
-    crictl_marked_container_candidates_from_ps_and_pods, crictl_marked_container_ids_from_ps,
-    docker_container_pid_from_engine_inspect, docker_snapshot_from_engine_inspect,
-    docker_workload_from_snapshot, f4_runtime_adapter_evidence_from_workload,
-    kubernetes_marked_pod_snapshots_from_api_list, kubernetes_pod_snapshot_from_api_object,
-    kubernetes_workload_from_pod_snapshot, run_runtime_adapter_with_policy, AdapterBackoffPolicy,
-    ContainerdCriRuntimeAdapter, ContainerdTaskSnapshot, CriRuntimeClient, DaemonConfig,
-    DaemonState, DockerContainerSnapshot, DockerEngineClient, DockerEnginePollingRuntimeAdapter,
-    DockerEngineRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
-    KubernetesPodSnapshot, RuntimeAdapterBackend, RuntimeWorkload, APOLYSIS_SESSION_ANNOTATION,
+    adapter_backoff_delay, cgroup_id_from_cri_inspect_cgroups_path, cgroup_id_from_proc_cgroup,
+    containerd_task_snapshot_from_cri_inspect, containerd_task_snapshot_from_metadata,
+    containerd_workload_from_snapshot, crictl_marked_container_candidates_from_ps_and_pods,
+    crictl_marked_container_ids_from_ps, docker_container_pid_from_engine_inspect,
+    docker_snapshot_from_engine_inspect, docker_workload_from_snapshot,
+    f4_runtime_adapter_evidence_from_workload, kubernetes_marked_pod_snapshots_from_api_list,
+    kubernetes_pod_snapshot_from_api_object, kubernetes_workload_from_pod_snapshot,
+    run_runtime_adapter_with_policy, AdapterBackoffPolicy, ContainerdCriRuntimeAdapter,
+    ContainerdTaskSnapshot, CriRuntimeClient, DaemonConfig, DaemonState, DockerContainerSnapshot,
+    DockerEngineClient, DockerEnginePollingRuntimeAdapter, DockerEngineRuntimeAdapter,
+    KubernetesCliClient, KubernetesCliRuntimeAdapter, KubernetesPodSnapshot, RuntimeAdapterBackend,
+    RuntimeWorkload, APOLYSIS_SESSION_ANNOTATION,
 };
 use apolysis_validation::{
     F4GvisorMetadataEvidenceReport, F4KataBoundaryEvidenceReport,
@@ -184,6 +185,57 @@ fn proc_cgroup_entry_resolves_to_cgroup_directory_inode() {
 
     let resolved = cgroup_id_from_proc_cgroup("0::/system.slice/docker-abc.scope\n", &root)
         .expect("resolve cgroup id");
+
+    assert_eq!(resolved, std::fs::metadata(&cgroup).unwrap().ino());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn proc_cgroup_entry_normalizes_host_pid_parent_components() {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "apolysis-cgroup-resolver-hostpid-{}-{id}",
+        std::process::id()
+    ));
+    let relative = "kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podabc.slice/cri-containerd-workload.scope";
+    let cgroup = root.join(relative);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cgroup).expect("create fake k3s cgroup");
+
+    let proc_cgroup = format!("1:net_cls:/\n0::/../../{relative}\n");
+    let resolved =
+        cgroup_id_from_proc_cgroup(&proc_cgroup, &root).expect("resolve normalized cgroup id");
+
+    assert_eq!(resolved, std::fs::metadata(&cgroup).unwrap().ino());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn cri_runtime_spec_systemd_cgroups_path_resolves_to_cgroup_inode() {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "apolysis-cri-cgroup-resolver-{}-{id}",
+        std::process::id()
+    ));
+    let relative = "kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podabc.slice/cri-containerd-workload.scope";
+    let cgroup = root.join(relative);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&cgroup).expect("create fake CRI cgroup");
+
+    let inspect = json!({
+        "info": {
+            "runtimeSpec": {
+                "linux": {
+                    "cgroupsPath": "kubepods-burstable-podabc.slice:cri-containerd:workload"
+                }
+            }
+        }
+    });
+    let resolved = cgroup_id_from_cri_inspect_cgroups_path(&inspect, &root)
+        .expect("parse CRI cgroupsPath")
+        .expect("CRI cgroupsPath exists");
 
     assert_eq!(resolved, std::fs::metadata(&cgroup).unwrap().ino());
 
