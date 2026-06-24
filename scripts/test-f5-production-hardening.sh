@@ -19,6 +19,7 @@ signing_execution_gate="$repo_root/scripts/test-f5-signing-execution.sh"
 aws_kms_signing_gate="$repo_root/scripts/test-f5-aws-kms-signing.sh"
 external_hsm_signing_gate="$repo_root/scripts/test-f5-external-hsm-signing.sh"
 signing_provider_readiness_gate="$repo_root/scripts/test-f5-signing-provider-readiness.sh"
+aws_kms_signer_bootstrap_gate="$repo_root/scripts/test-f5-aws-kms-signer-bootstrap.sh"
 worm_archive_policy_gate="$repo_root/scripts/test-f5-worm-archive-policy.sh"
 worm_archive_execution_gate="$repo_root/scripts/test-f5-worm-archive-execution.sh"
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
@@ -191,6 +192,11 @@ if [[ ! -s "$signing_provider_readiness_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$aws_kms_signer_bootstrap_gate" ]]; then
+    echo "missing F5.41 AWS KMS signer bootstrap artifact: $aws_kms_signer_bootstrap_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$worm_archive_policy_gate" ]]; then
     echo "missing F5.14 WORM archive policy artifact: $worm_archive_policy_gate" >&2
     exit 1
@@ -338,6 +344,11 @@ grep -q '^test-f5-external-hsm-signing:' "$makefile" || {
 
 grep -q '^test-f5-signing-provider-readiness:' "$makefile" || {
     echo "missing Makefile target: test-f5-signing-provider-readiness" >&2
+    exit 1
+}
+
+grep -q '^test-f5-aws-kms-signer-bootstrap:' "$makefile" || {
+    echo "missing Makefile target: test-f5-aws-kms-signer-bootstrap" >&2
     exit 1
 }
 
@@ -978,6 +989,56 @@ grep -q 'APOLYSIS_F5_EXTERNAL_HSM_PKCS11_MODULE' "$signing_provider_readiness_ga
 
 grep -q 'No secret values are recorded' "$signing_provider_readiness_gate" || {
     echo "F5.40 signing provider readiness gate must avoid recording secret values" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_AWS_KMS_SIGNER_BOOTSTRAP' "$aws_kms_signer_bootstrap_gate" || {
+    echo "F5.41 AWS KMS signer bootstrap gate must require explicit cloud-provider confirmation" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_AWS_KMS_BOOTSTRAP_MODE' "$aws_kms_signer_bootstrap_gate" || {
+    echo "F5.41 AWS KMS signer bootstrap gate must expose inspect/ensure mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_AWS_KMS_KEY_CREATION' "$aws_kms_signer_bootstrap_gate" || {
+    echo "F5.41 AWS KMS signer bootstrap gate must require separate key-creation confirmation" >&2
+    exit 1
+}
+
+grep -q 'kms create-key' "$aws_kms_signer_bootstrap_gate" || {
+    echo "F5.41 AWS KMS signer bootstrap gate must support opt-in KMS signing-key creation" >&2
+    exit 1
+}
+
+grep -q 'kms create-alias' "$aws_kms_signer_bootstrap_gate" || {
+    echo "F5.41 AWS KMS signer bootstrap gate must support opt-in alias binding" >&2
+    exit 1
+}
+
+grep -q 'kms describe-key' "$aws_kms_signer_bootstrap_gate" || {
+    echo "F5.41 AWS KMS signer bootstrap gate must inspect KMS key metadata" >&2
+    exit 1
+}
+
+grep -q 'kms get-public-key' "$aws_kms_signer_bootstrap_gate" || {
+    echo "F5.41 AWS KMS signer bootstrap gate must validate KMS public-key metadata" >&2
+    exit 1
+}
+
+grep -q 'SIGN_VERIFY' "$aws_kms_signer_bootstrap_gate" || {
+    echo "F5.41 AWS KMS signer bootstrap gate must require SIGN_VERIFY keys" >&2
+    exit 1
+}
+
+grep -q 'RSASSA_PKCS1_V1_5_SHA_256' "$aws_kms_signer_bootstrap_gate" || {
+    echo "F5.41 AWS KMS signer bootstrap gate must validate the F5 signing algorithm" >&2
+    exit 1
+}
+
+grep -q 'No secret values are recorded' "$aws_kms_signer_bootstrap_gate" || {
+    echo "F5.41 AWS KMS signer bootstrap gate must avoid recording secret values" >&2
     exit 1
 }
 
