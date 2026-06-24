@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery test-f2-performance test-f2-visibility-reports test-f2-production-qualification test-f3-guardrails test-f3-bpf-lsm-live test-f4-runtime-guardrails test-f5-production-hardening test-f5-live-deployment test-f5-supply-chain test-f5-helm-production test-f5-release-registry test-f5-tenant-query-retention test-f5-retention-enforcement test-f5-release-promotion-policy test-f5-registry-promotion-execution test-f5-dockerhub-registry-promotion test-f5-signing-profile test-f5-signing-execution test-f5-aws-kms-signing test-f5-external-hsm-signing test-f5-worm-archive-policy test-f5-worm-archive-execution test-f5-service-mesh-live-evidence test-f5-service-mesh-live-istio test-f5-managed-cloud-service-mesh test-f5-vke-cluster-readiness test-f5-operator-controller test-f5-chaos-performance test-f5-external-provider-qualification test-f5-final-external-provider-bundle test-f5-final-provider-readiness test-f5-final-provider-readiness-contract test-f5-final-provider-bundle-env test-f5-retained-provider-artifact-package
+.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery test-f2-performance test-f2-visibility-reports test-f2-production-qualification test-f3-guardrails test-f3-bpf-lsm-live test-f4-runtime-guardrails test-f5-production-hardening test-f5-live-deployment test-f5-supply-chain test-f5-helm-production test-f5-release-registry test-f5-tenant-query-retention test-f5-retention-enforcement test-f5-release-promotion-policy test-f5-registry-promotion-execution test-f5-dockerhub-registry-promotion test-f5-signing-profile test-f5-signing-execution test-f5-aws-kms-signing test-f5-external-hsm-signing test-f5-worm-archive-policy test-f5-worm-archive-execution test-f5-service-mesh-live-evidence test-f5-service-mesh-live-istio test-f5-managed-cloud-service-mesh test-f5-vke-cluster-readiness test-f5-operator-controller test-f5-chaos-performance test-f5-external-provider-qualification test-f5-final-external-provider-bundle test-f5-final-provider-readiness test-f5-final-provider-readiness-contract test-f5-final-provider-completion test-f5-final-provider-bundle-env test-f5-retained-provider-artifact-package
 
 build: build-ebpf
 	cargo build --workspace
@@ -134,6 +134,9 @@ test-f5-final-provider-readiness:
 
 test-f5-final-provider-readiness-contract:
 	./scripts/test-f5-final-provider-readiness-contract.sh
+
+test-f5-final-provider-completion:
+	./scripts/test-f5-final-provider-completion.sh
 
 test-f5-final-provider-bundle-env:
 	./scripts/prepare-f5-final-provider-bundle-env.sh

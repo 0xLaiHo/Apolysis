@@ -30,6 +30,7 @@ external_provider_qualification_gate="$repo_root/scripts/test-f5-external-provid
 final_external_bundle_builder="$repo_root/scripts/build-f5-final-external-provider-bundle.sh"
 final_external_bundle_gate="$repo_root/scripts/test-f5-final-external-provider-bundle.sh"
 final_provider_readiness_gate="$repo_root/scripts/test-f5-final-provider-readiness.sh"
+final_provider_completion_gate="$repo_root/scripts/verify-f5-final-provider-completion.sh"
 final_provider_workflow="$repo_root/.github/workflows/f5-final-provider-evidence.yml"
 final_bundle_env_gate="$repo_root/scripts/prepare-f5-final-provider-bundle-env.sh"
 retained_provider_package_gate="$repo_root/scripts/package-f5-retained-provider-artifacts.sh"
@@ -243,6 +244,11 @@ if [[ ! -s "$final_provider_readiness_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$final_provider_completion_gate" ]]; then
+    echo "missing F5.38 final provider completion artifact: $final_provider_completion_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$final_provider_workflow" ]]; then
     echo "missing F5.30 final provider evidence workflow: $final_provider_workflow" >&2
     exit 1
@@ -370,6 +376,11 @@ grep -q '^test-f5-final-external-provider-bundle:' "$makefile" || {
 
 grep -q '^test-f5-final-provider-readiness:' "$makefile" || {
     echo "missing Makefile target: test-f5-final-provider-readiness" >&2
+    exit 1
+}
+
+grep -q '^test-f5-final-provider-completion:' "$makefile" || {
+    echo "missing Makefile target: test-f5-final-provider-completion" >&2
     exit 1
 }
 
@@ -1560,6 +1571,21 @@ grep -q 'live_provider_evidence' "$final_provider_readiness_gate" || {
 
 grep -q 'accepted fixture artifacts without live_provider evidence source' "$repo_root/scripts/test-f5-final-provider-readiness-contract.sh" || {
     echo "F5.37 final provider readiness contract must reject accepted-looking fixtures" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_FINAL_PROVIDER_READINESS' "$final_provider_completion_gate" || {
+    echo "F5.38 final provider completion gate must require final provider readiness" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_RUN_F5_FINAL_BUNDLE' "$final_provider_completion_gate" || {
+    echo "F5.38 final provider completion gate must run final bundle assembly" >&2
+    exit 1
+}
+
+grep -q 'final_bundle_report' "$final_provider_completion_gate" || {
+    echo "F5.38 final provider completion report must retain final bundle report path" >&2
     exit 1
 }
 
