@@ -1069,6 +1069,16 @@ grep -q 'APOLYSIS_REQUIRE_F5_AWS_OIDC_HANDOFF' "$aws_oidc_handoff_gate" || {
     exit 1
 }
 
+grep -q 'APOLYSIS_F5_AWS_OIDC_HANDOFF_MODE' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must expose audit/inspect/ensure mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_AWS_OIDC_APPLY' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must require explicit AWS IAM apply confirmation" >&2
+    exit 1
+}
+
 grep -q 'token.actions.githubusercontent.com' "$aws_oidc_handoff_gate" || {
     echo "F5.44 AWS OIDC handoff gate must bind GitHub Actions OIDC issuer" >&2
     exit 1
@@ -1091,6 +1101,26 @@ grep -q 'kms:Sign' "$aws_oidc_handoff_gate" || {
 
 grep -q 'kms:GetPublicKey' "$aws_oidc_handoff_gate" || {
     echo "F5.44 AWS OIDC handoff gate must include KMS public-key read permissions" >&2
+    exit 1
+}
+
+grep -q 'iam get-role' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must inspect AWS IAM role state" >&2
+    exit 1
+}
+
+grep -q 'NoSuchEntity' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must distinguish missing IAM resources from AWS credential or permission failures" >&2
+    exit 1
+}
+
+grep -q 'iam create-role' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must support opt-in AWS IAM role creation" >&2
+    exit 1
+}
+
+grep -q 'iam put-role-policy' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must support opt-in AWS KMS policy attachment" >&2
     exit 1
 }
 
