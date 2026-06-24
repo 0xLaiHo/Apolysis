@@ -18,6 +18,7 @@ signing_profile_gate="$repo_root/scripts/test-f5-signing-profile.sh"
 signing_execution_gate="$repo_root/scripts/test-f5-signing-execution.sh"
 aws_kms_signing_gate="$repo_root/scripts/test-f5-aws-kms-signing.sh"
 external_hsm_signing_gate="$repo_root/scripts/test-f5-external-hsm-signing.sh"
+signing_provider_readiness_gate="$repo_root/scripts/test-f5-signing-provider-readiness.sh"
 worm_archive_policy_gate="$repo_root/scripts/test-f5-worm-archive-policy.sh"
 worm_archive_execution_gate="$repo_root/scripts/test-f5-worm-archive-execution.sh"
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
@@ -185,6 +186,11 @@ if [[ ! -s "$external_hsm_signing_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$signing_provider_readiness_gate" ]]; then
+    echo "missing F5.40 signing provider readiness artifact: $signing_provider_readiness_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$worm_archive_policy_gate" ]]; then
     echo "missing F5.14 WORM archive policy artifact: $worm_archive_policy_gate" >&2
     exit 1
@@ -327,6 +333,11 @@ grep -q '^test-f5-aws-kms-signing:' "$makefile" || {
 
 grep -q '^test-f5-external-hsm-signing:' "$makefile" || {
     echo "missing Makefile target: test-f5-external-hsm-signing" >&2
+    exit 1
+}
+
+grep -q '^test-f5-signing-provider-readiness:' "$makefile" || {
+    echo "missing Makefile target: test-f5-signing-provider-readiness" >&2
     exit 1
 }
 
@@ -942,6 +953,31 @@ grep -q 'provider": "external_hsm"' "$external_hsm_signing_gate" || {
 
 grep -q 'software HSM modules are not accepted' "$external_hsm_signing_gate" || {
     echo "F5.34 external HSM signing gate must reject software HSM modules" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_SIGNING_PROVIDER_READINESS' "$signing_provider_readiness_gate" || {
+    echo "F5.40 signing provider readiness gate must support fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_SIGNING_EVIDENCE' "$signing_provider_readiness_gate" || {
+    echo "F5.40 signing provider readiness gate must accept retained signing evidence" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_AWS_KMS_KEY_ID' "$signing_provider_readiness_gate" || {
+    echo "F5.40 signing provider readiness gate must audit AWS KMS prerequisites" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_EXTERNAL_HSM_PKCS11_MODULE' "$signing_provider_readiness_gate" || {
+    echo "F5.40 signing provider readiness gate must audit external HSM prerequisites" >&2
+    exit 1
+}
+
+grep -q 'No secret values are recorded' "$signing_provider_readiness_gate" || {
+    echo "F5.40 signing provider readiness gate must avoid recording secret values" >&2
     exit 1
 }
 
