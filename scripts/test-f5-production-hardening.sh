@@ -1421,6 +1421,46 @@ grep -q 'actions/upload-artifact' "$final_provider_workflow" || {
     exit 1
 }
 
+grep -q 'assemble_final_bundle' "$final_provider_workflow" || {
+    echo "F5.32 final provider evidence workflow must optionally assemble the final bundle" >&2
+    exit 1
+}
+
+grep -q 'retained_provider_artifact_run_id' "$final_provider_workflow" || {
+    echo "F5.32 final provider evidence workflow must accept a retained provider artifact run id" >&2
+    exit 1
+}
+
+grep -q "needs.aws-kms-signing.result == 'success'" "$final_provider_workflow" || {
+    echo "F5.32 final provider evidence workflow must wait for AWS KMS evidence success" >&2
+    exit 1
+}
+
+grep -q "needs.gke-managed-mesh.result == 'success'" "$final_provider_workflow" || {
+    echo "F5.32 final provider evidence workflow must wait for managed mesh evidence success" >&2
+    exit 1
+}
+
+grep -q 'actions/download-artifact' "$final_provider_workflow" || {
+    echo "F5.32 final provider evidence workflow must download retained provider artifacts for bundle assembly" >&2
+    exit 1
+}
+
+grep -q 'scripts/prepare-f5-final-provider-bundle-env.sh' "$final_provider_workflow" || {
+    echo "F5.32 final provider evidence workflow must run the F5.31 bundle env gate" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_RUN_F5_FINAL_BUNDLE' "$final_provider_workflow" || {
+    echo "F5.32 final provider evidence workflow must run the F5.26 final bundle builder through F5.31" >&2
+    exit 1
+}
+
+grep -q 'f5-final-external-provider-bundle' "$final_provider_workflow" || {
+    echo "F5.32 final provider evidence workflow must upload final bundle artifacts" >&2
+    exit 1
+}
+
 grep -q 'APOLYSIS_F5_PROVIDER_ARTIFACT_ROOT' "$final_bundle_env_gate" || {
     echo "F5.31 final provider bundle env gate must accept a provider artifact root" >&2
     exit 1

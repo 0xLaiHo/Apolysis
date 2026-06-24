@@ -11,6 +11,14 @@ on:
         description: Run F5.27 managed Cloud Service Mesh evidence
         type: boolean
         default: true
+      assemble_final_bundle:
+        description: Assemble final F5 provider bundle after provider evidence gates pass
+        type: boolean
+        default: true
+      retained_provider_artifact_run_id:
+        description: Optional workflow run ID containing retained WORM/registry provider artifacts
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -106,5 +114,57 @@ jobs:
         with:
           name: f5-managed-cloud-service-mesh-evidence
           path: target/f5-managed-cloud-service-mesh.*
+          if-no-files-found: error
+          retention-days: 30
+
+  assemble-final-bundle:
+    name: F5.32 final provider bundle assembly
+    if: ${{ always() && inputs.assemble_final_bundle && inputs.run_aws_kms && inputs.run_gke_mesh && needs.aws-kms-signing.result == 'success' && needs.gke-managed-mesh.result == 'success' }}
+    needs:
+      - aws-kms-signing
+      - gke-managed-mesh
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      APOLYSIS_REQUIRE_F5_FINAL_BUNDLE_ENV: "1"
+      APOLYSIS_RUN_F5_FINAL_BUNDLE: "1"
+      APOLYSIS_F5_PROVIDER_ARTIFACT_ROOT: provider-artifacts/current:provider-artifacts/retained
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download current-run provider artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: provider-artifacts/current
+          pattern: f5-*-evidence
+          merge-multiple: true
+
+      - name: Download retained WORM/registry artifacts
+        if: ${{ inputs.retained_provider_artifact_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.retained_provider_artifact_run_id }}
+          path: provider-artifacts/retained
+          pattern: f5-*-evidence
+          merge-multiple: true
+
+      - name: Prepare and validate final provider bundle
+        run: ./scripts/prepare-f5-final-provider-bundle-env.sh
+
+      - name: Upload final provider bundle artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f5-final-external-provider-bundle
+          path: |
+            target/f5-final-provider-bundle-env.*
+            target/f5-final-external-provider-bundle.*
           if-no-files-found: error
           retention-days: 30
