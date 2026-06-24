@@ -29,6 +29,7 @@ external_provider_qualification_gate="$repo_root/scripts/test-f5-external-provid
 final_external_bundle_builder="$repo_root/scripts/build-f5-final-external-provider-bundle.sh"
 final_external_bundle_gate="$repo_root/scripts/test-f5-final-external-provider-bundle.sh"
 final_provider_readiness_gate="$repo_root/scripts/test-f5-final-provider-readiness.sh"
+final_provider_workflow="$repo_root/.github/workflows/f5-final-provider-evidence.yml"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -231,6 +232,11 @@ fi
 
 if [[ ! -s "$final_provider_readiness_gate" ]]; then
     echo "missing F5.29 final provider readiness artifact: $final_provider_readiness_gate" >&2
+    exit 1
+fi
+
+if [[ ! -s "$final_provider_workflow" ]]; then
+    echo "missing F5.30 final provider evidence workflow: $final_provider_workflow" >&2
     exit 1
 fi
 
@@ -1356,6 +1362,51 @@ grep -q 'APOLYSIS_F5_GKE_MESH_FLEET_PROJECT' "$final_provider_readiness_gate" ||
 
 grep -q 'apolysis-f5-final-provider-readiness-report' "$final_provider_readiness_gate" || {
     echo "F5.29 final provider readiness gate must retain a machine-readable report" >&2
+    exit 1
+}
+
+grep -q 'workflow_dispatch' "$final_provider_workflow" || {
+    echo "F5.30 final provider evidence workflow must be manually dispatchable" >&2
+    exit 1
+}
+
+grep -q 'aws-actions/configure-aws-credentials' "$final_provider_workflow" || {
+    echo "F5.30 final provider evidence workflow must configure AWS credentials through GitHub Actions" >&2
+    exit 1
+}
+
+grep -q 'google-github-actions/auth' "$final_provider_workflow" || {
+    echo "F5.30 final provider evidence workflow must authenticate to GCP through GitHub Actions" >&2
+    exit 1
+}
+
+grep -q 'google-github-actions/get-gke-credentials' "$final_provider_workflow" || {
+    echo "F5.30 final provider evidence workflow must acquire GKE credentials for managed mesh evidence" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_AWS_KMS_SIGNING' "$final_provider_workflow" || {
+    echo "F5.30 final provider evidence workflow must run the opt-in AWS KMS gate" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_MANAGED_CLOUD_SERVICE_MESH' "$final_provider_workflow" || {
+    echo "F5.30 final provider evidence workflow must run the opt-in managed mesh gate" >&2
+    exit 1
+}
+
+grep -q 'scripts/test-f5-aws-kms-signing.sh' "$final_provider_workflow" || {
+    echo "F5.30 final provider evidence workflow must execute F5.25 AWS KMS signing" >&2
+    exit 1
+}
+
+grep -q 'scripts/test-f5-managed-cloud-service-mesh.sh' "$final_provider_workflow" || {
+    echo "F5.30 final provider evidence workflow must execute F5.27 managed mesh qualification" >&2
+    exit 1
+}
+
+grep -q 'actions/upload-artifact' "$final_provider_workflow" || {
+    echo "F5.30 final provider evidence workflow must retain provider artifacts" >&2
     exit 1
 }
 
