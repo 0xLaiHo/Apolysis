@@ -39,6 +39,7 @@ final_provider_workflow="$repo_root/.github/workflows/f5-final-provider-evidence
 final_bundle_env_gate="$repo_root/scripts/prepare-f5-final-provider-bundle-env.sh"
 retained_provider_package_gate="$repo_root/scripts/package-f5-retained-provider-artifacts.sh"
 provider_workflow_readiness_gate="$repo_root/scripts/test-f5-provider-workflow-readiness.sh"
+provider_workflow_dispatch_gate="$repo_root/scripts/test-f5-provider-workflow-dispatch.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -294,6 +295,11 @@ if [[ ! -s "$provider_workflow_readiness_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$provider_workflow_dispatch_gate" ]]; then
+    echo "missing F5.45 provider workflow dispatch artifact: $provider_workflow_dispatch_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -446,6 +452,11 @@ grep -q '^test-f5-retained-provider-artifact-package:' "$makefile" || {
 
 grep -q '^test-f5-provider-workflow-readiness:' "$makefile" || {
     echo "missing Makefile target: test-f5-provider-workflow-readiness" >&2
+    exit 1
+}
+
+grep -q '^test-f5-provider-workflow-dispatch:' "$makefile" || {
+    echo "missing Makefile target: test-f5-provider-workflow-dispatch" >&2
     exit 1
 }
 
@@ -1926,6 +1937,46 @@ grep -q 'github_token_environment_present' "$provider_workflow_readiness_gate" |
 
 grep -q 'No secret values are recorded' "$provider_workflow_readiness_gate" || {
     echo "F5.43 provider workflow readiness gate must avoid recording secret values" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_PROVIDER_WORKFLOW_DISPATCH' "$provider_workflow_dispatch_gate" || {
+    echo "F5.45 provider workflow dispatch gate must expose fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_PROVIDER_WORKFLOW_DISPATCH_MODE' "$provider_workflow_dispatch_gate" || {
+    echo "F5.45 provider workflow dispatch gate must expose dry-run/dispatch mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_PROVIDER_WORKFLOW_DISPATCH' "$provider_workflow_dispatch_gate" || {
+    echo "F5.45 provider workflow dispatch gate must require explicit dispatch confirmation" >&2
+    exit 1
+}
+
+grep -q 'gh workflow run' "$provider_workflow_dispatch_gate" || {
+    echo "F5.45 provider workflow dispatch gate must run the final provider evidence workflow" >&2
+    exit 1
+}
+
+grep -q 'retained_provider_artifact_sha256' "$provider_workflow_dispatch_gate" || {
+    echo "F5.45 provider workflow dispatch gate must require retained artifact SHA input for package dispatch" >&2
+    exit 1
+}
+
+grep -q 'without_query_or_fragment' "$provider_workflow_dispatch_gate" || {
+    echo "F5.45 provider workflow dispatch gate must reject signed URL query strings before recording commands" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-provider-workflow-dispatch-report' "$provider_workflow_dispatch_gate" || {
+    echo "F5.45 provider workflow dispatch gate must retain a machine-readable report" >&2
+    exit 1
+}
+
+grep -q 'No secret values are recorded' "$provider_workflow_dispatch_gate" || {
+    echo "F5.45 provider workflow dispatch gate must avoid recording secret values" >&2
     exit 1
 }
 
