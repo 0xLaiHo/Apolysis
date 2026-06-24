@@ -19,6 +19,14 @@ on:
         description: Optional workflow run ID containing retained WORM/registry provider artifacts
         type: string
         required: false
+      retained_provider_artifact_url:
+        description: Optional HTTPS URL for an apolysis-f5-retained-provider-artifacts.tar.gz package
+        type: string
+        required: false
+      retained_provider_artifact_sha256:
+        description: Required SHA-256 hex digest when retained_provider_artifact_url is set
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -154,6 +162,21 @@ jobs:
           path: provider-artifacts/retained
           pattern: f5-*-evidence
           merge-multiple: true
+
+      - name: Import retained provider artifact package
+        if: ${{ inputs.retained_provider_artifact_url != '' }}
+        env:
+          RETAINED_PROVIDER_ARTIFACT_URL: ${{ inputs.retained_provider_artifact_url }}
+          RETAINED_PROVIDER_ARTIFACT_SHA256: ${{ inputs.retained_provider_artifact_sha256 }}
+        run: |
+          test -n "$RETAINED_PROVIDER_ARTIFACT_SHA256"
+          mkdir -p provider-artifacts/retained-package provider-artifacts/retained
+          curl -fsSL "$RETAINED_PROVIDER_ARTIFACT_URL" \
+            -o provider-artifacts/retained-package/apolysis-f5-retained-provider-artifacts.tar.gz
+          echo "$RETAINED_PROVIDER_ARTIFACT_SHA256  provider-artifacts/retained-package/apolysis-f5-retained-provider-artifacts.tar.gz" \
+            | sha256sum -c -
+          tar -xzf provider-artifacts/retained-package/apolysis-f5-retained-provider-artifacts.tar.gz \
+            -C provider-artifacts/retained
 
       - name: Prepare and validate final provider bundle
         run: ./scripts/prepare-f5-final-provider-bundle-env.sh

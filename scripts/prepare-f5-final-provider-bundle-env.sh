@@ -118,15 +118,10 @@ def find_candidate(key: str, provider_class: str | None = None, report: bool = F
     if explicit:
         path = Path(explicit)
         return path if path.is_file() else path
-    default = known_defaults.get(key)
-    if default is not None and default.is_file():
-        return default
     # Signing and managed-mesh artifacts close the final production-readiness gap.
     # Do not discover them from the repo's default target/ tree because local
     # contract tests intentionally create accepted-looking fixture artifacts.
     roots = explicit_artifact_roots
-    if not roots:
-        return None
     candidates: list[Path] = []
     for root in roots:
         if not root.exists():
@@ -142,7 +137,13 @@ def find_candidate(key: str, provider_class: str | None = None, report: bool = F
             elif provider_of(path) in accepted_providers[provider_class] and observed_at(path) > 0:
                 filtered.append(path)
         candidates = filtered
-    return latest_existing(candidates)
+    candidate = latest_existing(candidates)
+    if candidate is not None:
+        return candidate
+    default = known_defaults.get(key)
+    if default is not None and default.is_file():
+        return default
+    return None
 
 paths = {
     "signing_evidence": find_candidate("signing_evidence", "signing"),

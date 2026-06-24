@@ -31,6 +31,7 @@ final_external_bundle_gate="$repo_root/scripts/test-f5-final-external-provider-b
 final_provider_readiness_gate="$repo_root/scripts/test-f5-final-provider-readiness.sh"
 final_provider_workflow="$repo_root/.github/workflows/f5-final-provider-evidence.yml"
 final_bundle_env_gate="$repo_root/scripts/prepare-f5-final-provider-bundle-env.sh"
+retained_provider_package_gate="$repo_root/scripts/package-f5-retained-provider-artifacts.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -246,6 +247,11 @@ if [[ ! -s "$final_bundle_env_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$retained_provider_package_gate" ]]; then
+    echo "missing F5.33 retained provider artifact package gate: $retained_provider_package_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -358,6 +364,11 @@ grep -q '^test-f5-final-provider-readiness:' "$makefile" || {
 
 grep -q '^test-f5-final-provider-bundle-env:' "$makefile" || {
     echo "missing Makefile target: test-f5-final-provider-bundle-env" >&2
+    exit 1
+}
+
+grep -q '^test-f5-retained-provider-artifact-package:' "$makefile" || {
+    echo "missing Makefile target: test-f5-retained-provider-artifact-package" >&2
     exit 1
 }
 
@@ -1458,6 +1469,31 @@ grep -q 'APOLYSIS_RUN_F5_FINAL_BUNDLE' "$final_provider_workflow" || {
 
 grep -q 'f5-final-external-provider-bundle' "$final_provider_workflow" || {
     echo "F5.32 final provider evidence workflow must upload final bundle artifacts" >&2
+    exit 1
+}
+
+grep -q 'retained_provider_artifact_url' "$final_provider_workflow" || {
+    echo "F5.33 final provider evidence workflow must import retained provider artifact packages by URL" >&2
+    exit 1
+}
+
+grep -q 'retained_provider_artifact_sha256' "$final_provider_workflow" || {
+    echo "F5.33 final provider evidence workflow must verify retained provider artifact package SHA-256" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_RETAINED_PROVIDER_PACKAGE' "$retained_provider_package_gate" || {
+    echo "F5.33 retained provider artifact package gate must expose fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-retained-provider-artifacts-manifest' "$retained_provider_package_gate" || {
+    echo "F5.33 retained provider artifact package gate must retain a package manifest" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-retained-provider-artifacts.tar.gz' "$retained_provider_package_gate" || {
+    echo "F5.33 retained provider artifact package gate must produce a portable tarball" >&2
     exit 1
 }
 
