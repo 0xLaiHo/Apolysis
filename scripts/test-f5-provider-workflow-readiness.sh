@@ -200,6 +200,7 @@ report = {
     "gh_authenticated": gh_authenticated,
     "gh_error_hint": gh_error,
     "next_commands": {
+        "authenticate_gh": "gh auth login --hostname github.com --git-protocol ssh --scopes repo,workflow --skip-ssh-key --web",
         "set_aws_oidc_role_secret": f"gh secret set F5_AWS_ROLE_TO_ASSUME --repo {repo}",
         "set_aws_region_variable": f"gh variable set F5_AWS_REGION --repo {repo} --body <aws-region>",
         "set_existing_kms_key_secret": f"gh secret set F5_AWS_KMS_KEY_ID --repo {repo}",
