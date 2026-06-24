@@ -201,6 +201,7 @@ report = {
     "gh_error_hint": gh_error,
     "next_commands": {
         "authenticate_gh": "gh auth login --hostname github.com --git-protocol ssh --scopes repo,workflow --skip-ssh-key --web",
+        "authenticate_gh_with_token": "printf '%s\\n' \"$GH_TOKEN\" | gh auth login --with-token --hostname github.com --git-protocol ssh",
         "set_aws_oidc_role_secret": f"gh secret set F5_AWS_ROLE_TO_ASSUME --repo {repo}",
         "set_aws_region_variable": f"gh variable set F5_AWS_REGION --repo {repo} --body <aws-region>",
         "set_existing_kms_key_secret": f"gh secret set F5_AWS_KMS_KEY_ID --repo {repo}",
@@ -211,6 +212,7 @@ report = {
         "No secret values are recorded in this report.",
         "GitHub secret and variable inventories contain names only.",
         "This gate does not create signing evidence; F5.25 still has to run aws kms sign.",
+        "For headless use, set GH_TOKEN in the shell and use next_commands.authenticate_gh_with_token; do not store token values in this report.",
         "Use retained managed-mesh and retained WORM/registry artifacts when only the signing evidence remains.",
     ],
     "observed_at_unix_ms": int(time.time() * 1000),
