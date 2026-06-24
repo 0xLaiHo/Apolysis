@@ -30,6 +30,7 @@ final_external_bundle_builder="$repo_root/scripts/build-f5-final-external-provid
 final_external_bundle_gate="$repo_root/scripts/test-f5-final-external-provider-bundle.sh"
 final_provider_readiness_gate="$repo_root/scripts/test-f5-final-provider-readiness.sh"
 final_provider_workflow="$repo_root/.github/workflows/f5-final-provider-evidence.yml"
+final_bundle_env_gate="$repo_root/scripts/prepare-f5-final-provider-bundle-env.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -240,6 +241,11 @@ if [[ ! -s "$final_provider_workflow" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$final_bundle_env_gate" ]]; then
+    echo "missing F5.31 final provider bundle env artifact: $final_bundle_env_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -347,6 +353,11 @@ grep -q '^test-f5-final-external-provider-bundle:' "$makefile" || {
 
 grep -q '^test-f5-final-provider-readiness:' "$makefile" || {
     echo "missing Makefile target: test-f5-final-provider-readiness" >&2
+    exit 1
+}
+
+grep -q '^test-f5-final-provider-bundle-env:' "$makefile" || {
+    echo "missing Makefile target: test-f5-final-provider-bundle-env" >&2
     exit 1
 }
 
@@ -1407,6 +1418,46 @@ grep -q 'scripts/test-f5-managed-cloud-service-mesh.sh' "$final_provider_workflo
 
 grep -q 'actions/upload-artifact' "$final_provider_workflow" || {
     echo "F5.30 final provider evidence workflow must retain provider artifacts" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_PROVIDER_ARTIFACT_ROOT' "$final_bundle_env_gate" || {
+    echo "F5.31 final provider bundle env gate must accept a provider artifact root" >&2
+    exit 1
+}
+
+grep -q 'explicit_artifact_roots' "$final_bundle_env_gate" || {
+    echo "F5.31 final provider bundle env gate must require explicit roots for final provider artifacts" >&2
+    exit 1
+}
+
+grep -q 'contract tests intentionally create accepted-looking fixture artifacts' "$final_bundle_env_gate" || {
+    echo "F5.31 final provider bundle env gate must avoid default target fixture contamination" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_FINAL_BUNDLE_ENV' "$final_bundle_env_gate" || {
+    echo "F5.31 final provider bundle env gate must expose fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_RUN_F5_FINAL_BUNDLE' "$final_bundle_env_gate" || {
+    echo "F5.31 final provider bundle env gate must optionally run the final bundle builder" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_SIGNING_EVIDENCE' "$final_bundle_env_gate" || {
+    echo "F5.31 final provider bundle env gate must export signing evidence paths" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_MANAGED_MESH_EVIDENCE' "$final_bundle_env_gate" || {
+    echo "F5.31 final provider bundle env gate must export managed mesh evidence paths" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-final-provider-bundle-env-report' "$final_bundle_env_gate" || {
+    echo "F5.31 final provider bundle env gate must retain a machine-readable report" >&2
     exit 1
 }
 
