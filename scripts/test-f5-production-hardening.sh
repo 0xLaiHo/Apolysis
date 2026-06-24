@@ -40,6 +40,7 @@ final_bundle_env_gate="$repo_root/scripts/prepare-f5-final-provider-bundle-env.s
 retained_provider_package_gate="$repo_root/scripts/package-f5-retained-provider-artifacts.sh"
 provider_workflow_readiness_gate="$repo_root/scripts/test-f5-provider-workflow-readiness.sh"
 provider_workflow_dispatch_gate="$repo_root/scripts/test-f5-provider-workflow-dispatch.sh"
+provider_workflow_artifact_import_gate="$repo_root/scripts/test-f5-provider-workflow-artifact-import.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -300,6 +301,11 @@ if [[ ! -s "$provider_workflow_dispatch_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$provider_workflow_artifact_import_gate" ]]; then
+    echo "missing F5.46 provider workflow artifact import artifact: $provider_workflow_artifact_import_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -457,6 +463,11 @@ grep -q '^test-f5-provider-workflow-readiness:' "$makefile" || {
 
 grep -q '^test-f5-provider-workflow-dispatch:' "$makefile" || {
     echo "missing Makefile target: test-f5-provider-workflow-dispatch" >&2
+    exit 1
+}
+
+grep -q '^test-f5-provider-workflow-artifact-import:' "$makefile" || {
+    echo "missing Makefile target: test-f5-provider-workflow-artifact-import" >&2
     exit 1
 }
 
@@ -1977,6 +1988,51 @@ grep -q 'apolysis-f5-provider-workflow-dispatch-report' "$provider_workflow_disp
 
 grep -q 'No secret values are recorded' "$provider_workflow_dispatch_gate" || {
     echo "F5.45 provider workflow dispatch gate must avoid recording secret values" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_PROVIDER_WORKFLOW_ARTIFACT_IMPORT' "$provider_workflow_artifact_import_gate" || {
+    echo "F5.46 provider workflow artifact import gate must expose fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_PROVIDER_WORKFLOW_ARTIFACT_IMPORT_MODE' "$provider_workflow_artifact_import_gate" || {
+    echo "F5.46 provider workflow artifact import gate must expose audit/download mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_PROVIDER_WORKFLOW_ARTIFACT_DOWNLOAD' "$provider_workflow_artifact_import_gate" || {
+    echo "F5.46 provider workflow artifact import gate must require explicit download confirmation" >&2
+    exit 1
+}
+
+grep -q 'gh run download' "$provider_workflow_artifact_import_gate" || {
+    echo "F5.46 provider workflow artifact import gate must support GitHub workflow artifact download" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_PROVIDER_ARTIFACT_ROOT' "$provider_workflow_artifact_import_gate" || {
+    echo "F5.46 provider workflow artifact import gate must hand imported artifacts to the final bundle env gate" >&2
+    exit 1
+}
+
+grep -q 'prepare-f5-final-provider-bundle-env.sh' "$provider_workflow_artifact_import_gate" || {
+    echo "F5.46 provider workflow artifact import gate must run the final bundle env audit" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-provider-workflow-artifact-import-report' "$provider_workflow_artifact_import_gate" || {
+    echo "F5.46 provider workflow artifact import gate must retain a machine-readable report" >&2
+    exit 1
+}
+
+grep -q 'retained_provider_artifact_package_no_links' "$provider_workflow_artifact_import_gate" || {
+    echo "F5.46 provider workflow artifact import gate must reject symlinks and hardlinks in retained packages" >&2
+    exit 1
+}
+
+grep -q 'No secret values are recorded' "$provider_workflow_artifact_import_gate" || {
+    echo "F5.46 provider workflow artifact import gate must avoid recording secret values" >&2
     exit 1
 }
 
