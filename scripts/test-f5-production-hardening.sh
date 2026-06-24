@@ -1548,6 +1548,21 @@ grep -q "needs.gke-managed-mesh.result == 'success' || inputs.retained_managed_m
     exit 1
 }
 
+grep -q 'test-f5-final-provider-readiness-contract' "$makefile" || {
+    echo "F5.37 final provider readiness fixture rejection contract must be exposed as a Make target" >&2
+    exit 1
+}
+
+grep -q 'live_provider_evidence' "$final_provider_readiness_gate" || {
+    echo "F5.37 final provider readiness gate must require live provider evidence source" >&2
+    exit 1
+}
+
+grep -q 'accepted fixture artifacts without live_provider evidence source' "$repo_root/scripts/test-f5-final-provider-readiness-contract.sh" || {
+    echo "F5.37 final provider readiness contract must reject accepted-looking fixtures" >&2
+    exit 1
+}
+
 grep -q 'APOLYSIS_REQUIRE_F5_RETAINED_PROVIDER_PACKAGE' "$retained_provider_package_gate" || {
     echo "F5.33 retained provider artifact package gate must expose fail-closed required mode" >&2
     exit 1

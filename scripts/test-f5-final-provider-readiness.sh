@@ -100,6 +100,8 @@ for name in artifact_envs:
         "exists": bool(path and path.is_file()),
         "path": str(path) if path is not None else "",
         "source": source,
+        "evidence_source": document.get("source", ""),
+        "live_provider_evidence": document.get("source") == "live_provider",
         "json_status": status,
         "report_passed": document.get("passed") is True,
         "provider": document.get("provider") or document.get("approval", {}).get("provider", ""),
@@ -114,6 +116,7 @@ def pair_ready(evidence_env: str, report_env: str, accepted_providers: set[str])
     return (
         evidence["exists"]
         and report["exists"]
+        and evidence["live_provider_evidence"]
         and report["report_passed"]
         and evidence["provider"] in accepted_providers
         and int(evidence["observed_at_unix_ms"] or 0) > 0
