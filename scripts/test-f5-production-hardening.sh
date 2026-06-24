@@ -1533,6 +1533,21 @@ grep -q "needs.aws-kms-signing.result == 'success' || inputs.retained_signing_pr
     exit 1
 }
 
+grep -q 'retained_managed_mesh_provider_artifact' "$final_provider_workflow" || {
+    echo "F5.36 final provider evidence workflow must allow retained managed mesh provider artifacts as a GKE managed-mesh alternative" >&2
+    exit 1
+}
+
+grep -q 'inputs.retained_managed_mesh_provider_artifact' "$final_provider_workflow" || {
+    echo "F5.36 final bundle assembly must be gated by retained managed mesh provider artifact confirmation" >&2
+    exit 1
+}
+
+grep -q "needs.gke-managed-mesh.result == 'success' || inputs.retained_managed_mesh_provider_artifact" "$final_provider_workflow" || {
+    echo "F5.36 final bundle assembly must accept GKE managed-mesh success or retained managed mesh artifacts" >&2
+    exit 1
+}
+
 grep -q 'APOLYSIS_REQUIRE_F5_RETAINED_PROVIDER_PACKAGE' "$retained_provider_package_gate" || {
     echo "F5.33 retained provider artifact package gate must expose fail-closed required mode" >&2
     exit 1
