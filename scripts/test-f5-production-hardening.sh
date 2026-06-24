@@ -37,6 +37,7 @@ final_provider_completion_gate="$repo_root/scripts/verify-f5-final-provider-comp
 final_provider_workflow="$repo_root/.github/workflows/f5-final-provider-evidence.yml"
 final_bundle_env_gate="$repo_root/scripts/prepare-f5-final-provider-bundle-env.sh"
 retained_provider_package_gate="$repo_root/scripts/package-f5-retained-provider-artifacts.sh"
+provider_workflow_readiness_gate="$repo_root/scripts/test-f5-provider-workflow-readiness.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -282,6 +283,11 @@ if [[ ! -s "$retained_provider_package_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$provider_workflow_readiness_gate" ]]; then
+    echo "missing F5.43 provider workflow readiness artifact: $provider_workflow_readiness_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -424,6 +430,11 @@ grep -q '^test-f5-final-provider-bundle-env:' "$makefile" || {
 
 grep -q '^test-f5-retained-provider-artifact-package:' "$makefile" || {
     echo "missing Makefile target: test-f5-retained-provider-artifact-package" >&2
+    exit 1
+}
+
+grep -q '^test-f5-provider-workflow-readiness:' "$makefile" || {
+    echo "missing Makefile target: test-f5-provider-workflow-readiness" >&2
     exit 1
 }
 
@@ -1774,6 +1785,51 @@ grep -q 'apolysis-f5-retained-provider-artifacts-manifest' "$retained_provider_p
 
 grep -q 'apolysis-f5-retained-provider-artifacts.tar.gz' "$retained_provider_package_gate" || {
     echo "F5.33 retained provider artifact package gate must produce a portable tarball" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_PROVIDER_WORKFLOW_READINESS' "$provider_workflow_readiness_gate" || {
+    echo "F5.43 provider workflow readiness gate must expose fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q '"gh", "secret", "list"' "$provider_workflow_readiness_gate" || {
+    echo "F5.43 provider workflow readiness gate must inspect GitHub repository secrets by name" >&2
+    exit 1
+}
+
+grep -q '"gh", "variable", "list"' "$provider_workflow_readiness_gate" || {
+    echo "F5.43 provider workflow readiness gate must inspect GitHub repository variables by name" >&2
+    exit 1
+}
+
+grep -q 'F5_AWS_ROLE_TO_ASSUME' "$provider_workflow_readiness_gate" || {
+    echo "F5.43 provider workflow readiness gate must require the AWS OIDC role secret" >&2
+    exit 1
+}
+
+grep -q 'F5_AWS_REGION' "$provider_workflow_readiness_gate" || {
+    echo "F5.43 provider workflow readiness gate must require the AWS region variable" >&2
+    exit 1
+}
+
+grep -q 'F5_AWS_KMS_KEY_ID' "$provider_workflow_readiness_gate" || {
+    echo "F5.43 provider workflow readiness gate must support direct AWS KMS key secret readiness" >&2
+    exit 1
+}
+
+grep -q 'F5_AWS_KMS_ALIAS' "$provider_workflow_readiness_gate" || {
+    echo "F5.43 provider workflow readiness gate must support AWS KMS bootstrap alias readiness" >&2
+    exit 1
+}
+
+grep -q 'gh workflow run' "$provider_workflow_readiness_gate" || {
+    echo "F5.43 provider workflow readiness gate must emit a dispatch command template" >&2
+    exit 1
+}
+
+grep -q 'No secret values are recorded' "$provider_workflow_readiness_gate" || {
+    echo "F5.43 provider workflow readiness gate must avoid recording secret values" >&2
     exit 1
 }
 
