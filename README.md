@@ -75,7 +75,7 @@ a release promotion policy gate and live OCI registry promotion execution for
 digest-locked production promotion, retention windows, rollback tags, and
 bounded registry access principals, plus a KMS/HSM signing profile gate for
 production signer eligibility and an HSM-compatible PKCS#11 signing execution
-gate plus an opt-in AWS KMS live signing gate, an external WORM/object-lock
+gate plus opt-in AWS KMS and external HSM live signing gates, an external WORM/object-lock
 archive policy gate with live S3-compatible Object Lock API execution, and a
 live Istio service-mesh admission/handshake evidence gate, plus live operator/controller
 reconciliation validation, live k3s and Vultr VKE managed-Kubernetes
@@ -332,7 +332,7 @@ managed-Kubernetes chaos/performance validation, fail-closed external provider
 qualification bundle validation, and
 live Cloudflare R2 Bucket Lock WORM evidence plus live Docker Hub immutable-tag
 registry promotion evidence and retained external provider bundle artifact
-verification, plus an opt-in AWS KMS live signing gate and final external
+verification, plus opt-in AWS KMS and external HSM live signing gates and final external
 provider bundle assembly, and an opt-in managed Cloud Service Mesh provider
 qualification gate, plus a Vultr VKE 3-node cluster readiness gate and final
 provider readiness audit, a manual final provider evidence workflow, and a
@@ -360,7 +360,7 @@ Focused roadmap:
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
-| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, KMS/HSM signing profile validation, PKCS#11 signing execution, opt-in AWS KMS live signing, Helm, registry/archive/promotion/WORM policy and API execution validation including live OCI promotion, service-mesh identity/live handshake validation, opt-in managed Cloud Service Mesh provider qualification, live operator/controller reconciliation validation, live k3s and Vultr VKE managed-Kubernetes chaos/performance validation, Vultr VKE 3-node readiness, final provider readiness audit, manual provider evidence workflow, final provider bundle environment preparation, workflow bundle assembly, retained provider artifact package handoff, fail-closed external provider qualification bundle validation with retained artifact SHA verification and final bundle assembly, live Cloudflare R2 Bucket Lock WORM evidence, live Docker Hub immutable-tag registry promotion evidence, and remaining live execution of external KMS/HSM plus managed service-mesh provider qualification | 🚧 **In Progress** |
+| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, KMS/HSM signing profile validation, PKCS#11 signing execution, opt-in AWS KMS and external HSM live signing, Helm, registry/archive/promotion/WORM policy and API execution validation including live OCI promotion, service-mesh identity/live handshake validation, opt-in managed Cloud Service Mesh provider qualification, live operator/controller reconciliation validation, live k3s and Vultr VKE managed-Kubernetes chaos/performance validation, Vultr VKE 3-node readiness, final provider readiness audit, manual provider evidence workflow, final provider bundle environment preparation, workflow bundle assembly, retained provider artifact package handoff, fail-closed external provider qualification bundle validation with retained artifact SHA verification and final bundle assembly, live Cloudflare R2 Bucket Lock WORM evidence, live Docker Hub immutable-tag registry promotion evidence, and remaining live execution of external KMS/HSM plus managed service-mesh provider qualification | 🚧 **In Progress** |
 
 ## 📜 License
 

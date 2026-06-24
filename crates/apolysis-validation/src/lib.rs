@@ -738,6 +738,7 @@ pub enum F5SigningExecutionProvider {
     EphemeralLocalValidation,
     LocalFile,
     Pkcs11Hsm,
+    ExternalHsm,
     CloudKms,
 }
 
@@ -2294,12 +2295,14 @@ pub fn evaluate_f5_signing_execution_evidence(
     }
     if !matches!(
         evidence.provider,
-        F5SigningExecutionProvider::Pkcs11Hsm | F5SigningExecutionProvider::CloudKms
+        F5SigningExecutionProvider::Pkcs11Hsm
+            | F5SigningExecutionProvider::ExternalHsm
+            | F5SigningExecutionProvider::CloudKms
     ) {
         f5_signing_execution_failure(
             &mut failures,
             "provider",
-            "signing execution requires PKCS#11 HSM or cloud KMS provider",
+            "signing execution requires PKCS#11 HSM, external HSM, or cloud KMS provider",
         );
     }
     if f5_is_file_key_uri(&evidence.key_uri) {
@@ -6776,7 +6779,7 @@ fn f5_signing_execution_uri_matches_provider(
     value: &str,
 ) -> bool {
     match provider {
-        F5SigningExecutionProvider::Pkcs11Hsm => {
+        F5SigningExecutionProvider::Pkcs11Hsm | F5SigningExecutionProvider::ExternalHsm => {
             value.starts_with("pkcs11:") || value.starts_with("pkcs11://")
         }
         F5SigningExecutionProvider::CloudKms => {

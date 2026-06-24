@@ -25,6 +25,22 @@ fn f5_signing_execution_evidence_accepts_live_pkcs11_hsm_signature() {
 }
 
 #[test]
+fn f5_signing_execution_evidence_accepts_live_external_hsm_signature() {
+    let mut evidence = pkcs11_execution_evidence();
+    evidence.provider = F5SigningExecutionProvider::ExternalHsm;
+
+    let report = evaluate_f5_signing_execution_evidence(evidence);
+
+    assert!(report.passed, "{:#?}", report.failures);
+    let approval = report.approval.expect("signing execution approval");
+    assert_eq!(approval.provider, F5SigningExecutionProvider::ExternalHsm);
+    assert_eq!(
+        approval.key_uri,
+        "pkcs11:token=apolysis-f5-release;object=f5-release;type=private"
+    );
+}
+
+#[test]
 fn f5_signing_execution_evidence_rejects_fixture_or_exportable_signing() {
     let mut evidence = pkcs11_execution_evidence();
     evidence.source = F5SigningExecutionSource::Fixture;
@@ -52,7 +68,7 @@ fn f5_signing_execution_evidence_rejects_fixture_or_exportable_signing() {
     let failure_text = serde_json::to_string(&report.failures).expect("serialize failures");
     for expected in [
         "live provider signing evidence is required",
-        "signing execution requires PKCS#11 HSM or cloud KMS provider",
+        "signing execution requires PKCS#11 HSM, external HSM, or cloud KMS provider",
         "file paths are not valid production signing key URIs",
         "token label is required",
         "key label is required",
