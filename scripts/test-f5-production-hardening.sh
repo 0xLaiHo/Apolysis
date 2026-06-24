@@ -28,6 +28,7 @@ chaos_performance_gate="$repo_root/scripts/test-f5-chaos-performance.sh"
 external_provider_qualification_gate="$repo_root/scripts/test-f5-external-provider-qualification.sh"
 final_external_bundle_builder="$repo_root/scripts/build-f5-final-external-provider-bundle.sh"
 final_external_bundle_gate="$repo_root/scripts/test-f5-final-external-provider-bundle.sh"
+final_provider_readiness_gate="$repo_root/scripts/test-f5-final-provider-readiness.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -228,6 +229,11 @@ if [[ ! -s "$final_external_bundle_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$final_provider_readiness_gate" ]]; then
+    echo "missing F5.29 final provider readiness artifact: $final_provider_readiness_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -330,6 +336,11 @@ grep -q '^test-f5-external-provider-qualification:' "$makefile" || {
 
 grep -q '^test-f5-final-external-provider-bundle:' "$makefile" || {
     echo "missing Makefile target: test-f5-final-external-provider-bundle" >&2
+    exit 1
+}
+
+grep -q '^test-f5-final-provider-readiness:' "$makefile" || {
+    echo "missing Makefile target: test-f5-final-provider-readiness" >&2
     exit 1
 }
 
@@ -1315,6 +1326,36 @@ grep -q 'cloud_kms_or_external_hsm_signing' "$final_external_bundle_builder" || 
 
 grep -q 'managed_service_mesh' "$final_external_bundle_builder" || {
     echo "F5.26 final bundle must include managed mesh provider qualification" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_FINAL_PROVIDER_READINESS' "$final_provider_readiness_gate" || {
+    echo "F5.29 final provider readiness gate must expose fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_SIGNING_EVIDENCE' "$final_provider_readiness_gate" || {
+    echo "F5.29 final provider readiness gate must check retained signing evidence input" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_MANAGED_MESH_EVIDENCE' "$final_provider_readiness_gate" || {
+    echo "F5.29 final provider readiness gate must check retained managed mesh evidence input" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_AWS_KMS_KEY_ID' "$final_provider_readiness_gate" || {
+    echo "F5.29 final provider readiness gate must report AWS KMS live prerequisites" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_GKE_MESH_FLEET_PROJECT' "$final_provider_readiness_gate" || {
+    echo "F5.29 final provider readiness gate must report managed mesh live prerequisites" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-final-provider-readiness-report' "$final_provider_readiness_gate" || {
+    echo "F5.29 final provider readiness gate must retain a machine-readable report" >&2
     exit 1
 }
 
