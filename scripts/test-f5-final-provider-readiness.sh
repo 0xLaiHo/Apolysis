@@ -143,6 +143,8 @@ readiness = {
         "APOLYSIS_F5_MANAGED_MESH_REPORT",
         {
             "gke_anthos_service_mesh",
+            "vultr_vke_istio",
+            "vultr_vke_service_mesh",
             "aks_istio_addon",
             "eks_app_mesh",
             "openshift_service_mesh",

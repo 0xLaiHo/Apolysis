@@ -56,6 +56,8 @@ accepted_providers = {
     "registry": {"docker_hub", "aws_ecr", "gcp_artifact_registry", "azure_container_registry", "ghcr", "quay"},
     "managed_mesh": {
         "gke_anthos_service_mesh",
+        "vultr_vke_istio",
+        "vultr_vke_service_mesh",
         "aks_istio_addon",
         "eks_app_mesh",
         "openshift_service_mesh",

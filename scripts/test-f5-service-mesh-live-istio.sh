@@ -36,6 +36,10 @@ fi
 
 stamp="$(date +%Y%m%d%H%M%S)-$$"
 istio_chart_version="${APOLYSIS_F5_ISTIO_CHART_VERSION:-1.30.1}"
+istio_pilot_cpu_request="${APOLYSIS_F5_ISTIO_PILOT_CPU_REQUEST:-100m}"
+istio_pilot_memory_request="${APOLYSIS_F5_ISTIO_PILOT_MEMORY_REQUEST:-256Mi}"
+istio_pilot_cpu_limit="${APOLYSIS_F5_ISTIO_PILOT_CPU_LIMIT:-500m}"
+istio_pilot_memory_limit="${APOLYSIS_F5_ISTIO_PILOT_MEMORY_LIMIT:-512Mi}"
 namespace="apolysis-f5-mesh-$stamp"
 plaintext_namespace="apolysis-f5-plain-$stamp"
 evidence_path="$output_dir/apolysis-f5-istio-live-evidence.json"
@@ -87,6 +91,10 @@ install_istio_if_missing() {
     helm upgrade --install istiod istio/istiod \
         -n istio-system \
         --version "$istio_chart_version" \
+        --set "pilot.resources.requests.cpu=$istio_pilot_cpu_request" \
+        --set "pilot.resources.requests.memory=$istio_pilot_memory_request" \
+        --set "pilot.resources.limits.cpu=$istio_pilot_cpu_limit" \
+        --set "pilot.resources.limits.memory=$istio_pilot_memory_limit" \
         --wait \
         --timeout 300s >/dev/null
     kubectl -n istio-system rollout status deploy/istiod --timeout=300s >/dev/null

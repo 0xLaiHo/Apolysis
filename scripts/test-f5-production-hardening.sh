@@ -23,6 +23,7 @@ worm_archive_execution_gate="$repo_root/scripts/test-f5-worm-archive-execution.s
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
 service_mesh_live_istio_gate="$repo_root/scripts/test-f5-service-mesh-live-istio.sh"
 managed_cloud_service_mesh_gate="$repo_root/scripts/test-f5-managed-cloud-service-mesh.sh"
+vke_service_mesh_provider_gate="$repo_root/scripts/test-f5-vke-service-mesh-provider.sh"
 vke_cluster_readiness_gate="$repo_root/scripts/test-f5-vke-cluster-readiness.sh"
 operator_controller_gate="$repo_root/scripts/test-f5-operator-controller.sh"
 chaos_performance_gate="$repo_root/scripts/test-f5-chaos-performance.sh"
@@ -209,6 +210,11 @@ if [[ ! -s "$managed_cloud_service_mesh_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$vke_service_mesh_provider_gate" ]]; then
+    echo "missing F5.39 Vultr VKE service-mesh provider artifact: $vke_service_mesh_provider_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$vke_cluster_readiness_gate" ]]; then
     echo "missing F5.28 Vultr VKE cluster readiness artifact: $vke_cluster_readiness_gate" >&2
     exit 1
@@ -351,6 +357,11 @@ grep -q '^test-f5-managed-cloud-service-mesh:' "$makefile" || {
 
 grep -q '^test-f5-vke-cluster-readiness:' "$makefile" || {
     echo "missing Makefile target: test-f5-vke-cluster-readiness" >&2
+    exit 1
+}
+
+grep -q '^test-f5-vke-service-mesh-provider:' "$makefile" || {
+    echo "missing Makefile target: test-f5-vke-service-mesh-provider" >&2
     exit 1
 }
 
@@ -1059,6 +1070,11 @@ grep -q 'APOLYSIS_F5_ISTIO_CHART_VERSION:-1.30.1' "$service_mesh_live_istio_gate
     exit 1
 }
 
+grep -q 'APOLYSIS_F5_ISTIO_PILOT_MEMORY_REQUEST' "$service_mesh_live_istio_gate" || {
+    echo "F5.39 live Istio service-mesh gate must expose low-memory pilot resource controls for small VKE nodes" >&2
+    exit 1
+}
+
 grep -q 'kind: PeerAuthentication' "$service_mesh_live_istio_gate" || {
     echo "F5.15 live Istio gate must apply PeerAuthentication" >&2
     exit 1
@@ -1111,6 +1127,26 @@ grep -q 'controlplanerevision' "$managed_cloud_service_mesh_gate" || {
 
 grep -q 'gke_anthos_service_mesh' "$managed_cloud_service_mesh_gate" || {
     echo "F5.27 managed Cloud Service Mesh evidence must use accepted managed mesh provider identity" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_VKE_SERVICE_MESH_PROVIDER' "$vke_service_mesh_provider_gate" || {
+    echo "F5.39 VKE service-mesh provider gate must require explicit live confirmation" >&2
+    exit 1
+}
+
+grep -q 'vultr_vke_istio' "$vke_service_mesh_provider_gate" || {
+    echo "F5.39 VKE service-mesh provider evidence must use the Vultr VKE Istio provider identity" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_MANAGED_MESH_EVIDENCE' "$vke_service_mesh_provider_gate" || {
+    echo "F5.39 VKE service-mesh provider gate must publish final-bundle managed mesh evidence paths" >&2
+    exit 1
+}
+
+grep -q 'vultr_vke_istio' "$repo_root/crates/apolysis-validation/src/lib.rs" || {
+    echo "F5.39 external provider qualification must accept Vultr VKE Istio managed mesh evidence" >&2
     exit 1
 }
 

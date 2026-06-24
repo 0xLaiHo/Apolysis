@@ -32,6 +32,27 @@ fn f5_external_provider_qualification_accepts_bundle_with_r2_and_dockerhub_evide
 }
 
 #[test]
+fn f5_external_provider_qualification_accepts_vultr_vke_istio_provider_evidence() {
+    let mut bundle = qualification_bundle();
+    let managed_mesh = bundle
+        .entries
+        .iter_mut()
+        .find(|entry| {
+            entry.requirement == F5ExternalProviderQualificationRequirement::ManagedServiceMesh
+        })
+        .expect("managed mesh entry");
+    managed_mesh.provider = "vultr_vke_istio".to_string();
+    managed_mesh.provider_control_plane =
+        "vke:vke-a88389c3-f720-412d-9579-c83d3c21eabb:istio".to_string();
+
+    let report = evaluate_f5_external_provider_qualification_bundle(bundle);
+
+    assert!(report.passed, "{:#?}", report.failures);
+    let approval = report.approval.expect("external provider approval");
+    assert!(approval.providers.contains(&"vultr_vke_istio".to_string()));
+}
+
+#[test]
 fn f5_external_provider_qualification_rejects_local_or_incomplete_bundles() {
     let mut bundle = qualification_bundle();
     bundle.source = F5ExternalProviderQualificationSource::Fixture;

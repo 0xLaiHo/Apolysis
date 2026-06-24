@@ -6965,6 +6965,8 @@ fn f5_is_accepted_external_provider(
             provider.as_str(),
             "gke_anthos_service_mesh"
                 | "anthos_service_mesh"
+                | "vultr_vke_istio"
+                | "vultr_vke_service_mesh"
                 | "aks_istio_addon"
                 | "eks_app_mesh"
                 | "openshift_service_mesh"
