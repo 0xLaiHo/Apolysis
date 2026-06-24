@@ -41,6 +41,7 @@ retained_provider_package_gate="$repo_root/scripts/package-f5-retained-provider-
 provider_workflow_readiness_gate="$repo_root/scripts/test-f5-provider-workflow-readiness.sh"
 provider_workflow_dispatch_gate="$repo_root/scripts/test-f5-provider-workflow-dispatch.sh"
 provider_workflow_artifact_import_gate="$repo_root/scripts/test-f5-provider-workflow-artifact-import.sh"
+final_provider_closure_gate="$repo_root/scripts/test-f5-final-provider-closure.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -306,6 +307,11 @@ if [[ ! -s "$provider_workflow_artifact_import_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$final_provider_closure_gate" ]]; then
+    echo "missing F5.47 final provider closure artifact: $final_provider_closure_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -468,6 +474,11 @@ grep -q '^test-f5-provider-workflow-dispatch:' "$makefile" || {
 
 grep -q '^test-f5-provider-workflow-artifact-import:' "$makefile" || {
     echo "missing Makefile target: test-f5-provider-workflow-artifact-import" >&2
+    exit 1
+}
+
+grep -q '^test-f5-final-provider-closure:' "$makefile" || {
+    echo "missing Makefile target: test-f5-final-provider-closure" >&2
     exit 1
 }
 
@@ -2033,6 +2044,46 @@ grep -q 'retained_provider_artifact_package_no_links' "$provider_workflow_artifa
 
 grep -q 'No secret values are recorded' "$provider_workflow_artifact_import_gate" || {
     echo "F5.46 provider workflow artifact import gate must avoid recording secret values" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_FINAL_PROVIDER_CLOSURE' "$final_provider_closure_gate" || {
+    echo "F5.47 final provider closure gate must expose fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_RUN_F5_FINAL_PROVIDER_COMPLETION' "$final_provider_closure_gate" || {
+    echo "F5.47 final provider closure gate must gate final completion execution explicitly" >&2
+    exit 1
+}
+
+grep -q 'test-f5-provider-workflow-readiness.sh' "$final_provider_closure_gate" || {
+    echo "F5.47 final provider closure gate must run the provider workflow readiness audit" >&2
+    exit 1
+}
+
+grep -q 'test-f5-provider-workflow-dispatch.sh' "$final_provider_closure_gate" || {
+    echo "F5.47 final provider closure gate must run the provider workflow dispatch audit" >&2
+    exit 1
+}
+
+grep -q 'test-f5-provider-workflow-artifact-import.sh' "$final_provider_closure_gate" || {
+    echo "F5.47 final provider closure gate must run the provider workflow artifact import audit" >&2
+    exit 1
+}
+
+grep -q 'verify-f5-final-provider-completion.sh' "$final_provider_closure_gate" || {
+    echo "F5.47 final provider closure gate must run the final provider completion gate when requested" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-final-provider-closure-report' "$final_provider_closure_gate" || {
+    echo "F5.47 final provider closure gate must retain a machine-readable report" >&2
+    exit 1
+}
+
+grep -q 'No secret values are recorded' "$final_provider_closure_gate" || {
+    echo "F5.47 final provider closure gate must avoid recording secret values" >&2
     exit 1
 }
 
