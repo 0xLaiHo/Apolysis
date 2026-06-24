@@ -94,8 +94,9 @@ readiness preflight for retained signing evidence, AWS KMS prerequisites, and
 external HSM prerequisites, an opt-in AWS KMS signer bootstrap gate for
 inspect/ensure handoff to live signing, a manual workflow path that can run
 that AWS KMS bootstrap before F5.25 signing, a provider workflow readiness gate
-for GitHub secret/variable setup and web/headless-token auth handoff, a final
-provider completion gate that binds
+for GitHub secret/variable setup and web/headless-token auth handoff, an AWS
+OIDC role/KMS policy handoff gate, and a final provider completion gate that
+binds
 that readiness audit to a passing final external provider bundle, a manual
 GitHub Actions workflow for running the remaining live provider evidence gates
 with repository secrets, and a final provider bundle environment preparation
@@ -355,7 +356,7 @@ preflight for retained signing evidence, AWS KMS prerequisites, and external
 HSM prerequisites, and opt-in AWS KMS signer bootstrap for inspect/ensure
 handoff to live signing with workflow bootstrap orchestration, plus provider
 workflow readiness web/headless-token auth handoff auditing for the remaining
-GitHub Actions setup. The
+GitHub Actions setup and AWS OIDC role/KMS policy handoff. The
 remaining F5 production-provider gap is real cloud KMS or external hardware HSM
 signing evidence.
 
@@ -380,7 +381,7 @@ Focused roadmap:
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
-| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, KMS/HSM signing profile validation, PKCS#11 signing execution, opt-in AWS KMS and external HSM live signing, signing-provider readiness preflight, AWS KMS signer bootstrap and workflow orchestration, provider workflow readiness web/headless-token auth handoff auditing, Helm, registry/archive/promotion/WORM policy and API execution validation including live OCI promotion, service-mesh identity/live handshake validation, opt-in managed Cloud Service Mesh provider qualification, Vultr VKE Istio live provider qualification for managed service-mesh evidence, live operator/controller reconciliation validation, live k3s and Vultr VKE managed-Kubernetes chaos/performance validation, Vultr VKE 3-node readiness, final provider readiness audit with live-provider fixture rejection, final provider completion gate, manual provider evidence workflow, final provider bundle environment preparation, workflow bundle assembly, retained provider artifact package handoff, retained provider workflow alternatives, fail-closed external provider qualification bundle validation with retained artifact SHA verification and final bundle assembly, live Cloudflare R2 Bucket Lock WORM evidence, live Docker Hub immutable-tag registry promotion evidence, and remaining live execution of external KMS/HSM signing evidence | 🚧 **In Progress** |
+| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, KMS/HSM signing profile validation, PKCS#11 signing execution, opt-in AWS KMS and external HSM live signing, signing-provider readiness preflight, AWS KMS signer bootstrap and workflow orchestration, provider workflow readiness web/headless-token auth handoff auditing, AWS OIDC role/KMS policy handoff, Helm, registry/archive/promotion/WORM policy and API execution validation including live OCI promotion, service-mesh identity/live handshake validation, opt-in managed Cloud Service Mesh provider qualification, Vultr VKE Istio live provider qualification for managed service-mesh evidence, live operator/controller reconciliation validation, live k3s and Vultr VKE managed-Kubernetes chaos/performance validation, Vultr VKE 3-node readiness, final provider readiness audit with live-provider fixture rejection, final provider completion gate, manual provider evidence workflow, final provider bundle environment preparation, workflow bundle assembly, retained provider artifact package handoff, retained provider workflow alternatives, fail-closed external provider qualification bundle validation with retained artifact SHA verification and final bundle assembly, live Cloudflare R2 Bucket Lock WORM evidence, live Docker Hub immutable-tag registry promotion evidence, and remaining live execution of external KMS/HSM signing evidence | 🚧 **In Progress** |
 
 ## 📜 License
 

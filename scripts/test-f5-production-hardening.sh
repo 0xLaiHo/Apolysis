@@ -20,6 +20,7 @@ aws_kms_signing_gate="$repo_root/scripts/test-f5-aws-kms-signing.sh"
 external_hsm_signing_gate="$repo_root/scripts/test-f5-external-hsm-signing.sh"
 signing_provider_readiness_gate="$repo_root/scripts/test-f5-signing-provider-readiness.sh"
 aws_kms_signer_bootstrap_gate="$repo_root/scripts/test-f5-aws-kms-signer-bootstrap.sh"
+aws_oidc_handoff_gate="$repo_root/scripts/test-f5-aws-oidc-handoff.sh"
 worm_archive_policy_gate="$repo_root/scripts/test-f5-worm-archive-policy.sh"
 worm_archive_execution_gate="$repo_root/scripts/test-f5-worm-archive-execution.sh"
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
@@ -198,6 +199,11 @@ if [[ ! -s "$aws_kms_signer_bootstrap_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$aws_oidc_handoff_gate" ]]; then
+    echo "missing F5.44 AWS OIDC handoff artifact: $aws_oidc_handoff_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$worm_archive_policy_gate" ]]; then
     echo "missing F5.14 WORM archive policy artifact: $worm_archive_policy_gate" >&2
     exit 1
@@ -355,6 +361,11 @@ grep -q '^test-f5-signing-provider-readiness:' "$makefile" || {
 
 grep -q '^test-f5-aws-kms-signer-bootstrap:' "$makefile" || {
     echo "missing Makefile target: test-f5-aws-kms-signer-bootstrap" >&2
+    exit 1
+}
+
+grep -q '^test-f5-aws-oidc-handoff:' "$makefile" || {
+    echo "missing Makefile target: test-f5-aws-oidc-handoff" >&2
     exit 1
 }
 
@@ -1050,6 +1061,46 @@ grep -q 'RSASSA_PKCS1_V1_5_SHA_256' "$aws_kms_signer_bootstrap_gate" || {
 
 grep -q 'No secret values are recorded' "$aws_kms_signer_bootstrap_gate" || {
     echo "F5.41 AWS KMS signer bootstrap gate must avoid recording secret values" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F5_AWS_OIDC_HANDOFF' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must support fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'token.actions.githubusercontent.com' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must bind GitHub Actions OIDC issuer" >&2
+    exit 1
+}
+
+grep -q 'sts:AssumeRoleWithWebIdentity' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must generate a web-identity trust policy" >&2
+    exit 1
+}
+
+grep -q 'F5_AWS_ROLE_TO_ASSUME' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must output the GitHub role secret handoff" >&2
+    exit 1
+}
+
+grep -q 'kms:Sign' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must include KMS signing permissions" >&2
+    exit 1
+}
+
+grep -q 'kms:GetPublicKey' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must include KMS public-key read permissions" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-aws-oidc-handoff-report' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must retain a machine-readable report" >&2
+    exit 1
+}
+
+grep -q 'No secret values are recorded' "$aws_oidc_handoff_gate" || {
+    echo "F5.44 AWS OIDC handoff gate must avoid recording secret values" >&2
     exit 1
 }
 
