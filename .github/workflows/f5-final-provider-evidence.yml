@@ -7,6 +7,21 @@ on:
         description: Run F5.25 AWS KMS signing evidence
         type: boolean
         default: true
+      run_aws_kms_bootstrap:
+        description: Run F5.41 AWS KMS signer bootstrap before F5.25 signing
+        type: boolean
+        default: true
+      aws_kms_bootstrap_mode:
+        description: AWS KMS signer bootstrap mode
+        type: choice
+        options:
+          - inspect
+          - ensure
+        default: inspect
+      confirm_aws_kms_key_creation:
+        description: Allow F5.41 ensure mode to create a missing AWS KMS signing key
+        type: boolean
+        default: false
       run_gke_mesh:
         description: Run F5.27 managed Cloud Service Mesh evidence
         type: boolean
@@ -50,6 +65,7 @@ jobs:
     env:
       APOLYSIS_CONFIRM_F5_AWS_KMS_SIGNING: "1"
       APOLYSIS_F5_AWS_KMS_KEY_ID: ${{ secrets.F5_AWS_KMS_KEY_ID }}
+      APOLYSIS_F5_AWS_KMS_ALIAS: ${{ vars.F5_AWS_KMS_ALIAS }}
       APOLYSIS_F5_AWS_REGION: ${{ vars.F5_AWS_REGION }}
     steps:
       - name: Checkout
@@ -68,6 +84,30 @@ jobs:
         with:
           role-to-assume: ${{ secrets.F5_AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ vars.F5_AWS_REGION }}
+
+      - name: Run AWS KMS signer bootstrap
+        if: ${{ inputs.run_aws_kms_bootstrap }}
+        env:
+          APOLYSIS_CONFIRM_F5_AWS_KMS_SIGNER_BOOTSTRAP: "1"
+          APOLYSIS_REQUIRE_F5_AWS_KMS_SIGNER_BOOTSTRAP: "1"
+          APOLYSIS_F5_AWS_KMS_BOOTSTRAP_MODE: ${{ inputs.aws_kms_bootstrap_mode }}
+          APOLYSIS_CONFIRM_F5_AWS_KMS_KEY_CREATION: ${{ inputs.confirm_aws_kms_key_creation && '1' || '0' }}
+        run: |
+          ./scripts/test-f5-aws-kms-signer-bootstrap.sh
+          report="$(find target -path '*/apolysis-f5-aws-kms-signer-bootstrap-report.json' -type f | sort | tail -n 1)"
+          test -n "$report"
+          key_id="$(jq -r '.aws_kms.key_arn // .aws_kms.key_id // empty' "$report")"
+          test -n "$key_id"
+          echo "APOLYSIS_F5_AWS_KMS_KEY_ID=$key_id" >> "$GITHUB_ENV"
+
+      - name: Upload AWS KMS signer bootstrap artifacts
+        if: ${{ always() && inputs.run_aws_kms_bootstrap }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: f5-aws-kms-signer-bootstrap
+          path: target/f5-aws-kms-signer-bootstrap.*
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Run AWS KMS signing evidence gate
         run: ./scripts/test-f5-aws-kms-signing.sh

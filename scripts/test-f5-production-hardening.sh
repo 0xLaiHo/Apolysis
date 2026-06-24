@@ -1592,6 +1592,46 @@ grep -q 'APOLYSIS_CONFIRM_F5_AWS_KMS_SIGNING' "$final_provider_workflow" || {
     exit 1
 }
 
+grep -q 'run_aws_kms_bootstrap' "$final_provider_workflow" || {
+    echo "F5.42 final provider evidence workflow must expose an AWS KMS signer bootstrap switch" >&2
+    exit 1
+}
+
+grep -q 'aws_kms_bootstrap_mode' "$final_provider_workflow" || {
+    echo "F5.42 final provider evidence workflow must expose AWS KMS bootstrap inspect/ensure mode" >&2
+    exit 1
+}
+
+grep -q 'confirm_aws_kms_key_creation' "$final_provider_workflow" || {
+    echo "F5.42 final provider evidence workflow must require explicit AWS KMS key creation confirmation" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_CONFIRM_F5_AWS_KMS_SIGNER_BOOTSTRAP' "$final_provider_workflow" || {
+    echo "F5.42 final provider evidence workflow must run the opt-in F5.41 AWS KMS bootstrap gate" >&2
+    exit 1
+}
+
+grep -q 'scripts/test-f5-aws-kms-signer-bootstrap.sh' "$final_provider_workflow" || {
+    echo "F5.42 final provider evidence workflow must execute F5.41 AWS KMS signer bootstrap" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-aws-kms-signer-bootstrap-report.json' "$final_provider_workflow" || {
+    echo "F5.42 final provider evidence workflow must parse the F5.41 bootstrap report" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_AWS_KMS_KEY_ID=' "$final_provider_workflow" || {
+    echo "F5.42 final provider evidence workflow must export the resolved AWS KMS key for F5.25 signing" >&2
+    exit 1
+}
+
+grep -q 'f5-aws-kms-signer-bootstrap' "$final_provider_workflow" || {
+    echo "F5.42 final provider evidence workflow must retain AWS KMS bootstrap artifacts" >&2
+    exit 1
+}
+
 grep -q 'APOLYSIS_CONFIRM_F5_MANAGED_CLOUD_SERVICE_MESH' "$final_provider_workflow" || {
     echo "F5.30 final provider evidence workflow must run the opt-in managed mesh gate" >&2
     exit 1
