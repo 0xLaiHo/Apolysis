@@ -1518,6 +1518,21 @@ grep -q 'retained_provider_artifact_sha256' "$final_provider_workflow" || {
     exit 1
 }
 
+grep -q 'retained_signing_provider_artifact' "$final_provider_workflow" || {
+    echo "F5.35 final provider evidence workflow must allow retained signing provider artifacts as an AWS KMS alternative" >&2
+    exit 1
+}
+
+grep -q 'inputs.retained_signing_provider_artifact' "$final_provider_workflow" || {
+    echo "F5.35 final bundle assembly must be gated by retained signing provider artifact confirmation" >&2
+    exit 1
+}
+
+grep -q "needs.aws-kms-signing.result == 'success' || inputs.retained_signing_provider_artifact" "$final_provider_workflow" || {
+    echo "F5.35 final bundle assembly must accept AWS KMS success or retained signing provider artifacts" >&2
+    exit 1
+}
+
 grep -q 'APOLYSIS_REQUIRE_F5_RETAINED_PROVIDER_PACKAGE' "$retained_provider_package_gate" || {
     echo "F5.33 retained provider artifact package gate must expose fail-closed required mode" >&2
     exit 1

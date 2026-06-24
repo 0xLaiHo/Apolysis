@@ -15,6 +15,10 @@ on:
         description: Assemble final F5 provider bundle after provider evidence gates pass
         type: boolean
         default: true
+      retained_signing_provider_artifact:
+        description: Treat retained provider artifacts as satisfying signing evidence, for external HSM or prior KMS runs
+        type: boolean
+        default: false
       retained_provider_artifact_run_id:
         description: Optional workflow run ID containing retained WORM/registry provider artifacts
         type: string
@@ -127,7 +131,7 @@ jobs:
 
   assemble-final-bundle:
     name: F5.32 final provider bundle assembly
-    if: ${{ always() && inputs.assemble_final_bundle && inputs.run_aws_kms && inputs.run_gke_mesh && needs.aws-kms-signing.result == 'success' && needs.gke-managed-mesh.result == 'success' }}
+    if: ${{ always() && inputs.assemble_final_bundle && inputs.run_gke_mesh && needs.gke-managed-mesh.result == 'success' && (inputs.run_aws_kms || inputs.retained_signing_provider_artifact) && (needs.aws-kms-signing.result == 'success' || inputs.retained_signing_provider_artifact) }}
     needs:
       - aws-kms-signing
       - gke-managed-mesh
