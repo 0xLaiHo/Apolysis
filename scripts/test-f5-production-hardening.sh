@@ -1838,6 +1838,11 @@ grep -q 'gh auth login --with-token' "$provider_workflow_readiness_gate" || {
     exit 1
 }
 
+grep -q 'github_token_environment_present' "$provider_workflow_readiness_gate" || {
+    echo "F5.43 provider workflow readiness gate must record headless GitHub token environment presence" >&2
+    exit 1
+}
+
 grep -q 'No secret values are recorded' "$provider_workflow_readiness_gate" || {
     echo "F5.43 provider workflow readiness gate must avoid recording secret values" >&2
     exit 1

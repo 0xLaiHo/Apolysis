@@ -95,29 +95,39 @@ workflow_contract = {
 }
 workflow_contract_ready = all(workflow_contract.values())
 
+github_token_environment_present = any(
+    bool(os.environ.get(name))
+    for name in ("GH_TOKEN", "GITHUB_TOKEN")
+)
+gh_stored_auth = False
 gh_authenticated = False
 inspected_repository_settings = False
+secret_inventory_read = False
+variable_inventory_read = False
 secret_names: set[str] = set()
 variable_names: set[str] = set()
 gh_error = ""
 
 if gh_path and repo:
     rc, _ = run(["gh", "auth", "status", "--hostname", "github.com"])
-    gh_authenticated = rc == 0
-    if gh_authenticated:
+    gh_stored_auth = rc == 0
+    if gh_stored_auth or github_token_environment_present:
         rc, output = run(["gh", "secret", "list", "--repo", repo])
         if rc == 0:
+            secret_inventory_read = True
             secret_names = {line.split()[0] for line in output.splitlines() if line.strip()}
             secret_list_path.write_text("\n".join(sorted(secret_names)) + "\n", encoding="utf-8")
         else:
             gh_error = output[:4000]
         rc_vars, output_vars = run(["gh", "variable", "list", "--repo", repo])
         if rc_vars == 0:
+            variable_inventory_read = True
             variable_names = {line.split()[0] for line in output_vars.splitlines() if line.strip()}
             variable_list_path.write_text("\n".join(sorted(variable_names)) + "\n", encoding="utf-8")
         else:
             gh_error = (gh_error + "\n" + output_vars)[:4000]
-        inspected_repository_settings = bool(secret_names or variable_names)
+        inspected_repository_settings = secret_inventory_read and variable_inventory_read
+    gh_authenticated = gh_stored_auth or (github_token_environment_present and inspected_repository_settings)
 
 required_secrets = {
     "F5_AWS_ROLE_TO_ASSUME": "AWS OIDC role assumed by the F5.25 signing job",
@@ -198,6 +208,10 @@ report = {
     "missing_requirements": missing_requirements,
     "tools": tools,
     "gh_authenticated": gh_authenticated,
+    "gh_stored_auth": gh_stored_auth,
+    "github_token_environment_present": github_token_environment_present,
+    "secret_inventory_read": secret_inventory_read,
+    "variable_inventory_read": variable_inventory_read,
     "gh_error_hint": gh_error,
     "next_commands": {
         "authenticate_gh": "gh auth login --hostname github.com --git-protocol ssh --scopes repo,workflow --skip-ssh-key --web",
