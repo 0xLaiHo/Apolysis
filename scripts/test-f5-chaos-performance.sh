@@ -9,7 +9,7 @@ confirm="${APOLYSIS_CONFIRM_F5_CHAOS_PERFORMANCE:-0}"
 if [[ "$confirm" != "1" ]]; then
     cat >&2 <<'EOF'
 apolysis-f5: refusing to run live chaos/performance validation without confirmation.
-Set APOLYSIS_CONFIRM_F5_CHAOS_PERFORMANCE=1 to create a temporary k3s
+Set APOLYSIS_CONFIRM_F5_CHAOS_PERFORMANCE=1 to create a temporary Kubernetes
 namespace, run bounded 30-pod workload scale, delete a 20% pod sample, collect
 metrics-server CPU/memory evidence, validate recovery, and delete resources.
 EOF
@@ -35,6 +35,7 @@ output_dir="$(cd "$output_dir" && pwd)"
 
 namespace="${APOLYSIS_F5_CHAOS_NAMESPACE:-apolysis-f5-chaos-$stamp}"
 cluster_name="${APOLYSIS_F5_CHAOS_CLUSTER_NAME:-mactavish-k3s}"
+chaos_provider="${APOLYSIS_F5_CHAOS_PROVIDER:-k3s}"
 image="${APOLYSIS_F5_CHAOS_IMAGE:-alpine:3.20}"
 deployment_count="${APOLYSIS_F5_CHAOS_DEPLOYMENTS:-3}"
 replicas_per_deployment="${APOLYSIS_F5_CHAOS_REPLICAS_PER_DEPLOYMENT:-10}"
@@ -76,8 +77,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+case "$chaos_provider" in
+    k3s|managed_kubernetes)
+        ;;
+    *)
+        echo "apolysis-f5: APOLYSIS_F5_CHAOS_PROVIDER must be k3s or managed_kubernetes" >&2
+        exit 2
+        ;;
+esac
+
 if ! kubectl get nodes >/dev/null 2>&1; then
-    echo "apolysis-f5: kubectl cannot reach the live k3s cluster" >&2
+    echo "apolysis-f5: kubectl cannot reach the live Kubernetes cluster" >&2
     exit 1
 fi
 
@@ -298,6 +308,7 @@ python3 - \
     "$total_cpu_limit_millicores" \
     "$total_memory_request_mib" \
     "$total_memory_limit_mib" \
+    "$chaos_provider" \
     "$cleanup_confirmed" <<'PY'
 import datetime as dt
 import json
@@ -332,6 +343,7 @@ from pathlib import Path
     total_cpu_limit_millicores,
     total_memory_request_mib,
     total_memory_limit_mib,
+    chaos_provider,
     cleanup_confirmed,
 ) = sys.argv[1:]
 
@@ -478,7 +490,7 @@ observed_at_unix_ms = int(time.time() * 1000)
 evidence = {
     "evidence_id": f"f5-chaos-performance-{observed_at_unix_ms}",
     "source": "live_cluster",
-    "provider": "k3s",
+    "provider": chaos_provider,
     "cluster_name": cluster_name,
     "namespace": namespace,
     "workload_deployment_count": deployment_count,
@@ -524,10 +536,10 @@ PY
 cargo run -q -p apolysis-validation --bin apolysis-f5-chaos-performance-evidence -- \
     --evidence "$evidence" >"$report"
 
-jq -e '
+jq -e --arg provider "$chaos_provider" '
   .schema_version == 1
   and .passed == true
-  and .approval.provider == "k3s"
+  and .approval.provider == $provider
   and .approval.workload_replicas_total >= 30
   and .approval.pod_churn_deleted >= 6
   and .approval.max_observed_cpu_millicores <= 1000

@@ -22,6 +22,7 @@ worm_archive_execution_gate="$repo_root/scripts/test-f5-worm-archive-execution.s
 service_mesh_live_evidence_gate="$repo_root/scripts/test-f5-service-mesh-live-evidence.sh"
 service_mesh_live_istio_gate="$repo_root/scripts/test-f5-service-mesh-live-istio.sh"
 managed_cloud_service_mesh_gate="$repo_root/scripts/test-f5-managed-cloud-service-mesh.sh"
+vke_cluster_readiness_gate="$repo_root/scripts/test-f5-vke-cluster-readiness.sh"
 operator_controller_gate="$repo_root/scripts/test-f5-operator-controller.sh"
 chaos_performance_gate="$repo_root/scripts/test-f5-chaos-performance.sh"
 external_provider_qualification_gate="$repo_root/scripts/test-f5-external-provider-qualification.sh"
@@ -197,6 +198,11 @@ if [[ ! -s "$managed_cloud_service_mesh_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$vke_cluster_readiness_gate" ]]; then
+    echo "missing F5.28 Vultr VKE cluster readiness artifact: $vke_cluster_readiness_gate" >&2
+    exit 1
+fi
+
 if [[ ! -s "$operator_controller_gate" ]]; then
     echo "missing F5.19 operator/controller artifact: $operator_controller_gate" >&2
     exit 1
@@ -299,6 +305,11 @@ grep -q '^test-f5-service-mesh-live-istio:' "$makefile" || {
 
 grep -q '^test-f5-managed-cloud-service-mesh:' "$makefile" || {
     echo "missing Makefile target: test-f5-managed-cloud-service-mesh" >&2
+    exit 1
+}
+
+grep -q '^test-f5-vke-cluster-readiness:' "$makefile" || {
+    echo "missing Makefile target: test-f5-vke-cluster-readiness" >&2
     exit 1
 }
 
@@ -1022,6 +1033,36 @@ grep -q 'APOLYSIS_F5_MANAGED_MESH_EVIDENCE' "$managed_cloud_service_mesh_gate" |
     exit 1
 }
 
+grep -q 'APOLYSIS_CONFIRM_F5_VKE_CLUSTER_READINESS' "$vke_cluster_readiness_gate" || {
+    echo "F5.28 VKE readiness gate must require explicit live confirmation" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_VKE_EXPECTED_NODES' "$vke_cluster_readiness_gate" || {
+    echo "F5.28 VKE readiness gate must make node count explicit" >&2
+    exit 1
+}
+
+grep -q 'kubectl get nodes' "$vke_cluster_readiness_gate" || {
+    echo "F5.28 VKE readiness gate must inspect live node state" >&2
+    exit 1
+}
+
+grep -q 'containerd' "$vke_cluster_readiness_gate" || {
+    echo "F5.28 VKE readiness gate must verify containerd runtime evidence" >&2
+    exit 1
+}
+
+grep -q 'vultr_vke' "$vke_cluster_readiness_gate" || {
+    echo "F5.28 VKE readiness evidence must use Vultr VKE provider identity" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f5-vke-cluster-readiness-evidence' "$vke_cluster_readiness_gate" || {
+    echo "F5.28 VKE readiness gate must retain machine-readable evidence" >&2
+    exit 1
+}
+
 grep -q 'APOLYSIS_CONFIRM_F5_OPERATOR_CONTROLLER' "$operator_controller_gate" || {
     echo "F5.19 operator/controller gate must require explicit live confirmation" >&2
     exit 1
@@ -1094,6 +1135,11 @@ grep -q 'managed resource ownerReferences must point to the custom resource' "$r
 
 grep -q 'APOLYSIS_CONFIRM_F5_CHAOS_PERFORMANCE' "$chaos_performance_gate" || {
     echo "F5.20 chaos/performance gate must require explicit live confirmation" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F5_CHAOS_PROVIDER' "$chaos_performance_gate" || {
+    echo "F5.20 chaos/performance gate must support explicit Kubernetes provider identity" >&2
     exit 1
 }
 
