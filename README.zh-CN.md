@@ -194,6 +194,10 @@ deploy/systemd/
 
 Kubernetes deployment assets 包括 RBAC、NetworkPolicy、DaemonSet、RuntimeClass examples、service mesh policy examples 和 production-oriented container hardening checks。
 
+## 发布验证
+
+仓库包含面向 regulated environment 的验证脚本，用于生成外部签名、不可变归档留存、registry promotion 和 managed service-mesh evidence。这些脚本将本地 evidence 写入 `target/`，运行时应使用明确限定权限范围的 provider credentials。
+
 ## 仓库结构
 
 ```text

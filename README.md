@@ -225,6 +225,13 @@ The Kubernetes deployment assets include RBAC, NetworkPolicy, DaemonSet,
 RuntimeClass examples, service mesh policy examples, and production-oriented
 container hardening checks.
 
+## Release Validation
+
+The repository includes validation scripts for regulated environments that need
+external signing, immutable archive retention, registry promotion, and managed
+service-mesh evidence. These scripts write local evidence under `target/` and
+are intended to be run with explicitly scoped provider credentials.
+
 ## Repository Layout
 
 ```text
