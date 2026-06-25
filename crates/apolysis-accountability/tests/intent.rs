@@ -15,7 +15,7 @@ fn parses_a_v1_register_intent_request() {
             "schema_version":1,
             "tenant_id":"tenant-a",
             "retention_tier":"extended",
-            "session_id":"session-f2",
+            "session_id":"session-runtime_foundation",
             "expires_at_unix_ms":1780000060000,
             "declared_actions":["test","read_file"],
             "allowed_resources":[
@@ -27,7 +27,7 @@ fn parses_a_v1_register_intent_request() {
                 {
                     "runtime":"docker",
                     "key":"apolysis.session_id",
-                    "value":"session-f2"
+                    "value":"session-runtime_foundation"
                 }
             ]
         }
@@ -41,7 +41,7 @@ fn parses_a_v1_register_intent_request() {
     assert_eq!(intent.schema_version, 1);
     assert_eq!(intent.tenant_id, "tenant-a");
     assert_eq!(intent.retention_tier, RetentionTier::Extended);
-    assert_eq!(intent.session_id, "session-f2");
+    assert_eq!(intent.session_id, "session-runtime_foundation");
     assert_eq!(
         intent.declared_actions,
         vec![ActionClass::Test, ActionClass::ReadFile]
@@ -61,28 +61,34 @@ fn parses_health_and_session_lifecycle_requests() {
     );
     assert_eq!(
         decode_intent_frame(
-            br#"{"type":"renew","session_id":"session-f2","expires_at_unix_ms":1780000060000}"#,
+            br#"{"type":"renew","session_id":"session-runtime_foundation","expires_at_unix_ms":1780000060000}"#,
             NOW_MS,
         )
         .expect("renew"),
         IntentRequest::Renew {
-            session_id: "session-f2".to_string(),
+            session_id: "session-runtime_foundation".to_string(),
             expires_at_unix_ms: 1_780_000_060_000,
         }
     );
     assert_eq!(
-        decode_intent_frame(br#"{"type":"close","session_id":"session-f2"}"#, NOW_MS)
-            .expect("close"),
+        decode_intent_frame(
+            br#"{"type":"close","session_id":"session-runtime_foundation"}"#,
+            NOW_MS
+        )
+        .expect("close"),
         IntentRequest::Close {
-            session_id: "session-f2".to_string(),
+            session_id: "session-runtime_foundation".to_string(),
         }
     );
     assert_eq!(
-        decode_intent_frame(br#"{"type":"query","session_id":"session-f2"}"#, NOW_MS)
-            .expect("query"),
+        decode_intent_frame(
+            br#"{"type":"query","session_id":"session-runtime_foundation"}"#,
+            NOW_MS
+        )
+        .expect("query"),
         IntentRequest::Query {
             tenant_id: DEFAULT_TENANT_ID.to_string(),
-            session_id: "session-f2".to_string(),
+            session_id: "session-runtime_foundation".to_string(),
         }
     );
 }
@@ -91,13 +97,13 @@ fn parses_health_and_session_lifecycle_requests() {
 fn parses_tenant_scoped_query_and_session_list_requests() {
     assert_eq!(
         decode_intent_frame(
-            br#"{"type":"query","tenant_id":"tenant-a","session_id":"session-f2"}"#,
+            br#"{"type":"query","tenant_id":"tenant-a","session_id":"session-runtime_foundation"}"#,
             NOW_MS,
         )
         .expect("tenant query"),
         IntentRequest::Query {
             tenant_id: "tenant-a".to_string(),
-            session_id: "session-f2".to_string(),
+            session_id: "session-runtime_foundation".to_string(),
         }
     );
     assert_eq!(
@@ -147,7 +153,7 @@ fn rejects_unknown_schema_versions() {
         "type":"register",
         "intent":{
             "schema_version":2,
-            "session_id":"session-f2",
+            "session_id":"session-runtime_foundation",
             "expires_at_unix_ms":1780000060000,
             "declared_actions":["test"],
             "allowed_resources":[],
@@ -185,7 +191,7 @@ fn rejects_empty_session_ids_and_expired_intent() {
         "type":"register",
         "intent":{
             "schema_version":1,
-            "session_id":"session-f2",
+            "session_id":"session-runtime_foundation",
             "expires_at_unix_ms":1779999999999,
             "declared_actions":["test"],
             "allowed_resources":[],
@@ -217,8 +223,9 @@ fn rejects_invalid_renew_and_query_session_ids() {
 #[test]
 fn rejects_tenant_ids_that_are_unsafe_for_state_or_query_scope() {
     for tenant_id in ["", " ", "../escape", "nested/tenant", "tenant\nbreak"] {
-        let frame =
-            format!(r#"{{"type":"query","tenant_id":{tenant_id:?},"session_id":"session-f2"}}"#);
+        let frame = format!(
+            r#"{{"type":"query","tenant_id":{tenant_id:?},"session_id":"session-runtime_foundation"}}"#
+        );
         assert!(
             matches!(
                 decode_intent_frame(frame.as_bytes(), NOW_MS),

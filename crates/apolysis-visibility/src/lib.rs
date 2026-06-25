@@ -2,7 +2,7 @@
 
 //! Visibility validation for strong-isolation runtime backends.
 //!
-//! M7 does not claim to run production gVisor, Kata, or Firecracker sessions.
+//! VisibilityValidation does not claim to run production gVisor, Kata, or Firecracker sessions.
 //! It codifies what host-side eBPF can still prove from fixture observations and
 //! when runtime metadata or a guest-side collector is required to recover full
 //! agent side-effect semantics.
@@ -12,7 +12,8 @@ use std::collections::BTreeSet;
 use apolysis_core::{fields::PipeFields, json_string, records, JsonLine};
 use apolysis_kubernetes::KubernetesMetadata;
 use apolysis_validation::{
-    F4GvisorMetadataEvidenceReport, F4KataBoundaryEvidenceReport, F4RuntimeAdapterEvidenceSource,
+    RuntimeGuardrailsGvisorMetadataEvidenceReport, RuntimeGuardrailsKataBoundaryEvidenceReport,
+    RuntimeGuardrailsRuntimeAdapterEvidenceSource,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -162,33 +163,39 @@ pub fn assess_visibility(input: VisibilityInput) -> Result<VisibilityAssessment,
     })
 }
 
-pub fn f4_gvisor_metadata_evidence_from_assessment(
+pub fn runtime_guardrails_gvisor_metadata_evidence_from_assessment(
     assessment: &VisibilityAssessment,
     evidence_id: impl Into<String>,
     runtime_adapter_evidence_id: impl Into<String>,
     runtime_handler: Option<&str>,
-    source: F4RuntimeAdapterEvidenceSource,
-) -> Result<F4GvisorMetadataEvidenceReport, String> {
+    source: RuntimeGuardrailsRuntimeAdapterEvidenceSource,
+) -> Result<RuntimeGuardrailsGvisorMetadataEvidenceReport, String> {
     if !matches!(
         assessment.runtime_profile,
         RuntimeVisibilityProfile::DockerGvisor | RuntimeVisibilityProfile::KubernetesGvisor
     ) {
-        return Err("F4 gVisor metadata evidence requires a gVisor visibility profile".to_string());
+        return Err(
+            "RuntimeGuardrails gVisor metadata evidence requires a gVisor visibility profile"
+                .to_string(),
+        );
     }
 
     let evidence_id = evidence_id.into();
     if evidence_id.trim().is_empty() {
-        return Err("F4 gVisor metadata evidence id must not be empty".to_string());
+        return Err("RuntimeGuardrails gVisor metadata evidence id must not be empty".to_string());
     }
     let runtime_adapter_evidence_id = runtime_adapter_evidence_id.into();
     if runtime_adapter_evidence_id.trim().is_empty() {
-        return Err("F4 gVisor runtime adapter evidence reference must not be empty".to_string());
+        return Err(
+            "RuntimeGuardrails gVisor runtime adapter evidence reference must not be empty"
+                .to_string(),
+        );
     }
     let runsc_observed = subject_observed(&assessment.host_event_subjects, "runsc");
     let sentry_observed = subject_observed(&assessment.host_event_subjects, "sentry");
     let gofer_observed = subject_observed(&assessment.host_event_subjects, "gofer");
 
-    Ok(F4GvisorMetadataEvidenceReport {
+    Ok(RuntimeGuardrailsGvisorMetadataEvidenceReport {
         evidence_id,
         source,
         runtime_adapter_evidence_id,
@@ -203,34 +210,40 @@ pub fn f4_gvisor_metadata_evidence_from_assessment(
     })
 }
 
-pub fn f4_kata_boundary_evidence_from_assessment(
+pub fn runtime_guardrails_kata_boundary_evidence_from_assessment(
     assessment: &VisibilityAssessment,
     evidence_id: impl Into<String>,
     runtime_adapter_evidence_id: impl Into<String>,
     runtime_handler: Option<&str>,
-    source: F4RuntimeAdapterEvidenceSource,
-) -> Result<F4KataBoundaryEvidenceReport, String> {
+    source: RuntimeGuardrailsRuntimeAdapterEvidenceSource,
+) -> Result<RuntimeGuardrailsKataBoundaryEvidenceReport, String> {
     if !matches!(
         assessment.runtime_profile,
         RuntimeVisibilityProfile::KubernetesKata
     ) {
-        return Err("F4 Kata boundary evidence requires a Kubernetes Kata profile".to_string());
+        return Err(
+            "RuntimeGuardrails Kata boundary evidence requires a Kubernetes Kata profile"
+                .to_string(),
+        );
     }
 
     let evidence_id = evidence_id.into();
     if evidence_id.trim().is_empty() {
-        return Err("F4 Kata boundary evidence id must not be empty".to_string());
+        return Err("RuntimeGuardrails Kata boundary evidence id must not be empty".to_string());
     }
     let runtime_adapter_evidence_id = runtime_adapter_evidence_id.into();
     if runtime_adapter_evidence_id.trim().is_empty() {
-        return Err("F4 Kata runtime adapter evidence reference must not be empty".to_string());
+        return Err(
+            "RuntimeGuardrails Kata runtime adapter evidence reference must not be empty"
+                .to_string(),
+        );
     }
     let shim_observed = subject_observed(&assessment.host_event_subjects, "shim")
         && subject_observed(&assessment.host_event_subjects, "kata");
     let vmm_observed = subject_observed(&assessment.host_event_subjects, "qemu")
         || subject_observed(&assessment.host_event_subjects, "vmm");
 
-    Ok(F4KataBoundaryEvidenceReport {
+    Ok(RuntimeGuardrailsKataBoundaryEvidenceReport {
         evidence_id,
         source,
         runtime_adapter_evidence_id,

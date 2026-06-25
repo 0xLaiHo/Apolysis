@@ -11,7 +11,7 @@ const CAP_SYS_ADMIN: u32 = 21;
 const CAP_PERFMON: u32 = 38;
 const CAP_BPF: u32 = 39;
 
-/// Validate the kernel interfaces and effective capabilities needed by F1.
+/// Validate the kernel interfaces and effective capabilities needed by AuditObserver.
 pub fn validate_live_prerequisites(scope: &LiveScope, plan: &AyaLoaderPlan) -> Result<(), String> {
     if !cfg!(target_os = "linux") {
         return Err("live eBPF requires Linux".to_string());

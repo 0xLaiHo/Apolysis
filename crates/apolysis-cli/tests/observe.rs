@@ -16,7 +16,7 @@ fn observe_fixture_ring_buffer_writes_raw_and_canonical_timeline() {
             "--input",
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
-            "session-m4-fixture",
+            "session-host-observer-fixture",
             "--policy",
             "policies/local-dev.yaml",
             "--output",
@@ -42,7 +42,7 @@ fn observe_fixture_ring_buffer_writes_raw_and_canonical_timeline() {
         timeline
             .lines()
             .filter(|line| line.contains(r#""record_type":"event""#))
-            .all(|line| line.contains(r#""session_id":"session-m4-fixture""#)),
+            .all(|line| line.contains(r#""session_id":"session-host-observer-fixture""#)),
         "all canonical events should use the requested session id:\n{timeline}"
     );
 
@@ -62,7 +62,7 @@ fn observe_fixture_reports_runner_plan_metadata() {
             "--input",
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
-            "session-m4-runners",
+            "session-host-observer-runners",
             "--policy",
             "policies/local-dev.yaml",
             "--output",
@@ -101,9 +101,9 @@ fn observe_fixture_emits_policy_violations_and_feedback_file() {
             "--input",
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
-            "session-m5-policy",
+            "session-policy-feedback-policy",
             "--policy",
-            "tests/fixtures/policies/m5-block-policy.yaml",
+            "tests/fixtures/policies/policy-feedback-block-policy.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--feedback-dir",
@@ -127,7 +127,7 @@ fn observe_fixture_emits_policy_violations_and_feedback_file() {
 
     let feedback =
         std::fs::read_to_string(feedback_dir.join("last-violation.txt")).expect("read feedback");
-    assert!(feedback.contains("session_id: session-m5-policy"));
+    assert!(feedback.contains("session_id: session-policy-feedback-policy"));
     assert!(feedback.contains("rule_id:"));
     assert!(feedback.contains("decision: notify"));
     assert!(feedback.contains("APOLYSIS_VIOLATION"));
@@ -149,9 +149,9 @@ fn observe_fixture_emits_kill_containment_metadata() {
             "--input",
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
-            "session-f3-kill",
+            "session-policy-guardrails-kill",
             "--policy",
-            "tests/fixtures/policies/f3-kill-policy.yaml",
+            "tests/fixtures/policies/policy-guardrails-kill-policy.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
         ])
@@ -192,9 +192,9 @@ fn observe_fixture_preserves_policy_feedback_with_kubernetes_metadata() {
             "--input",
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
-            "session-m6-k8s",
+            "session-kubernetes-metadata-k8s",
             "--policy",
-            "tests/fixtures/policies/m5-block-policy.yaml",
+            "tests/fixtures/policies/policy-feedback-block-policy.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--feedback-dir",
@@ -230,7 +230,7 @@ fn observe_fixture_preserves_policy_feedback_with_kubernetes_metadata() {
 
     let feedback =
         std::fs::read_to_string(feedback_dir.join("last-violation.txt")).expect("read feedback");
-    assert!(feedback.contains("session_id: session-m6-k8s"));
+    assert!(feedback.contains("session_id: session-kubernetes-metadata-k8s"));
     assert!(feedback.contains("decision: notify"));
     assert!(feedback.contains("APOLYSIS_VIOLATION"));
 
@@ -247,7 +247,7 @@ fn observe_live_requires_exactly_one_session_scope() {
             "--backend",
             "live",
             "--session",
-            "session-f1-live",
+            "session-audit-observer-live",
             "--policy",
             "policies/local-dev.yaml",
             "--output",
@@ -279,7 +279,7 @@ fn observe_live_rejects_fixture_input() {
             "--input",
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
-            "session-f1-live",
+            "session-audit-observer-live",
             "--policy",
             "policies/local-dev.yaml",
             "--output",
@@ -311,7 +311,7 @@ fn observe_live_validates_the_bpf_object_before_loading() {
             "--backend",
             "live",
             "--session",
-            "session-f1-live",
+            "session-audit-observer-live",
             "--policy",
             "policies/local-dev.yaml",
             "--output",
@@ -363,7 +363,7 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
             "--backend",
             "live",
             "--session",
-            "session-f1-live-smoke",
+            "session-audit-observer-live-smoke",
             "--policy",
             "policies/local-dev.yaml",
             "--output",

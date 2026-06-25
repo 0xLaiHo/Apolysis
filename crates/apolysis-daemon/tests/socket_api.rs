@@ -78,7 +78,7 @@ async fn register_renew_query_and_close_update_session_state() {
         "type":"register",
         "intent":{
             "schema_version":1,
-            "session_id":"session-f2",
+            "session_id":"session-runtime_foundation",
             "expires_at_unix_ms":4102444800000,
             "declared_actions":["test"],
             "allowed_resources":[],
@@ -92,16 +92,16 @@ async fn register_renew_query_and_close_update_session_state() {
             operation,
             session_id: Some(session_id),
             ..
-        } if operation == "register" && session_id == "session-f2"
+        } if operation == "register" && session_id == "session-runtime_foundation"
     ));
 
-    let renew = br#"{"type":"renew","session_id":"session-f2","expires_at_unix_ms":4102444801000}"#;
+    let renew = br#"{"type":"renew","session_id":"session-runtime_foundation","expires_at_unix_ms":4102444801000}"#;
     assert!(matches!(
         request(&server.config.socket_path, renew).await,
         DaemonResponse::Ack { operation, .. } if operation == "renew"
     ));
 
-    let query = br#"{"type":"query","session_id":"session-f2"}"#;
+    let query = br#"{"type":"query","session_id":"session-runtime_foundation"}"#;
     let DaemonResponse::Session {
         session: Some(session),
         ..
@@ -111,7 +111,7 @@ async fn register_renew_query_and_close_update_session_state() {
     };
     assert_eq!(session.expires_at_unix_ms, 4_102_444_801_000);
 
-    let close = br#"{"type":"close","session_id":"session-f2"}"#;
+    let close = br#"{"type":"close","session_id":"session-runtime_foundation"}"#;
     assert!(matches!(
         request(&server.config.socket_path, close).await,
         DaemonResponse::Ack { operation, .. } if operation == "close"

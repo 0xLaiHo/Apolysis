@@ -36,5 +36,5 @@ name = "apolysisd-health"
 path = "src/bin/apolysisd-health.rs"
 
 [[bin]]
-name = "apolysis-f2-pipeline-benchmark"
-path = "src/bin/apolysis-f2-pipeline-benchmark.rs"
+name = "apolysis-runtime-foundation-pipeline-benchmark"
+path = "src/bin/apolysis-runtime-foundation-pipeline-benchmark.rs"

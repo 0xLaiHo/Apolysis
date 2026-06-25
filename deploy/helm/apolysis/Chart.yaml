@@ -8,4 +8,4 @@ home: https://github.com/0xLaiHo/Apolysis
 sources:
   - https://github.com/0xLaiHo/Apolysis
 annotations:
-  apolysis.dev/phase: "f5.7-helm-production-hardening"
+  apolysis.dev/phase: "production_hardening.7-helm-production-hardening"

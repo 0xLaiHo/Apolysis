@@ -58,7 +58,7 @@ fn machine_feedback_escapes_untrusted_fields() {
 
 fn violation(rule_id: &str, reason: &str) -> PolicyViolation {
     PolicyViolation::new(
-        "session-f2",
+        "session-runtime_foundation",
         rule_id,
         PolicyDecision::Notify,
         reason,

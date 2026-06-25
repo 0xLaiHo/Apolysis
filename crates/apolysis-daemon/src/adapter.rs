@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use apolysis_accountability::{AdapterKind, AssociationOutcome, ComponentState};
 use apolysis_validation::{
-    F4RuntimeAdapterEvidenceReport, F4RuntimeAdapterEvidenceSource, F4RuntimeGuardrailTarget,
+    RuntimeGuardrailsRuntimeAdapterEvidenceReport, RuntimeGuardrailsRuntimeAdapterEvidenceSource,
+    RuntimeGuardrailsRuntimeGuardrailTarget,
 };
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,29 +35,35 @@ pub struct RuntimeWorkload {
     pub runtime_handler: Option<String>,
 }
 
-pub fn f4_runtime_adapter_evidence_from_workload(
+pub fn runtime_guardrails_runtime_adapter_evidence_from_workload(
     workload: &RuntimeWorkload,
     evidence_id: impl Into<String>,
-    source: F4RuntimeAdapterEvidenceSource,
-) -> Result<F4RuntimeAdapterEvidenceReport, String> {
+    source: RuntimeGuardrailsRuntimeAdapterEvidenceSource,
+) -> Result<RuntimeGuardrailsRuntimeAdapterEvidenceReport, String> {
     let evidence_id = evidence_id.into();
     if evidence_id.trim().is_empty() {
-        return Err("F4 runtime adapter evidence id must not be empty".to_string());
+        return Err("RuntimeGuardrails runtime adapter evidence id must not be empty".to_string());
     }
     if workload.session_id.trim().is_empty() {
-        return Err("F4 runtime adapter evidence session id must not be empty".to_string());
+        return Err(
+            "RuntimeGuardrails runtime adapter evidence session id must not be empty".to_string(),
+        );
     }
     if workload.workload_id.trim().is_empty() {
-        return Err("F4 runtime adapter evidence workload id must not be empty".to_string());
+        return Err(
+            "RuntimeGuardrails runtime adapter evidence workload id must not be empty".to_string(),
+        );
     }
     if workload.cgroup_id == 0 {
-        return Err("F4 runtime adapter evidence cgroup id must be non-zero".to_string());
+        return Err(
+            "RuntimeGuardrails runtime adapter evidence cgroup id must be non-zero".to_string(),
+        );
     }
 
-    Ok(F4RuntimeAdapterEvidenceReport {
+    Ok(RuntimeGuardrailsRuntimeAdapterEvidenceReport {
         evidence_id,
         source,
-        runtime: f4_runtime_target_from_workload(workload),
+        runtime: runtime_guardrails_runtime_target_from_workload(workload),
         adapter: adapter_name(workload.adapter).to_string(),
         session_id: workload.session_id.clone(),
         workload_id: workload.workload_id.clone(),
@@ -78,26 +85,28 @@ pub struct DockerContainerSnapshot {
     pub runtime_handler: Option<String>,
 }
 
-fn f4_runtime_target_from_workload(workload: &RuntimeWorkload) -> F4RuntimeGuardrailTarget {
+fn runtime_guardrails_runtime_target_from_workload(
+    workload: &RuntimeWorkload,
+) -> RuntimeGuardrailsRuntimeGuardrailTarget {
     if let Some(handler) = workload.runtime_handler.as_deref() {
         let handler = handler.to_ascii_lowercase();
         if handler.contains("runsc") || handler.contains("gvisor") {
-            return F4RuntimeGuardrailTarget::Gvisor;
+            return RuntimeGuardrailsRuntimeGuardrailTarget::Gvisor;
         }
         if handler.contains("kata") {
-            return F4RuntimeGuardrailTarget::Kata;
+            return RuntimeGuardrailsRuntimeGuardrailTarget::Kata;
         }
         if handler.contains("firecracker") {
-            return F4RuntimeGuardrailTarget::Firecracker;
+            return RuntimeGuardrailsRuntimeGuardrailTarget::Firecracker;
         }
     }
 
     match workload.adapter {
-        AdapterKind::Docker => F4RuntimeGuardrailTarget::Docker,
+        AdapterKind::Docker => RuntimeGuardrailsRuntimeGuardrailTarget::Docker,
         AdapterKind::Containerd | AdapterKind::K3sContainerd => {
-            F4RuntimeGuardrailTarget::Containerd
+            RuntimeGuardrailsRuntimeGuardrailTarget::Containerd
         }
-        AdapterKind::Kubernetes => F4RuntimeGuardrailTarget::Kubernetes,
+        AdapterKind::Kubernetes => RuntimeGuardrailsRuntimeGuardrailTarget::Kubernetes,
     }
 }
 

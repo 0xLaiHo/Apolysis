@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live test-f2-foundation test-f2-runtime test-f2-validation-harness test-f2-runtime-registration test-f2-runtime-adapters test-f2-runtime-adapter-matrix test-f2-recovery test-f2-performance test-f2-visibility-reports test-f2-production-qualification test-f3-guardrails test-f3-bpf-lsm-live test-f4-runtime-guardrails test-f5-production-hardening test-f5-live-deployment test-f5-supply-chain test-f5-helm-production test-f5-release-registry test-f5-tenant-query-retention test-f5-retention-enforcement test-f5-release-promotion-policy test-f5-registry-promotion-execution test-f5-dockerhub-registry-promotion test-f5-signing-profile test-f5-signing-execution test-f5-aws-kms-signing test-f5-external-hsm-signing test-f5-signing-provider-readiness test-f5-aws-kms-signer-bootstrap test-f5-aws-oidc-handoff test-f5-worm-archive-policy test-f5-worm-archive-execution test-f5-service-mesh-live-evidence test-f5-service-mesh-live-istio test-f5-managed-cloud-service-mesh test-f5-vke-cluster-readiness test-f5-vke-service-mesh-provider test-f5-operator-controller test-f5-chaos-performance test-f5-external-provider-qualification test-f5-final-external-provider-bundle test-f5-final-provider-readiness test-f5-final-provider-readiness-contract test-f5-final-provider-completion test-f5-final-provider-bundle-env test-f5-retained-provider-artifact-package test-f5-provider-workflow-readiness test-f5-provider-workflow-dispatch test-f5-provider-workflow-artifact-import test-f5-final-provider-closure test-f6-regulated-release test-f6-provider-execution-plan test-f6-provider-artifact-import test-f6-final-provider-closure test-f6-signing-evidence test-f6-evidence-package test-f6-retained-evidence-package test-f6-external-retention test-f6-immutable-registry-retention test-f6-managed-mesh-decision test-f6-live-provider-readback test-f6-final-release-signoff
+.PHONY: build test lint clean build-ebpf test-live test-runtime-foundation test-runtime-foundation-runtime test-runtime-foundation-validation-harness test-runtime-foundation-runtime-registration test-runtime-foundation-runtime-adapters test-runtime-foundation-runtime-adapter-matrix test-runtime-foundation-recovery test-runtime-foundation-performance test-runtime-foundation-visibility-reports test-runtime-foundation-production-qualification test-policy-guardrails test-policy-guardrails-bpf-lsm-live test-runtime-guardrails test-production-hardening test-production-hardening-live-deployment test-production-hardening-supply-chain test-production-hardening-helm-production test-production-hardening-release-registry test-production-hardening-tenant-query-retention test-production-hardening-retention-enforcement test-production-hardening-release-promotion-policy test-production-hardening-registry-promotion-execution test-production-hardening-dockerhub-registry-promotion test-production-hardening-signing-profile test-production-hardening-signing-execution test-production-hardening-aws-kms-signing test-production-hardening-external-hsm-signing test-production-hardening-signing-provider-readiness test-production-hardening-aws-kms-signer-bootstrap test-production-hardening-aws-oidc-handoff test-production-hardening-worm-archive-policy test-production-hardening-worm-archive-execution test-production-hardening-service-mesh-live-evidence test-production-hardening-service-mesh-live-istio test-production-hardening-managed-cloud-service-mesh test-production-hardening-vke-cluster-readiness test-production-hardening-vke-service-mesh-provider test-production-hardening-operator-controller test-production-hardening-chaos-performance test-production-hardening-external-provider-qualification test-production-hardening-final-external-provider-bundle test-production-hardening-final-provider-readiness test-production-hardening-final-provider-readiness-contract test-production-hardening-final-provider-completion test-production-hardening-final-provider-bundle-env test-production-hardening-retained-provider-artifact-package test-production-hardening-provider-workflow-readiness test-production-hardening-provider-workflow-dispatch test-production-hardening-provider-workflow-artifact-import test-production-hardening-final-provider-closure test-regulated-release test-regulated-release-provider-execution-plan test-regulated-release-provider-artifact-import test-regulated-release-final-provider-closure test-regulated-release-signing-evidence test-regulated-release-evidence-package test-regulated-release-retained-evidence-package test-regulated-release-external-retention test-regulated-release-immutable-registry-retention test-regulated-release-managed-mesh-decision test-regulated-release-live-provider-readback test-regulated-release-final-release-signoff
 
 build: build-ebpf
 	cargo build --workspace
@@ -19,187 +19,187 @@ build-ebpf:
 test-live: build-ebpf
 	./scripts/test-live-observer.sh
 
-test-f2-foundation:
-	./scripts/test-f2-foundation.sh
+test-runtime-foundation:
+	./scripts/test-runtime-foundation.sh
 
-test-f2-runtime: build-ebpf
-	./scripts/test-f2-runtime.sh
+test-runtime-foundation-runtime: build-ebpf
+	./scripts/test-runtime-foundation-runtime.sh
 
-test-f2-validation-harness:
-	./scripts/test-f2-validation-harness.sh
+test-runtime-foundation-validation-harness:
+	./scripts/test-runtime-foundation-validation-harness.sh
 
-test-f2-runtime-registration:
-	./scripts/test-f2-runtime-registration.sh
+test-runtime-foundation-runtime-registration:
+	./scripts/test-runtime-foundation-runtime-registration.sh
 
-test-f2-runtime-adapters:
-	./scripts/test-f2-runtime-adapters.sh
+test-runtime-foundation-runtime-adapters:
+	./scripts/test-runtime-foundation-runtime-adapters.sh
 
-test-f2-runtime-adapter-matrix:
-	./scripts/test-f2-runtime-adapter-matrix.sh
+test-runtime-foundation-runtime-adapter-matrix:
+	./scripts/test-runtime-foundation-runtime-adapter-matrix.sh
 
-test-f2-recovery:
-	./scripts/test-f2-recovery.sh
+test-runtime-foundation-recovery:
+	./scripts/test-runtime-foundation-recovery.sh
 
-test-f2-performance:
-	./scripts/test-f2-performance.sh
+test-runtime-foundation-performance:
+	./scripts/test-runtime-foundation-performance.sh
 
-test-f2-visibility-reports:
-	./scripts/test-f2-visibility-reports.sh
+test-runtime-foundation-visibility-reports:
+	./scripts/test-runtime-foundation-visibility-reports.sh
 
-test-f2-production-qualification: test-f2-recovery test-f2-performance test-f2-visibility-reports
+test-runtime-foundation-production-qualification: test-runtime-foundation-recovery test-runtime-foundation-performance test-runtime-foundation-visibility-reports
 
-test-f3-guardrails:
-	./scripts/test-f3-guardrails.sh
+test-policy-guardrails:
+	./scripts/test-policy-guardrails.sh
 
-test-f3-bpf-lsm-live:
-	./scripts/test-f3-bpf-lsm-live.sh
+test-policy-guardrails-bpf-lsm-live:
+	./scripts/test-policy-guardrails-bpf-lsm-live.sh
 
-test-f4-runtime-guardrails:
-	./scripts/test-f4-runtime-guardrails.sh
+test-runtime-guardrails:
+	./scripts/test-runtime-guardrails.sh
 
-test-f5-production-hardening:
-	./scripts/test-f5-production-hardening.sh
+test-production-hardening:
+	./scripts/test-production-hardening.sh
 
-test-f5-live-deployment:
-	./scripts/test-f5-live-deployment.sh
+test-production-hardening-live-deployment:
+	./scripts/test-production-hardening-live-deployment.sh
 
-test-f5-supply-chain:
-	./scripts/test-f5-supply-chain.sh
+test-production-hardening-supply-chain:
+	./scripts/test-production-hardening-supply-chain.sh
 
-test-f5-helm-production:
-	./scripts/test-f5-helm-production.sh
+test-production-hardening-helm-production:
+	./scripts/test-production-hardening-helm-production.sh
 
-test-f5-release-registry:
-	./scripts/test-f5-release-registry.sh
+test-production-hardening-release-registry:
+	./scripts/test-production-hardening-release-registry.sh
 
-test-f5-tenant-query-retention:
-	./scripts/test-f5-tenant-query-retention.sh
+test-production-hardening-tenant-query-retention:
+	./scripts/test-production-hardening-tenant-query-retention.sh
 
-test-f5-retention-enforcement:
-	./scripts/test-f5-retention-enforcement.sh
+test-production-hardening-retention-enforcement:
+	./scripts/test-production-hardening-retention-enforcement.sh
 
-test-f5-release-promotion-policy:
-	./scripts/test-f5-release-promotion-policy.sh
+test-production-hardening-release-promotion-policy:
+	./scripts/test-production-hardening-release-promotion-policy.sh
 
-test-f5-registry-promotion-execution:
-	./scripts/test-f5-registry-promotion-execution.sh
+test-production-hardening-registry-promotion-execution:
+	./scripts/test-production-hardening-registry-promotion-execution.sh
 
-test-f5-dockerhub-registry-promotion:
-	./scripts/test-f5-dockerhub-registry-promotion.sh
+test-production-hardening-dockerhub-registry-promotion:
+	./scripts/test-production-hardening-dockerhub-registry-promotion.sh
 
-test-f5-signing-profile:
-	./scripts/test-f5-signing-profile.sh
+test-production-hardening-signing-profile:
+	./scripts/test-production-hardening-signing-profile.sh
 
-test-f5-signing-execution:
-	./scripts/test-f5-signing-execution.sh
+test-production-hardening-signing-execution:
+	./scripts/test-production-hardening-signing-execution.sh
 
-test-f5-aws-kms-signing:
-	./scripts/test-f5-aws-kms-signing.sh
+test-production-hardening-aws-kms-signing:
+	./scripts/test-production-hardening-aws-kms-signing.sh
 
-test-f5-external-hsm-signing:
-	./scripts/test-f5-external-hsm-signing.sh
+test-production-hardening-external-hsm-signing:
+	./scripts/test-production-hardening-external-hsm-signing.sh
 
-test-f5-signing-provider-readiness:
-	./scripts/test-f5-signing-provider-readiness.sh
+test-production-hardening-signing-provider-readiness:
+	./scripts/test-production-hardening-signing-provider-readiness.sh
 
-test-f5-aws-kms-signer-bootstrap:
-	./scripts/test-f5-aws-kms-signer-bootstrap.sh
+test-production-hardening-aws-kms-signer-bootstrap:
+	./scripts/test-production-hardening-aws-kms-signer-bootstrap.sh
 
-test-f5-aws-oidc-handoff:
-	./scripts/test-f5-aws-oidc-handoff.sh
+test-production-hardening-aws-oidc-handoff:
+	./scripts/test-production-hardening-aws-oidc-handoff.sh
 
-test-f5-worm-archive-policy:
-	./scripts/test-f5-worm-archive-policy.sh
+test-production-hardening-worm-archive-policy:
+	./scripts/test-production-hardening-worm-archive-policy.sh
 
-test-f5-worm-archive-execution:
-	./scripts/test-f5-worm-archive-execution.sh
+test-production-hardening-worm-archive-execution:
+	./scripts/test-production-hardening-worm-archive-execution.sh
 
-test-f5-service-mesh-live-evidence:
-	./scripts/test-f5-service-mesh-live-evidence.sh
+test-production-hardening-service-mesh-live-evidence:
+	./scripts/test-production-hardening-service-mesh-live-evidence.sh
 
-test-f5-service-mesh-live-istio:
-	./scripts/test-f5-service-mesh-live-istio.sh
+test-production-hardening-service-mesh-live-istio:
+	./scripts/test-production-hardening-service-mesh-live-istio.sh
 
-test-f5-managed-cloud-service-mesh:
-	./scripts/test-f5-managed-cloud-service-mesh.sh
+test-production-hardening-managed-cloud-service-mesh:
+	./scripts/test-production-hardening-managed-cloud-service-mesh.sh
 
-test-f5-vke-cluster-readiness:
-	./scripts/test-f5-vke-cluster-readiness.sh
+test-production-hardening-vke-cluster-readiness:
+	./scripts/test-production-hardening-vke-cluster-readiness.sh
 
-test-f5-vke-service-mesh-provider:
-	./scripts/test-f5-vke-service-mesh-provider.sh
+test-production-hardening-vke-service-mesh-provider:
+	./scripts/test-production-hardening-vke-service-mesh-provider.sh
 
-test-f5-operator-controller:
-	./scripts/test-f5-operator-controller.sh
+test-production-hardening-operator-controller:
+	./scripts/test-production-hardening-operator-controller.sh
 
-test-f5-chaos-performance:
-	./scripts/test-f5-chaos-performance.sh
+test-production-hardening-chaos-performance:
+	./scripts/test-production-hardening-chaos-performance.sh
 
-test-f5-external-provider-qualification:
-	./scripts/test-f5-external-provider-qualification.sh
+test-production-hardening-external-provider-qualification:
+	./scripts/test-production-hardening-external-provider-qualification.sh
 
-test-f5-final-external-provider-bundle:
-	./scripts/test-f5-final-external-provider-bundle.sh
+test-production-hardening-final-external-provider-bundle:
+	./scripts/test-production-hardening-final-external-provider-bundle.sh
 
-test-f5-final-provider-readiness:
-	./scripts/test-f5-final-provider-readiness.sh
+test-production-hardening-final-provider-readiness:
+	./scripts/test-production-hardening-final-provider-readiness.sh
 
-test-f5-final-provider-readiness-contract:
-	./scripts/test-f5-final-provider-readiness-contract.sh
+test-production-hardening-final-provider-readiness-contract:
+	./scripts/test-production-hardening-final-provider-readiness-contract.sh
 
-test-f5-final-provider-completion:
-	./scripts/test-f5-final-provider-completion.sh
+test-production-hardening-final-provider-completion:
+	./scripts/test-production-hardening-final-provider-completion.sh
 
-test-f5-final-provider-bundle-env:
-	./scripts/prepare-f5-final-provider-bundle-env.sh
+test-production-hardening-final-provider-bundle-env:
+	./scripts/prepare-production-hardening-final-provider-bundle-env.sh
 
-test-f5-retained-provider-artifact-package:
-	./scripts/package-f5-retained-provider-artifacts.sh
+test-production-hardening-retained-provider-artifact-package:
+	./scripts/package-production-hardening-retained-provider-artifacts.sh
 
-test-f5-provider-workflow-readiness:
-	./scripts/test-f5-provider-workflow-readiness.sh
+test-production-hardening-provider-workflow-readiness:
+	./scripts/test-production-hardening-provider-workflow-readiness.sh
 
-test-f5-provider-workflow-dispatch:
-	./scripts/test-f5-provider-workflow-dispatch.sh
+test-production-hardening-provider-workflow-dispatch:
+	./scripts/test-production-hardening-provider-workflow-dispatch.sh
 
-test-f5-provider-workflow-artifact-import:
-	./scripts/test-f5-provider-workflow-artifact-import.sh
+test-production-hardening-provider-workflow-artifact-import:
+	./scripts/test-production-hardening-provider-workflow-artifact-import.sh
 
-test-f5-final-provider-closure:
-	./scripts/test-f5-final-provider-closure.sh
+test-production-hardening-final-provider-closure:
+	./scripts/test-production-hardening-final-provider-closure.sh
 
-test-f6-regulated-release:
-	./scripts/test-f6-regulated-release.sh
+test-regulated-release:
+	./scripts/test-regulated-release.sh
 
-test-f6-provider-execution-plan:
-	./scripts/test-f6-provider-execution-plan.sh
+test-regulated-release-provider-execution-plan:
+	./scripts/test-regulated-release-provider-execution-plan.sh
 
-test-f6-provider-artifact-import:
-	./scripts/test-f6-provider-artifact-import.sh
+test-regulated-release-provider-artifact-import:
+	./scripts/test-regulated-release-provider-artifact-import.sh
 
-test-f6-final-provider-closure:
-	./scripts/test-f6-final-provider-closure.sh
+test-regulated-release-final-provider-closure:
+	./scripts/test-regulated-release-final-provider-closure.sh
 
-test-f6-signing-evidence:
-	./scripts/test-f6-signing-evidence.sh
+test-regulated-release-signing-evidence:
+	./scripts/test-regulated-release-signing-evidence.sh
 
-test-f6-evidence-package:
-	./scripts/test-f6-evidence-package.sh
+test-regulated-release-evidence-package:
+	./scripts/test-regulated-release-evidence-package.sh
 
-test-f6-retained-evidence-package:
-	./scripts/test-f6-retained-evidence-package.sh
+test-regulated-release-retained-evidence-package:
+	./scripts/test-regulated-release-retained-evidence-package.sh
 
-test-f6-external-retention:
-	./scripts/test-f6-external-retention.sh
+test-regulated-release-external-retention:
+	./scripts/test-regulated-release-external-retention.sh
 
-test-f6-immutable-registry-retention:
-	./scripts/test-f6-immutable-registry-retention.sh
+test-regulated-release-immutable-registry-retention:
+	./scripts/test-regulated-release-immutable-registry-retention.sh
 
-test-f6-managed-mesh-decision:
-	./scripts/test-f6-managed-mesh-decision.sh
+test-regulated-release-managed-mesh-decision:
+	./scripts/test-regulated-release-managed-mesh-decision.sh
 
-test-f6-live-provider-readback:
-	./scripts/test-f6-live-provider-readback.sh
+test-regulated-release-live-provider-readback:
+	./scripts/test-regulated-release-live-provider-readback.sh
 
-test-f6-final-release-signoff:
-	./scripts/test-f6-final-release-signoff.sh
+test-regulated-release-final-release-signoff:
+	./scripts/test-regulated-release-final-release-signoff.sh

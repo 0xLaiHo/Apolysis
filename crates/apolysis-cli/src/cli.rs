@@ -2,7 +2,7 @@
 
 //! CLI vocabulary shared by command parsers.
 //!
-//! The binary intentionally keeps argument parsing lightweight for M1-M7, but
+//! The binary intentionally keeps argument parsing lightweight for TimelineStore-VisibilityValidation, but
 //! command names and flags still form a public interface.  Centralizing them
 //! makes new subcommands less error-prone and keeps usage text in sync with
 //! parser logic.

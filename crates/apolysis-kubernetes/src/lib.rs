@@ -2,7 +2,7 @@
 
 //! Kubernetes and Agent Sandbox metadata extraction.
 //!
-//! M6 intentionally consumes Kubernetes metadata from manifests or captured pod
+//! KubernetesMetadata intentionally consumes Kubernetes metadata from manifests or captured pod
 //! snapshots instead of talking to the cluster API.  This keeps local tests
 //! deterministic while defining the timeline records that a future in-cluster
 //! adapter or Agent Sandbox integration must emit.
@@ -12,7 +12,10 @@ use apolysis_core::{
     scalars::{clean_scalar, parse_bool},
     CanonicalEvent, EventSource, EventType,
 };
-use apolysis_validation::{F4KubernetesAgentSandboxEvidenceReport, F4RuntimeAdapterEvidenceSource};
+use apolysis_validation::{
+    RuntimeGuardrailsKubernetesAgentSandboxEvidenceReport,
+    RuntimeGuardrailsRuntimeAdapterEvidenceSource,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KubernetesMetadata {
@@ -130,36 +133,44 @@ impl KubernetesMetadata {
     }
 }
 
-pub fn f4_agent_sandbox_evidence_from_metadata(
+pub fn runtime_guardrails_agent_sandbox_evidence_from_metadata(
     metadata: &KubernetesMetadata,
     session_id: impl Into<String>,
     evidence_id: impl Into<String>,
     runtime_adapter_evidence_id: impl Into<String>,
-    source: F4RuntimeAdapterEvidenceSource,
-) -> Result<F4KubernetesAgentSandboxEvidenceReport, String> {
+    source: RuntimeGuardrailsRuntimeAdapterEvidenceSource,
+) -> Result<RuntimeGuardrailsKubernetesAgentSandboxEvidenceReport, String> {
     let session_id = session_id.into();
     let evidence_id = evidence_id.into();
     let runtime_adapter_evidence_id = runtime_adapter_evidence_id.into();
 
     if session_id.trim().is_empty() {
-        return Err("F4 Kubernetes Agent Sandbox evidence requires session id".to_string());
+        return Err(
+            "RuntimeGuardrails Kubernetes Agent Sandbox evidence requires session id".to_string(),
+        );
     }
     if evidence_id.trim().is_empty() {
-        return Err("F4 Kubernetes Agent Sandbox evidence requires evidence id".to_string());
+        return Err(
+            "RuntimeGuardrails Kubernetes Agent Sandbox evidence requires evidence id".to_string(),
+        );
     }
     if runtime_adapter_evidence_id.trim().is_empty() {
         return Err(
-            "F4 Kubernetes Agent Sandbox evidence requires runtime adapter evidence id".to_string(),
+            "RuntimeGuardrails Kubernetes Agent Sandbox evidence requires runtime adapter evidence id".to_string(),
         );
     }
     if metadata.pod_name.trim().is_empty() {
-        return Err("F4 Kubernetes Agent Sandbox evidence requires pod name".to_string());
+        return Err(
+            "RuntimeGuardrails Kubernetes Agent Sandbox evidence requires pod name".to_string(),
+        );
     }
     if metadata.namespace.trim().is_empty() {
-        return Err("F4 Kubernetes Agent Sandbox evidence requires namespace".to_string());
+        return Err(
+            "RuntimeGuardrails Kubernetes Agent Sandbox evidence requires namespace".to_string(),
+        );
     }
 
-    Ok(F4KubernetesAgentSandboxEvidenceReport {
+    Ok(RuntimeGuardrailsKubernetesAgentSandboxEvidenceReport {
         evidence_id,
         source,
         runtime_adapter_evidence_id,

@@ -21,7 +21,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        apolysis.dev/phase: "f5.7-helm-production-hardening"
+        apolysis.dev/phase: "production_hardening.7-helm-production-hardening"
         apolysis.dev/production-facing-kernel-blocking: {{ ternary "enabled" "disabled" .Values.daemonset.productionFacingKernelBlocking | quote }}
         apolysis.dev/tenant-id: {{ include "apolysis.tenantId" . | quote }}
         {{- if .Values.mesh.mtls.required }}

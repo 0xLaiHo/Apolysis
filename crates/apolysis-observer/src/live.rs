@@ -114,7 +114,7 @@ pub struct DaemonObserver {
 impl DaemonObserver {
     pub fn load(config: DaemonObserverConfig) -> Result<Self, String> {
         config.validate()?;
-        let loader_plan = AyaLoaderPlan::f1_default(&config.object_path);
+        let loader_plan = AyaLoaderPlan::audit_observer_default(&config.object_path);
         validate_live_prerequisites(&LiveScope::Cgroup(1), &loader_plan)
             .map_err(|error| format!("daemon observer prerequisite failed: {error}"))?;
         let mut ebpf = EbpfLoader::new()
@@ -182,8 +182,8 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     let policy = load_policy(&request.policy_path)?;
     let capabilities = PolicyRuntimeCapabilities::detect();
     let feedback = request.feedback_dir.clone().map(FeedbackWriter::new);
-    let runner_plan = ObserverRunnerPlan::m4_default();
-    let loader_plan = AyaLoaderPlan::f1_default(&request.object_path);
+    let runner_plan = ObserverRunnerPlan::host_observer_default();
+    let loader_plan = AyaLoaderPlan::audit_observer_default(&request.object_path);
     let mut store = JsonlStore::create(&request.output_path)
         .map_err(|error| format!("failed to create live observer timeline: {error}"))?;
 

@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_validation::{
-    evaluate_visibility_report_gate, required_f2_visibility_targets, VisibilityReport,
+    evaluate_visibility_report_gate, required_runtime_foundation_visibility_targets,
+    VisibilityReport,
 };
 
 #[test]
-fn f2_visibility_gate_requires_every_published_runtime_target() {
-    let reports = required_f2_visibility_targets()
+fn runtime_foundation_visibility_gate_requires_every_published_runtime_target() {
+    let reports = required_runtime_foundation_visibility_targets()
         .into_iter()
         .map(|target| VisibilityReport {
             target,
             live_validated: true,
-            evidence_source: "f2-runtime-adapter-matrix".to_string(),
+            evidence_source: "runtime-foundation-runtime-adapter-matrix".to_string(),
             host_visibility_scope: "runtime_boundary".to_string(),
             guest_semantics_claimed: false,
         })
@@ -25,15 +26,15 @@ fn f2_visibility_gate_requires_every_published_runtime_target() {
 }
 
 #[test]
-fn f2_visibility_gate_rejects_missing_or_unvalidated_reports() {
-    let mut targets = required_f2_visibility_targets();
+fn runtime_foundation_visibility_gate_rejects_missing_or_unvalidated_reports() {
+    let mut targets = required_runtime_foundation_visibility_targets();
     let missing = targets.pop().expect("one target to remove");
     let mut reports: Vec<_> = targets
         .into_iter()
         .map(|target| VisibilityReport {
             target,
             live_validated: true,
-            evidence_source: "f2-runtime-adapter-matrix".to_string(),
+            evidence_source: "runtime-foundation-runtime-adapter-matrix".to_string(),
             host_visibility_scope: "runtime_boundary".to_string(),
             guest_semantics_claimed: false,
         })

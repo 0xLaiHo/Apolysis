@@ -398,7 +398,7 @@ impl ObserveRequest {
                 }
                 if kubernetes_metadata_path.is_some() {
                     return Err(
-                        "--kubernetes-metadata is not supported by --backend live in F1"
+                        "--kubernetes-metadata is not supported by --backend live in AuditObserver"
                             .to_string(),
                     );
                 }

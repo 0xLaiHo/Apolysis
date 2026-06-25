@@ -2,9 +2,9 @@
 
 //! Observer pipeline for kernel-derived events.
 //!
-//! M4 established the userspace contract that a future Aya loader will feed:
+//! HostObserver established the userspace contract that a future Aya loader will feed:
 //! raw ring-buffer records are preserved, analyzed into canonical events, and
-//! written into the JSONL timeline. M5 adds policy evaluation, downgrade
+//! written into the JSONL timeline. PolicyFeedback adds policy evaluation, downgrade
 //! metadata, and agent-facing feedback while keeping real blocking disabled
 //! until BPF-LSM support is proven at runtime.
 
@@ -122,8 +122,8 @@ pub struct ObserverRunnerPlan {
 }
 
 impl ObserverRunnerPlan {
-    /// Return the M4 default host observer runner plan.
-    pub fn m4_default() -> Self {
+    /// Return the HostObserver default host observer runner plan.
+    pub fn host_observer_default() -> Self {
         Self {
             process: true,
             system: true,
@@ -153,7 +153,7 @@ pub struct AyaLoaderPlan {
 
 impl AyaLoaderPlan {
     /// Return the initial Aya loader plan and tracepoint attachment set.
-    pub fn m4_default(object_path: impl Into<PathBuf>) -> Self {
+    pub fn host_observer_default(object_path: impl Into<PathBuf>) -> Self {
         Self {
             object_path: object_path.into(),
             ring_buffer_map: "APOLYSIS_EVENTS".to_string(),
@@ -171,9 +171,9 @@ impl AyaLoaderPlan {
         }
     }
 
-    /// Return the F1 live observer attachment set.
-    pub fn f1_default(object_path: impl Into<PathBuf>) -> Self {
-        let mut plan = Self::m4_default(object_path);
+    /// Return the AuditObserver live observer attachment set.
+    pub fn audit_observer_default(object_path: impl Into<PathBuf>) -> Self {
+        let mut plan = Self::host_observer_default(object_path);
         plan.tracepoints
             .insert(1, TracepointAttach::new("sched", "sched_process_fork"));
         plan
@@ -205,7 +205,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
     let policy = load_policy(&request.policy_path)?;
     let mut store = JsonlStore::create(&request.output_path)
         .map_err(|error| format!("failed to create observer timeline: {error}"))?;
-    let runner_plan = ObserverRunnerPlan::m4_default();
+    let runner_plan = ObserverRunnerPlan::host_observer_default();
     let capabilities = PolicyRuntimeCapabilities::detect();
     let feedback = request.feedback_dir.clone().map(FeedbackWriter::new);
 
@@ -506,8 +506,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn m4_default_aya_loader_plan_names_tracepoints_and_ring_buffer() {
-        let plan = AyaLoaderPlan::f1_default("target/ebpf/apolysis_observer.bpf.o");
+    fn host_observer_default_aya_loader_plan_names_tracepoints_and_ring_buffer() {
+        let plan = AyaLoaderPlan::audit_observer_default("target/ebpf/apolysis_observer.bpf.o");
 
         assert_eq!(plan.ring_buffer_map, "APOLYSIS_EVENTS");
         assert_eq!(plan.tracepoints.len(), 10);
@@ -533,8 +533,8 @@ mod tests {
     }
 
     #[test]
-    fn m4_default_runner_plan_keeps_optional_runners_disabled() {
-        let plan = ObserverRunnerPlan::m4_default();
+    fn host_observer_default_runner_plan_keeps_optional_runners_disabled() {
+        let plan = ObserverRunnerPlan::host_observer_default();
 
         assert_eq!(
             plan.summary(),

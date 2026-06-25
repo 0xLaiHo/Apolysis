@@ -1,4 +1,4 @@
-# Synthetic ring-buffer records for M4 observer tests.
+# Synthetic ring-buffer records for HostObserver observer tests.
 # Fields are pipe-delimited key=value pairs.
 timestamp=1780328000001|pid=4100|ppid=4000|uid=1000|gid=1000|comm=bash|event=exec|resource=/usr/bin/bash|action=execve|container_id=container-a|cgroup_id=42|payload=argv=bash -lc fixture
 timestamp=1780328000002|pid=4100|ppid=4000|uid=1000|gid=1000|comm=bash|event=openat|resource=tests/fixtures/child.py|action=read|container_id=container-a|cgroup_id=42|payload=flags=O_RDONLY

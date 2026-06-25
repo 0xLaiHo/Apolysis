@@ -1,6 +1,6 @@
 # Strong-Isolation Visibility Validation
 
-M7 validates what Apolysis can prove from host-side observations when agent
+VisibilityValidation validates what Apolysis can prove from host-side observations when agent
 workloads run behind stronger isolation backends. The current implementation is
 fixture-driven: it does not start production gVisor, Kata, or Firecracker
 instances. Instead, it records a repeatable decision model for how much
@@ -32,11 +32,11 @@ Each assessment records the runtime profile, observed host subjects, visibility
 scope, whether host semantics collapsed, whether runtime metadata is required,
 and whether a guest collector is required.
 
-## M7 Decision
+## VisibilityValidation Decision
 
 Apolysis should not treat host-only events from Kata or Firecracker as complete
-agent side-effect evidence. For those backends, M7 marks guest-side collection
+agent side-effect evidence. For those backends, VisibilityValidation marks guest-side collection
 as required before claiming full process, file, network, or credential-read
-semantics. For gVisor, M7 keeps the initial path metadata-first: host events are
+semantics. For gVisor, VisibilityValidation keeps the initial path metadata-first: host events are
 useful for boundary accountability, while runtime metadata is required for
 session correlation.

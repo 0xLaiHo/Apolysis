@@ -102,7 +102,7 @@ network:
     )
     .expect("parse policy");
     let event = CanonicalEvent::new(
-        "session-m5",
+        "session-policy_feedback",
         EventSource::KernelTracepoint,
         EventType::NetworkConnect,
         42,
@@ -145,7 +145,7 @@ workspace:
     )
     .expect("parse policy");
     let event = CanonicalEvent::new(
-        "session-m5",
+        "session-policy_feedback",
         EventSource::KernelTracepoint,
         EventType::FileOpen,
         42,
@@ -248,7 +248,7 @@ network:
     };
 
     let file_event = CanonicalEvent::new(
-        "session-f3",
+        "session-policy_guardrails",
         EventSource::KernelTracepoint,
         EventType::FileOpen,
         42,
@@ -258,7 +258,7 @@ network:
         "open",
     );
     let network_event = CanonicalEvent::new(
-        "session-f3",
+        "session-policy_guardrails",
         EventSource::KernelTracepoint,
         EventType::NetworkConnect,
         42,

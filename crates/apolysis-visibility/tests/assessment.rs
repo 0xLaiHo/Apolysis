@@ -8,7 +8,7 @@ use apolysis_visibility::{
 fn docker_default_keeps_guest_process_semantics_visible_on_host() {
     let events = fixture("tests/fixtures/visibility/docker-default-host-events.txt");
     let assessment = assess_visibility(VisibilityInput::new(
-        "session-m7-docker",
+        "session-visibility-validation-docker",
         RuntimeVisibilityProfile::DockerDefault,
         events,
     ))
@@ -27,7 +27,7 @@ fn docker_default_keeps_guest_process_semantics_visible_on_host() {
 fn gvisor_collapses_host_events_to_runtime_boundary() {
     let events = fixture("tests/fixtures/visibility/docker-gvisor-host-events.txt");
     let assessment = assess_visibility(VisibilityInput::new(
-        "session-m7-gvisor",
+        "session-visibility-validation-gvisor",
         RuntimeVisibilityProfile::DockerGvisor,
         events,
     ))
@@ -46,7 +46,7 @@ fn gvisor_collapses_host_events_to_runtime_boundary() {
 #[test]
 fn kubernetes_gvisor_needs_runtime_metadata_for_pod_correlation() {
     let assessment = assess_visibility(VisibilityInput::new(
-        "session-m7-k8s-gvisor",
+        "session-visibility-validation-k8s-gvisor",
         RuntimeVisibilityProfile::KubernetesGvisor,
         fixture("tests/fixtures/visibility/kubernetes-gvisor-host-events.txt"),
     ))
@@ -65,7 +65,7 @@ fn kubernetes_gvisor_needs_runtime_metadata_for_pod_correlation() {
 #[test]
 fn kata_and_firecracker_require_guest_collectors_for_full_semantics() {
     let kata = assess_visibility(VisibilityInput::new(
-        "session-m7-kata",
+        "session-visibility-validation-kata",
         RuntimeVisibilityProfile::KubernetesKata,
         fixture("tests/fixtures/visibility/kubernetes-kata-host-events.txt"),
     ))
@@ -79,7 +79,7 @@ fn kata_and_firecracker_require_guest_collectors_for_full_semantics() {
     assert!(kata.notes.contains("guest kernel"));
 
     let firecracker = assess_visibility(VisibilityInput::new(
-        "session-m7-firecracker",
+        "session-visibility-validation-firecracker",
         RuntimeVisibilityProfile::FirecrackerPrototype,
         fixture("tests/fixtures/visibility/firecracker-boundary-events.txt"),
     ))

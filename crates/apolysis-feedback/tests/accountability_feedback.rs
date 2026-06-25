@@ -26,14 +26,14 @@ fn writes_latest_accountability_finding_feedback_atomically() {
     let text =
         std::fs::read_to_string(writer.accountability_path()).expect("text finding feedback");
     assert!(text.contains("Apolysis accountability finding"));
-    assert!(text.contains("session_id: session-f2"));
+    assert!(text.contains("session_id: session-runtime_foundation"));
     assert!(text.contains("kind: unknown_egress"));
     assert!(text.contains("decision: review"));
 
     let json =
         std::fs::read_to_string(writer.accountability_json_path()).expect("JSON finding feedback");
     let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-    assert_eq!(value["session_id"], "session-f2");
+    assert_eq!(value["session_id"], "session-runtime_foundation");
     assert_eq!(value["kind"], "unknown_egress");
     assert_eq!(value["decision"], "review");
     assert_eq!(value["runtime"]["runtime"], "docker");
@@ -55,7 +55,7 @@ fn writes_latest_accountability_finding_feedback_atomically() {
 fn finding(kind: FindingKind, decision: FindingDecision, reason: &str) -> AccountabilityFinding {
     AccountabilityFinding {
         schema_version: FINDING_SCHEMA_V1,
-        session_id: "session-f2".to_string(),
+        session_id: "session-runtime_foundation".to_string(),
         kind,
         decision,
         reason: reason.to_string(),

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_validation::{
-    default_f2_performance_budgets, evaluate_performance_gate, PerformanceLoad, PerformanceSample,
+    default_runtime_foundation_performance_budgets, evaluate_performance_gate, PerformanceLoad,
+    PerformanceSample,
 };
 
 #[test]
-fn f2_performance_gate_accepts_the_required_load_profile() {
+fn runtime_foundation_performance_gate_accepts_the_required_load_profile() {
     let report = evaluate_performance_gate(
-        default_f2_performance_budgets(),
+        default_runtime_foundation_performance_budgets(),
         vec![
             PerformanceSample {
                 load: PerformanceLoad::Idle,
@@ -63,9 +64,9 @@ fn f2_performance_gate_accepts_the_required_load_profile() {
 }
 
 #[test]
-fn f2_performance_gate_reports_each_budget_violation() {
+fn runtime_foundation_performance_gate_reports_each_budget_violation() {
     let report = evaluate_performance_gate(
-        default_f2_performance_budgets(),
+        default_runtime_foundation_performance_budgets(),
         vec![
             PerformanceSample {
                 load: PerformanceLoad::Idle,

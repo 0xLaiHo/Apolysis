@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# F5.1 production-hardening baseline for running apolysisd as a node-local
+# production-hardening.baseline production-hardening baseline for running apolysisd as a node-local
 # accountability agent. This manifest keeps production-facing kernel blocking
 # disabled and focuses on the minimum auditable deployment surface: bounded
 # resources, read-only runtime socket access, explicit Linux capabilities, and
@@ -76,7 +76,7 @@ spec:
         app.kubernetes.io/name: apolysisd
         app.kubernetes.io/part-of: apolysis
       annotations:
-        apolysis.dev/phase: "f5.1-production-hardening"
+        apolysis.dev/phase: "production_hardening.1-production-hardening"
         apolysis.dev/production-facing-kernel-blocking: "disabled"
     spec:
       serviceAccountName: apolysisd

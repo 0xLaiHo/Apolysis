@@ -15,6 +15,32 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toml_edit::{value as toml_value, DocumentMut, Item, Table};
 
+/// Public release-contract strings shared by validators, fixtures, and tests.
+pub mod release_contracts {
+    pub const PRODUCTION_HARDENING_RELEASE_MANIFEST_SCHEMA: &str =
+        "apolysis.dev/production-hardening-release-manifest/v1";
+    pub const PRODUCTION_HARDENING_REGISTRY_ATTACHMENT_SCHEMA: &str =
+        "apolysis.dev/production-hardening-registry-attachment/v1";
+    pub const PRODUCTION_HARDENING_IMMUTABLE_ARCHIVE_SCHEMA: &str =
+        "apolysis.dev/production-hardening-immutable-archive-manifest/v1";
+
+    pub const PRODUCTION_HARDENING_RELEASE_MANIFEST_PHASE: &str =
+        "production-hardening.release-manifest";
+    pub const PRODUCTION_HARDENING_REGISTRY_ATTACHMENT_PHASE: &str =
+        "production-hardening.registry-attachment";
+    pub const PRODUCTION_HARDENING_IMMUTABLE_ARCHIVE_PHASE: &str =
+        "production-hardening.immutable-archive";
+
+    pub const PRODUCTION_HARDENING_RELEASE_PAYLOAD_ARTIFACT: &str =
+        "apolysis-production-hardening-release-payload.tar.gz";
+    pub const PRODUCTION_HARDENING_DAEMON_IMAGE_ARTIFACT: &str =
+        "apolysis-production-hardening-apolysisd-image.tar";
+    pub const PRODUCTION_HARDENING_SBOM_ARTIFACT: &str =
+        "apolysis-production-hardening-sbom.cdx.json";
+    pub const PRODUCTION_HARDENING_PROVENANCE_ARTIFACT: &str =
+        "apolysis-production-hardening-provenance.intoto.json";
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackupCaptureRequest {
     pub output_dir: PathBuf,
@@ -224,12 +250,12 @@ pub struct VisibilityReportGateReport {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F3BlockValidationSource {
+pub enum PolicyGuardrailsBlockValidationSource {
     Fixture,
     LiveHost,
 }
 
-impl F3BlockValidationSource {
+impl PolicyGuardrailsBlockValidationSource {
     fn policy_source(self) -> BlockPrototypeEvidenceSource {
         match self {
             Self::Fixture => BlockPrototypeEvidenceSource::Fixture,
@@ -240,7 +266,7 @@ impl F3BlockValidationSource {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F3BlockValidationRuntime {
+pub enum PolicyGuardrailsBlockValidationRuntime {
     Local,
     Docker,
     Containerd,
@@ -251,7 +277,7 @@ pub enum F3BlockValidationRuntime {
     Unknown,
 }
 
-impl F3BlockValidationRuntime {
+impl PolicyGuardrailsBlockValidationRuntime {
     fn policy_runtime(self) -> EnforcementRuntime {
         match self {
             Self::Local => EnforcementRuntime::Local,
@@ -268,7 +294,7 @@ impl F3BlockValidationRuntime {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F3BlockValidationAction {
+pub enum PolicyGuardrailsBlockValidationAction {
     Exec,
     FileRead,
     FileWrite,
@@ -276,7 +302,7 @@ pub enum F3BlockValidationAction {
     CredentialRead,
 }
 
-impl F3BlockValidationAction {
+impl PolicyGuardrailsBlockValidationAction {
     fn policy_event_type(self) -> EventType {
         match self {
             Self::Exec => EventType::Exec,
@@ -289,11 +315,11 @@ impl F3BlockValidationAction {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BlockValidationReport {
+pub struct PolicyGuardrailsBlockValidationReport {
     pub evidence_id: String,
-    pub source: F3BlockValidationSource,
-    pub runtime: F3BlockValidationRuntime,
-    pub action: F3BlockValidationAction,
+    pub source: PolicyGuardrailsBlockValidationSource,
+    pub runtime: PolicyGuardrailsBlockValidationRuntime,
+    pub action: PolicyGuardrailsBlockValidationAction,
     pub backend: String,
     pub host_bpf_lsm_available: bool,
     pub seccomp_available: bool,
@@ -303,87 +329,87 @@ pub struct F3BlockValidationReport {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BlockValidationEnablement {
+pub struct PolicyGuardrailsBlockValidationEnablement {
     pub evidence_id: String,
-    pub runtime: F3BlockValidationRuntime,
-    pub action: F3BlockValidationAction,
+    pub runtime: PolicyGuardrailsBlockValidationRuntime,
+    pub action: PolicyGuardrailsBlockValidationAction,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BlockValidationGateFailure {
+pub struct PolicyGuardrailsBlockValidationGateFailure {
     pub evidence_id: Option<String>,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BlockValidationGateReport {
+pub struct PolicyGuardrailsBlockValidationGateReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub reports: Vec<F3BlockValidationReport>,
-    pub validated_blocks: Vec<F3BlockValidationEnablement>,
-    pub failures: Vec<F3BlockValidationGateFailure>,
+    pub reports: Vec<PolicyGuardrailsBlockValidationReport>,
+    pub validated_blocks: Vec<PolicyGuardrailsBlockValidationEnablement>,
+    pub failures: Vec<PolicyGuardrailsBlockValidationGateFailure>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BlockRollbackPlan {
+pub struct PolicyGuardrailsBlockRollbackPlan {
     pub plan_id: String,
     pub disable_command: String,
     pub validation_command: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BlockEnablementRequest {
+pub struct PolicyGuardrailsBlockEnablementRequest {
     pub request_id: String,
     pub evidence_id: String,
     pub backend: String,
-    pub runtime: F3BlockValidationRuntime,
-    pub action: F3BlockValidationAction,
+    pub runtime: PolicyGuardrailsBlockValidationRuntime,
+    pub action: PolicyGuardrailsBlockValidationAction,
     pub operator_approved: bool,
     pub default_enabled: bool,
-    pub rollback: Option<F3BlockRollbackPlan>,
+    pub rollback: Option<PolicyGuardrailsBlockRollbackPlan>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BlockApprovedEnablement {
+pub struct PolicyGuardrailsBlockApprovedEnablement {
     pub request_id: String,
     pub evidence_id: String,
     pub backend: String,
-    pub runtime: F3BlockValidationRuntime,
-    pub action: F3BlockValidationAction,
+    pub runtime: PolicyGuardrailsBlockValidationRuntime,
+    pub action: PolicyGuardrailsBlockValidationAction,
     pub default_enabled: bool,
     pub rollback_plan_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BlockEnablementFailure {
+pub struct PolicyGuardrailsBlockEnablementFailure {
     pub request_id: Option<String>,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BlockEnablementPolicyReport {
+pub struct PolicyGuardrailsBlockEnablementPolicyReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approved_enablements: Vec<F3BlockApprovedEnablement>,
-    pub failures: Vec<F3BlockEnablementFailure>,
+    pub approved_enablements: Vec<PolicyGuardrailsBlockApprovedEnablement>,
+    pub failures: Vec<PolicyGuardrailsBlockEnablementFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F3BlockOperatorAuditOperation {
+pub enum PolicyGuardrailsBlockOperatorAuditOperation {
     Approve,
     Rollback,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BlockOperatorAuditRecord {
+pub struct PolicyGuardrailsBlockOperatorAuditRecord {
     pub record_type: String,
-    pub operation: F3BlockOperatorAuditOperation,
+    pub operation: PolicyGuardrailsBlockOperatorAuditOperation,
     pub request_id: String,
     pub evidence_id: String,
     pub backend: String,
-    pub runtime: F3BlockValidationRuntime,
-    pub action: F3BlockValidationAction,
+    pub runtime: PolicyGuardrailsBlockValidationRuntime,
+    pub action: PolicyGuardrailsBlockValidationAction,
     pub default_enabled: bool,
     pub rollback_plan_id: String,
     pub operator: String,
@@ -391,22 +417,22 @@ pub struct F3BlockOperatorAuditRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3LocalSeccompExecutionRequest {
+pub struct PolicyGuardrailsLocalSeccompExecutionRequest {
     pub evidence_id: String,
     pub backend: String,
-    pub runtime: F3BlockValidationRuntime,
-    pub action: F3BlockValidationAction,
+    pub runtime: PolicyGuardrailsBlockValidationRuntime,
+    pub action: PolicyGuardrailsBlockValidationAction,
     pub target_path: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3LocalSeccompExecutionFailure {
+pub struct PolicyGuardrailsLocalSeccompExecutionFailure {
     pub evidence_id: Option<String>,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3LocalSeccompExecutionReport {
+pub struct PolicyGuardrailsLocalSeccompExecutionReport {
     pub schema_version: u32,
     pub passed: bool,
     pub evidence_id: String,
@@ -415,11 +441,11 @@ pub struct F3LocalSeccompExecutionReport {
     pub enforcement_backend: Option<String>,
     pub blocked_errno: Option<i32>,
     pub blocked_message: Option<String>,
-    pub failures: Vec<F3LocalSeccompExecutionFailure>,
+    pub failures: Vec<PolicyGuardrailsLocalSeccompExecutionFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BpfLsmPrototypeEnvironment {
+pub struct PolicyGuardrailsBpfLsmPrototypeEnvironment {
     pub linux: bool,
     pub btf_available: bool,
     pub bpf_lsm_configured: bool,
@@ -429,21 +455,21 @@ pub struct F3BpfLsmPrototypeEnvironment {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BpfLsmPrototypePrerequisiteFailure {
+pub struct PolicyGuardrailsBpfLsmPrototypePrerequisiteFailure {
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F3BpfLsmPrototypePrerequisiteReport {
+pub struct PolicyGuardrailsBpfLsmPrototypePrerequisiteReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub environment: F3BpfLsmPrototypeEnvironment,
-    pub failures: Vec<F3BpfLsmPrototypePrerequisiteFailure>,
+    pub environment: PolicyGuardrailsBpfLsmPrototypeEnvironment,
+    pub failures: Vec<PolicyGuardrailsBpfLsmPrototypePrerequisiteFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F4RuntimeGuardrailTarget {
+pub enum RuntimeGuardrailsRuntimeGuardrailTarget {
     Local,
     Docker,
     Containerd,
@@ -453,7 +479,7 @@ pub enum F4RuntimeGuardrailTarget {
     Firecracker,
 }
 
-impl F4RuntimeGuardrailTarget {
+impl RuntimeGuardrailsRuntimeGuardrailTarget {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Local => "local",
@@ -469,7 +495,7 @@ impl F4RuntimeGuardrailTarget {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F4GuardrailSupportStatus {
+pub enum RuntimeGuardrailsGuardrailSupportStatus {
     Supported,
     PrototypeValidated,
     RequiresRuntimeEvidence,
@@ -478,68 +504,69 @@ pub enum F4GuardrailSupportStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4GuardrailSupportEntry {
-    pub status: F4GuardrailSupportStatus,
+pub struct RuntimeGuardrailsGuardrailSupportEntry {
+    pub status: RuntimeGuardrailsGuardrailSupportStatus,
     pub evidence_ids: Vec<String>,
     pub note: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4RuntimeGuardrailSupport {
-    pub runtime: F4RuntimeGuardrailTarget,
-    pub notify: F4GuardrailSupportEntry,
-    pub review: F4GuardrailSupportEntry,
-    pub kill: F4GuardrailSupportEntry,
-    pub seccomp_block: F4GuardrailSupportEntry,
-    pub bpf_lsm_block: F4GuardrailSupportEntry,
+pub struct RuntimeGuardrailsRuntimeGuardrailSupport {
+    pub runtime: RuntimeGuardrailsRuntimeGuardrailTarget,
+    pub notify: RuntimeGuardrailsGuardrailSupportEntry,
+    pub review: RuntimeGuardrailsGuardrailSupportEntry,
+    pub kill: RuntimeGuardrailsGuardrailSupportEntry,
+    pub seccomp_block: RuntimeGuardrailsGuardrailSupportEntry,
+    pub bpf_lsm_block: RuntimeGuardrailsGuardrailSupportEntry,
     pub requires_guest_collector: bool,
     pub no_go_claims: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4RuntimeGuardrailMatrixReport {
+pub struct RuntimeGuardrailsRuntimeGuardrailMatrixReport {
     pub schema_version: u32,
     pub production_facing_kernel_blocking_supported: bool,
-    pub runtimes: Vec<F4RuntimeGuardrailSupport>,
+    pub runtimes: Vec<RuntimeGuardrailsRuntimeGuardrailSupport>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4LiveRuntimeEvidenceBundleRequest {
+pub struct RuntimeGuardrailsLiveRuntimeEvidenceBundleRequest {
     pub artifact_dir: PathBuf,
     pub visibility_reports: Vec<VisibilityReport>,
-    pub block_validation_reports: Vec<F3BlockValidationReport>,
-    pub runtime_adapter_evidence_reports: Vec<F4RuntimeAdapterEvidenceReport>,
-    pub gvisor_metadata_evidence_reports: Vec<F4GvisorMetadataEvidenceReport>,
-    pub kubernetes_agent_sandbox_evidence_reports: Vec<F4KubernetesAgentSandboxEvidenceReport>,
-    pub kata_boundary_evidence_reports: Vec<F4KataBoundaryEvidenceReport>,
+    pub block_validation_reports: Vec<PolicyGuardrailsBlockValidationReport>,
+    pub runtime_adapter_evidence_reports: Vec<RuntimeGuardrailsRuntimeAdapterEvidenceReport>,
+    pub gvisor_metadata_evidence_reports: Vec<RuntimeGuardrailsGvisorMetadataEvidenceReport>,
+    pub kubernetes_agent_sandbox_evidence_reports:
+        Vec<RuntimeGuardrailsKubernetesAgentSandboxEvidenceReport>,
+    pub kata_boundary_evidence_reports: Vec<RuntimeGuardrailsKataBoundaryEvidenceReport>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4LiveRuntimeEvidenceBundleFailure {
+pub struct RuntimeGuardrailsLiveRuntimeEvidenceBundleFailure {
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4LiveRuntimeEvidenceBundleReport {
+pub struct RuntimeGuardrailsLiveRuntimeEvidenceBundleReport {
     pub schema_version: u32,
     pub passed: bool,
     pub artifact_dir: PathBuf,
     pub visibility_gate: VisibilityReportGateReport,
-    pub matrix: Option<F4RuntimeGuardrailMatrixReport>,
-    pub failures: Vec<F4LiveRuntimeEvidenceBundleFailure>,
+    pub matrix: Option<RuntimeGuardrailsRuntimeGuardrailMatrixReport>,
+    pub failures: Vec<RuntimeGuardrailsLiveRuntimeEvidenceBundleFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5ReleasePromotionChannel {
+pub enum ProductionHardeningReleasePromotionChannel {
     Staging,
     Production,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ReleasePromotionRequest {
+pub struct ProductionHardeningReleasePromotionRequest {
     pub promotion_id: String,
-    pub channel: F5ReleasePromotionChannel,
+    pub channel: ProductionHardeningReleasePromotionChannel,
     pub source_tag: String,
     pub target_tag: String,
     pub image_digest: String,
@@ -557,7 +584,7 @@ pub struct F5ReleasePromotionRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct F5ReleasePromotionPolicyEvidence {
+pub struct ProductionHardeningReleasePromotionPolicyEvidence {
     pub release_manifest_sha256: String,
     pub registry_attachment_sha256: String,
     pub release_manifest: serde_json::Value,
@@ -566,9 +593,9 @@ pub struct F5ReleasePromotionPolicyEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ReleasePromotionApproval {
+pub struct ProductionHardeningReleasePromotionApproval {
     pub promotion_id: String,
-    pub channel: F5ReleasePromotionChannel,
+    pub channel: ProductionHardeningReleasePromotionChannel,
     pub source_tag: String,
     pub target_tag: String,
     pub image_digest: String,
@@ -582,29 +609,29 @@ pub struct F5ReleasePromotionApproval {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ReleasePromotionPolicyFailure {
+pub struct ProductionHardeningReleasePromotionPolicyFailure {
     pub field: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ReleasePromotionPolicyReport {
+pub struct ProductionHardeningReleasePromotionPolicyReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approval: Option<F5ReleasePromotionApproval>,
-    pub failures: Vec<F5ReleasePromotionPolicyFailure>,
+    pub approval: Option<ProductionHardeningReleasePromotionApproval>,
+    pub failures: Vec<ProductionHardeningReleasePromotionPolicyFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5RegistryPromotionExecutionSource {
+pub enum ProductionHardeningRegistryPromotionExecutionSource {
     Fixture,
     LiveProvider,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5RegistryPromotionExecutionProvider {
+pub enum ProductionHardeningRegistryPromotionExecutionProvider {
     LocalFilesystem,
     OciDistributionRegistry,
     AwsEcr,
@@ -614,10 +641,10 @@ pub enum F5RegistryPromotionExecutionProvider {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5RegistryPromotionExecutionEvidence {
+pub struct ProductionHardeningRegistryPromotionExecutionEvidence {
     pub evidence_id: String,
-    pub source: F5RegistryPromotionExecutionSource,
-    pub provider: F5RegistryPromotionExecutionProvider,
+    pub source: ProductionHardeningRegistryPromotionExecutionSource,
+    pub provider: ProductionHardeningRegistryPromotionExecutionProvider,
     pub registry_uri: String,
     pub repository: String,
     pub source_tag: String,
@@ -642,9 +669,9 @@ pub struct F5RegistryPromotionExecutionEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5RegistryPromotionExecutionApproval {
+pub struct ProductionHardeningRegistryPromotionExecutionApproval {
     pub evidence_id: String,
-    pub provider: F5RegistryPromotionExecutionProvider,
+    pub provider: ProductionHardeningRegistryPromotionExecutionProvider,
     pub registry_uri: String,
     pub repository: String,
     pub source_tag: String,
@@ -656,22 +683,22 @@ pub struct F5RegistryPromotionExecutionApproval {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5RegistryPromotionExecutionFailure {
+pub struct ProductionHardeningRegistryPromotionExecutionFailure {
     pub field: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5RegistryPromotionExecutionReport {
+pub struct ProductionHardeningRegistryPromotionExecutionReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approval: Option<F5RegistryPromotionExecutionApproval>,
-    pub failures: Vec<F5RegistryPromotionExecutionFailure>,
+    pub approval: Option<ProductionHardeningRegistryPromotionExecutionApproval>,
+    pub failures: Vec<ProductionHardeningRegistryPromotionExecutionFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5SigningKeyProvider {
+pub enum ProductionHardeningSigningKeyProvider {
     EphemeralLocalValidation,
     LocalFile,
     Kms,
@@ -680,15 +707,15 @@ pub enum F5SigningKeyProvider {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5SigningReleaseChannel {
+pub enum ProductionHardeningSigningReleaseChannel {
     Staging,
     Production,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5SigningProfile {
+pub struct ProductionHardeningSigningProfile {
     pub profile_id: String,
-    pub provider: F5SigningKeyProvider,
+    pub provider: ProductionHardeningSigningKeyProvider,
     pub key_uri: String,
     pub public_key_ref: String,
     pub certificate_chain_ref: String,
@@ -697,13 +724,13 @@ pub struct F5SigningProfile {
     pub hardware_or_service_backed: bool,
     pub operator_approved: bool,
     pub rotation_period_days: u32,
-    pub allowed_release_channels: Vec<F5SigningReleaseChannel>,
+    pub allowed_release_channels: Vec<ProductionHardeningSigningReleaseChannel>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5SigningProfileApproval {
+pub struct ProductionHardeningSigningProfileApproval {
     pub profile_id: String,
-    pub provider: F5SigningKeyProvider,
+    pub provider: ProductionHardeningSigningKeyProvider,
     pub key_uri: String,
     pub public_key_ref: String,
     pub certificate_chain_ref: String,
@@ -712,29 +739,29 @@ pub struct F5SigningProfileApproval {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5SigningProfileFailure {
+pub struct ProductionHardeningSigningProfileFailure {
     pub field: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5SigningProfileReport {
+pub struct ProductionHardeningSigningProfileReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approval: Option<F5SigningProfileApproval>,
-    pub failures: Vec<F5SigningProfileFailure>,
+    pub approval: Option<ProductionHardeningSigningProfileApproval>,
+    pub failures: Vec<ProductionHardeningSigningProfileFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5SigningExecutionSource {
+pub enum ProductionHardeningSigningExecutionSource {
     Fixture,
     LiveProvider,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5SigningExecutionProvider {
+pub enum ProductionHardeningSigningExecutionProvider {
     EphemeralLocalValidation,
     LocalFile,
     Pkcs11Hsm,
@@ -744,21 +771,21 @@ pub enum F5SigningExecutionProvider {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5SigningExecutionAlgorithm {
+pub enum ProductionHardeningSigningExecutionAlgorithm {
     RsaPkcs1Sha256,
     EcdsaP256Sha256,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5SigningExecutionEvidence {
+pub struct ProductionHardeningSigningExecutionEvidence {
     pub evidence_id: String,
-    pub source: F5SigningExecutionSource,
-    pub provider: F5SigningExecutionProvider,
+    pub source: ProductionHardeningSigningExecutionSource,
+    pub provider: ProductionHardeningSigningExecutionProvider,
     pub key_uri: String,
     pub token_label: String,
     pub key_label: String,
     pub key_id: String,
-    pub algorithm: F5SigningExecutionAlgorithm,
+    pub algorithm: ProductionHardeningSigningExecutionAlgorithm,
     pub release_manifest_sha256: String,
     pub signature_sha256: String,
     pub public_key_sha256: String,
@@ -775,11 +802,11 @@ pub struct F5SigningExecutionEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5SigningExecutionApproval {
+pub struct ProductionHardeningSigningExecutionApproval {
     pub evidence_id: String,
-    pub provider: F5SigningExecutionProvider,
+    pub provider: ProductionHardeningSigningExecutionProvider,
     pub key_uri: String,
-    pub algorithm: F5SigningExecutionAlgorithm,
+    pub algorithm: ProductionHardeningSigningExecutionAlgorithm,
     pub release_manifest_sha256: String,
     pub signature_sha256: String,
     pub public_key_sha256: String,
@@ -787,22 +814,22 @@ pub struct F5SigningExecutionApproval {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5SigningExecutionFailure {
+pub struct ProductionHardeningSigningExecutionFailure {
     pub field: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5SigningExecutionReport {
+pub struct ProductionHardeningSigningExecutionReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approval: Option<F5SigningExecutionApproval>,
-    pub failures: Vec<F5SigningExecutionFailure>,
+    pub approval: Option<ProductionHardeningSigningExecutionApproval>,
+    pub failures: Vec<ProductionHardeningSigningExecutionFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5WormProvider {
+pub enum ProductionHardeningWormProvider {
     LocalFilesystem,
     S3ObjectLock,
     GcsBucketLock,
@@ -812,22 +839,22 @@ pub enum F5WormProvider {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5WormRetentionMode {
+pub enum ProductionHardeningWormRetentionMode {
     Governance,
     Compliance,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5WormArchivePolicy {
+pub struct ProductionHardeningWormArchivePolicy {
     pub policy_id: String,
-    pub provider: F5WormProvider,
+    pub provider: ProductionHardeningWormProvider,
     pub bucket_uri: String,
     pub object_prefix: String,
     pub release_manifest_sha256: String,
     pub requested_at_unix_ms: u64,
     pub retention_days: u32,
     pub retain_until_unix_ms: u64,
-    pub retention_mode: F5WormRetentionMode,
+    pub retention_mode: ProductionHardeningWormRetentionMode,
     pub object_lock_enabled: bool,
     pub versioning_enabled: bool,
     pub legal_hold_supported: bool,
@@ -841,9 +868,9 @@ pub struct F5WormArchivePolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5WormArchiveApproval {
+pub struct ProductionHardeningWormArchiveApproval {
     pub policy_id: String,
-    pub provider: F5WormProvider,
+    pub provider: ProductionHardeningWormProvider,
     pub bucket_uri: String,
     pub object_prefix: String,
     pub release_manifest_sha256: String,
@@ -853,31 +880,31 @@ pub struct F5WormArchiveApproval {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5WormArchivePolicyFailure {
+pub struct ProductionHardeningWormArchivePolicyFailure {
     pub field: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5WormArchivePolicyReport {
+pub struct ProductionHardeningWormArchivePolicyReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approval: Option<F5WormArchiveApproval>,
-    pub failures: Vec<F5WormArchivePolicyFailure>,
+    pub approval: Option<ProductionHardeningWormArchiveApproval>,
+    pub failures: Vec<ProductionHardeningWormArchivePolicyFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5WormArchiveExecutionSource {
+pub enum ProductionHardeningWormArchiveExecutionSource {
     Fixture,
     LiveProvider,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5WormArchiveExecutionEvidence {
+pub struct ProductionHardeningWormArchiveExecutionEvidence {
     pub evidence_id: String,
-    pub source: F5WormArchiveExecutionSource,
-    pub provider: F5WormProvider,
+    pub source: ProductionHardeningWormArchiveExecutionSource,
+    pub provider: ProductionHardeningWormProvider,
     pub endpoint_uri: String,
     pub bucket_uri: String,
     pub object_key: String,
@@ -887,7 +914,7 @@ pub struct F5WormArchiveExecutionEvidence {
     pub observed_at_unix_ms: u64,
     pub retention_days: u32,
     pub retain_until_unix_ms: u64,
-    pub retention_mode: F5WormRetentionMode,
+    pub retention_mode: ProductionHardeningWormRetentionMode,
     pub object_lock_enabled: bool,
     pub versioning_enabled: bool,
     pub put_object_succeeded: bool,
@@ -901,9 +928,9 @@ pub struct F5WormArchiveExecutionEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5WormArchiveExecutionApproval {
+pub struct ProductionHardeningWormArchiveExecutionApproval {
     pub evidence_id: String,
-    pub provider: F5WormProvider,
+    pub provider: ProductionHardeningWormProvider,
     pub bucket_uri: String,
     pub object_key: String,
     pub object_version_id: String,
@@ -911,33 +938,33 @@ pub struct F5WormArchiveExecutionApproval {
     pub object_sha256: String,
     pub retention_days: u32,
     pub retain_until_unix_ms: u64,
-    pub retention_mode: F5WormRetentionMode,
+    pub retention_mode: ProductionHardeningWormRetentionMode,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5WormArchiveExecutionFailure {
+pub struct ProductionHardeningWormArchiveExecutionFailure {
     pub field: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5WormArchiveExecutionReport {
+pub struct ProductionHardeningWormArchiveExecutionReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approval: Option<F5WormArchiveExecutionApproval>,
-    pub failures: Vec<F5WormArchiveExecutionFailure>,
+    pub approval: Option<ProductionHardeningWormArchiveExecutionApproval>,
+    pub failures: Vec<ProductionHardeningWormArchiveExecutionFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5ServiceMeshEvidenceSource {
+pub enum ProductionHardeningServiceMeshEvidenceSource {
     Fixture,
     LiveCluster,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5ServiceMeshProvider {
+pub enum ProductionHardeningServiceMeshProvider {
     None,
     Istio,
     Linkerd,
@@ -946,7 +973,7 @@ pub enum F5ServiceMeshProvider {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5ServiceMeshMtlsMode {
+pub enum ProductionHardeningServiceMeshMtlsMode {
     Disable,
     Permissive,
     Strict,
@@ -954,24 +981,24 @@ pub enum F5ServiceMeshMtlsMode {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5ServiceMeshTrafficSecurity {
+pub enum ProductionHardeningServiceMeshTrafficSecurity {
     Plaintext,
     Tls,
     MutualTls,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ServiceMeshLiveEvidence {
+pub struct ProductionHardeningServiceMeshLiveEvidence {
     pub evidence_id: String,
-    pub source: F5ServiceMeshEvidenceSource,
-    pub provider: F5ServiceMeshProvider,
+    pub source: ProductionHardeningServiceMeshEvidenceSource,
+    pub provider: ProductionHardeningServiceMeshProvider,
     pub cluster_name: String,
     pub namespace: String,
     pub workload_service_account: String,
     pub metrics_service_name: String,
     pub peer_authentication_name: String,
     pub authorization_policy_name: String,
-    pub mtls_mode: F5ServiceMeshMtlsMode,
+    pub mtls_mode: ProductionHardeningServiceMeshMtlsMode,
     pub peer_authentication_admitted: bool,
     pub authorization_policy_admitted: bool,
     pub authorized_principal: String,
@@ -979,15 +1006,15 @@ pub struct F5ServiceMeshLiveEvidence {
     pub authorized_handshake_succeeded: bool,
     pub unauthorized_handshake_denied: bool,
     pub plaintext_handshake_denied: bool,
-    pub observed_traffic_security: F5ServiceMeshTrafficSecurity,
+    pub observed_traffic_security: ProductionHardeningServiceMeshTrafficSecurity,
     pub cleanup_confirmed: bool,
     pub observed_at_unix_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ServiceMeshLiveApproval {
+pub struct ProductionHardeningServiceMeshLiveApproval {
     pub evidence_id: String,
-    pub provider: F5ServiceMeshProvider,
+    pub provider: ProductionHardeningServiceMeshProvider,
     pub cluster_name: String,
     pub namespace: String,
     pub metrics_service_name: String,
@@ -997,46 +1024,46 @@ pub struct F5ServiceMeshLiveApproval {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ServiceMeshLiveEvidenceFailure {
+pub struct ProductionHardeningServiceMeshLiveEvidenceFailure {
     pub field: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ServiceMeshLiveEvidenceReport {
+pub struct ProductionHardeningServiceMeshLiveEvidenceReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approval: Option<F5ServiceMeshLiveApproval>,
-    pub failures: Vec<F5ServiceMeshLiveEvidenceFailure>,
+    pub approval: Option<ProductionHardeningServiceMeshLiveApproval>,
+    pub failures: Vec<ProductionHardeningServiceMeshLiveEvidenceFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5OperatorControllerEvidenceSource {
+pub enum ProductionHardeningOperatorControllerEvidenceSource {
     Fixture,
     LiveCluster,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5OperatorControllerProvider {
+pub enum ProductionHardeningOperatorControllerProvider {
     StaticManifest,
     KubernetesController,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5OperatorControllerRbacScope {
+pub enum ProductionHardeningOperatorControllerRbacScope {
     ClusterAdmin,
     ClusterWide,
     NamespaceScoped,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5OperatorControllerEvidence {
+pub struct ProductionHardeningOperatorControllerEvidence {
     pub evidence_id: String,
-    pub source: F5OperatorControllerEvidenceSource,
-    pub provider: F5OperatorControllerProvider,
+    pub source: ProductionHardeningOperatorControllerEvidenceSource,
+    pub provider: ProductionHardeningOperatorControllerProvider,
     pub cluster_name: String,
     pub namespace: String,
     pub crd_name: String,
@@ -1047,7 +1074,7 @@ pub struct F5OperatorControllerEvidence {
     pub controller_ready_replicas: u32,
     pub leader_election_lease: String,
     pub lease_holder_identity: String,
-    pub rbac_scope: F5OperatorControllerRbacScope,
+    pub rbac_scope: ProductionHardeningOperatorControllerRbacScope,
     pub controller_cpu_request_millicores: u32,
     pub controller_cpu_limit_millicores: u32,
     pub controller_memory_request_mib: u32,
@@ -1070,9 +1097,9 @@ pub struct F5OperatorControllerEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5OperatorControllerApproval {
+pub struct ProductionHardeningOperatorControllerApproval {
     pub evidence_id: String,
-    pub provider: F5OperatorControllerProvider,
+    pub provider: ProductionHardeningOperatorControllerProvider,
     pub cluster_name: String,
     pub namespace: String,
     pub crd_name: String,
@@ -1085,29 +1112,29 @@ pub struct F5OperatorControllerApproval {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5OperatorControllerFailure {
+pub struct ProductionHardeningOperatorControllerFailure {
     pub field: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5OperatorControllerReport {
+pub struct ProductionHardeningOperatorControllerReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approval: Option<F5OperatorControllerApproval>,
-    pub failures: Vec<F5OperatorControllerFailure>,
+    pub approval: Option<ProductionHardeningOperatorControllerApproval>,
+    pub failures: Vec<ProductionHardeningOperatorControllerFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5ChaosPerformanceSource {
+pub enum ProductionHardeningChaosPerformanceSource {
     Fixture,
     LiveCluster,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5ChaosPerformanceProvider {
+pub enum ProductionHardeningChaosPerformanceProvider {
     Fixture,
     K3s,
     ManagedKubernetes,
@@ -1115,17 +1142,17 @@ pub enum F5ChaosPerformanceProvider {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5ChaosAction {
+pub enum ProductionHardeningChaosAction {
     PodDelete,
     DeploymentSelfHealing,
     MetricsScrape,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ChaosPerformanceEvidence {
+pub struct ProductionHardeningChaosPerformanceEvidence {
     pub evidence_id: String,
-    pub source: F5ChaosPerformanceSource,
-    pub provider: F5ChaosPerformanceProvider,
+    pub source: ProductionHardeningChaosPerformanceSource,
+    pub provider: ProductionHardeningChaosPerformanceProvider,
     pub cluster_name: String,
     pub namespace: String,
     pub workload_deployment_count: u32,
@@ -1133,7 +1160,7 @@ pub struct F5ChaosPerformanceEvidence {
     pub workload_ready_replicas_before_chaos: u32,
     pub workload_ready_replicas_after_chaos: u32,
     pub pod_churn_deleted: u32,
-    pub chaos_actions: Vec<F5ChaosAction>,
+    pub chaos_actions: Vec<ProductionHardeningChaosAction>,
     pub p95_startup_latency_ms: u64,
     pub p95_recovery_latency_ms: u64,
     pub metrics_server_available: bool,
@@ -1152,9 +1179,9 @@ pub struct F5ChaosPerformanceEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ChaosPerformanceApproval {
+pub struct ProductionHardeningChaosPerformanceApproval {
     pub evidence_id: String,
-    pub provider: F5ChaosPerformanceProvider,
+    pub provider: ProductionHardeningChaosPerformanceProvider,
     pub cluster_name: String,
     pub namespace: String,
     pub workload_deployment_count: u32,
@@ -1168,29 +1195,29 @@ pub struct F5ChaosPerformanceApproval {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ChaosPerformanceFailure {
+pub struct ProductionHardeningChaosPerformanceFailure {
     pub field: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ChaosPerformanceReport {
+pub struct ProductionHardeningChaosPerformanceReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approval: Option<F5ChaosPerformanceApproval>,
-    pub failures: Vec<F5ChaosPerformanceFailure>,
+    pub approval: Option<ProductionHardeningChaosPerformanceApproval>,
+    pub failures: Vec<ProductionHardeningChaosPerformanceFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5ExternalProviderQualificationSource {
+pub enum ProductionHardeningExternalProviderQualificationSource {
     Fixture,
     EvidenceBundle,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F5ExternalProviderQualificationRequirement {
+pub enum ProductionHardeningExternalProviderQualificationRequirement {
     CloudKmsOrExternalHsmSigning,
     CloudWormObjectLockArchive,
     CloudRegistryPromotionRetention,
@@ -1198,8 +1225,8 @@ pub enum F5ExternalProviderQualificationRequirement {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ExternalProviderQualificationEntry {
-    pub requirement: F5ExternalProviderQualificationRequirement,
+pub struct ProductionHardeningExternalProviderQualificationEntry {
+    pub requirement: ProductionHardeningExternalProviderQualificationRequirement,
     pub provider: String,
     pub provider_control_plane: String,
     pub evidence_ref: String,
@@ -1212,48 +1239,48 @@ pub struct F5ExternalProviderQualificationEntry {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ExternalProviderQualificationBundle {
+pub struct ProductionHardeningExternalProviderQualificationBundle {
     pub bundle_id: String,
-    pub source: F5ExternalProviderQualificationSource,
-    pub entries: Vec<F5ExternalProviderQualificationEntry>,
+    pub source: ProductionHardeningExternalProviderQualificationSource,
+    pub entries: Vec<ProductionHardeningExternalProviderQualificationEntry>,
     pub operator_approved: bool,
     pub generated_at_unix_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ExternalProviderQualificationApproval {
+pub struct ProductionHardeningExternalProviderQualificationApproval {
     pub bundle_id: String,
-    pub qualified_requirements: Vec<F5ExternalProviderQualificationRequirement>,
+    pub qualified_requirements: Vec<ProductionHardeningExternalProviderQualificationRequirement>,
     pub providers: Vec<String>,
     pub generated_at_unix_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ExternalProviderQualificationFailure {
+pub struct ProductionHardeningExternalProviderQualificationFailure {
     pub field: String,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F5ExternalProviderQualificationReport {
+pub struct ProductionHardeningExternalProviderQualificationReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub approval: Option<F5ExternalProviderQualificationApproval>,
-    pub failures: Vec<F5ExternalProviderQualificationFailure>,
+    pub approval: Option<ProductionHardeningExternalProviderQualificationApproval>,
+    pub failures: Vec<ProductionHardeningExternalProviderQualificationFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum F4RuntimeAdapterEvidenceSource {
+pub enum RuntimeGuardrailsRuntimeAdapterEvidenceSource {
     Fixture,
     LiveHost,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4RuntimeAdapterEvidenceReport {
+pub struct RuntimeGuardrailsRuntimeAdapterEvidenceReport {
     pub evidence_id: String,
-    pub source: F4RuntimeAdapterEvidenceSource,
-    pub runtime: F4RuntimeGuardrailTarget,
+    pub source: RuntimeGuardrailsRuntimeAdapterEvidenceSource,
+    pub runtime: RuntimeGuardrailsRuntimeGuardrailTarget,
     pub adapter: String,
     pub session_id: String,
     pub workload_id: String,
@@ -1266,24 +1293,24 @@ pub struct F4RuntimeAdapterEvidenceReport {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4RuntimeAdapterEvidenceGateFailure {
+pub struct RuntimeGuardrailsRuntimeAdapterEvidenceGateFailure {
     pub evidence_id: Option<String>,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4RuntimeAdapterEvidenceGateReport {
+pub struct RuntimeGuardrailsRuntimeAdapterEvidenceGateReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub reports: Vec<F4RuntimeAdapterEvidenceReport>,
-    pub validated_evidence: Vec<F4RuntimeAdapterEvidenceReport>,
-    pub failures: Vec<F4RuntimeAdapterEvidenceGateFailure>,
+    pub reports: Vec<RuntimeGuardrailsRuntimeAdapterEvidenceReport>,
+    pub validated_evidence: Vec<RuntimeGuardrailsRuntimeAdapterEvidenceReport>,
+    pub failures: Vec<RuntimeGuardrailsRuntimeAdapterEvidenceGateFailure>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4GvisorMetadataEvidenceReport {
+pub struct RuntimeGuardrailsGvisorMetadataEvidenceReport {
     pub evidence_id: String,
-    pub source: F4RuntimeAdapterEvidenceSource,
+    pub source: RuntimeGuardrailsRuntimeAdapterEvidenceSource,
     pub runtime_adapter_evidence_id: String,
     pub session_id: String,
     pub runtime_handler: Option<String>,
@@ -1296,24 +1323,24 @@ pub struct F4GvisorMetadataEvidenceReport {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4GvisorMetadataEvidenceGateFailure {
+pub struct RuntimeGuardrailsGvisorMetadataEvidenceGateFailure {
     pub evidence_id: Option<String>,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4GvisorMetadataEvidenceGateReport {
+pub struct RuntimeGuardrailsGvisorMetadataEvidenceGateReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub reports: Vec<F4GvisorMetadataEvidenceReport>,
-    pub validated_evidence: Vec<F4GvisorMetadataEvidenceReport>,
-    pub failures: Vec<F4GvisorMetadataEvidenceGateFailure>,
+    pub reports: Vec<RuntimeGuardrailsGvisorMetadataEvidenceReport>,
+    pub validated_evidence: Vec<RuntimeGuardrailsGvisorMetadataEvidenceReport>,
+    pub failures: Vec<RuntimeGuardrailsGvisorMetadataEvidenceGateFailure>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4KubernetesAgentSandboxEvidenceReport {
+pub struct RuntimeGuardrailsKubernetesAgentSandboxEvidenceReport {
     pub evidence_id: String,
-    pub source: F4RuntimeAdapterEvidenceSource,
+    pub source: RuntimeGuardrailsRuntimeAdapterEvidenceSource,
     pub runtime_adapter_evidence_id: String,
     pub session_id: String,
     pub pod_name: String,
@@ -1328,24 +1355,24 @@ pub struct F4KubernetesAgentSandboxEvidenceReport {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4KubernetesAgentSandboxEvidenceGateFailure {
+pub struct RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateFailure {
     pub evidence_id: Option<String>,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4KubernetesAgentSandboxEvidenceGateReport {
+pub struct RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub reports: Vec<F4KubernetesAgentSandboxEvidenceReport>,
-    pub validated_evidence: Vec<F4KubernetesAgentSandboxEvidenceReport>,
-    pub failures: Vec<F4KubernetesAgentSandboxEvidenceGateFailure>,
+    pub reports: Vec<RuntimeGuardrailsKubernetesAgentSandboxEvidenceReport>,
+    pub validated_evidence: Vec<RuntimeGuardrailsKubernetesAgentSandboxEvidenceReport>,
+    pub failures: Vec<RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateFailure>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4KataBoundaryEvidenceReport {
+pub struct RuntimeGuardrailsKataBoundaryEvidenceReport {
     pub evidence_id: String,
-    pub source: F4RuntimeAdapterEvidenceSource,
+    pub source: RuntimeGuardrailsRuntimeAdapterEvidenceSource,
     pub runtime_adapter_evidence_id: String,
     pub session_id: String,
     pub runtime_handler: Option<String>,
@@ -1358,24 +1385,25 @@ pub struct F4KataBoundaryEvidenceReport {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4KataBoundaryEvidenceGateFailure {
+pub struct RuntimeGuardrailsKataBoundaryEvidenceGateFailure {
     pub evidence_id: Option<String>,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct F4KataBoundaryEvidenceGateReport {
+pub struct RuntimeGuardrailsKataBoundaryEvidenceGateReport {
     pub schema_version: u32,
     pub passed: bool,
-    pub reports: Vec<F4KataBoundaryEvidenceReport>,
-    pub validated_evidence: Vec<F4KataBoundaryEvidenceReport>,
-    pub failures: Vec<F4KataBoundaryEvidenceGateFailure>,
+    pub reports: Vec<RuntimeGuardrailsKataBoundaryEvidenceReport>,
+    pub validated_evidence: Vec<RuntimeGuardrailsKataBoundaryEvidenceReport>,
+    pub failures: Vec<RuntimeGuardrailsKataBoundaryEvidenceGateFailure>,
 }
 
-impl F3BlockOperatorAuditRecord {
+impl PolicyGuardrailsBlockOperatorAuditRecord {
     pub fn to_json_line(&self) -> Result<String, String> {
-        serde_json::to_string(self)
-            .map_err(|error| format!("failed to serialize F3 block operator audit record: {error}"))
+        serde_json::to_string(self).map_err(|error| {
+            format!("failed to serialize PolicyGuardrails block operator audit record: {error}")
+        })
     }
 }
 
@@ -1586,7 +1614,7 @@ pub fn default_host_backup_sources() -> Vec<BackupSource> {
     ]
 }
 
-pub fn default_f2_performance_budgets() -> Vec<PerformanceBudget> {
+pub fn default_runtime_foundation_performance_budgets() -> Vec<PerformanceBudget> {
     vec![
         PerformanceBudget {
             load: PerformanceLoad::Idle,
@@ -1740,7 +1768,7 @@ pub fn evaluate_performance_gate(
     }
 }
 
-pub fn required_f2_visibility_targets() -> Vec<VisibilityTarget> {
+pub fn required_runtime_foundation_visibility_targets() -> Vec<VisibilityTarget> {
     vec![
         VisibilityTarget::Local,
         VisibilityTarget::DockerRunc,
@@ -1754,70 +1782,74 @@ pub fn required_f2_visibility_targets() -> Vec<VisibilityTarget> {
     ]
 }
 
-pub fn evaluate_f5_release_promotion_policy(
-    request: F5ReleasePromotionRequest,
-    evidence: F5ReleasePromotionPolicyEvidence,
-) -> F5ReleasePromotionPolicyReport {
+pub fn evaluate_production_hardening_release_promotion_policy(
+    request: ProductionHardeningReleasePromotionRequest,
+    evidence: ProductionHardeningReleasePromotionPolicyEvidence,
+) -> ProductionHardeningReleasePromotionPolicyReport {
     const MIN_PRODUCTION_RETENTION_DAYS: u32 = 90;
     const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
 
     let mut failures = Vec::new();
 
     if request.promotion_id.trim().is_empty() {
-        f5_push_failure(&mut failures, "promotion_id", "promotion id is required");
+        production_hardening_push_failure(
+            &mut failures,
+            "promotion_id",
+            "promotion id is required",
+        );
     }
-    if !f5_is_sha256_digest(&request.image_digest) {
-        f5_push_failure(
+    if !production_hardening_is_sha256_digest(&request.image_digest) {
+        production_hardening_push_failure(
             &mut failures,
             "image_digest",
             "image digest must be a sha256 digest",
         );
     }
-    if !f5_is_sha256_digest(&request.sbom_attachment_digest) {
-        f5_push_failure(
+    if !production_hardening_is_sha256_digest(&request.sbom_attachment_digest) {
+        production_hardening_push_failure(
             &mut failures,
             "sbom_attachment_digest",
             "SBOM attachment digest must be a sha256 digest",
         );
     }
-    if !f5_is_sha256_hex(&request.release_manifest_sha256) {
-        f5_push_failure(
+    if !production_hardening_is_sha256_hex(&request.release_manifest_sha256) {
+        production_hardening_push_failure(
             &mut failures,
             "release_manifest_sha256",
             "release manifest sha256 must be 64 hex characters",
         );
     }
     if request.release_manifest_sha256 != evidence.release_manifest_sha256 {
-        f5_push_failure(
+        production_hardening_push_failure(
             &mut failures,
             "release_manifest_sha256",
             "request release manifest digest does not match evidence",
         );
     }
-    if !f5_is_sha256_hex(&evidence.registry_attachment_sha256) {
-        f5_push_failure(
+    if !production_hardening_is_sha256_hex(&evidence.registry_attachment_sha256) {
+        production_hardening_push_failure(
             &mut failures,
             "registry_attachment_sha256",
             "registry attachment sha256 must be 64 hex characters",
         );
     }
 
-    f5_validate_release_manifest(&evidence, &mut failures);
-    f5_validate_registry_attachment(&request, &evidence, &mut failures);
-    f5_validate_archive_manifest(&request, &evidence, &mut failures);
+    production_hardening_validate_release_manifest(&evidence, &mut failures);
+    production_hardening_validate_registry_attachment(&request, &evidence, &mut failures);
+    production_hardening_validate_archive_manifest(&request, &evidence, &mut failures);
 
     if request.target_tag == "latest" || !request.target_tag.starts_with("prod-") {
-        f5_push_failure(
+        production_hardening_push_failure(
             &mut failures,
             "target_tag",
             "target tag must be immutable and start with prod-",
         );
     }
     if request.source_tag.trim().is_empty() {
-        f5_push_failure(&mut failures, "source_tag", "source tag is required");
+        production_hardening_push_failure(&mut failures, "source_tag", "source tag is required");
     }
     if request.retention_days < MIN_PRODUCTION_RETENTION_DAYS {
-        f5_push_failure(
+        production_hardening_push_failure(
             &mut failures,
             "retention_days",
             "minimum production retention is 90 days",
@@ -1827,42 +1859,42 @@ pub fn evaluate_f5_release_promotion_policy(
         .requested_at_unix_ms
         .saturating_add(u64::from(request.retention_days).saturating_mul(DAY_MS));
     if request.retain_until_unix_ms < required_retain_until {
-        f5_push_failure(
+        production_hardening_push_failure(
             &mut failures,
             "retain_until_unix_ms",
             "retain-until timestamp must cover the requested retention window",
         );
     }
     if !request.promotion_approved {
-        f5_push_failure(
+        production_hardening_push_failure(
             &mut failures,
             "promotion_approved",
             "operator approval is required",
         );
     }
     if !request.require_digest_pulls {
-        f5_push_failure(
+        production_hardening_push_failure(
             &mut failures,
             "require_digest_pulls",
             "digest-only pulls are required",
         );
     }
     if request.allow_anonymous_pull {
-        f5_push_failure(
+        production_hardening_push_failure(
             &mut failures,
             "allow_anonymous_pull",
             "anonymous registry pull access is forbidden",
         );
     }
     if request.allowed_pull_principals.is_empty() {
-        f5_push_failure(
+        production_hardening_push_failure(
             &mut failures,
             "allowed_pull_principals",
             "at least one pull principal is required",
         );
     }
     if request.allowed_push_principals.is_empty() {
-        f5_push_failure(
+        production_hardening_push_failure(
             &mut failures,
             "allowed_push_principals",
             "at least one push principal is required",
@@ -1870,14 +1902,14 @@ pub fn evaluate_f5_release_promotion_policy(
     }
     for principal in &request.allowed_pull_principals {
         if principal == "*" {
-            f5_push_failure(
+            production_hardening_push_failure(
                 &mut failures,
                 "allowed_pull_principals",
                 "wildcard pull principals are forbidden",
             );
         }
-        if f5_is_anonymous_principal(principal) {
-            f5_push_failure(
+        if production_hardening_is_anonymous_principal(principal) {
+            production_hardening_push_failure(
                 &mut failures,
                 "allowed_pull_principals",
                 "anonymous pull principals are forbidden",
@@ -1886,14 +1918,14 @@ pub fn evaluate_f5_release_promotion_policy(
     }
     for principal in &request.allowed_push_principals {
         if principal == "*" {
-            f5_push_failure(
+            production_hardening_push_failure(
                 &mut failures,
                 "allowed_push_principals",
                 "wildcard push principals are forbidden",
             );
         }
-        if f5_is_anonymous_principal(principal) {
-            f5_push_failure(
+        if production_hardening_is_anonymous_principal(principal) {
+            production_hardening_push_failure(
                 &mut failures,
                 "allowed_push_principals",
                 "anonymous push principals are forbidden",
@@ -1901,11 +1933,15 @@ pub fn evaluate_f5_release_promotion_policy(
         }
     }
     if request.rollback_tag.trim().is_empty() {
-        f5_push_failure(&mut failures, "rollback_tag", "rollback tag is required");
+        production_hardening_push_failure(
+            &mut failures,
+            "rollback_tag",
+            "rollback tag is required",
+        );
     }
 
     let approval = if failures.is_empty() {
-        Some(F5ReleasePromotionApproval {
+        Some(ProductionHardeningReleasePromotionApproval {
             promotion_id: request.promotion_id,
             channel: request.channel,
             source_tag: request.source_tag,
@@ -1923,7 +1959,7 @@ pub fn evaluate_f5_release_promotion_policy(
         None
     };
 
-    F5ReleasePromotionPolicyReport {
+    ProductionHardeningReleasePromotionPolicyReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -1931,22 +1967,22 @@ pub fn evaluate_f5_release_promotion_policy(
     }
 }
 
-pub fn evaluate_f5_registry_promotion_execution_evidence(
-    evidence: F5RegistryPromotionExecutionEvidence,
-) -> F5RegistryPromotionExecutionReport {
+pub fn evaluate_production_hardening_registry_promotion_execution_evidence(
+    evidence: ProductionHardeningRegistryPromotionExecutionEvidence,
+) -> ProductionHardeningRegistryPromotionExecutionReport {
     const MIN_PRODUCTION_RETENTION_DAYS: u32 = 90;
     const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
     let mut failures = Vec::new();
 
     if evidence.evidence_id.trim().is_empty() {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "evidence_id",
             "evidence id is required",
         );
     }
-    if evidence.source != F5RegistryPromotionExecutionSource::LiveProvider {
-        f5_registry_promotion_execution_failure(
+    if evidence.source != ProductionHardeningRegistryPromotionExecutionSource::LiveProvider {
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "source",
             "live registry promotion execution evidence is required",
@@ -1954,163 +1990,166 @@ pub fn evaluate_f5_registry_promotion_execution_evidence(
     }
     if !matches!(
         evidence.provider,
-        F5RegistryPromotionExecutionProvider::OciDistributionRegistry
-            | F5RegistryPromotionExecutionProvider::AwsEcr
-            | F5RegistryPromotionExecutionProvider::GcpArtifactRegistry
-            | F5RegistryPromotionExecutionProvider::AzureContainerRegistry
-            | F5RegistryPromotionExecutionProvider::DockerHub
+        ProductionHardeningRegistryPromotionExecutionProvider::OciDistributionRegistry
+            | ProductionHardeningRegistryPromotionExecutionProvider::AwsEcr
+            | ProductionHardeningRegistryPromotionExecutionProvider::GcpArtifactRegistry
+            | ProductionHardeningRegistryPromotionExecutionProvider::AzureContainerRegistry
+            | ProductionHardeningRegistryPromotionExecutionProvider::DockerHub
     ) {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "provider",
             "registry promotion execution requires a provider-backed OCI registry",
         );
     }
-    if !f5_registry_promotion_uri_matches_provider(evidence.provider, &evidence.registry_uri) {
-        f5_registry_promotion_execution_failure(
+    if !production_hardening_registry_promotion_uri_matches_provider(
+        evidence.provider,
+        &evidence.registry_uri,
+    ) {
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "registry_uri",
             "registry URI must be provider-backed",
         );
     }
     if evidence.repository.trim().is_empty() {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "repository",
             "repository is required",
         );
     }
     if evidence.source_tag.trim().is_empty() {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "source_tag",
             "source tag is required",
         );
     }
     if evidence.target_tag == "latest" || !evidence.target_tag.starts_with("prod-") {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "target_tag",
             "target tag must be immutable and start with prod-",
         );
     }
     if evidence.rollback_tag.trim().is_empty() {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "rollback_tag",
             "rollback tag is required",
         );
     }
-    if !f5_is_sha256_digest(&evidence.image_digest) {
-        f5_registry_promotion_execution_failure(
+    if !production_hardening_is_sha256_digest(&evidence.image_digest) {
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "image_digest",
             "image digest must be a sha256 digest",
         );
     }
-    if !f5_is_sha256_digest(&evidence.promoted_digest) {
-        f5_registry_promotion_execution_failure(
+    if !production_hardening_is_sha256_digest(&evidence.promoted_digest) {
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "promoted_digest",
             "promoted digest must be a sha256 digest",
         );
     } else if evidence.promoted_digest != evidence.image_digest {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "promoted_digest",
             "promoted digest must match image digest",
         );
     }
-    if !f5_is_sha256_digest(&evidence.production_tag_digest) {
-        f5_registry_promotion_execution_failure(
+    if !production_hardening_is_sha256_digest(&evidence.production_tag_digest) {
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "production_tag_digest",
             "production tag digest must be a sha256 digest",
         );
     } else if evidence.production_tag_digest != evidence.image_digest {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "production_tag_digest",
             "production tag digest must match image digest",
         );
     }
     if evidence.rollback_tag_digest.trim().is_empty() {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "rollback_tag_digest",
             "rollback tag digest is required",
         );
-    } else if !f5_is_sha256_digest(&evidence.rollback_tag_digest) {
-        f5_registry_promotion_execution_failure(
+    } else if !production_hardening_is_sha256_digest(&evidence.rollback_tag_digest) {
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "rollback_tag_digest",
             "rollback tag digest must be a sha256 digest",
         );
     } else if evidence.rollback_tag_digest != evidence.image_digest {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "rollback_tag_digest",
             "rollback tag digest must match image digest",
         );
     }
     if evidence.manifest_media_type.trim().is_empty() {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "manifest_media_type",
             "manifest media type is required",
         );
     }
     if !evidence.staging_manifest_verified {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "staging_manifest_verified",
             "staging manifest must be verified through the registry API",
         );
     }
     if !evidence.production_manifest_verified {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "production_manifest_verified",
             "production manifest must be verified through the registry API",
         );
     }
     if !evidence.rollback_manifest_verified {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "rollback_manifest_verified",
             "rollback manifest must be verified through the registry API",
         );
     }
     if !evidence.digest_promotion_performed {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "digest_promotion_performed",
             "promotion must be performed by digest through the registry API",
         );
     }
     if !evidence.digest_pulls_verified {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "digest_pulls_verified",
             "digest pulls must be verified through the registry API",
         );
     }
     if !evidence.production_delete_without_retention_denied {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "production_delete_without_retention_denied",
             "production delete without retention bypass must be denied by the registry API",
         );
     }
     if evidence.retention_days < MIN_PRODUCTION_RETENTION_DAYS {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "retention_days",
             "minimum production retention is 90 days",
         );
     }
     if evidence.observed_at_unix_ms == 0 {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "observed_at_unix_ms",
             "live observation timestamp is required",
@@ -2120,21 +2159,21 @@ pub fn evaluate_f5_registry_promotion_execution_evidence(
         .observed_at_unix_ms
         .saturating_add(u64::from(evidence.retention_days).saturating_mul(DAY_MS));
     if evidence.retain_until_unix_ms < required_retain_until {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "retain_until_unix_ms",
             "retain-until timestamp must cover the requested retention window",
         );
     }
     if !evidence.promotion_approved {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "promotion_approved",
             "operator approval is required",
         );
     }
     if evidence.api_tool.trim().is_empty() {
-        f5_registry_promotion_execution_failure(
+        production_hardening_registry_promotion_execution_failure(
             &mut failures,
             "api_tool",
             "API tool evidence is required",
@@ -2142,7 +2181,7 @@ pub fn evaluate_f5_registry_promotion_execution_evidence(
     }
 
     let approval = if failures.is_empty() {
-        Some(F5RegistryPromotionExecutionApproval {
+        Some(ProductionHardeningRegistryPromotionExecutionApproval {
             evidence_id: evidence.evidence_id,
             provider: evidence.provider,
             registry_uri: evidence.registry_uri,
@@ -2158,7 +2197,7 @@ pub fn evaluate_f5_registry_promotion_execution_evidence(
         None
     };
 
-    F5RegistryPromotionExecutionReport {
+    ProductionHardeningRegistryPromotionExecutionReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -2166,67 +2205,69 @@ pub fn evaluate_f5_registry_promotion_execution_evidence(
     }
 }
 
-pub fn evaluate_f5_signing_profile(profile: F5SigningProfile) -> F5SigningProfileReport {
+pub fn evaluate_production_hardening_signing_profile(
+    profile: ProductionHardeningSigningProfile,
+) -> ProductionHardeningSigningProfileReport {
     const MAX_ROTATION_DAYS: u32 = 180;
     let mut failures = Vec::new();
 
     if profile.profile_id.trim().is_empty() {
-        f5_signing_failure(&mut failures, "profile_id", "profile id is required");
+        production_hardening_signing_failure(&mut failures, "profile_id", "profile id is required");
     }
     if !matches!(
         profile.provider,
-        F5SigningKeyProvider::Kms | F5SigningKeyProvider::Hsm
+        ProductionHardeningSigningKeyProvider::Kms | ProductionHardeningSigningKeyProvider::Hsm
     ) {
-        f5_signing_failure(
+        production_hardening_signing_failure(
             &mut failures,
             "provider",
             "production release signing requires KMS or HSM provider",
         );
     }
     if !profile.non_exportable {
-        f5_signing_failure(
+        production_hardening_signing_failure(
             &mut failures,
             "non_exportable",
             "production signing key must be non-exportable",
         );
     }
     if !profile.hardware_or_service_backed {
-        f5_signing_failure(
+        production_hardening_signing_failure(
             &mut failures,
             "hardware_or_service_backed",
             "production signing key must be hardware-backed or managed by a KMS service",
         );
     }
     if !profile.operator_approved {
-        f5_signing_failure(
+        production_hardening_signing_failure(
             &mut failures,
             "operator_approved",
             "operator approval is required",
         );
     }
     if profile.public_key_ref.trim().is_empty() {
-        f5_signing_failure(
+        production_hardening_signing_failure(
             &mut failures,
             "public_key_ref",
             "public key reference is required",
         );
     }
     if profile.certificate_chain_ref.trim().is_empty() {
-        f5_signing_failure(
+        production_hardening_signing_failure(
             &mut failures,
             "certificate_chain_ref",
             "certificate chain or verification bundle reference is required",
         );
     }
     if profile.attestation_ref.trim().is_empty() {
-        f5_signing_failure(
+        production_hardening_signing_failure(
             &mut failures,
             "attestation_ref",
             "attestation or key policy evidence is required",
         );
     }
     if profile.rotation_period_days == 0 || profile.rotation_period_days > MAX_ROTATION_DAYS {
-        f5_signing_failure(
+        production_hardening_signing_failure(
             &mut failures,
             "rotation_period_days",
             "rotation period must be 180 days or less",
@@ -2234,22 +2275,23 @@ pub fn evaluate_f5_signing_profile(profile: F5SigningProfile) -> F5SigningProfil
     }
     if !profile
         .allowed_release_channels
-        .contains(&F5SigningReleaseChannel::Production)
+        .contains(&ProductionHardeningSigningReleaseChannel::Production)
     {
-        f5_signing_failure(
+        production_hardening_signing_failure(
             &mut failures,
             "allowed_release_channels",
             "production release channel must be allowed",
         );
     }
-    if f5_is_file_key_uri(&profile.key_uri) {
-        f5_signing_failure(
+    if production_hardening_is_file_key_uri(&profile.key_uri) {
+        production_hardening_signing_failure(
             &mut failures,
             "key_uri",
             "file paths are not valid production signing key URIs",
         );
-    } else if !f5_signing_uri_matches_provider(profile.provider, &profile.key_uri) {
-        f5_signing_failure(
+    } else if !production_hardening_signing_uri_matches_provider(profile.provider, &profile.key_uri)
+    {
+        production_hardening_signing_failure(
             &mut failures,
             "key_uri",
             "signing key URI must match the selected KMS or HSM provider",
@@ -2257,7 +2299,7 @@ pub fn evaluate_f5_signing_profile(profile: F5SigningProfile) -> F5SigningProfil
     }
 
     let approval = if failures.is_empty() {
-        Some(F5SigningProfileApproval {
+        Some(ProductionHardeningSigningProfileApproval {
             profile_id: profile.profile_id,
             provider: profile.provider,
             key_uri: profile.key_uri,
@@ -2270,7 +2312,7 @@ pub fn evaluate_f5_signing_profile(profile: F5SigningProfile) -> F5SigningProfil
         None
     };
 
-    F5SigningProfileReport {
+    ProductionHardeningSigningProfileReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -2278,16 +2320,20 @@ pub fn evaluate_f5_signing_profile(profile: F5SigningProfile) -> F5SigningProfil
     }
 }
 
-pub fn evaluate_f5_signing_execution_evidence(
-    evidence: F5SigningExecutionEvidence,
-) -> F5SigningExecutionReport {
+pub fn evaluate_production_hardening_signing_execution_evidence(
+    evidence: ProductionHardeningSigningExecutionEvidence,
+) -> ProductionHardeningSigningExecutionReport {
     let mut failures = Vec::new();
 
     if evidence.evidence_id.trim().is_empty() {
-        f5_signing_execution_failure(&mut failures, "evidence_id", "evidence id is required");
+        production_hardening_signing_execution_failure(
+            &mut failures,
+            "evidence_id",
+            "evidence id is required",
+        );
     }
-    if evidence.source != F5SigningExecutionSource::LiveProvider {
-        f5_signing_execution_failure(
+    if evidence.source != ProductionHardeningSigningExecutionSource::LiveProvider {
+        production_hardening_signing_execution_failure(
             &mut failures,
             "source",
             "live provider signing evidence is required",
@@ -2295,116 +2341,139 @@ pub fn evaluate_f5_signing_execution_evidence(
     }
     if !matches!(
         evidence.provider,
-        F5SigningExecutionProvider::Pkcs11Hsm
-            | F5SigningExecutionProvider::ExternalHsm
-            | F5SigningExecutionProvider::CloudKms
+        ProductionHardeningSigningExecutionProvider::Pkcs11Hsm
+            | ProductionHardeningSigningExecutionProvider::ExternalHsm
+            | ProductionHardeningSigningExecutionProvider::CloudKms
     ) {
-        f5_signing_execution_failure(
+        production_hardening_signing_execution_failure(
             &mut failures,
             "provider",
             "signing execution requires PKCS#11 HSM, external HSM, or cloud KMS provider",
         );
     }
-    if f5_is_file_key_uri(&evidence.key_uri) {
-        f5_signing_execution_failure(
+    if production_hardening_is_file_key_uri(&evidence.key_uri) {
+        production_hardening_signing_execution_failure(
             &mut failures,
             "key_uri",
             "file paths are not valid production signing key URIs",
         );
-    } else if !f5_signing_execution_uri_matches_provider(evidence.provider, &evidence.key_uri) {
-        f5_signing_execution_failure(
+    } else if !production_hardening_signing_execution_uri_matches_provider(
+        evidence.provider,
+        &evidence.key_uri,
+    ) {
+        production_hardening_signing_execution_failure(
             &mut failures,
             "key_uri",
             "signing key URI must match the selected execution provider",
         );
     }
     if evidence.token_label.trim().is_empty() {
-        f5_signing_execution_failure(&mut failures, "token_label", "token label is required");
+        production_hardening_signing_execution_failure(
+            &mut failures,
+            "token_label",
+            "token label is required",
+        );
     }
     if evidence.key_label.trim().is_empty() {
-        f5_signing_execution_failure(&mut failures, "key_label", "key label is required");
+        production_hardening_signing_execution_failure(
+            &mut failures,
+            "key_label",
+            "key label is required",
+        );
     }
     if evidence.key_id.trim().is_empty() {
-        f5_signing_execution_failure(&mut failures, "key_id", "key id is required");
+        production_hardening_signing_execution_failure(
+            &mut failures,
+            "key_id",
+            "key id is required",
+        );
     }
-    if !f5_is_sha256_hex(&evidence.release_manifest_sha256) {
-        f5_signing_execution_failure(
+    if !production_hardening_is_sha256_hex(&evidence.release_manifest_sha256) {
+        production_hardening_signing_execution_failure(
             &mut failures,
             "release_manifest_sha256",
             "release manifest sha256 must be 64 hex characters",
         );
     }
-    if !f5_is_sha256_hex(&evidence.signature_sha256) {
-        f5_signing_execution_failure(
+    if !production_hardening_is_sha256_hex(&evidence.signature_sha256) {
+        production_hardening_signing_execution_failure(
             &mut failures,
             "signature_sha256",
             "signature sha256 must be 64 hex characters",
         );
     }
-    if !f5_is_sha256_hex(&evidence.public_key_sha256) {
-        f5_signing_execution_failure(
+    if !production_hardening_is_sha256_hex(&evidence.public_key_sha256) {
+        production_hardening_signing_execution_failure(
             &mut failures,
             "public_key_sha256",
             "public key sha256 must be 64 hex characters",
         );
     }
     if !evidence.signature_verified {
-        f5_signing_execution_failure(
+        production_hardening_signing_execution_failure(
             &mut failures,
             "signature_verified",
             "signature verification evidence is required",
         );
     }
     if !evidence.private_key_non_extractable {
-        f5_signing_execution_failure(
+        production_hardening_signing_execution_failure(
             &mut failures,
             "private_key_non_extractable",
             "private key must be non-extractable",
         );
     }
     if !evidence.private_key_sensitive {
-        f5_signing_execution_failure(
+        production_hardening_signing_execution_failure(
             &mut failures,
             "private_key_sensitive",
             "private key must be sensitive",
         );
     }
     if !evidence.key_generated_in_provider {
-        f5_signing_execution_failure(
+        production_hardening_signing_execution_failure(
             &mut failures,
             "key_generated_in_provider",
             "key must be generated inside the signing provider",
         );
     }
     if !evidence.token_initialized {
-        f5_signing_execution_failure(
+        production_hardening_signing_execution_failure(
             &mut failures,
             "token_initialized",
             "token initialization evidence is required",
         );
     }
     if evidence.signer_tool.trim().is_empty() {
-        f5_signing_execution_failure(&mut failures, "signer_tool", "signer tool is required");
+        production_hardening_signing_execution_failure(
+            &mut failures,
+            "signer_tool",
+            "signer tool is required",
+        );
     }
     if evidence.verifier_tool.trim().is_empty() {
-        f5_signing_execution_failure(&mut failures, "verifier_tool", "verifier tool is required");
+        production_hardening_signing_execution_failure(
+            &mut failures,
+            "verifier_tool",
+            "verifier tool is required",
+        );
     }
     if !evidence.operator_approved {
-        f5_signing_execution_failure(
+        production_hardening_signing_execution_failure(
             &mut failures,
             "operator_approved",
             "operator approval is required",
         );
     }
     if !evidence.cleanup_confirmed {
-        f5_signing_execution_failure(
+        production_hardening_signing_execution_failure(
             &mut failures,
             "cleanup_confirmed",
             "cleanup confirmation is required",
         );
     }
     if evidence.observed_at_unix_ms == 0 {
-        f5_signing_execution_failure(
+        production_hardening_signing_execution_failure(
             &mut failures,
             "observed_at_unix_ms",
             "observed timestamp is required",
@@ -2412,7 +2481,7 @@ pub fn evaluate_f5_signing_execution_evidence(
     }
 
     let approval = if failures.is_empty() {
-        Some(F5SigningExecutionApproval {
+        Some(ProductionHardeningSigningExecutionApproval {
             evidence_id: evidence.evidence_id,
             provider: evidence.provider,
             key_uri: evidence.key_uri,
@@ -2426,7 +2495,7 @@ pub fn evaluate_f5_signing_execution_evidence(
         None
     };
 
-    F5SigningExecutionReport {
+    ProductionHardeningSigningExecutionReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -2434,28 +2503,30 @@ pub fn evaluate_f5_signing_execution_evidence(
     }
 }
 
-pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArchivePolicyReport {
+pub fn evaluate_production_hardening_worm_archive_policy(
+    policy: ProductionHardeningWormArchivePolicy,
+) -> ProductionHardeningWormArchivePolicyReport {
     const MIN_WORM_RETENTION_DAYS: u32 = 180;
     const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
     let mut failures = Vec::new();
 
     if policy.policy_id.trim().is_empty() {
-        f5_worm_failure(&mut failures, "policy_id", "policy id is required");
+        production_hardening_worm_failure(&mut failures, "policy_id", "policy id is required");
     }
     if !matches!(
         policy.provider,
-        F5WormProvider::S3ObjectLock
-            | F5WormProvider::GcsBucketLock
-            | F5WormProvider::AzureImmutableBlob
+        ProductionHardeningWormProvider::S3ObjectLock
+            | ProductionHardeningWormProvider::GcsBucketLock
+            | ProductionHardeningWormProvider::AzureImmutableBlob
     ) {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "provider",
             "external WORM archive requires S3 Object Lock, GCS Bucket Lock, or Azure Immutable Blob",
         );
     }
-    if !f5_worm_uri_matches_provider(policy.provider, &policy.bucket_uri) {
-        f5_worm_failure(
+    if !production_hardening_worm_uri_matches_provider(policy.provider, &policy.bucket_uri) {
+        production_hardening_worm_failure(
             &mut failures,
             "bucket_uri",
             "production archive URI must be provider-backed object storage",
@@ -2465,42 +2536,42 @@ pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArc
         || policy.object_prefix.starts_with('/')
         || policy.object_prefix.contains("..")
     {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "object_prefix",
             "object prefix must be a bounded relative object prefix",
         );
     }
-    if !f5_is_sha256_hex(&policy.release_manifest_sha256) {
-        f5_worm_failure(
+    if !production_hardening_is_sha256_hex(&policy.release_manifest_sha256) {
+        production_hardening_worm_failure(
             &mut failures,
             "release_manifest_sha256",
             "release manifest sha256 must be 64 hex characters",
         );
     }
     if !policy.object_lock_enabled {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "object_lock_enabled",
             "object lock must be enabled",
         );
     }
     if !policy.versioning_enabled {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "versioning_enabled",
             "object versioning must be enabled",
         );
     }
-    if policy.retention_mode != F5WormRetentionMode::Compliance {
-        f5_worm_failure(
+    if policy.retention_mode != ProductionHardeningWormRetentionMode::Compliance {
+        production_hardening_worm_failure(
             &mut failures,
             "retention_mode",
             "retention mode must be compliance",
         );
     }
     if policy.retention_days < MIN_WORM_RETENTION_DAYS {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "retention_days",
             "minimum WORM retention is 180 days",
@@ -2510,49 +2581,49 @@ pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArc
         .requested_at_unix_ms
         .saturating_add(u64::from(policy.retention_days).saturating_mul(DAY_MS));
     if policy.retain_until_unix_ms < required_retain_until {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "retain_until_unix_ms",
             "retain-until timestamp must cover the WORM retention window",
         );
     }
     if !policy.legal_hold_supported {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "legal_hold_supported",
             "legal hold support is required",
         );
     }
     if !policy.delete_protection_enabled {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "delete_protection_enabled",
             "delete protection must be enabled",
         );
     }
     if policy.audit_log_ref.trim().is_empty() {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "audit_log_ref",
             "audit log reference is required",
         );
     }
     if !policy.operator_approved {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "operator_approved",
             "operator approval is required",
         );
     }
     if policy.allowed_writer_principals.is_empty() {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "allowed_writer_principals",
             "writer principals are required",
         );
     }
     if policy.allowed_reader_principals.is_empty() {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "allowed_reader_principals",
             "reader principals are required",
@@ -2560,14 +2631,14 @@ pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArc
     }
     for principal in &policy.allowed_writer_principals {
         if principal == "*" {
-            f5_worm_failure(
+            production_hardening_worm_failure(
                 &mut failures,
                 "allowed_writer_principals",
                 "wildcard writer principals are forbidden",
             );
         }
-        if f5_is_anonymous_principal(principal) {
-            f5_worm_failure(
+        if production_hardening_is_anonymous_principal(principal) {
+            production_hardening_worm_failure(
                 &mut failures,
                 "allowed_writer_principals",
                 "anonymous writer principals are forbidden",
@@ -2576,14 +2647,14 @@ pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArc
     }
     for principal in &policy.allowed_reader_principals {
         if principal == "*" {
-            f5_worm_failure(
+            production_hardening_worm_failure(
                 &mut failures,
                 "allowed_reader_principals",
                 "wildcard reader principals are forbidden",
             );
         }
-        if f5_is_anonymous_principal(principal) {
-            f5_worm_failure(
+        if production_hardening_is_anonymous_principal(principal) {
+            production_hardening_worm_failure(
                 &mut failures,
                 "allowed_reader_principals",
                 "anonymous reader principals are forbidden",
@@ -2591,26 +2662,29 @@ pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArc
         }
     }
     if policy.deny_delete_principals.is_empty() {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "deny_delete_principals",
             "delete-deny principals are required",
         );
     }
     if policy.replication_target_uri.trim().is_empty() {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "replication_target_uri",
             "replication target URI is required",
         );
-    } else if !f5_worm_uri_matches_provider(policy.provider, &policy.replication_target_uri) {
-        f5_worm_failure(
+    } else if !production_hardening_worm_uri_matches_provider(
+        policy.provider,
+        &policy.replication_target_uri,
+    ) {
+        production_hardening_worm_failure(
             &mut failures,
             "replication_target_uri",
             "replication target URI must use the same provider-backed storage type",
         );
     } else if policy.replication_target_uri == policy.bucket_uri {
-        f5_worm_failure(
+        production_hardening_worm_failure(
             &mut failures,
             "replication_target_uri",
             "replication target URI must differ from the primary archive URI",
@@ -2618,7 +2692,7 @@ pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArc
     }
 
     let approval = if failures.is_empty() {
-        Some(F5WormArchiveApproval {
+        Some(ProductionHardeningWormArchiveApproval {
             policy_id: policy.policy_id,
             provider: policy.provider,
             bucket_uri: policy.bucket_uri,
@@ -2632,7 +2706,7 @@ pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArc
         None
     };
 
-    F5WormArchivePolicyReport {
+    ProductionHardeningWormArchivePolicyReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -2640,18 +2714,22 @@ pub fn evaluate_f5_worm_archive_policy(policy: F5WormArchivePolicy) -> F5WormArc
     }
 }
 
-pub fn evaluate_f5_worm_archive_execution_evidence(
-    evidence: F5WormArchiveExecutionEvidence,
-) -> F5WormArchiveExecutionReport {
+pub fn evaluate_production_hardening_worm_archive_execution_evidence(
+    evidence: ProductionHardeningWormArchiveExecutionEvidence,
+) -> ProductionHardeningWormArchiveExecutionReport {
     const MIN_WORM_RETENTION_DAYS: u32 = 180;
     const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
     let mut failures = Vec::new();
 
     if evidence.evidence_id.trim().is_empty() {
-        f5_worm_execution_failure(&mut failures, "evidence_id", "evidence id is required");
+        production_hardening_worm_execution_failure(
+            &mut failures,
+            "evidence_id",
+            "evidence id is required",
+        );
     }
-    if evidence.source != F5WormArchiveExecutionSource::LiveProvider {
-        f5_worm_execution_failure(
+    if evidence.source != ProductionHardeningWormArchiveExecutionSource::LiveProvider {
+        production_hardening_worm_execution_failure(
             &mut failures,
             "source",
             "live WORM archive API execution evidence is required",
@@ -2659,26 +2737,29 @@ pub fn evaluate_f5_worm_archive_execution_evidence(
     }
     if !matches!(
         evidence.provider,
-        F5WormProvider::S3ObjectLock
-            | F5WormProvider::GcsBucketLock
-            | F5WormProvider::AzureImmutableBlob
-            | F5WormProvider::CloudflareR2BucketLock
+        ProductionHardeningWormProvider::S3ObjectLock
+            | ProductionHardeningWormProvider::GcsBucketLock
+            | ProductionHardeningWormProvider::AzureImmutableBlob
+            | ProductionHardeningWormProvider::CloudflareR2BucketLock
     ) {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "provider",
             "WORM archive execution requires S3 Object Lock, GCS Bucket Lock, Azure Immutable Blob, or Cloudflare R2 Bucket Lock",
         );
     }
-    if !f5_worm_endpoint_matches_provider(evidence.provider, &evidence.endpoint_uri) {
-        f5_worm_execution_failure(
+    if !production_hardening_worm_endpoint_matches_provider(
+        evidence.provider,
+        &evidence.endpoint_uri,
+    ) {
+        production_hardening_worm_execution_failure(
             &mut failures,
             "endpoint_uri",
             "archive endpoint must be provider-backed object storage",
         );
     }
-    if !f5_worm_uri_matches_provider(evidence.provider, &evidence.bucket_uri) {
-        f5_worm_execution_failure(
+    if !production_hardening_worm_uri_matches_provider(evidence.provider, &evidence.bucket_uri) {
+        production_hardening_worm_execution_failure(
             &mut failures,
             "bucket_uri",
             "archive bucket URI must be provider-backed object storage",
@@ -2688,49 +2769,49 @@ pub fn evaluate_f5_worm_archive_execution_evidence(
         || evidence.object_key.starts_with('/')
         || evidence.object_key.contains("..")
     {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "object_key",
             "object key must be a bounded relative object key",
         );
     }
     if evidence.object_version_id.trim().is_empty() {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "object_version_id",
             "object version id is required",
         );
     }
-    if !f5_is_sha256_hex(&evidence.release_manifest_sha256) {
-        f5_worm_execution_failure(
+    if !production_hardening_is_sha256_hex(&evidence.release_manifest_sha256) {
+        production_hardening_worm_execution_failure(
             &mut failures,
             "release_manifest_sha256",
             "release manifest sha256 must be 64 hex characters",
         );
     }
-    if !f5_is_sha256_hex(&evidence.object_sha256) {
-        f5_worm_execution_failure(
+    if !production_hardening_is_sha256_hex(&evidence.object_sha256) {
+        production_hardening_worm_execution_failure(
             &mut failures,
             "object_sha256",
             "object sha256 must be 64 hex characters",
         );
     }
     if evidence.observed_at_unix_ms == 0 {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "observed_at_unix_ms",
             "live observation timestamp is required",
         );
     }
-    if evidence.retention_mode != F5WormRetentionMode::Compliance {
-        f5_worm_execution_failure(
+    if evidence.retention_mode != ProductionHardeningWormRetentionMode::Compliance {
+        production_hardening_worm_execution_failure(
             &mut failures,
             "retention_mode",
             "retention mode must be compliance",
         );
     }
     if evidence.retention_days < MIN_WORM_RETENTION_DAYS {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "retention_days",
             "minimum WORM retention is 180 days",
@@ -2740,81 +2821,89 @@ pub fn evaluate_f5_worm_archive_execution_evidence(
         .observed_at_unix_ms
         .saturating_add(u64::from(evidence.retention_days).saturating_mul(DAY_MS));
     if evidence.retain_until_unix_ms < required_retain_until {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "retain_until_unix_ms",
             "retain-until timestamp must cover the WORM retention window",
         );
     }
     if !evidence.object_lock_enabled {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "object_lock_enabled",
             "object lock must be enabled by the provider",
         );
     }
-    if evidence.provider != F5WormProvider::CloudflareR2BucketLock && !evidence.versioning_enabled {
-        f5_worm_execution_failure(
+    if evidence.provider != ProductionHardeningWormProvider::CloudflareR2BucketLock
+        && !evidence.versioning_enabled
+    {
+        production_hardening_worm_execution_failure(
             &mut failures,
             "versioning_enabled",
             "object versioning must be enabled by the provider",
         );
     }
     if !evidence.put_object_succeeded {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "put_object_succeeded",
             "archive object write must succeed through the provider API",
         );
     }
     if !evidence.retention_applied {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "retention_applied",
             "retention must be applied through the provider API",
         );
     }
-    if evidence.provider != F5WormProvider::CloudflareR2BucketLock && !evidence.legal_hold_applied {
-        f5_worm_execution_failure(
+    if evidence.provider != ProductionHardeningWormProvider::CloudflareR2BucketLock
+        && !evidence.legal_hold_applied
+    {
+        production_hardening_worm_execution_failure(
             &mut failures,
             "legal_hold_applied",
             "legal hold must be applied through the provider API",
         );
     }
     if !evidence.head_object_verified {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "head_object_verified",
             "retained object metadata must be verified through the provider API",
         );
     }
     if !evidence.delete_without_bypass_denied {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "delete_without_bypass_denied",
             "delete without bypass must be denied by the provider API",
         );
     }
     if evidence.audit_log_ref.trim().is_empty() {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "audit_log_ref",
             "audit log reference is required",
         );
     }
     if !evidence.operator_approved {
-        f5_worm_execution_failure(
+        production_hardening_worm_execution_failure(
             &mut failures,
             "operator_approved",
             "operator approval is required",
         );
     }
     if evidence.api_tool.trim().is_empty() {
-        f5_worm_execution_failure(&mut failures, "api_tool", "API tool evidence is required");
+        production_hardening_worm_execution_failure(
+            &mut failures,
+            "api_tool",
+            "API tool evidence is required",
+        );
     }
 
     let approval = if failures.is_empty() {
-        Some(F5WormArchiveExecutionApproval {
+        Some(ProductionHardeningWormArchiveExecutionApproval {
             evidence_id: evidence.evidence_id,
             provider: evidence.provider,
             bucket_uri: evidence.bucket_uri,
@@ -2830,7 +2919,7 @@ pub fn evaluate_f5_worm_archive_execution_evidence(
         None
     };
 
-    F5WormArchiveExecutionReport {
+    ProductionHardeningWormArchiveExecutionReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -2838,126 +2927,148 @@ pub fn evaluate_f5_worm_archive_execution_evidence(
     }
 }
 
-pub fn evaluate_f5_service_mesh_live_evidence(
-    evidence: F5ServiceMeshLiveEvidence,
-) -> F5ServiceMeshLiveEvidenceReport {
+pub fn evaluate_production_hardening_service_mesh_live_evidence(
+    evidence: ProductionHardeningServiceMeshLiveEvidence,
+) -> ProductionHardeningServiceMeshLiveEvidenceReport {
     let mut failures = Vec::new();
 
     if evidence.evidence_id.trim().is_empty() {
-        f5_service_mesh_failure(&mut failures, "evidence_id", "evidence id is required");
+        production_hardening_service_mesh_failure(
+            &mut failures,
+            "evidence_id",
+            "evidence id is required",
+        );
     }
-    if evidence.source != F5ServiceMeshEvidenceSource::LiveCluster {
-        f5_service_mesh_failure(&mut failures, "source", "live cluster evidence is required");
+    if evidence.source != ProductionHardeningServiceMeshEvidenceSource::LiveCluster {
+        production_hardening_service_mesh_failure(
+            &mut failures,
+            "source",
+            "live cluster evidence is required",
+        );
     }
-    if evidence.provider != F5ServiceMeshProvider::Istio {
-        f5_service_mesh_failure(
+    if evidence.provider != ProductionHardeningServiceMeshProvider::Istio {
+        production_hardening_service_mesh_failure(
             &mut failures,
             "provider",
-            "Istio is required for this F5 service-mesh live gate",
+            "Istio is required for this ProductionHardening service-mesh live gate",
         );
     }
     if evidence.cluster_name.trim().is_empty() {
-        f5_service_mesh_failure(&mut failures, "cluster_name", "cluster name is required");
+        production_hardening_service_mesh_failure(
+            &mut failures,
+            "cluster_name",
+            "cluster name is required",
+        );
     }
     if evidence.namespace.trim().is_empty() {
-        f5_service_mesh_failure(&mut failures, "namespace", "namespace is required");
+        production_hardening_service_mesh_failure(
+            &mut failures,
+            "namespace",
+            "namespace is required",
+        );
     }
     if evidence.workload_service_account.trim().is_empty() {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "workload_service_account",
             "workload service account is required",
         );
     }
     if evidence.metrics_service_name.trim().is_empty() {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "metrics_service_name",
             "metrics service name is required",
         );
     }
     if evidence.peer_authentication_name.trim().is_empty() {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "peer_authentication_name",
             "PeerAuthentication name is required",
         );
     }
     if evidence.authorization_policy_name.trim().is_empty() {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "authorization_policy_name",
             "AuthorizationPolicy name is required",
         );
     }
-    if evidence.mtls_mode != F5ServiceMeshMtlsMode::Strict {
-        f5_service_mesh_failure(&mut failures, "mtls_mode", "strict mTLS mode is required");
+    if evidence.mtls_mode != ProductionHardeningServiceMeshMtlsMode::Strict {
+        production_hardening_service_mesh_failure(
+            &mut failures,
+            "mtls_mode",
+            "strict mTLS mode is required",
+        );
     }
     if !evidence.peer_authentication_admitted {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "peer_authentication_admitted",
             "PeerAuthentication admission evidence is required",
         );
     }
     if !evidence.authorization_policy_admitted {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "authorization_policy_admitted",
             "AuthorizationPolicy admission evidence is required",
         );
     }
-    if !f5_is_service_account_principal(&evidence.authorized_principal) {
-        f5_service_mesh_failure(
+    if !production_hardening_is_service_account_principal(&evidence.authorized_principal) {
+        production_hardening_service_mesh_failure(
             &mut failures,
             "authorized_principal",
             "authorized service-account principal is required",
         );
     }
-    if !f5_is_service_account_principal(&evidence.server_principal) {
-        f5_service_mesh_failure(
+    if !production_hardening_is_service_account_principal(&evidence.server_principal) {
+        production_hardening_service_mesh_failure(
             &mut failures,
             "server_principal",
             "server service-account principal is required",
         );
     }
     if !evidence.authorized_handshake_succeeded {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "authorized_handshake_succeeded",
             "authorized mTLS handshake must succeed",
         );
     }
     if !evidence.unauthorized_handshake_denied {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "unauthorized_handshake_denied",
             "unauthorized principal must be denied",
         );
     }
     if !evidence.plaintext_handshake_denied {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "plaintext_handshake_denied",
             "plaintext traffic must be denied",
         );
     }
-    if evidence.observed_traffic_security != F5ServiceMeshTrafficSecurity::MutualTls {
-        f5_service_mesh_failure(
+    if evidence.observed_traffic_security
+        != ProductionHardeningServiceMeshTrafficSecurity::MutualTls
+    {
+        production_hardening_service_mesh_failure(
             &mut failures,
             "observed_traffic_security",
             "traffic telemetry must report mutual TLS",
         );
     }
     if !evidence.cleanup_confirmed {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "cleanup_confirmed",
             "cleanup confirmation is required",
         );
     }
     if evidence.observed_at_unix_ms == 0 {
-        f5_service_mesh_failure(
+        production_hardening_service_mesh_failure(
             &mut failures,
             "observed_at_unix_ms",
             "observed timestamp is required",
@@ -2965,7 +3076,7 @@ pub fn evaluate_f5_service_mesh_live_evidence(
     }
 
     let approval = if failures.is_empty() {
-        Some(F5ServiceMeshLiveApproval {
+        Some(ProductionHardeningServiceMeshLiveApproval {
             evidence_id: evidence.evidence_id,
             provider: evidence.provider,
             cluster_name: evidence.cluster_name,
@@ -2979,7 +3090,7 @@ pub fn evaluate_f5_service_mesh_live_evidence(
         None
     };
 
-    F5ServiceMeshLiveEvidenceReport {
+    ProductionHardeningServiceMeshLiveEvidenceReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -2987,9 +3098,9 @@ pub fn evaluate_f5_service_mesh_live_evidence(
     }
 }
 
-pub fn evaluate_f5_operator_controller_evidence(
-    evidence: F5OperatorControllerEvidence,
-) -> F5OperatorControllerReport {
+pub fn evaluate_production_hardening_operator_controller_evidence(
+    evidence: ProductionHardeningOperatorControllerEvidence,
+) -> ProductionHardeningOperatorControllerReport {
     const MAX_CONTROLLER_CPU_REQUEST_MILLICORES: u32 = 100;
     const MAX_CONTROLLER_CPU_LIMIT_MILLICORES: u32 = 250;
     const MAX_CONTROLLER_MEMORY_REQUEST_MIB: u32 = 128;
@@ -2998,60 +3109,72 @@ pub fn evaluate_f5_operator_controller_evidence(
     let mut failures = Vec::new();
 
     if evidence.evidence_id.trim().is_empty() {
-        f5_operator_controller_failure(&mut failures, "evidence_id", "evidence id is required");
+        production_hardening_operator_controller_failure(
+            &mut failures,
+            "evidence_id",
+            "evidence id is required",
+        );
     }
-    if evidence.source != F5OperatorControllerEvidenceSource::LiveCluster {
-        f5_operator_controller_failure(
+    if evidence.source != ProductionHardeningOperatorControllerEvidenceSource::LiveCluster {
+        production_hardening_operator_controller_failure(
             &mut failures,
             "source",
             "live Kubernetes cluster evidence is required",
         );
     }
-    if evidence.provider != F5OperatorControllerProvider::KubernetesController {
-        f5_operator_controller_failure(
+    if evidence.provider != ProductionHardeningOperatorControllerProvider::KubernetesController {
+        production_hardening_operator_controller_failure(
             &mut failures,
             "provider",
             "Kubernetes controller execution evidence is required",
         );
     }
     if evidence.cluster_name.trim().is_empty() {
-        f5_operator_controller_failure(&mut failures, "cluster_name", "cluster name is required");
+        production_hardening_operator_controller_failure(
+            &mut failures,
+            "cluster_name",
+            "cluster name is required",
+        );
     }
     if evidence.namespace.trim().is_empty() {
-        f5_operator_controller_failure(&mut failures, "namespace", "namespace is required");
+        production_hardening_operator_controller_failure(
+            &mut failures,
+            "namespace",
+            "namespace is required",
+        );
     }
     if evidence.crd_name.trim().is_empty()
         || evidence.crd_name != "apolysisproductionconfigs.apolysis.dev"
     {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "crd_name",
             "ApolysisProductionConfig CRD name is required",
         );
     }
     if evidence.custom_resource_name.trim().is_empty() {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "custom_resource_name",
             "custom resource name is required",
         );
     }
     if evidence.controller_deployment.trim().is_empty() {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "controller_deployment",
             "controller deployment name is required",
         );
     }
     if evidence.controller_service_account.trim().is_empty() {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "controller_service_account",
             "controller service account is required",
         );
     }
     if evidence.controller_desired_replicas < 2 {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "controller_desired_replicas",
             "controller must run at least two desired replicas",
@@ -3060,28 +3183,28 @@ pub fn evaluate_f5_operator_controller_evidence(
     if evidence.controller_ready_replicas < evidence.controller_desired_replicas
         || evidence.controller_ready_replicas < 2
     {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "controller_ready_replicas",
             "all controller replicas must be ready",
         );
     }
     if evidence.leader_election_lease.trim().is_empty() {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "leader_election_lease",
             "leader-election Lease evidence is required",
         );
     }
     if evidence.lease_holder_identity.trim().is_empty() {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "lease_holder_identity",
             "leader holder identity is required",
         );
     }
-    if evidence.rbac_scope != F5OperatorControllerRbacScope::NamespaceScoped {
-        f5_operator_controller_failure(
+    if evidence.rbac_scope != ProductionHardeningOperatorControllerRbacScope::NamespaceScoped {
+        production_hardening_operator_controller_failure(
             &mut failures,
             "rbac_scope",
             "controller RBAC must be namespace-scoped",
@@ -3090,7 +3213,7 @@ pub fn evaluate_f5_operator_controller_evidence(
     if evidence.controller_cpu_request_millicores == 0
         || evidence.controller_cpu_request_millicores > MAX_CONTROLLER_CPU_REQUEST_MILLICORES
     {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "controller_cpu_request_millicores",
             "controller CPU request must be between 1m and 100m",
@@ -3099,7 +3222,7 @@ pub fn evaluate_f5_operator_controller_evidence(
     if evidence.controller_cpu_limit_millicores < evidence.controller_cpu_request_millicores
         || evidence.controller_cpu_limit_millicores > MAX_CONTROLLER_CPU_LIMIT_MILLICORES
     {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "controller_cpu_limit_millicores",
             "controller CPU limit must be between request and 250m",
@@ -3108,7 +3231,7 @@ pub fn evaluate_f5_operator_controller_evidence(
     if evidence.controller_memory_request_mib == 0
         || evidence.controller_memory_request_mib > MAX_CONTROLLER_MEMORY_REQUEST_MIB
     {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "controller_memory_request_mib",
             "controller memory request must be between 1Mi and 128Mi",
@@ -3117,112 +3240,112 @@ pub fn evaluate_f5_operator_controller_evidence(
     if evidence.controller_memory_limit_mib < evidence.controller_memory_request_mib
         || evidence.controller_memory_limit_mib > MAX_CONTROLLER_MEMORY_LIMIT_MIB
     {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "controller_memory_limit_mib",
             "controller memory limit must be between request and 256Mi",
         );
     }
     if !evidence.crd_established {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "crd_established",
             "CRD Established condition evidence is required",
         );
     }
     if !evidence.crd_served {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "crd_served",
             "CRD served version evidence is required",
         );
     }
     if !evidence.custom_resource_admitted {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "custom_resource_admitted",
             "custom resource admission evidence is required",
         );
     }
     if !evidence.reconciliation_observed {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "reconciliation_observed",
             "controller reconciliation evidence is required",
         );
     }
     if evidence.observed_generation == 0 {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "observed_generation",
             "observed generation is required",
         );
     }
     if evidence.reconciled_generation < evidence.observed_generation {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "reconciled_generation",
             "reconciled generation must cover the observed custom resource generation",
         );
     }
     if evidence.managed_daemonset_name.trim().is_empty() {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "managed_daemonset_name",
             "managed DaemonSet name is required",
         );
     }
     if !evidence.managed_daemonset_ready {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "managed_daemonset_ready",
             "managed DaemonSet readiness evidence is required",
         );
     }
     if evidence.managed_configmap_name.trim().is_empty() {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "managed_configmap_name",
             "managed ConfigMap name is required",
         );
     }
     if !evidence.owner_references_verified {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "owner_references_verified",
             "managed resource ownerReferences must point to the custom resource",
         );
     }
     if !evidence.status_condition_ready {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "status_condition_ready",
             "Ready status condition evidence is required",
         );
     }
     if !evidence.status_observed_generation_matches {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "status_observed_generation_matches",
             "status observedGeneration must match the reconciled generation",
         );
     }
     if !evidence.rollback_or_delete_cleanup_verified {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "rollback_or_delete_cleanup_verified",
             "delete or rollback cleanup evidence is required",
         );
     }
     if !evidence.cleanup_confirmed {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "cleanup_confirmed",
             "cleanup confirmation is required",
         );
     }
     if evidence.observed_at_unix_ms == 0 {
-        f5_operator_controller_failure(
+        production_hardening_operator_controller_failure(
             &mut failures,
             "observed_at_unix_ms",
             "observed timestamp is required",
@@ -3230,7 +3353,7 @@ pub fn evaluate_f5_operator_controller_evidence(
     }
 
     let approval = if failures.is_empty() {
-        Some(F5OperatorControllerApproval {
+        Some(ProductionHardeningOperatorControllerApproval {
             evidence_id: evidence.evidence_id,
             provider: evidence.provider,
             cluster_name: evidence.cluster_name,
@@ -3247,7 +3370,7 @@ pub fn evaluate_f5_operator_controller_evidence(
         None
     };
 
-    F5OperatorControllerReport {
+    ProductionHardeningOperatorControllerReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -3255,9 +3378,9 @@ pub fn evaluate_f5_operator_controller_evidence(
     }
 }
 
-pub fn evaluate_f5_chaos_performance_evidence(
-    evidence: F5ChaosPerformanceEvidence,
-) -> F5ChaosPerformanceReport {
+pub fn evaluate_production_hardening_chaos_performance_evidence(
+    evidence: ProductionHardeningChaosPerformanceEvidence,
+) -> ProductionHardeningChaosPerformanceReport {
     const MIN_DEPLOYMENTS: u32 = 3;
     const MIN_REPLICAS: u32 = 30;
     const MAX_P95_LATENCY_MS: u64 = 180_000;
@@ -3271,10 +3394,14 @@ pub fn evaluate_f5_chaos_performance_evidence(
     let mut failures = Vec::new();
 
     if evidence.evidence_id.trim().is_empty() {
-        f5_chaos_performance_failure(&mut failures, "evidence_id", "evidence id is required");
+        production_hardening_chaos_performance_failure(
+            &mut failures,
+            "evidence_id",
+            "evidence id is required",
+        );
     }
-    if evidence.source != F5ChaosPerformanceSource::LiveCluster {
-        f5_chaos_performance_failure(
+    if evidence.source != ProductionHardeningChaosPerformanceSource::LiveCluster {
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "source",
             "live Kubernetes cluster evidence is required",
@@ -3282,57 +3409,69 @@ pub fn evaluate_f5_chaos_performance_evidence(
     }
     if !matches!(
         evidence.provider,
-        F5ChaosPerformanceProvider::K3s | F5ChaosPerformanceProvider::ManagedKubernetes
+        ProductionHardeningChaosPerformanceProvider::K3s
+            | ProductionHardeningChaosPerformanceProvider::ManagedKubernetes
     ) {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "provider",
             "k3s or managed Kubernetes provider evidence is required",
         );
     }
     if evidence.cluster_name.trim().is_empty() {
-        f5_chaos_performance_failure(&mut failures, "cluster_name", "cluster name is required");
+        production_hardening_chaos_performance_failure(
+            &mut failures,
+            "cluster_name",
+            "cluster name is required",
+        );
     }
     if evidence.namespace.trim().is_empty() {
-        f5_chaos_performance_failure(&mut failures, "namespace", "namespace is required");
+        production_hardening_chaos_performance_failure(
+            &mut failures,
+            "namespace",
+            "namespace is required",
+        );
     }
     if evidence.workload_deployment_count < MIN_DEPLOYMENTS {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "workload_deployment_count",
             "at least three workload deployments are required",
         );
     }
     if evidence.workload_replicas_total < MIN_REPLICAS {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "workload_replicas_total",
             "at least thirty workload replicas are required",
         );
     }
     if evidence.workload_ready_replicas_before_chaos < evidence.workload_replicas_total {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "workload_ready_replicas_before_chaos",
             "all replicas must be ready before chaos",
         );
     }
     if evidence.workload_ready_replicas_after_chaos < evidence.workload_replicas_total {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "workload_ready_replicas_after_chaos",
             "all replicas must recover after chaos",
         );
     }
     if evidence.pod_churn_deleted.saturating_mul(5) < evidence.workload_replicas_total {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "pod_churn_deleted",
             "pod-delete chaos must remove at least 20% of workload pods",
         );
     }
-    if !evidence.chaos_actions.contains(&F5ChaosAction::PodDelete) {
-        f5_chaos_performance_failure(
+    if !evidence
+        .chaos_actions
+        .contains(&ProductionHardeningChaosAction::PodDelete)
+    {
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "chaos_actions",
             "pod-delete chaos action evidence is required",
@@ -3340,51 +3479,51 @@ pub fn evaluate_f5_chaos_performance_evidence(
     }
     if !evidence
         .chaos_actions
-        .contains(&F5ChaosAction::DeploymentSelfHealing)
+        .contains(&ProductionHardeningChaosAction::DeploymentSelfHealing)
     {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "chaos_actions",
             "deployment self-healing action evidence is required",
         );
     }
     if evidence.p95_startup_latency_ms > MAX_P95_LATENCY_MS {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "p95_startup_latency_ms",
             "startup p95 latency must be 180 seconds or less",
         );
     }
     if evidence.p95_recovery_latency_ms > MAX_P95_LATENCY_MS {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "p95_recovery_latency_ms",
             "recovery p95 latency must be 180 seconds or less",
         );
     }
     if !evidence.metrics_server_available {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "metrics_server_available",
             "metrics-server availability evidence is required",
         );
     }
     if !evidence.resource_metrics_collected {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "resource_metrics_collected",
             "resource metrics collection evidence is required",
         );
     }
     if evidence.max_observed_cpu_millicores > MAX_OBSERVED_CPU_MILLICORES {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "max_observed_cpu_millicores",
             "observed CPU must stay at or below 1000m",
         );
     }
     if evidence.max_observed_memory_mib > MAX_OBSERVED_MEMORY_MIB {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "max_observed_memory_mib",
             "observed memory must stay at or below 1024Mi",
@@ -3393,7 +3532,7 @@ pub fn evaluate_f5_chaos_performance_evidence(
     if evidence.total_cpu_request_millicores == 0
         || evidence.total_cpu_request_millicores > MAX_TOTAL_CPU_REQUEST_MILLICORES
     {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "total_cpu_request_millicores",
             "aggregate CPU request must stay at or below 500m",
@@ -3402,7 +3541,7 @@ pub fn evaluate_f5_chaos_performance_evidence(
     if evidence.total_cpu_limit_millicores < evidence.total_cpu_request_millicores
         || evidence.total_cpu_limit_millicores > MAX_TOTAL_CPU_LIMIT_MILLICORES
     {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "total_cpu_limit_millicores",
             "aggregate CPU limit must stay at or below 1000m",
@@ -3411,7 +3550,7 @@ pub fn evaluate_f5_chaos_performance_evidence(
     if evidence.total_memory_request_mib == 0
         || evidence.total_memory_request_mib > MAX_TOTAL_MEMORY_REQUEST_MIB
     {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "total_memory_request_mib",
             "aggregate memory request must stay at or below 512Mi",
@@ -3420,38 +3559,42 @@ pub fn evaluate_f5_chaos_performance_evidence(
     if evidence.total_memory_limit_mib < evidence.total_memory_request_mib
         || evidence.total_memory_limit_mib > MAX_TOTAL_MEMORY_LIMIT_MIB
     {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "total_memory_limit_mib",
             "aggregate memory limit must stay at or below 1024Mi",
         );
     }
     if evidence.scheduling_failure_count > 0 {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "scheduling_failure_count",
             "scheduling failures are not allowed",
         );
     }
     if evidence.oom_kill_count > 0 {
-        f5_chaos_performance_failure(&mut failures, "oom_kill_count", "OOM kills are not allowed");
+        production_hardening_chaos_performance_failure(
+            &mut failures,
+            "oom_kill_count",
+            "OOM kills are not allowed",
+        );
     }
     if evidence.restart_count > 0 {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "restart_count",
             "container restarts are not allowed during the run",
         );
     }
     if !evidence.cleanup_confirmed {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "cleanup_confirmed",
             "cleanup confirmation is required",
         );
     }
     if evidence.observed_at_unix_ms == 0 {
-        f5_chaos_performance_failure(
+        production_hardening_chaos_performance_failure(
             &mut failures,
             "observed_at_unix_ms",
             "observed timestamp is required",
@@ -3459,7 +3602,7 @@ pub fn evaluate_f5_chaos_performance_evidence(
     }
 
     let approval = if failures.is_empty() {
-        Some(F5ChaosPerformanceApproval {
+        Some(ProductionHardeningChaosPerformanceApproval {
             evidence_id: evidence.evidence_id,
             provider: evidence.provider,
             cluster_name: evidence.cluster_name,
@@ -3477,7 +3620,7 @@ pub fn evaluate_f5_chaos_performance_evidence(
         None
     };
 
-    F5ChaosPerformanceReport {
+    ProductionHardeningChaosPerformanceReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -3485,48 +3628,50 @@ pub fn evaluate_f5_chaos_performance_evidence(
     }
 }
 
-pub fn evaluate_f5_external_provider_qualification_bundle(
-    bundle: F5ExternalProviderQualificationBundle,
-) -> F5ExternalProviderQualificationReport {
-    const REQUIRED: [F5ExternalProviderQualificationRequirement; 4] = [
-        F5ExternalProviderQualificationRequirement::CloudKmsOrExternalHsmSigning,
-        F5ExternalProviderQualificationRequirement::CloudWormObjectLockArchive,
-        F5ExternalProviderQualificationRequirement::CloudRegistryPromotionRetention,
-        F5ExternalProviderQualificationRequirement::ManagedServiceMesh,
+pub fn evaluate_production_hardening_external_provider_qualification_bundle(
+    bundle: ProductionHardeningExternalProviderQualificationBundle,
+) -> ProductionHardeningExternalProviderQualificationReport {
+    const REQUIRED: [ProductionHardeningExternalProviderQualificationRequirement; 4] = [
+        ProductionHardeningExternalProviderQualificationRequirement::CloudKmsOrExternalHsmSigning,
+        ProductionHardeningExternalProviderQualificationRequirement::CloudWormObjectLockArchive,
+        ProductionHardeningExternalProviderQualificationRequirement::CloudRegistryPromotionRetention,
+        ProductionHardeningExternalProviderQualificationRequirement::ManagedServiceMesh,
     ];
 
     let mut failures = Vec::new();
     if bundle.bundle_id.trim().is_empty() {
-        f5_external_provider_qualification_failure(
+        production_hardening_external_provider_qualification_failure(
             &mut failures,
             "bundle_id",
             "bundle id is required",
         );
     }
-    if bundle.source != F5ExternalProviderQualificationSource::EvidenceBundle {
-        f5_external_provider_qualification_failure(
+    if bundle.source != ProductionHardeningExternalProviderQualificationSource::EvidenceBundle {
+        production_hardening_external_provider_qualification_failure(
             &mut failures,
             "source",
             "external provider qualification bundle evidence is required",
         );
     }
     if !bundle.operator_approved {
-        f5_external_provider_qualification_failure(
+        production_hardening_external_provider_qualification_failure(
             &mut failures,
             "operator_approved",
             "operator approval is required",
         );
     }
     if bundle.generated_at_unix_ms == 0 {
-        f5_external_provider_qualification_failure(
+        production_hardening_external_provider_qualification_failure(
             &mut failures,
             "generated_at_unix_ms",
             "bundle generation timestamp is required",
         );
     }
 
-    let mut requirement_counts: BTreeMap<F5ExternalProviderQualificationRequirement, usize> =
-        BTreeMap::new();
+    let mut requirement_counts: BTreeMap<
+        ProductionHardeningExternalProviderQualificationRequirement,
+        usize,
+    > = BTreeMap::new();
     let mut qualified_requirements = BTreeSet::new();
     let mut providers = BTreeSet::new();
 
@@ -3534,70 +3679,70 @@ pub fn evaluate_f5_external_provider_qualification_bundle(
         *requirement_counts.entry(entry.requirement).or_default() += 1;
 
         if entry.provider.trim().is_empty() {
-            f5_external_provider_qualification_failure(
+            production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "provider",
                 "provider is required",
             );
         }
         if entry.provider_control_plane.trim().is_empty() {
-            f5_external_provider_qualification_failure(
+            production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "provider_control_plane",
                 "provider control plane is required",
             );
         }
         if entry.evidence_ref.trim().is_empty() {
-            f5_external_provider_qualification_failure(
+            production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "evidence_ref",
                 "evidence artifact reference is required",
             );
         }
-        if !f5_is_sha256_digest(&entry.evidence_sha256) {
-            f5_external_provider_qualification_failure(
+        if !production_hardening_is_sha256_digest(&entry.evidence_sha256) {
+            production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "evidence_sha256",
                 "evidence artifact sha256 is required",
             );
         }
         if entry.report_ref.trim().is_empty() {
-            f5_external_provider_qualification_failure(
+            production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "report_ref",
                 "report artifact reference is required",
             );
         }
-        if !f5_is_sha256_digest(&entry.report_sha256) {
-            f5_external_provider_qualification_failure(
+        if !production_hardening_is_sha256_digest(&entry.report_sha256) {
+            production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "report_sha256",
                 "report artifact sha256 is required",
             );
         }
         if !entry.live_provider {
-            f5_external_provider_qualification_failure(
+            production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "live_provider",
                 "live provider evidence is required",
             );
         }
         if !entry.external_provider {
-            f5_external_provider_qualification_failure(
+            production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "external_provider",
                 "external provider evidence is required",
             );
         }
-        if !f5_is_accepted_external_provider(entry.requirement, &entry.provider) {
-            f5_external_provider_qualification_failure(
+        if !production_hardening_is_accepted_external_provider(entry.requirement, &entry.provider) {
+            production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "provider",
                 "provider must be an accepted external provider for this requirement",
             );
         }
         if entry.observed_at_unix_ms == 0 {
-            f5_external_provider_qualification_failure(
+            production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "observed_at_unix_ms",
                 "provider observation timestamp is required",
@@ -3606,9 +3751,12 @@ pub fn evaluate_f5_external_provider_qualification_bundle(
 
         if entry.live_provider
             && entry.external_provider
-            && f5_is_accepted_external_provider(entry.requirement, &entry.provider)
-            && f5_is_sha256_digest(&entry.evidence_sha256)
-            && f5_is_sha256_digest(&entry.report_sha256)
+            && production_hardening_is_accepted_external_provider(
+                entry.requirement,
+                &entry.provider,
+            )
+            && production_hardening_is_sha256_digest(&entry.evidence_sha256)
+            && production_hardening_is_sha256_digest(&entry.report_sha256)
             && !entry.provider_control_plane.trim().is_empty()
             && !entry.evidence_ref.trim().is_empty()
             && !entry.report_ref.trim().is_empty()
@@ -3625,13 +3773,13 @@ pub fn evaluate_f5_external_provider_qualification_bundle(
             .copied()
             .unwrap_or_default()
         {
-            0 => f5_external_provider_qualification_failure(
+            0 => production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "entries",
-                f5_external_provider_missing_requirement_message(requirement),
+                production_hardening_external_provider_missing_requirement_message(requirement),
             ),
             1 => {}
-            _ => f5_external_provider_qualification_failure(
+            _ => production_hardening_external_provider_qualification_failure(
                 &mut failures,
                 "entries",
                 "duplicate external provider qualification entry is not allowed",
@@ -3640,7 +3788,7 @@ pub fn evaluate_f5_external_provider_qualification_bundle(
     }
 
     let approval = if failures.is_empty() {
-        Some(F5ExternalProviderQualificationApproval {
+        Some(ProductionHardeningExternalProviderQualificationApproval {
             bundle_id: bundle.bundle_id,
             qualified_requirements: qualified_requirements.into_iter().collect(),
             providers: providers.into_iter().collect(),
@@ -3650,7 +3798,7 @@ pub fn evaluate_f5_external_provider_qualification_bundle(
         None
     };
 
-    F5ExternalProviderQualificationReport {
+    ProductionHardeningExternalProviderQualificationReport {
         schema_version: 1,
         passed: approval.is_some(),
         approval,
@@ -3667,7 +3815,7 @@ pub fn evaluate_visibility_report_gate(
         .collect();
     let mut failures = Vec::new();
 
-    for target in required_f2_visibility_targets() {
+    for target in required_runtime_foundation_visibility_targets() {
         let Some(report) = reports_by_target.get(&target) else {
             failures.push(visibility_failure(
                 Some(target),
@@ -3715,15 +3863,15 @@ pub fn evaluate_visibility_report_gate(
     }
 }
 
-pub fn evaluate_f4_live_runtime_evidence_bundle(
-    request: F4LiveRuntimeEvidenceBundleRequest,
-) -> F4LiveRuntimeEvidenceBundleReport {
+pub fn evaluate_runtime_guardrails_live_runtime_evidence_bundle(
+    request: RuntimeGuardrailsLiveRuntimeEvidenceBundleRequest,
+) -> RuntimeGuardrailsLiveRuntimeEvidenceBundleReport {
     let mut failures = Vec::new();
 
-    for artifact in required_f4_live_runtime_artifacts() {
+    for artifact in required_runtime_guardrails_live_runtime_artifacts() {
         let path = request.artifact_dir.join(artifact);
         if !path.is_file() {
-            failures.push(f4_live_runtime_evidence_failure(format!(
+            failures.push(runtime_guardrails_live_runtime_evidence_failure(format!(
                 "runtime adapter matrix artifact missing required file: {}",
                 path.display()
             )));
@@ -3733,13 +3881,13 @@ pub fn evaluate_f4_live_runtime_evidence_bundle(
     let artifact_marker = request.artifact_dir.display().to_string();
     let visibility_gate = evaluate_visibility_report_gate(request.visibility_reports);
     if !visibility_gate.passed {
-        failures.push(f4_live_runtime_evidence_failure(
-            "F4 live runtime evidence requires a passed F2 visibility report gate",
+        failures.push(runtime_guardrails_live_runtime_evidence_failure(
+            "RuntimeGuardrails live runtime evidence requires a passed RuntimeFoundation visibility report gate",
         ));
     }
     for report in &visibility_gate.reports {
         if !report.evidence_source.contains(&artifact_marker) {
-            failures.push(f4_live_runtime_evidence_failure(format!(
+            failures.push(runtime_guardrails_live_runtime_evidence_failure(format!(
                 "visibility evidence source for {} must reference runtime adapter matrix artifact {}",
                 report.target.as_str(),
                 artifact_marker
@@ -3747,15 +3895,16 @@ pub fn evaluate_f4_live_runtime_evidence_bundle(
         }
     }
 
-    let adapter_gate =
-        evaluate_f4_runtime_adapter_evidence_gate(request.runtime_adapter_evidence_reports);
+    let adapter_gate = evaluate_runtime_guardrails_runtime_adapter_evidence_gate(
+        request.runtime_adapter_evidence_reports,
+    );
     if !adapter_gate.passed {
-        failures.push(f4_live_runtime_evidence_failure(
-            "F4 live runtime evidence requires a passed runtime adapter evidence gate",
+        failures.push(runtime_guardrails_live_runtime_evidence_failure(
+            "RuntimeGuardrails live runtime evidence requires a passed runtime adapter evidence gate",
         ));
     }
     let gvisor_gate = if request.gvisor_metadata_evidence_reports.is_empty() {
-        F4GvisorMetadataEvidenceGateReport {
+        RuntimeGuardrailsGvisorMetadataEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
@@ -3763,17 +3912,18 @@ pub fn evaluate_f4_live_runtime_evidence_bundle(
             failures: Vec::new(),
         }
     } else {
-        let gate =
-            evaluate_f4_gvisor_metadata_evidence_gate(request.gvisor_metadata_evidence_reports);
+        let gate = evaluate_runtime_guardrails_gvisor_metadata_evidence_gate(
+            request.gvisor_metadata_evidence_reports,
+        );
         if !gate.passed {
-            failures.push(f4_live_runtime_evidence_failure(
-                "F4 live runtime evidence requires a passed gVisor metadata evidence gate",
+            failures.push(runtime_guardrails_live_runtime_evidence_failure(
+                "RuntimeGuardrails live runtime evidence requires a passed gVisor metadata evidence gate",
             ));
         }
         gate
     };
     let kubernetes_gate = if request.kubernetes_agent_sandbox_evidence_reports.is_empty() {
-        F4KubernetesAgentSandboxEvidenceGateReport {
+        RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
@@ -3781,18 +3931,18 @@ pub fn evaluate_f4_live_runtime_evidence_bundle(
             failures: Vec::new(),
         }
     } else {
-        let gate = evaluate_f4_kubernetes_agent_sandbox_evidence_gate(
+        let gate = evaluate_runtime_guardrails_kubernetes_agent_sandbox_evidence_gate(
             request.kubernetes_agent_sandbox_evidence_reports,
         );
         if !gate.passed {
-            failures.push(f4_live_runtime_evidence_failure(
-                "F4 live runtime evidence requires a passed Kubernetes Agent Sandbox evidence gate",
+            failures.push(runtime_guardrails_live_runtime_evidence_failure(
+                "RuntimeGuardrails live runtime evidence requires a passed Kubernetes Agent Sandbox evidence gate",
             ));
         }
         gate
     };
     let kata_gate = if request.kata_boundary_evidence_reports.is_empty() {
-        F4KataBoundaryEvidenceGateReport {
+        RuntimeGuardrailsKataBoundaryEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
@@ -3800,28 +3950,32 @@ pub fn evaluate_f4_live_runtime_evidence_bundle(
             failures: Vec::new(),
         }
     } else {
-        let gate = evaluate_f4_kata_boundary_evidence_gate(request.kata_boundary_evidence_reports);
+        let gate = evaluate_runtime_guardrails_kata_boundary_evidence_gate(
+            request.kata_boundary_evidence_reports,
+        );
         if !gate.passed {
-            failures.push(f4_live_runtime_evidence_failure(
-                "F4 live runtime evidence requires a passed Kata boundary evidence gate",
+            failures.push(runtime_guardrails_live_runtime_evidence_failure(
+                "RuntimeGuardrails live runtime evidence requires a passed Kata boundary evidence gate",
             ));
         }
         gate
     };
 
     let matrix = if failures.is_empty() {
-        Some(evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
-            request.block_validation_reports,
-            adapter_gate,
-            gvisor_gate,
-            kubernetes_gate,
-            kata_gate,
-        ))
+        Some(
+            evaluate_runtime_guardrails_runtime_guardrail_matrix_with_runtime_metadata(
+                request.block_validation_reports,
+                adapter_gate,
+                gvisor_gate,
+                kubernetes_gate,
+                kata_gate,
+            ),
+        )
     } else {
         None
     };
 
-    F4LiveRuntimeEvidenceBundleReport {
+    RuntimeGuardrailsLiveRuntimeEvidenceBundleReport {
         schema_version: 1,
         passed: failures.is_empty(),
         artifact_dir: request.artifact_dir,
@@ -3831,16 +3985,16 @@ pub fn evaluate_f4_live_runtime_evidence_bundle(
     }
 }
 
-pub fn evaluate_f3_block_validation_gate(
-    reports: Vec<F3BlockValidationReport>,
-) -> F3BlockValidationGateReport {
+pub fn evaluate_policy_guardrails_block_validation_gate(
+    reports: Vec<PolicyGuardrailsBlockValidationReport>,
+) -> PolicyGuardrailsBlockValidationGateReport {
     let mut failures = Vec::new();
     let mut validated_blocks = Vec::new();
 
     if reports.is_empty() {
-        failures.push(f3_block_failure(
+        failures.push(policy_guardrails_block_failure(
             None,
-            "at least one F3 block validation report is required",
+            "at least one PolicyGuardrails block validation report is required",
         ));
     }
 
@@ -3858,49 +4012,49 @@ pub fn evaluate_f3_block_validation_gate(
         };
 
         if report.evidence_id.trim().is_empty() {
-            report_failures.push(f3_block_failure(
+            report_failures.push(policy_guardrails_block_failure(
                 None,
                 "block validation report is missing evidence id",
             ));
         }
         if backend.is_none() {
-            report_failures.push(f3_block_failure(
+            report_failures.push(policy_guardrails_block_failure(
                 evidence_id.clone(),
-                "F3 block validation report must target bpf_lsm_block or seccomp_block backend",
+                "PolicyGuardrails block validation report must target bpf_lsm_block or seccomp_block backend",
             ));
         }
-        if report.source != F3BlockValidationSource::LiveHost {
-            report_failures.push(f3_block_failure(
+        if report.source != PolicyGuardrailsBlockValidationSource::LiveHost {
+            report_failures.push(policy_guardrails_block_failure(
                 evidence_id.clone(),
                 "pre-operation block requires live-host validation evidence",
             ));
         }
         if backend == Some(BlockPrototypeBackend::BpfLsm) && !report.host_bpf_lsm_available {
-            report_failures.push(f3_block_failure(
+            report_failures.push(policy_guardrails_block_failure(
                 evidence_id.clone(),
                 "BPF-LSM must be available before enabling block prototype",
             ));
         }
         if backend == Some(BlockPrototypeBackend::Seccomp) && !report.seccomp_available {
-            report_failures.push(f3_block_failure(
+            report_failures.push(policy_guardrails_block_failure(
                 evidence_id.clone(),
                 "seccomp must be available before enabling block prototype",
             ));
         }
         if !report.preoperation_prevention {
-            report_failures.push(f3_block_failure(
+            report_failures.push(policy_guardrails_block_failure(
                 evidence_id.clone(),
                 "block prototype evidence must prove pre-operation prevention",
             ));
         }
         if report.decision_latency_ms.is_none() {
-            report_failures.push(f3_block_failure(
+            report_failures.push(policy_guardrails_block_failure(
                 evidence_id.clone(),
                 "block prototype evidence must include decision latency",
             ));
         }
         if report.side_effect_race_window_ms != Some(0) {
-            report_failures.push(f3_block_failure(
+            report_failures.push(policy_guardrails_block_failure(
                 evidence_id.clone(),
                 "block prototype evidence must prove a zero side-effect race window",
             ));
@@ -3929,26 +4083,27 @@ pub fn evaluate_f3_block_validation_gate(
                         report.runtime.policy_runtime(),
                         report.action.policy_event_type(),
                     ) {
-                        validated_blocks.push(F3BlockValidationEnablement {
+                        validated_blocks.push(PolicyGuardrailsBlockValidationEnablement {
                             evidence_id: report.evidence_id.clone(),
                             runtime: report.runtime,
                             action: report.action,
                         });
                     } else {
-                        report_failures.push(f3_block_failure(
+                        report_failures.push(policy_guardrails_block_failure(
                             evidence_id.clone(),
                             "validated block prototype did not enable the requested action",
                         ));
                     }
                 }
-                Err(error) => report_failures.push(f3_block_failure(evidence_id.clone(), error)),
+                Err(error) => report_failures
+                    .push(policy_guardrails_block_failure(evidence_id.clone(), error)),
             }
         }
 
         failures.extend(report_failures);
     }
 
-    F3BlockValidationGateReport {
+    PolicyGuardrailsBlockValidationGateReport {
         schema_version: 1,
         passed: failures.is_empty(),
         reports,
@@ -3961,12 +4116,12 @@ pub fn evaluate_f3_block_validation_gate(
     }
 }
 
-pub fn evaluate_f4_runtime_guardrail_matrix(
-    reports: Vec<F3BlockValidationReport>,
-) -> F4RuntimeGuardrailMatrixReport {
-    evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
+pub fn evaluate_runtime_guardrails_runtime_guardrail_matrix(
+    reports: Vec<PolicyGuardrailsBlockValidationReport>,
+) -> RuntimeGuardrailsRuntimeGuardrailMatrixReport {
+    evaluate_runtime_guardrails_runtime_guardrail_matrix_with_adapter_evidence(
         reports,
-        F4RuntimeAdapterEvidenceGateReport {
+        RuntimeGuardrailsRuntimeAdapterEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
@@ -3976,14 +4131,14 @@ pub fn evaluate_f4_runtime_guardrail_matrix(
     )
 }
 
-pub fn evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
-    reports: Vec<F3BlockValidationReport>,
-    adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
-) -> F4RuntimeGuardrailMatrixReport {
-    evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
+pub fn evaluate_runtime_guardrails_runtime_guardrail_matrix_with_adapter_evidence(
+    reports: Vec<PolicyGuardrailsBlockValidationReport>,
+    adapter_evidence: RuntimeGuardrailsRuntimeAdapterEvidenceGateReport,
+) -> RuntimeGuardrailsRuntimeGuardrailMatrixReport {
+    evaluate_runtime_guardrails_runtime_guardrail_matrix_with_gvisor_metadata(
         reports,
         adapter_evidence,
-        F4GvisorMetadataEvidenceGateReport {
+        RuntimeGuardrailsGvisorMetadataEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
@@ -3993,23 +4148,23 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_adapter_evidence(
     )
 }
 
-pub fn evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
-    reports: Vec<F3BlockValidationReport>,
-    adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
-    gvisor_metadata: F4GvisorMetadataEvidenceGateReport,
-) -> F4RuntimeGuardrailMatrixReport {
-    evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
+pub fn evaluate_runtime_guardrails_runtime_guardrail_matrix_with_gvisor_metadata(
+    reports: Vec<PolicyGuardrailsBlockValidationReport>,
+    adapter_evidence: RuntimeGuardrailsRuntimeAdapterEvidenceGateReport,
+    gvisor_metadata: RuntimeGuardrailsGvisorMetadataEvidenceGateReport,
+) -> RuntimeGuardrailsRuntimeGuardrailMatrixReport {
+    evaluate_runtime_guardrails_runtime_guardrail_matrix_with_runtime_metadata(
         reports,
         adapter_evidence,
         gvisor_metadata,
-        F4KubernetesAgentSandboxEvidenceGateReport {
+        RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
             validated_evidence: Vec::new(),
             failures: Vec::new(),
         },
-        F4KataBoundaryEvidenceGateReport {
+        RuntimeGuardrailsKataBoundaryEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
@@ -4019,15 +4174,15 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_gvisor_metadata(
     )
 }
 
-pub fn evaluate_f4_runtime_guardrail_matrix_with_kubernetes_agent_sandbox(
-    reports: Vec<F3BlockValidationReport>,
-    adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
-    kubernetes_agent_sandbox: F4KubernetesAgentSandboxEvidenceGateReport,
-) -> F4RuntimeGuardrailMatrixReport {
-    evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
+pub fn evaluate_runtime_guardrails_runtime_guardrail_matrix_with_kubernetes_agent_sandbox(
+    reports: Vec<PolicyGuardrailsBlockValidationReport>,
+    adapter_evidence: RuntimeGuardrailsRuntimeAdapterEvidenceGateReport,
+    kubernetes_agent_sandbox: RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateReport,
+) -> RuntimeGuardrailsRuntimeGuardrailMatrixReport {
+    evaluate_runtime_guardrails_runtime_guardrail_matrix_with_runtime_metadata(
         reports,
         adapter_evidence,
-        F4GvisorMetadataEvidenceGateReport {
+        RuntimeGuardrailsGvisorMetadataEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
@@ -4035,7 +4190,7 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_kubernetes_agent_sandbox(
             failures: Vec::new(),
         },
         kubernetes_agent_sandbox,
-        F4KataBoundaryEvidenceGateReport {
+        RuntimeGuardrailsKataBoundaryEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
@@ -4045,22 +4200,22 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_kubernetes_agent_sandbox(
     )
 }
 
-pub fn evaluate_f4_runtime_guardrail_matrix_with_kata_boundary(
-    reports: Vec<F3BlockValidationReport>,
-    adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
-    kata_boundary: F4KataBoundaryEvidenceGateReport,
-) -> F4RuntimeGuardrailMatrixReport {
-    evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
+pub fn evaluate_runtime_guardrails_runtime_guardrail_matrix_with_kata_boundary(
+    reports: Vec<PolicyGuardrailsBlockValidationReport>,
+    adapter_evidence: RuntimeGuardrailsRuntimeAdapterEvidenceGateReport,
+    kata_boundary: RuntimeGuardrailsKataBoundaryEvidenceGateReport,
+) -> RuntimeGuardrailsRuntimeGuardrailMatrixReport {
+    evaluate_runtime_guardrails_runtime_guardrail_matrix_with_runtime_metadata(
         reports,
         adapter_evidence,
-        F4GvisorMetadataEvidenceGateReport {
+        RuntimeGuardrailsGvisorMetadataEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
             validated_evidence: Vec::new(),
             failures: Vec::new(),
         },
-        F4KubernetesAgentSandboxEvidenceGateReport {
+        RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateReport {
             schema_version: 1,
             passed: true,
             reports: Vec::new(),
@@ -4071,159 +4226,171 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_kata_boundary(
     )
 }
 
-pub fn evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
-    reports: Vec<F3BlockValidationReport>,
-    adapter_evidence: F4RuntimeAdapterEvidenceGateReport,
-    gvisor_metadata: F4GvisorMetadataEvidenceGateReport,
-    kubernetes_agent_sandbox: F4KubernetesAgentSandboxEvidenceGateReport,
-    kata_boundary: F4KataBoundaryEvidenceGateReport,
-) -> F4RuntimeGuardrailMatrixReport {
-    let local_seccomp_evidence = f4_validated_local_block_evidence(&reports, "seccomp_block");
-    let local_bpf_lsm_evidence = f4_validated_local_block_evidence(&reports, "bpf_lsm_block");
-    let adapter_evidence_ids = f4_adapter_evidence_ids_by_runtime(&adapter_evidence);
-    let gvisor_evidence_ids = f4_gvisor_metadata_evidence_ids(&gvisor_metadata);
-    let gvisor_combined_evidence_ids = f4_merge_evidence_ids(
-        f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Gvisor),
+pub fn evaluate_runtime_guardrails_runtime_guardrail_matrix_with_runtime_metadata(
+    reports: Vec<PolicyGuardrailsBlockValidationReport>,
+    adapter_evidence: RuntimeGuardrailsRuntimeAdapterEvidenceGateReport,
+    gvisor_metadata: RuntimeGuardrailsGvisorMetadataEvidenceGateReport,
+    kubernetes_agent_sandbox: RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateReport,
+    kata_boundary: RuntimeGuardrailsKataBoundaryEvidenceGateReport,
+) -> RuntimeGuardrailsRuntimeGuardrailMatrixReport {
+    let local_seccomp_evidence =
+        runtime_guardrails_validated_local_block_evidence(&reports, "seccomp_block");
+    let local_bpf_lsm_evidence =
+        runtime_guardrails_validated_local_block_evidence(&reports, "bpf_lsm_block");
+    let adapter_evidence_ids =
+        runtime_guardrails_adapter_evidence_ids_by_runtime(&adapter_evidence);
+    let gvisor_evidence_ids = runtime_guardrails_gvisor_metadata_evidence_ids(&gvisor_metadata);
+    let gvisor_combined_evidence_ids = runtime_guardrails_merge_evidence_ids(
+        runtime_guardrails_adapter_ids(
+            &adapter_evidence_ids,
+            RuntimeGuardrailsRuntimeGuardrailTarget::Gvisor,
+        ),
         gvisor_evidence_ids,
     );
     let kubernetes_evidence_ids =
-        f4_kubernetes_agent_sandbox_evidence_ids(&kubernetes_agent_sandbox);
-    let kubernetes_combined_evidence_ids = f4_merge_evidence_ids(
-        f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kubernetes),
+        runtime_guardrails_kubernetes_agent_sandbox_evidence_ids(&kubernetes_agent_sandbox);
+    let kubernetes_combined_evidence_ids = runtime_guardrails_merge_evidence_ids(
+        runtime_guardrails_adapter_ids(
+            &adapter_evidence_ids,
+            RuntimeGuardrailsRuntimeGuardrailTarget::Kubernetes,
+        ),
         kubernetes_evidence_ids,
     );
-    let kata_evidence_ids = f4_kata_boundary_evidence_ids(&kata_boundary);
-    let kata_combined_evidence_ids = f4_merge_evidence_ids(
-        f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Kata),
+    let kata_evidence_ids = runtime_guardrails_kata_boundary_evidence_ids(&kata_boundary);
+    let kata_combined_evidence_ids = runtime_guardrails_merge_evidence_ids(
+        runtime_guardrails_adapter_ids(
+            &adapter_evidence_ids,
+            RuntimeGuardrailsRuntimeGuardrailTarget::Kata,
+        ),
         kata_evidence_ids,
     );
 
-    F4RuntimeGuardrailMatrixReport {
+    RuntimeGuardrailsRuntimeGuardrailMatrixReport {
         schema_version: 1,
         production_facing_kernel_blocking_supported: false,
         runtimes: vec![
-            F4RuntimeGuardrailSupport {
-                runtime: F4RuntimeGuardrailTarget::Local,
-                notify: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
+            RuntimeGuardrailsRuntimeGuardrailSupport {
+                runtime: RuntimeGuardrailsRuntimeGuardrailTarget::Local,
+                notify: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
                     Vec::new(),
                     "audit timeline can emit notify findings for local process sessions",
                 ),
-                review: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
+                review: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
                     Vec::new(),
                     "review findings can be attached to local session evidence",
                 ),
-                kill: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
+                kill: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
                     Vec::new(),
                     "post-event kill containment is available for local process sessions",
                 ),
-                seccomp_block: f4_local_block_entry(local_seccomp_evidence, "seccomp_block"),
-                bpf_lsm_block: f4_local_block_entry(local_bpf_lsm_evidence, "bpf_lsm_block"),
+                seccomp_block: runtime_guardrails_local_block_entry(local_seccomp_evidence, "seccomp_block"),
+                bpf_lsm_block: runtime_guardrails_local_block_entry(local_bpf_lsm_evidence, "bpf_lsm_block"),
                 requires_guest_collector: false,
                 no_go_claims: vec![
                     "local block prototypes are not production-facing kernel blocking".to_string(),
                     "block remains opt-in and must keep validation, approval, rollback, and audit evidence".to_string(),
                 ],
             },
-            F4RuntimeGuardrailSupport {
-                runtime: F4RuntimeGuardrailTarget::Docker,
-                notify: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Docker),
+            RuntimeGuardrailsRuntimeGuardrailSupport {
+                runtime: RuntimeGuardrailsRuntimeGuardrailTarget::Docker,
+                notify: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Docker),
                     "Docker metadata correlation supports accountable notify findings",
                 ),
-                review: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Docker),
+                review: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Docker),
                     "Docker workload identity can be attached to review findings",
                 ),
-                kill: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Docker),
+                kill: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Docker),
                     "Docker workload metadata supports post-event kill containment decisions",
                 ),
-                seccomp_block: f4_runtime_evidence_required("Docker seccomp block"),
-                bpf_lsm_block: f4_runtime_evidence_required("Docker BPF-LSM block"),
+                seccomp_block: runtime_guardrails_runtime_evidence_required("Docker seccomp block"),
+                bpf_lsm_block: runtime_guardrails_runtime_evidence_required("Docker BPF-LSM block"),
                 requires_guest_collector: false,
                 no_go_claims: vec![
-                    "Docker block support must not inherit local-only F3 evidence".to_string(),
+                    "Docker block support must not inherit local-only PolicyGuardrails evidence".to_string(),
                     "runtime-specific live evidence is required before any Docker block enablement".to_string(),
                 ],
             },
-            F4RuntimeGuardrailSupport {
-                runtime: F4RuntimeGuardrailTarget::Containerd,
-                notify: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Containerd),
+            RuntimeGuardrailsRuntimeGuardrailSupport {
+                runtime: RuntimeGuardrailsRuntimeGuardrailTarget::Containerd,
+                notify: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Containerd),
                     "containerd task metadata supports accountable notify findings",
                 ),
-                review: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Containerd),
+                review: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Containerd),
                     "containerd workload identity can be attached to review findings",
                 ),
-                kill: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Containerd),
+                kill: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Containerd),
                     "containerd task metadata supports post-event kill containment decisions",
                 ),
-                seccomp_block: f4_runtime_evidence_required("containerd seccomp block"),
-                bpf_lsm_block: f4_runtime_evidence_required("containerd BPF-LSM block"),
+                seccomp_block: runtime_guardrails_runtime_evidence_required("containerd seccomp block"),
+                bpf_lsm_block: runtime_guardrails_runtime_evidence_required("containerd BPF-LSM block"),
                 requires_guest_collector: false,
                 no_go_claims: vec![
-                    "containerd block support must not inherit local-only F3 evidence".to_string(),
+                    "containerd block support must not inherit local-only PolicyGuardrails evidence".to_string(),
                     "runtime-specific live evidence is required before any containerd block enablement".to_string(),
                 ],
             },
-            F4RuntimeGuardrailSupport {
-                runtime: F4RuntimeGuardrailTarget::Kubernetes,
-                notify: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
+            RuntimeGuardrailsRuntimeGuardrailSupport {
+                runtime: RuntimeGuardrailsRuntimeGuardrailTarget::Kubernetes,
+                notify: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
                     kubernetes_combined_evidence_ids.clone(),
                     "Pod, namespace, service account, and RuntimeClass metadata support notify findings",
                 ),
-                review: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
+                review: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
                     kubernetes_combined_evidence_ids.clone(),
                     "Kubernetes identity can be attached to review findings",
                 ),
-                kill: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
+                kill: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
                     kubernetes_combined_evidence_ids,
                     "Kubernetes workload identity supports post-event containment decisions",
                 ),
-                seccomp_block: f4_runtime_evidence_required("Kubernetes seccomp block"),
-                bpf_lsm_block: f4_runtime_evidence_required("Kubernetes BPF-LSM block"),
+                seccomp_block: runtime_guardrails_runtime_evidence_required("Kubernetes seccomp block"),
+                bpf_lsm_block: runtime_guardrails_runtime_evidence_required("Kubernetes BPF-LSM block"),
                 requires_guest_collector: false,
                 no_go_claims: vec![
-                    "Kubernetes block support must not inherit local-only F3 evidence".to_string(),
+                    "Kubernetes block support must not inherit local-only PolicyGuardrails evidence".to_string(),
                     "RuntimeClass-specific live evidence is required before any Kubernetes block enablement".to_string(),
                 ],
             },
-            F4RuntimeGuardrailSupport {
-                runtime: F4RuntimeGuardrailTarget::Gvisor,
-                notify: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
+            RuntimeGuardrailsRuntimeGuardrailSupport {
+                runtime: RuntimeGuardrailsRuntimeGuardrailTarget::Gvisor,
+                notify: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
                     gvisor_combined_evidence_ids.clone(),
                     "runsc, sentry, and gofer metadata can identify the sandbox boundary",
                 ),
-                review: f4_entry(
-                    F4GuardrailSupportStatus::Supported,
+                review: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::Supported,
                     gvisor_combined_evidence_ids.clone(),
                     "gVisor metadata can support review findings without claiming guest syscall semantics",
                 ),
-                kill: f4_entry(
-                    F4GuardrailSupportStatus::RequiresRuntimeEvidence,
+                kill: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::RequiresRuntimeEvidence,
                     gvisor_combined_evidence_ids.clone(),
                     "kill containment needs runtime-specific evidence for runsc/sentry/gofer behavior",
                 ),
-                seccomp_block: f4_metadata_only_block(
+                seccomp_block: runtime_guardrails_metadata_only_block(
                     "gVisor seccomp block",
                     gvisor_combined_evidence_ids.clone(),
                 ),
-                bpf_lsm_block: f4_metadata_only_block(
+                bpf_lsm_block: runtime_guardrails_metadata_only_block(
                     "gVisor BPF-LSM block",
                     gvisor_combined_evidence_ids,
                 ),
@@ -4233,28 +4400,28 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
                     "block support is metadata-only until runtime-specific prevention is proven".to_string(),
                 ],
             },
-            F4RuntimeGuardrailSupport {
-                runtime: F4RuntimeGuardrailTarget::Kata,
-                notify: f4_entry(
-                    F4GuardrailSupportStatus::BoundaryOnly,
+            RuntimeGuardrailsRuntimeGuardrailSupport {
+                runtime: RuntimeGuardrailsRuntimeGuardrailTarget::Kata,
+                notify: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::BoundaryOnly,
                     kata_combined_evidence_ids.clone(),
                     "host visibility can identify the Kata VM boundary",
                 ),
-                review: f4_entry(
-                    F4GuardrailSupportStatus::BoundaryOnly,
+                review: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::BoundaryOnly,
                     kata_combined_evidence_ids.clone(),
                     "review findings must be scoped to host-boundary evidence unless a guest collector exists",
                 ),
-                kill: f4_entry(
-                    F4GuardrailSupportStatus::BoundaryOnly,
+                kill: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::BoundaryOnly,
                     kata_combined_evidence_ids.clone(),
                     "kill containment is limited to boundary-level actions without guest evidence",
                 ),
-                seccomp_block: f4_boundary_only_block(
+                seccomp_block: runtime_guardrails_boundary_only_block(
                     "Kata seccomp block",
                     kata_combined_evidence_ids.clone(),
                 ),
-                bpf_lsm_block: f4_boundary_only_block(
+                bpf_lsm_block: runtime_guardrails_boundary_only_block(
                     "Kata BPF-LSM block",
                     kata_combined_evidence_ids,
                 ),
@@ -4264,34 +4431,34 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
                     "guest collector evidence is required for guest-semantic guardrail claims".to_string(),
                 ],
             },
-            F4RuntimeGuardrailSupport {
-                runtime: F4RuntimeGuardrailTarget::Firecracker,
-                notify: f4_entry(
-                    F4GuardrailSupportStatus::BoundaryOnly,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Firecracker),
+            RuntimeGuardrailsRuntimeGuardrailSupport {
+                runtime: RuntimeGuardrailsRuntimeGuardrailTarget::Firecracker,
+                notify: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::BoundaryOnly,
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Firecracker),
                     "Firecracker support remains a host-boundary research prototype",
                 ),
-                review: f4_entry(
-                    F4GuardrailSupportStatus::BoundaryOnly,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Firecracker),
+                review: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::BoundaryOnly,
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Firecracker),
                     "review findings must be scoped to the VM boundary in the research prototype",
                 ),
-                kill: f4_entry(
-                    F4GuardrailSupportStatus::BoundaryOnly,
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Firecracker),
+                kill: runtime_guardrails_entry(
+                    RuntimeGuardrailsGuardrailSupportStatus::BoundaryOnly,
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Firecracker),
                     "kill containment is limited to boundary-level research behavior",
                 ),
-                seccomp_block: f4_boundary_only_block(
+                seccomp_block: runtime_guardrails_boundary_only_block(
                     "Firecracker seccomp block",
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Firecracker),
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Firecracker),
                 ),
-                bpf_lsm_block: f4_boundary_only_block(
+                bpf_lsm_block: runtime_guardrails_boundary_only_block(
                     "Firecracker BPF-LSM block",
-                    f4_adapter_ids(&adapter_evidence_ids, F4RuntimeGuardrailTarget::Firecracker),
+                    runtime_guardrails_adapter_ids(&adapter_evidence_ids, RuntimeGuardrailsRuntimeGuardrailTarget::Firecracker),
                 ),
                 requires_guest_collector: true,
                 no_go_claims: vec![
-                    "Firecracker is not a production runtime lifecycle manager in F4".to_string(),
+                    "Firecracker is not a production runtime lifecycle manager in RuntimeGuardrails".to_string(),
                     "host-side kernel block must not claim Firecracker guest-semantic prevention".to_string(),
                 ],
             },
@@ -4299,16 +4466,16 @@ pub fn evaluate_f4_runtime_guardrail_matrix_with_runtime_metadata(
     }
 }
 
-pub fn evaluate_f4_gvisor_metadata_evidence_gate(
-    reports: Vec<F4GvisorMetadataEvidenceReport>,
-) -> F4GvisorMetadataEvidenceGateReport {
+pub fn evaluate_runtime_guardrails_gvisor_metadata_evidence_gate(
+    reports: Vec<RuntimeGuardrailsGvisorMetadataEvidenceReport>,
+) -> RuntimeGuardrailsGvisorMetadataEvidenceGateReport {
     let mut failures = Vec::new();
     let mut validated_evidence = Vec::new();
 
     if reports.is_empty() {
-        failures.push(f4_gvisor_failure(
+        failures.push(runtime_guardrails_gvisor_failure(
             None,
-            "at least one F4 gVisor metadata evidence report is required",
+            "at least one RuntimeGuardrails gVisor metadata evidence report is required",
         ));
     }
 
@@ -4321,25 +4488,25 @@ pub fn evaluate_f4_gvisor_metadata_evidence_gate(
         let mut report_failures = Vec::new();
 
         if report.evidence_id.trim().is_empty() {
-            report_failures.push(f4_gvisor_failure(
+            report_failures.push(runtime_guardrails_gvisor_failure(
                 None,
                 "gVisor metadata evidence is missing evidence id",
             ));
         }
-        if report.source != F4RuntimeAdapterEvidenceSource::LiveHost {
-            report_failures.push(f4_gvisor_failure(
+        if report.source != RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost {
+            report_failures.push(runtime_guardrails_gvisor_failure(
                 evidence_id.clone(),
                 "gVisor metadata evidence requires live-host evidence",
             ));
         }
         if report.runtime_adapter_evidence_id.trim().is_empty() {
-            report_failures.push(f4_gvisor_failure(
+            report_failures.push(runtime_guardrails_gvisor_failure(
                 evidence_id.clone(),
                 "gVisor metadata evidence is missing runtime adapter evidence id",
             ));
         }
         if report.session_id.trim().is_empty() {
-            report_failures.push(f4_gvisor_failure(
+            report_failures.push(runtime_guardrails_gvisor_failure(
                 evidence_id.clone(),
                 "gVisor metadata evidence is missing session id",
             ));
@@ -4347,43 +4514,43 @@ pub fn evaluate_f4_gvisor_metadata_evidence_gate(
         if !report
             .runtime_handler
             .as_deref()
-            .map(f4_is_gvisor_handler)
+            .map(runtime_guardrails_is_gvisor_handler)
             .unwrap_or(false)
         {
-            report_failures.push(f4_gvisor_failure(
+            report_failures.push(runtime_guardrails_gvisor_failure(
                 evidence_id.clone(),
                 "gVisor metadata evidence requires a runsc or gvisor runtime handler",
             ));
         }
         if report.host_event_subjects.is_empty() {
-            report_failures.push(f4_gvisor_failure(
+            report_failures.push(runtime_guardrails_gvisor_failure(
                 evidence_id.clone(),
                 "gVisor metadata evidence must include host event subjects",
             ));
         }
         if !report.runsc_observed || !report.sentry_observed || !report.gofer_observed {
-            report_failures.push(f4_gvisor_failure(
+            report_failures.push(runtime_guardrails_gvisor_failure(
                 evidence_id.clone(),
                 "gVisor metadata evidence must observe runsc, sentry, and gofer",
             ));
         }
-        if !f4_subject_observed(&report.host_event_subjects, "runsc")
-            || !f4_subject_observed(&report.host_event_subjects, "sentry")
-            || !f4_subject_observed(&report.host_event_subjects, "gofer")
+        if !runtime_guardrails_subject_observed(&report.host_event_subjects, "runsc")
+            || !runtime_guardrails_subject_observed(&report.host_event_subjects, "sentry")
+            || !runtime_guardrails_subject_observed(&report.host_event_subjects, "gofer")
         {
-            report_failures.push(f4_gvisor_failure(
+            report_failures.push(runtime_guardrails_gvisor_failure(
                 evidence_id.clone(),
                 "gVisor host event subjects must include runsc, sentry, and gofer",
             ));
         }
         if !report.host_semantics_collapsed {
-            report_failures.push(f4_gvisor_failure(
+            report_failures.push(runtime_guardrails_gvisor_failure(
                 evidence_id.clone(),
                 "gVisor metadata evidence must prove host semantics are collapsed to the runtime boundary",
             ));
         }
         if report.guest_semantics_claimed {
-            report_failures.push(f4_gvisor_failure(
+            report_failures.push(runtime_guardrails_gvisor_failure(
                 evidence_id.clone(),
                 "gVisor metadata evidence must not claim guest semantics",
             ));
@@ -4395,7 +4562,7 @@ pub fn evaluate_f4_gvisor_metadata_evidence_gate(
         failures.extend(report_failures);
     }
 
-    F4GvisorMetadataEvidenceGateReport {
+    RuntimeGuardrailsGvisorMetadataEvidenceGateReport {
         schema_version: 1,
         passed: failures.is_empty(),
         reports,
@@ -4408,16 +4575,16 @@ pub fn evaluate_f4_gvisor_metadata_evidence_gate(
     }
 }
 
-pub fn evaluate_f4_kubernetes_agent_sandbox_evidence_gate(
-    reports: Vec<F4KubernetesAgentSandboxEvidenceReport>,
-) -> F4KubernetesAgentSandboxEvidenceGateReport {
+pub fn evaluate_runtime_guardrails_kubernetes_agent_sandbox_evidence_gate(
+    reports: Vec<RuntimeGuardrailsKubernetesAgentSandboxEvidenceReport>,
+) -> RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateReport {
     let mut failures = Vec::new();
     let mut validated_evidence = Vec::new();
 
     if reports.is_empty() {
-        failures.push(f4_kubernetes_agent_sandbox_failure(
+        failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
             None,
-            "at least one F4 Kubernetes Agent Sandbox evidence report is required",
+            "at least one RuntimeGuardrails Kubernetes Agent Sandbox evidence report is required",
         ));
     }
 
@@ -4430,67 +4597,67 @@ pub fn evaluate_f4_kubernetes_agent_sandbox_evidence_gate(
         let mut report_failures = Vec::new();
 
         if report.evidence_id.trim().is_empty() {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 None,
                 "Kubernetes Agent Sandbox evidence is missing evidence id",
             ));
         }
-        if report.source != F4RuntimeAdapterEvidenceSource::LiveHost {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+        if report.source != RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost {
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 evidence_id.clone(),
                 "Kubernetes Agent Sandbox evidence requires live-host evidence",
             ));
         }
         if report.runtime_adapter_evidence_id.trim().is_empty() {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 evidence_id.clone(),
                 "Kubernetes Agent Sandbox evidence is missing runtime adapter evidence id",
             ));
         }
         if report.session_id.trim().is_empty() {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 evidence_id.clone(),
                 "Kubernetes Agent Sandbox evidence is missing session id",
             ));
         }
         if report.pod_name.trim().is_empty() {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 evidence_id.clone(),
                 "Kubernetes Agent Sandbox evidence is missing pod name",
             ));
         }
         if report.namespace.trim().is_empty() {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 evidence_id.clone(),
                 "Kubernetes Agent Sandbox evidence is missing namespace",
             ));
         }
-        if !f4_optional_nonempty(&report.service_account) {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+        if !runtime_guardrails_optional_nonempty(&report.service_account) {
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 evidence_id.clone(),
                 "Kubernetes Agent Sandbox evidence is missing service account",
             ));
         }
-        if !f4_optional_nonempty(&report.runtime_class_name) {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+        if !runtime_guardrails_optional_nonempty(&report.runtime_class_name) {
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 evidence_id.clone(),
                 "Kubernetes Agent Sandbox evidence is missing RuntimeClass",
             ));
         }
-        if !f4_optional_nonempty(&report.sandbox_name) {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+        if !runtime_guardrails_optional_nonempty(&report.sandbox_name) {
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 evidence_id.clone(),
                 "Kubernetes Agent Sandbox evidence is missing sandbox name",
             ));
         }
         if !report.host_boundary_visibility {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 evidence_id.clone(),
                 "Kubernetes Agent Sandbox evidence must prove host-boundary visibility",
             ));
         }
         if report.guest_semantics_claimed {
-            report_failures.push(f4_kubernetes_agent_sandbox_failure(
+            report_failures.push(runtime_guardrails_kubernetes_agent_sandbox_failure(
                 evidence_id.clone(),
                 "Kubernetes Agent Sandbox evidence must not claim guest semantics",
             ));
@@ -4502,7 +4669,7 @@ pub fn evaluate_f4_kubernetes_agent_sandbox_evidence_gate(
         failures.extend(report_failures);
     }
 
-    F4KubernetesAgentSandboxEvidenceGateReport {
+    RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateReport {
         schema_version: 1,
         passed: failures.is_empty(),
         reports,
@@ -4515,16 +4682,16 @@ pub fn evaluate_f4_kubernetes_agent_sandbox_evidence_gate(
     }
 }
 
-pub fn evaluate_f4_kata_boundary_evidence_gate(
-    reports: Vec<F4KataBoundaryEvidenceReport>,
-) -> F4KataBoundaryEvidenceGateReport {
+pub fn evaluate_runtime_guardrails_kata_boundary_evidence_gate(
+    reports: Vec<RuntimeGuardrailsKataBoundaryEvidenceReport>,
+) -> RuntimeGuardrailsKataBoundaryEvidenceGateReport {
     let mut failures = Vec::new();
     let mut validated_evidence = Vec::new();
 
     if reports.is_empty() {
-        failures.push(f4_kata_boundary_failure(
+        failures.push(runtime_guardrails_kata_boundary_failure(
             None,
-            "at least one F4 Kata boundary evidence report is required",
+            "at least one RuntimeGuardrails Kata boundary evidence report is required",
         ));
     }
 
@@ -4537,25 +4704,25 @@ pub fn evaluate_f4_kata_boundary_evidence_gate(
         let mut report_failures = Vec::new();
 
         if report.evidence_id.trim().is_empty() {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 None,
                 "Kata boundary evidence is missing evidence id",
             ));
         }
-        if report.source != F4RuntimeAdapterEvidenceSource::LiveHost {
-            report_failures.push(f4_kata_boundary_failure(
+        if report.source != RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost {
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata boundary evidence requires live-host evidence",
             ));
         }
         if report.runtime_adapter_evidence_id.trim().is_empty() {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata boundary evidence is missing runtime adapter evidence id",
             ));
         }
         if report.session_id.trim().is_empty() {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata boundary evidence is missing session id",
             ));
@@ -4563,62 +4730,62 @@ pub fn evaluate_f4_kata_boundary_evidence_gate(
         if !report
             .runtime_handler
             .as_deref()
-            .map(f4_is_kata_handler)
+            .map(runtime_guardrails_is_kata_handler)
             .unwrap_or(false)
         {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata boundary evidence requires a Kata runtime handler",
             ));
         }
         if report.host_event_subjects.is_empty() {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata boundary evidence must include host event subjects",
             ));
         }
         if !report.shim_observed {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata boundary evidence must observe the containerd shim",
             ));
         }
         if !report.vmm_observed {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata boundary evidence must observe the VMM",
             ));
         }
-        if !f4_subject_observed(&report.host_event_subjects, "shim")
-            || !f4_subject_observed(&report.host_event_subjects, "kata")
+        if !runtime_guardrails_subject_observed(&report.host_event_subjects, "shim")
+            || !runtime_guardrails_subject_observed(&report.host_event_subjects, "kata")
         {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata host event subjects must include the Kata shim",
             ));
         }
-        if !f4_subject_observed(&report.host_event_subjects, "qemu")
-            && !f4_subject_observed(&report.host_event_subjects, "vmm")
+        if !runtime_guardrails_subject_observed(&report.host_event_subjects, "qemu")
+            && !runtime_guardrails_subject_observed(&report.host_event_subjects, "vmm")
         {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata host event subjects must include a VMM",
             ));
         }
         if !report.host_boundary_visibility {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata boundary evidence must prove host-boundary visibility",
             ));
         }
         if !report.guest_collector_required {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata boundary evidence must require a guest collector for guest semantics",
             ));
         }
         if report.guest_semantics_claimed {
-            report_failures.push(f4_kata_boundary_failure(
+            report_failures.push(runtime_guardrails_kata_boundary_failure(
                 evidence_id.clone(),
                 "Kata boundary evidence must not claim guest semantics",
             ));
@@ -4630,7 +4797,7 @@ pub fn evaluate_f4_kata_boundary_evidence_gate(
         failures.extend(report_failures);
     }
 
-    F4KataBoundaryEvidenceGateReport {
+    RuntimeGuardrailsKataBoundaryEvidenceGateReport {
         schema_version: 1,
         passed: failures.is_empty(),
         reports,
@@ -4643,16 +4810,16 @@ pub fn evaluate_f4_kata_boundary_evidence_gate(
     }
 }
 
-pub fn evaluate_f4_runtime_adapter_evidence_gate(
-    reports: Vec<F4RuntimeAdapterEvidenceReport>,
-) -> F4RuntimeAdapterEvidenceGateReport {
+pub fn evaluate_runtime_guardrails_runtime_adapter_evidence_gate(
+    reports: Vec<RuntimeGuardrailsRuntimeAdapterEvidenceReport>,
+) -> RuntimeGuardrailsRuntimeAdapterEvidenceGateReport {
     let mut failures = Vec::new();
     let mut validated_evidence = Vec::new();
 
     if reports.is_empty() {
-        failures.push(f4_adapter_failure(
+        failures.push(runtime_guardrails_adapter_failure(
             None,
-            "at least one F4 runtime adapter evidence report is required",
+            "at least one RuntimeGuardrails runtime adapter evidence report is required",
         ));
     }
 
@@ -4665,55 +4832,55 @@ pub fn evaluate_f4_runtime_adapter_evidence_gate(
         let mut report_failures = Vec::new();
 
         if report.evidence_id.trim().is_empty() {
-            report_failures.push(f4_adapter_failure(
+            report_failures.push(runtime_guardrails_adapter_failure(
                 None,
                 "runtime adapter evidence is missing evidence id",
             ));
         }
-        if report.source != F4RuntimeAdapterEvidenceSource::LiveHost {
-            report_failures.push(f4_adapter_failure(
+        if report.source != RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost {
+            report_failures.push(runtime_guardrails_adapter_failure(
                 evidence_id.clone(),
-                "F4 runtime guardrail support requires live runtime adapter evidence",
+                "RuntimeGuardrails runtime guardrail support requires live runtime adapter evidence",
             ));
         }
         if report.adapter.trim().is_empty() {
-            report_failures.push(f4_adapter_failure(
+            report_failures.push(runtime_guardrails_adapter_failure(
                 evidence_id.clone(),
                 "runtime adapter evidence is missing adapter name",
             ));
         }
         if report.session_id.trim().is_empty() {
-            report_failures.push(f4_adapter_failure(
+            report_failures.push(runtime_guardrails_adapter_failure(
                 evidence_id.clone(),
                 "runtime adapter evidence is missing session id",
             ));
         }
         if report.workload_id.trim().is_empty() {
-            report_failures.push(f4_adapter_failure(
+            report_failures.push(runtime_guardrails_adapter_failure(
                 evidence_id.clone(),
                 "runtime adapter evidence is missing workload id",
             ));
         }
         if report.cgroup_id == 0 {
-            report_failures.push(f4_adapter_failure(
+            report_failures.push(runtime_guardrails_adapter_failure(
                 evidence_id.clone(),
                 "runtime adapter evidence must include a non-zero cgroup id",
             ));
         }
         if !report.metadata_correlation {
-            report_failures.push(f4_adapter_failure(
+            report_failures.push(runtime_guardrails_adapter_failure(
                 evidence_id.clone(),
                 "runtime adapter evidence must prove metadata correlation",
             ));
         }
         if !report.cgroup_correlation {
-            report_failures.push(f4_adapter_failure(
+            report_failures.push(runtime_guardrails_adapter_failure(
                 evidence_id.clone(),
                 "runtime adapter evidence must prove cgroup correlation",
             ));
         }
         if !report.host_boundary_visibility {
-            report_failures.push(f4_adapter_failure(
+            report_failures.push(runtime_guardrails_adapter_failure(
                 evidence_id.clone(),
                 "runtime adapter evidence must prove host-boundary visibility",
             ));
@@ -4721,12 +4888,12 @@ pub fn evaluate_f4_runtime_adapter_evidence_gate(
         if report.guest_semantics_claimed
             && matches!(
                 report.runtime,
-                F4RuntimeGuardrailTarget::Gvisor
-                    | F4RuntimeGuardrailTarget::Kata
-                    | F4RuntimeGuardrailTarget::Firecracker
+                RuntimeGuardrailsRuntimeGuardrailTarget::Gvisor
+                    | RuntimeGuardrailsRuntimeGuardrailTarget::Kata
+                    | RuntimeGuardrailsRuntimeGuardrailTarget::Firecracker
             )
         {
-            report_failures.push(f4_adapter_failure(
+            report_failures.push(runtime_guardrails_adapter_failure(
                 evidence_id.clone(),
                 "strong-isolation runtime adapter evidence must not claim guest semantics",
             ));
@@ -4738,7 +4905,7 @@ pub fn evaluate_f4_runtime_adapter_evidence_gate(
         failures.extend(report_failures);
     }
 
-    F4RuntimeAdapterEvidenceGateReport {
+    RuntimeGuardrailsRuntimeAdapterEvidenceGateReport {
         schema_version: 1,
         passed: failures.is_empty(),
         reports,
@@ -4751,13 +4918,13 @@ pub fn evaluate_f4_runtime_adapter_evidence_gate(
     }
 }
 
-pub fn evaluate_f3_block_enablement_policy(
-    validation: F3BlockValidationGateReport,
-    requests: Vec<F3BlockEnablementRequest>,
-) -> F3BlockEnablementPolicyReport {
+pub fn evaluate_policy_guardrails_block_enablement_policy(
+    validation: PolicyGuardrailsBlockValidationGateReport,
+    requests: Vec<PolicyGuardrailsBlockEnablementRequest>,
+) -> PolicyGuardrailsBlockEnablementPolicyReport {
     let mut failures = Vec::new();
     let mut approved_enablements = Vec::new();
-    let reports_by_evidence: BTreeMap<&str, &F3BlockValidationReport> = validation
+    let reports_by_evidence: BTreeMap<&str, &PolicyGuardrailsBlockValidationReport> = validation
         .reports
         .iter()
         .map(|report| (report.evidence_id.as_str(), report))
@@ -4769,13 +4936,13 @@ pub fn evaluate_f3_block_enablement_policy(
         .collect();
 
     if !validation.passed {
-        failures.push(f3_enablement_failure(
+        failures.push(policy_guardrails_enablement_failure(
             None,
             "block validation gate must pass before enablement can be approved",
         ));
     }
     if requests.is_empty() {
-        failures.push(f3_enablement_failure(
+        failures.push(policy_guardrails_enablement_failure(
             None,
             "at least one block enablement request is required",
         ));
@@ -4790,25 +4957,25 @@ pub fn evaluate_f3_block_enablement_policy(
         };
 
         if request.request_id.trim().is_empty() {
-            request_failures.push(f3_enablement_failure(
+            request_failures.push(policy_guardrails_enablement_failure(
                 None,
                 "block enablement request is missing request id",
             ));
         }
         if request.evidence_id.trim().is_empty() {
-            request_failures.push(f3_enablement_failure(
+            request_failures.push(policy_guardrails_enablement_failure(
                 request_id.clone(),
                 "block enablement request is missing evidence id",
             ));
         }
         if !request.operator_approved {
-            request_failures.push(f3_enablement_failure(
+            request_failures.push(policy_guardrails_enablement_failure(
                 request_id.clone(),
                 "operator approval is required",
             ));
         }
         if request.default_enabled {
-            request_failures.push(f3_enablement_failure(
+            request_failures.push(policy_guardrails_enablement_failure(
                 request_id.clone(),
                 "production-facing block must remain opt-in",
             ));
@@ -4817,25 +4984,25 @@ pub fn evaluate_f3_block_enablement_policy(
         match &request.rollback {
             Some(rollback) => {
                 if rollback.plan_id.trim().is_empty() {
-                    request_failures.push(f3_enablement_failure(
+                    request_failures.push(policy_guardrails_enablement_failure(
                         request_id.clone(),
                         "rollback plan is missing plan id",
                     ));
                 }
                 if rollback.disable_command.trim().is_empty() {
-                    request_failures.push(f3_enablement_failure(
+                    request_failures.push(policy_guardrails_enablement_failure(
                         request_id.clone(),
                         "rollback plan is missing disable command",
                     ));
                 }
                 if rollback.validation_command.trim().is_empty() {
-                    request_failures.push(f3_enablement_failure(
+                    request_failures.push(policy_guardrails_enablement_failure(
                         request_id.clone(),
                         "rollback plan is missing validation command",
                     ));
                 }
             }
-            None => request_failures.push(f3_enablement_failure(
+            None => request_failures.push(policy_guardrails_enablement_failure(
                 request_id.clone(),
                 "rollback plan is required",
             )),
@@ -4843,7 +5010,7 @@ pub fn evaluate_f3_block_enablement_policy(
 
         let validated_report = reports_by_evidence.get(request.evidence_id.as_str());
         if !validated_by_evidence.contains(request.evidence_id.as_str()) {
-            request_failures.push(f3_enablement_failure(
+            request_failures.push(policy_guardrails_enablement_failure(
                 request_id.clone(),
                 "no matching validated block evidence",
             ));
@@ -4853,7 +5020,7 @@ pub fn evaluate_f3_block_enablement_policy(
                 || report.runtime != request.runtime
                 || report.action != request.action
             {
-                request_failures.push(f3_enablement_failure(
+                request_failures.push(policy_guardrails_enablement_failure(
                     request_id.clone(),
                     "enablement request does not match validated runtime/action/backend",
                 ));
@@ -4862,7 +5029,7 @@ pub fn evaluate_f3_block_enablement_policy(
 
         if request_failures.is_empty() {
             let rollback = request.rollback.as_ref().expect("rollback was validated");
-            approved_enablements.push(F3BlockApprovedEnablement {
+            approved_enablements.push(PolicyGuardrailsBlockApprovedEnablement {
                 request_id: request.request_id.clone(),
                 evidence_id: request.evidence_id.clone(),
                 backend: request.backend.clone(),
@@ -4876,7 +5043,7 @@ pub fn evaluate_f3_block_enablement_policy(
         failures.extend(request_failures);
     }
 
-    F3BlockEnablementPolicyReport {
+    PolicyGuardrailsBlockEnablementPolicyReport {
         schema_version: 1,
         passed: failures.is_empty(),
         approved_enablements: if failures.is_empty() {
@@ -4888,27 +5055,28 @@ pub fn evaluate_f3_block_enablement_policy(
     }
 }
 
-pub fn f3_block_operator_audit_records(
-    report: &F3BlockEnablementPolicyReport,
-    operation: F3BlockOperatorAuditOperation,
+pub fn policy_guardrails_block_operator_audit_records(
+    report: &PolicyGuardrailsBlockEnablementPolicyReport,
+    operation: PolicyGuardrailsBlockOperatorAuditOperation,
     operator: &str,
     timestamp_unix_ms: u128,
-) -> Result<Vec<F3BlockOperatorAuditRecord>, String> {
+) -> Result<Vec<PolicyGuardrailsBlockOperatorAuditRecord>, String> {
     let operator = operator.trim();
     if operator.is_empty() {
-        return Err("operator is required for F3 block operator audit".to_string());
+        return Err("operator is required for PolicyGuardrails block operator audit".to_string());
     }
     if !report.passed {
         return Err(
-            "F3 block operator audit requires a passed enablement policy report".to_string(),
+            "PolicyGuardrails block operator audit requires a passed enablement policy report"
+                .to_string(),
         );
     }
 
     Ok(report
         .approved_enablements
         .iter()
-        .map(|enablement| F3BlockOperatorAuditRecord {
-            record_type: "f3_block_operator_audit".to_string(),
+        .map(|enablement| PolicyGuardrailsBlockOperatorAuditRecord {
+            record_type: "policy_guardrails_block_operator_audit".to_string(),
             operation,
             request_id: enablement.request_id.clone(),
             evidence_id: enablement.evidence_id.clone(),
@@ -4923,46 +5091,46 @@ pub fn f3_block_operator_audit_records(
         .collect())
 }
 
-pub fn evaluate_f3_local_seccomp_execution_gate(
-    report: &F3BlockEnablementPolicyReport,
-    request: F3LocalSeccompExecutionRequest,
-) -> F3LocalSeccompExecutionReport {
+pub fn evaluate_policy_guardrails_local_seccomp_execution_gate(
+    report: &PolicyGuardrailsBlockEnablementPolicyReport,
+    request: PolicyGuardrailsLocalSeccompExecutionRequest,
+) -> PolicyGuardrailsLocalSeccompExecutionReport {
     let evidence_id = request.evidence_id.trim().to_string();
     let target_path = request.target_path.trim().to_string();
     let mut failures = Vec::new();
 
     if !report.passed {
-        failures.push(f3_local_seccomp_execution_failure(
+        failures.push(policy_guardrails_local_seccomp_execution_failure(
             None,
             "local seccomp execution requires a passed enablement policy report",
         ));
     }
     if evidence_id.is_empty() {
-        failures.push(f3_local_seccomp_execution_failure(
+        failures.push(policy_guardrails_local_seccomp_execution_failure(
             None,
             "evidence id is required",
         ));
     }
     if target_path.is_empty() {
-        failures.push(f3_local_seccomp_execution_failure(
+        failures.push(policy_guardrails_local_seccomp_execution_failure(
             evidence_id_opt(&evidence_id),
             "target path is required",
         ));
     }
     if request.backend != "seccomp_block" {
-        failures.push(f3_local_seccomp_execution_failure(
+        failures.push(policy_guardrails_local_seccomp_execution_failure(
             evidence_id_opt(&evidence_id),
             "local seccomp execution only supports backend seccomp_block",
         ));
     }
-    if request.runtime != F3BlockValidationRuntime::Local {
-        failures.push(f3_local_seccomp_execution_failure(
+    if request.runtime != PolicyGuardrailsBlockValidationRuntime::Local {
+        failures.push(policy_guardrails_local_seccomp_execution_failure(
             evidence_id_opt(&evidence_id),
             "local seccomp execution only supports local runtime",
         ));
     }
-    if request.action != F3BlockValidationAction::FileRead {
-        failures.push(f3_local_seccomp_execution_failure(
+    if request.action != PolicyGuardrailsBlockValidationAction::FileRead {
+        failures.push(policy_guardrails_local_seccomp_execution_failure(
             evidence_id_opt(&evidence_id),
             "local seccomp execution only supports file_read action",
         ));
@@ -4976,13 +5144,13 @@ pub fn evaluate_f3_local_seccomp_execution_gate(
             && !enablement.default_enabled
     });
     if matching_enablement.is_none() {
-        failures.push(f3_local_seccomp_execution_failure(
+        failures.push(policy_guardrails_local_seccomp_execution_failure(
             evidence_id_opt(&evidence_id),
             "no matching approved local seccomp file-read enablement",
         ));
     }
 
-    F3LocalSeccompExecutionReport {
+    PolicyGuardrailsLocalSeccompExecutionReport {
         schema_version: 1,
         passed: failures.is_empty(),
         evidence_id,
@@ -5003,43 +5171,43 @@ pub fn evaluate_f3_local_seccomp_execution_gate(
     }
 }
 
-pub fn evaluate_f3_bpf_lsm_prototype_prerequisites(
-    environment: F3BpfLsmPrototypeEnvironment,
-) -> F3BpfLsmPrototypePrerequisiteReport {
+pub fn evaluate_policy_guardrails_bpf_lsm_prototype_prerequisites(
+    environment: PolicyGuardrailsBpfLsmPrototypeEnvironment,
+) -> PolicyGuardrailsBpfLsmPrototypePrerequisiteReport {
     let mut failures = Vec::new();
 
     if !environment.linux {
-        failures.push(f3_bpf_lsm_prerequisite_failure(
+        failures.push(policy_guardrails_bpf_lsm_prerequisite_failure(
             "BPF-LSM prototype requires Linux",
         ));
     }
     if !environment.btf_available {
-        failures.push(f3_bpf_lsm_prerequisite_failure(
+        failures.push(policy_guardrails_bpf_lsm_prerequisite_failure(
             "readable kernel BTF is required",
         ));
     }
     if !environment.bpf_lsm_configured {
-        failures.push(f3_bpf_lsm_prerequisite_failure(
+        failures.push(policy_guardrails_bpf_lsm_prerequisite_failure(
             "kernel must be configured with CONFIG_BPF_LSM",
         ));
     }
     if !environment.bpf_lsm_active {
-        failures.push(f3_bpf_lsm_prerequisite_failure(
+        failures.push(policy_guardrails_bpf_lsm_prerequisite_failure(
             "active LSM list must include bpf",
         ));
     }
     if !environment.prototype_object_available {
-        failures.push(f3_bpf_lsm_prerequisite_failure(
+        failures.push(policy_guardrails_bpf_lsm_prerequisite_failure(
             "BPF-LSM prototype object is required",
         ));
     }
     if !environment.privileged_for_bpf {
-        failures.push(f3_bpf_lsm_prerequisite_failure(
+        failures.push(policy_guardrails_bpf_lsm_prerequisite_failure(
             "CAP_BPF and CAP_PERFMON or CAP_SYS_ADMIN are required",
         ));
     }
 
-    F3BpfLsmPrototypePrerequisiteReport {
+    PolicyGuardrailsBpfLsmPrototypePrerequisiteReport {
         schema_version: 1,
         passed: failures.is_empty(),
         environment,
@@ -6195,27 +6363,27 @@ fn visibility_failure(
     }
 }
 
-fn f3_block_failure(
+fn policy_guardrails_block_failure(
     evidence_id: Option<String>,
     message: impl Into<String>,
-) -> F3BlockValidationGateFailure {
-    F3BlockValidationGateFailure {
+) -> PolicyGuardrailsBlockValidationGateFailure {
+    PolicyGuardrailsBlockValidationGateFailure {
         evidence_id,
         message: message.into(),
     }
 }
 
-fn f3_enablement_failure(
+fn policy_guardrails_enablement_failure(
     request_id: Option<String>,
     message: impl Into<String>,
-) -> F3BlockEnablementFailure {
-    F3BlockEnablementFailure {
+) -> PolicyGuardrailsBlockEnablementFailure {
+    PolicyGuardrailsBlockEnablementFailure {
         request_id,
         message: message.into(),
     }
 }
 
-fn required_f4_live_runtime_artifacts() -> [&'static str; 6] {
+fn required_runtime_guardrails_live_runtime_artifacts() -> [&'static str; 6] {
     [
         "backup-manifest.json",
         "service-state.json",
@@ -6226,24 +6394,24 @@ fn required_f4_live_runtime_artifacts() -> [&'static str; 6] {
     ]
 }
 
-fn f4_live_runtime_evidence_failure(
+fn runtime_guardrails_live_runtime_evidence_failure(
     message: impl Into<String>,
-) -> F4LiveRuntimeEvidenceBundleFailure {
-    F4LiveRuntimeEvidenceBundleFailure {
+) -> RuntimeGuardrailsLiveRuntimeEvidenceBundleFailure {
+    RuntimeGuardrailsLiveRuntimeEvidenceBundleFailure {
         message: message.into(),
     }
 }
 
-fn f4_validated_local_block_evidence(
-    reports: &[F3BlockValidationReport],
+fn runtime_guardrails_validated_local_block_evidence(
+    reports: &[PolicyGuardrailsBlockValidationReport],
     backend: &str,
 ) -> Vec<String> {
     reports
         .iter()
         .filter(|report| {
-            report.source == F3BlockValidationSource::LiveHost
-                && report.runtime == F3BlockValidationRuntime::Local
-                && report.action == F3BlockValidationAction::FileRead
+            report.source == PolicyGuardrailsBlockValidationSource::LiveHost
+                && report.runtime == PolicyGuardrailsBlockValidationRuntime::Local
+                && report.action == PolicyGuardrailsBlockValidationAction::FileRead
                 && report.backend == backend
                 && report.preoperation_prevention
                 && report.decision_latency_ms.is_some()
@@ -6258,51 +6426,53 @@ fn f4_validated_local_block_evidence(
         .collect()
 }
 
-fn f4_entry(
-    status: F4GuardrailSupportStatus,
+fn runtime_guardrails_entry(
+    status: RuntimeGuardrailsGuardrailSupportStatus,
     evidence_ids: Vec<String>,
     note: impl Into<String>,
-) -> F4GuardrailSupportEntry {
-    F4GuardrailSupportEntry {
+) -> RuntimeGuardrailsGuardrailSupportEntry {
+    RuntimeGuardrailsGuardrailSupportEntry {
         status,
         evidence_ids,
         note: note.into(),
     }
 }
 
-fn f4_local_block_entry(
+fn runtime_guardrails_local_block_entry(
     evidence_ids: Vec<String>,
     backend_label: &'static str,
-) -> F4GuardrailSupportEntry {
+) -> RuntimeGuardrailsGuardrailSupportEntry {
     if evidence_ids.is_empty() {
-        f4_entry(
-            F4GuardrailSupportStatus::RequiresRuntimeEvidence,
+        runtime_guardrails_entry(
+            RuntimeGuardrailsGuardrailSupportStatus::RequiresRuntimeEvidence,
             evidence_ids,
-            format!("{backend_label} requires live local F3 validation evidence"),
+            format!("{backend_label} requires live local PolicyGuardrails validation evidence"),
         )
     } else {
-        f4_entry(
-            F4GuardrailSupportStatus::PrototypeValidated,
+        runtime_guardrails_entry(
+            RuntimeGuardrailsGuardrailSupportStatus::PrototypeValidated,
             evidence_ids,
             format!("{backend_label} has narrow live local file-read prototype evidence only"),
         )
     }
 }
 
-fn f4_runtime_evidence_required(capability: &'static str) -> F4GuardrailSupportEntry {
-    f4_entry(
-        F4GuardrailSupportStatus::RequiresRuntimeEvidence,
+fn runtime_guardrails_runtime_evidence_required(
+    capability: &'static str,
+) -> RuntimeGuardrailsGuardrailSupportEntry {
+    runtime_guardrails_entry(
+        RuntimeGuardrailsGuardrailSupportStatus::RequiresRuntimeEvidence,
         Vec::new(),
         format!("{capability} requires runtime-specific live prevention evidence"),
     )
 }
 
-fn f4_metadata_only_block(
+fn runtime_guardrails_metadata_only_block(
     capability: &'static str,
     evidence_ids: Vec<String>,
-) -> F4GuardrailSupportEntry {
-    f4_entry(
-        F4GuardrailSupportStatus::MetadataOnly,
+) -> RuntimeGuardrailsGuardrailSupportEntry {
+    runtime_guardrails_entry(
+        RuntimeGuardrailsGuardrailSupportStatus::MetadataOnly,
         evidence_ids,
         format!(
             "{capability} is metadata-only until guest/runtime prevention semantics are proven"
@@ -6310,21 +6480,22 @@ fn f4_metadata_only_block(
     )
 }
 
-fn f4_boundary_only_block(
+fn runtime_guardrails_boundary_only_block(
     capability: &'static str,
     evidence_ids: Vec<String>,
-) -> F4GuardrailSupportEntry {
-    f4_entry(
-        F4GuardrailSupportStatus::BoundaryOnly,
+) -> RuntimeGuardrailsGuardrailSupportEntry {
+    runtime_guardrails_entry(
+        RuntimeGuardrailsGuardrailSupportStatus::BoundaryOnly,
         evidence_ids,
         format!("{capability} is boundary-only without guest collector evidence"),
     )
 }
 
-fn f4_adapter_evidence_ids_by_runtime(
-    gate: &F4RuntimeAdapterEvidenceGateReport,
-) -> BTreeMap<F4RuntimeGuardrailTarget, Vec<String>> {
-    let mut by_runtime: BTreeMap<F4RuntimeGuardrailTarget, Vec<String>> = BTreeMap::new();
+fn runtime_guardrails_adapter_evidence_ids_by_runtime(
+    gate: &RuntimeGuardrailsRuntimeAdapterEvidenceGateReport,
+) -> BTreeMap<RuntimeGuardrailsRuntimeGuardrailTarget, Vec<String>> {
+    let mut by_runtime: BTreeMap<RuntimeGuardrailsRuntimeGuardrailTarget, Vec<String>> =
+        BTreeMap::new();
     if !gate.passed {
         return by_runtime;
     }
@@ -6337,35 +6508,25 @@ fn f4_adapter_evidence_ids_by_runtime(
     by_runtime
 }
 
-fn f4_adapter_ids(
-    by_runtime: &BTreeMap<F4RuntimeGuardrailTarget, Vec<String>>,
-    runtime: F4RuntimeGuardrailTarget,
+fn runtime_guardrails_adapter_ids(
+    by_runtime: &BTreeMap<RuntimeGuardrailsRuntimeGuardrailTarget, Vec<String>>,
+    runtime: RuntimeGuardrailsRuntimeGuardrailTarget,
 ) -> Vec<String> {
     by_runtime.get(&runtime).cloned().unwrap_or_default()
 }
 
-fn f4_adapter_failure(
+fn runtime_guardrails_adapter_failure(
     evidence_id: Option<String>,
     message: impl Into<String>,
-) -> F4RuntimeAdapterEvidenceGateFailure {
-    F4RuntimeAdapterEvidenceGateFailure {
+) -> RuntimeGuardrailsRuntimeAdapterEvidenceGateFailure {
+    RuntimeGuardrailsRuntimeAdapterEvidenceGateFailure {
         evidence_id,
         message: message.into(),
     }
 }
 
-fn f4_gvisor_metadata_evidence_ids(gate: &F4GvisorMetadataEvidenceGateReport) -> Vec<String> {
-    if !gate.passed {
-        return Vec::new();
-    }
-    gate.validated_evidence
-        .iter()
-        .map(|report| report.evidence_id.clone())
-        .collect()
-}
-
-fn f4_kubernetes_agent_sandbox_evidence_ids(
-    gate: &F4KubernetesAgentSandboxEvidenceGateReport,
+fn runtime_guardrails_gvisor_metadata_evidence_ids(
+    gate: &RuntimeGuardrailsGvisorMetadataEvidenceGateReport,
 ) -> Vec<String> {
     if !gate.passed {
         return Vec::new();
@@ -6376,7 +6537,9 @@ fn f4_kubernetes_agent_sandbox_evidence_ids(
         .collect()
 }
 
-fn f4_kata_boundary_evidence_ids(gate: &F4KataBoundaryEvidenceGateReport) -> Vec<String> {
+fn runtime_guardrails_kubernetes_agent_sandbox_evidence_ids(
+    gate: &RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateReport,
+) -> Vec<String> {
     if !gate.passed {
         return Vec::new();
     }
@@ -6386,28 +6549,42 @@ fn f4_kata_boundary_evidence_ids(gate: &F4KataBoundaryEvidenceGateReport) -> Vec
         .collect()
 }
 
-fn f5_validate_release_manifest(
-    evidence: &F5ReleasePromotionPolicyEvidence,
-    failures: &mut Vec<F5ReleasePromotionPolicyFailure>,
+fn runtime_guardrails_kata_boundary_evidence_ids(
+    gate: &RuntimeGuardrailsKataBoundaryEvidenceGateReport,
+) -> Vec<String> {
+    if !gate.passed {
+        return Vec::new();
+    }
+    gate.validated_evidence
+        .iter()
+        .map(|report| report.evidence_id.clone())
+        .collect()
+}
+
+fn production_hardening_validate_release_manifest(
+    evidence: &ProductionHardeningReleasePromotionPolicyEvidence,
+    failures: &mut Vec<ProductionHardeningReleasePromotionPolicyFailure>,
 ) {
+    use release_contracts::*;
+
     let manifest = &evidence.release_manifest;
-    f5_expect_json_string(
+    production_hardening_expect_json_string(
         failures,
         manifest,
         "/schema",
-        "apolysis.dev/f5-release-manifest/v1",
-        "release manifest schema must be F5 release manifest v1",
+        PRODUCTION_HARDENING_RELEASE_MANIFEST_SCHEMA,
+        "release manifest schema must be ProductionHardening release manifest v1",
     );
-    f5_expect_json_string(
+    production_hardening_expect_json_string(
         failures,
         manifest,
         "/phase",
-        "F5.6",
-        "release manifest phase must be F5.6",
+        PRODUCTION_HARDENING_RELEASE_MANIFEST_PHASE,
+        "release manifest phase must match the production-hardening release contract",
     );
-    let key_mode = f5_json_str(manifest, "/signing/keyMode").unwrap_or_default();
-    if !f5_is_production_signing_mode(key_mode) {
-        f5_push_failure(
+    let key_mode = production_hardening_json_str(manifest, "/signing/keyMode").unwrap_or_default();
+    if !production_hardening_is_production_signing_mode(key_mode) {
+        production_hardening_push_failure(
             failures,
             "release_manifest.signing.keyMode",
             "external or KMS/HSM-backed signing is required",
@@ -6427,22 +6604,22 @@ fn f5_validate_release_manifest(
             "release provenance signature bundle is required",
         ),
     ] {
-        if f5_json_str(manifest, pointer)
+        if production_hardening_json_str(manifest, pointer)
             .map(str::trim)
             .unwrap_or_default()
             .is_empty()
         {
-            f5_push_failure(failures, pointer, message);
+            production_hardening_push_failure(failures, pointer, message);
         }
     }
     for artifact in [
-        "apolysis-f5-release-payload.tar.gz",
-        "apolysis-f5-apolysisd-image.tar",
-        "apolysis-f5-sbom.cdx.json",
-        "apolysis-f5-provenance.intoto.json",
+        PRODUCTION_HARDENING_RELEASE_PAYLOAD_ARTIFACT,
+        PRODUCTION_HARDENING_DAEMON_IMAGE_ARTIFACT,
+        PRODUCTION_HARDENING_SBOM_ARTIFACT,
+        PRODUCTION_HARDENING_PROVENANCE_ARTIFACT,
     ] {
-        if !f5_json_array_contains_path(manifest, "/files", artifact) {
-            f5_push_failure(
+        if !production_hardening_json_array_contains_path(manifest, "/files", artifact) {
+            production_hardening_push_failure(
                 failures,
                 "release_manifest.files",
                 format!("release manifest must include {artifact}"),
@@ -6451,76 +6628,83 @@ fn f5_validate_release_manifest(
     }
 }
 
-fn f5_validate_registry_attachment(
-    request: &F5ReleasePromotionRequest,
-    evidence: &F5ReleasePromotionPolicyEvidence,
-    failures: &mut Vec<F5ReleasePromotionPolicyFailure>,
+fn production_hardening_validate_registry_attachment(
+    request: &ProductionHardeningReleasePromotionRequest,
+    evidence: &ProductionHardeningReleasePromotionPolicyEvidence,
+    failures: &mut Vec<ProductionHardeningReleasePromotionPolicyFailure>,
 ) {
+    use release_contracts::*;
+
     let attachment = &evidence.registry_attachment;
-    f5_expect_json_string(
+    production_hardening_expect_json_string(
         failures,
         attachment,
         "/schema",
-        "apolysis.dev/f5-registry-attachment/v1",
-        "registry attachment schema must be F5 registry attachment v1",
+        PRODUCTION_HARDENING_REGISTRY_ATTACHMENT_SCHEMA,
+        "registry attachment schema must be ProductionHardening registry attachment v1",
     );
-    f5_expect_json_string(
+    production_hardening_expect_json_string(
         failures,
         attachment,
         "/phase",
-        "F5.8",
-        "registry attachment phase must be F5.8",
+        PRODUCTION_HARDENING_REGISTRY_ATTACHMENT_PHASE,
+        "registry attachment phase must match the production-hardening registry contract",
     );
-    if f5_json_str(attachment, "/registry/imageDigest") != Some(request.image_digest.as_str()) {
-        f5_push_failure(
+    if production_hardening_json_str(attachment, "/registry/imageDigest")
+        != Some(request.image_digest.as_str())
+    {
+        production_hardening_push_failure(
             failures,
             "registry.imageDigest",
             "image digest does not match registry attachment",
         );
     }
-    if f5_json_str(attachment, "/registry/sbomAttachmentDigest")
+    if production_hardening_json_str(attachment, "/registry/sbomAttachmentDigest")
         != Some(request.sbom_attachment_digest.as_str())
     {
-        f5_push_failure(
+        production_hardening_push_failure(
             failures,
             "registry.sbomAttachmentDigest",
             "SBOM attachment digest does not match registry attachment",
         );
     }
-    if f5_json_str(attachment, "/registry/tag") != Some(request.source_tag.as_str()) {
-        f5_push_failure(
+    if production_hardening_json_str(attachment, "/registry/tag")
+        != Some(request.source_tag.as_str())
+    {
+        production_hardening_push_failure(
             failures,
             "registry.tag",
             "source tag does not match registry attachment",
         );
     }
-    if f5_json_str(attachment, "/releaseArtifacts/manifest/sha256")
+    if production_hardening_json_str(attachment, "/releaseArtifacts/manifest/sha256")
         != Some(evidence.release_manifest_sha256.as_str())
     {
-        f5_push_failure(
+        production_hardening_push_failure(
             failures,
             "registry.releaseArtifacts.manifest.sha256",
             "registry attachment release manifest digest does not match evidence",
         );
     }
-    if !f5_json_array_contains_string(
+    if !production_hardening_json_array_contains_string(
         attachment,
         "/registryObservedState/tagsAfterSbom/tags",
         &request.source_tag,
     ) {
-        f5_push_failure(
+        production_hardening_push_failure(
             failures,
             "registryObservedState.tagsAfterSbom",
             "registry observed tags must include the source image tag",
         );
     }
-    if let Some(sbom_tag) = f5_json_str(attachment, "/registry/sbomAttachmentTag") {
-        if !f5_json_array_contains_string(
+    if let Some(sbom_tag) = production_hardening_json_str(attachment, "/registry/sbomAttachmentTag")
+    {
+        if !production_hardening_json_array_contains_string(
             attachment,
             "/registryObservedState/tagsAfterSbom/tags",
             sbom_tag,
         ) {
-            f5_push_failure(
+            production_hardening_push_failure(
                 failures,
                 "registryObservedState.tagsAfterSbom",
                 "registry observed tags must include the SBOM attachment tag",
@@ -6529,72 +6713,74 @@ fn f5_validate_registry_attachment(
     }
 }
 
-fn f5_validate_archive_manifest(
-    request: &F5ReleasePromotionRequest,
-    evidence: &F5ReleasePromotionPolicyEvidence,
-    failures: &mut Vec<F5ReleasePromotionPolicyFailure>,
+fn production_hardening_validate_archive_manifest(
+    request: &ProductionHardeningReleasePromotionRequest,
+    evidence: &ProductionHardeningReleasePromotionPolicyEvidence,
+    failures: &mut Vec<ProductionHardeningReleasePromotionPolicyFailure>,
 ) {
+    use release_contracts::*;
+
     let archive = &evidence.archive_manifest;
-    f5_expect_json_string(
+    production_hardening_expect_json_string(
         failures,
         archive,
         "/schema",
-        "apolysis.dev/f5-immutable-archive-manifest/v1",
-        "archive manifest schema must be F5 immutable archive manifest v1",
+        PRODUCTION_HARDENING_IMMUTABLE_ARCHIVE_SCHEMA,
+        "archive manifest schema must be ProductionHardening immutable archive manifest v1",
     );
-    f5_expect_json_string(
+    production_hardening_expect_json_string(
         failures,
         archive,
         "/phase",
-        "F5.8",
-        "archive manifest phase must be F5.8",
+        PRODUCTION_HARDENING_IMMUTABLE_ARCHIVE_PHASE,
+        "archive manifest phase must match the production-hardening archive contract",
     );
-    if f5_json_str(archive, "/archive/releaseManifestSha256")
+    if production_hardening_json_str(archive, "/archive/releaseManifestSha256")
         != Some(request.release_manifest_sha256.as_str())
     {
-        f5_push_failure(
+        production_hardening_push_failure(
             failures,
             "archive.releaseManifestSha256",
             "archive release manifest digest does not match request",
         );
     }
-    if f5_json_str(archive, "/archive/registryAttachmentSha256")
+    if production_hardening_json_str(archive, "/archive/registryAttachmentSha256")
         != Some(evidence.registry_attachment_sha256.as_str())
     {
-        f5_push_failure(
+        production_hardening_push_failure(
             failures,
             "archive.registryAttachmentSha256",
             "archive registry attachment digest does not match evidence",
         );
     }
-    f5_expect_json_string(
+    production_hardening_expect_json_string(
         failures,
         archive,
         "/immutability/directoryMode",
         "0555",
         "archive directory mode must be read-only",
     );
-    f5_expect_json_string(
+    production_hardening_expect_json_string(
         failures,
         archive,
         "/immutability/fileMode",
         "0444",
         "archive file mode must be read-only",
     );
-    if f5_json_str(archive, "/immutability/mutationProbe") != Some("denied") {
-        f5_push_failure(
+    if production_hardening_json_str(archive, "/immutability/mutationProbe") != Some("denied") {
+        production_hardening_push_failure(
             failures,
             "archive.immutability.mutationProbe",
             "archive mutation probe must be denied",
         );
     }
     for artifact in [
-        "apolysis-f5-release-manifest.json",
-        "apolysis-f5-registry-attachment.json",
-        "apolysis-f5-apolysisd-image.tar",
+        "apolysis-production-hardening-release-manifest.json",
+        "apolysis-production-hardening-registry-attachment.json",
+        "apolysis-production-hardening-apolysisd-image.tar",
     ] {
-        if !f5_json_array_contains_path(archive, "/artifacts", artifact) {
-            f5_push_failure(
+        if !production_hardening_json_array_contains_path(archive, "/artifacts", artifact) {
+            production_hardening_push_failure(
                 failures,
                 "archive.artifacts",
                 format!("archive manifest must include {artifact}"),
@@ -6611,7 +6797,7 @@ fn f5_validate_archive_manifest(
                     .get("path")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("<unknown>");
-                f5_push_failure(
+                production_hardening_push_failure(
                     failures,
                     "archive.artifacts.mode",
                     format!("archive artifact {path} must be read-only"),
@@ -6621,23 +6807,30 @@ fn f5_validate_archive_manifest(
     }
 }
 
-fn f5_expect_json_string(
-    failures: &mut Vec<F5ReleasePromotionPolicyFailure>,
+fn production_hardening_expect_json_string(
+    failures: &mut Vec<ProductionHardeningReleasePromotionPolicyFailure>,
     value: &serde_json::Value,
     pointer: &str,
     expected: &str,
     message: impl Into<String>,
 ) {
-    if f5_json_str(value, pointer) != Some(expected) {
-        f5_push_failure(failures, pointer, message);
+    if production_hardening_json_str(value, pointer) != Some(expected) {
+        production_hardening_push_failure(failures, pointer, message);
     }
 }
 
-fn f5_json_str<'a>(value: &'a serde_json::Value, pointer: &str) -> Option<&'a str> {
+fn production_hardening_json_str<'a>(
+    value: &'a serde_json::Value,
+    pointer: &str,
+) -> Option<&'a str> {
     value.pointer(pointer)?.as_str()
 }
 
-fn f5_json_array_contains_path(value: &serde_json::Value, pointer: &str, path: &str) -> bool {
+fn production_hardening_json_array_contains_path(
+    value: &serde_json::Value,
+    pointer: &str,
+    path: &str,
+) -> bool {
     value
         .pointer(pointer)
         .and_then(serde_json::Value::as_array)
@@ -6653,7 +6846,11 @@ fn f5_json_array_contains_path(value: &serde_json::Value, pointer: &str, path: &
         .unwrap_or(false)
 }
 
-fn f5_json_array_contains_string(value: &serde_json::Value, pointer: &str, expected: &str) -> bool {
+fn production_hardening_json_array_contains_string(
+    value: &serde_json::Value,
+    pointer: &str,
+    expected: &str,
+) -> bool {
     value
         .pointer(pointer)
         .and_then(serde_json::Value::as_array)
@@ -6661,256 +6858,271 @@ fn f5_json_array_contains_string(value: &serde_json::Value, pointer: &str, expec
         .unwrap_or(false)
 }
 
-fn f5_push_failure(
-    failures: &mut Vec<F5ReleasePromotionPolicyFailure>,
+fn production_hardening_push_failure(
+    failures: &mut Vec<ProductionHardeningReleasePromotionPolicyFailure>,
     field: impl Into<String>,
     message: impl Into<String>,
 ) {
-    failures.push(F5ReleasePromotionPolicyFailure {
+    failures.push(ProductionHardeningReleasePromotionPolicyFailure {
         field: field.into(),
         message: message.into(),
     });
 }
 
-fn f5_registry_promotion_execution_failure(
-    failures: &mut Vec<F5RegistryPromotionExecutionFailure>,
+fn production_hardening_registry_promotion_execution_failure(
+    failures: &mut Vec<ProductionHardeningRegistryPromotionExecutionFailure>,
     field: impl Into<String>,
     message: impl Into<String>,
 ) {
-    failures.push(F5RegistryPromotionExecutionFailure {
+    failures.push(ProductionHardeningRegistryPromotionExecutionFailure {
         field: field.into(),
         message: message.into(),
     });
 }
 
-fn f5_registry_promotion_uri_matches_provider(
-    provider: F5RegistryPromotionExecutionProvider,
+fn production_hardening_registry_promotion_uri_matches_provider(
+    provider: ProductionHardeningRegistryPromotionExecutionProvider,
     value: &str,
 ) -> bool {
     match provider {
-        F5RegistryPromotionExecutionProvider::OciDistributionRegistry => {
+        ProductionHardeningRegistryPromotionExecutionProvider::OciDistributionRegistry => {
             value.starts_with("https://")
                 || value.starts_with("http://")
                 || value.starts_with("oci://")
         }
-        F5RegistryPromotionExecutionProvider::AwsEcr => {
+        ProductionHardeningRegistryPromotionExecutionProvider::AwsEcr => {
             value.starts_with("https://") || value.starts_with("ecr://")
         }
-        F5RegistryPromotionExecutionProvider::GcpArtifactRegistry => {
+        ProductionHardeningRegistryPromotionExecutionProvider::GcpArtifactRegistry => {
             value.starts_with("https://") || value.starts_with("artifactregistry://")
         }
-        F5RegistryPromotionExecutionProvider::AzureContainerRegistry => {
+        ProductionHardeningRegistryPromotionExecutionProvider::AzureContainerRegistry => {
             value.starts_with("https://") || value.starts_with("acr://")
         }
-        F5RegistryPromotionExecutionProvider::DockerHub => {
+        ProductionHardeningRegistryPromotionExecutionProvider::DockerHub => {
             value.starts_with("https://index.docker.io/")
                 || value.starts_with("https://registry-1.docker.io/")
                 || value.starts_with("dockerhub://")
         }
-        F5RegistryPromotionExecutionProvider::LocalFilesystem => false,
+        ProductionHardeningRegistryPromotionExecutionProvider::LocalFilesystem => false,
     }
 }
 
-fn f5_is_sha256_digest(value: &str) -> bool {
+fn production_hardening_is_sha256_digest(value: &str) -> bool {
     value
         .strip_prefix("sha256:")
-        .map(f5_is_sha256_hex)
+        .map(production_hardening_is_sha256_hex)
         .unwrap_or(false)
 }
 
-fn f5_is_sha256_hex(value: &str) -> bool {
+fn production_hardening_is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn f5_is_production_signing_mode(value: &str) -> bool {
+fn production_hardening_is_production_signing_mode(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
     normalized == "external" || normalized.contains("kms") || normalized.contains("hsm")
 }
 
-fn f5_is_anonymous_principal(value: &str) -> bool {
+fn production_hardening_is_anonymous_principal(value: &str) -> bool {
     matches!(value, "anonymous" | "system:anonymous")
 }
 
-fn f5_signing_failure(
-    failures: &mut Vec<F5SigningProfileFailure>,
+fn production_hardening_signing_failure(
+    failures: &mut Vec<ProductionHardeningSigningProfileFailure>,
     field: impl Into<String>,
     message: impl Into<String>,
 ) {
-    failures.push(F5SigningProfileFailure {
+    failures.push(ProductionHardeningSigningProfileFailure {
         field: field.into(),
         message: message.into(),
     });
 }
 
-fn f5_is_file_key_uri(value: &str) -> bool {
+fn production_hardening_is_file_key_uri(value: &str) -> bool {
     value.starts_with('/')
         || value.starts_with("./")
         || value.starts_with("../")
         || value.starts_with("file:")
 }
 
-fn f5_signing_uri_matches_provider(provider: F5SigningKeyProvider, value: &str) -> bool {
-    match provider {
-        F5SigningKeyProvider::Kms => {
-            value.starts_with("awskms://")
-                || value.starts_with("azurekms://")
-                || value.starts_with("gcpkms://")
-                || value.starts_with("hashivault://")
-                || value.starts_with("kms://")
-        }
-        F5SigningKeyProvider::Hsm => value.starts_with("pkcs11:") || value.starts_with("pkcs11://"),
-        F5SigningKeyProvider::EphemeralLocalValidation | F5SigningKeyProvider::LocalFile => false,
-    }
-}
-
-fn f5_signing_execution_failure(
-    failures: &mut Vec<F5SigningExecutionFailure>,
-    field: impl Into<String>,
-    message: impl Into<String>,
-) {
-    failures.push(F5SigningExecutionFailure {
-        field: field.into(),
-        message: message.into(),
-    });
-}
-
-fn f5_signing_execution_uri_matches_provider(
-    provider: F5SigningExecutionProvider,
+fn production_hardening_signing_uri_matches_provider(
+    provider: ProductionHardeningSigningKeyProvider,
     value: &str,
 ) -> bool {
     match provider {
-        F5SigningExecutionProvider::Pkcs11Hsm | F5SigningExecutionProvider::ExternalHsm => {
-            value.starts_with("pkcs11:") || value.starts_with("pkcs11://")
-        }
-        F5SigningExecutionProvider::CloudKms => {
+        ProductionHardeningSigningKeyProvider::Kms => {
             value.starts_with("awskms://")
                 || value.starts_with("azurekms://")
                 || value.starts_with("gcpkms://")
                 || value.starts_with("hashivault://")
                 || value.starts_with("kms://")
         }
-        F5SigningExecutionProvider::EphemeralLocalValidation
-        | F5SigningExecutionProvider::LocalFile => false,
+        ProductionHardeningSigningKeyProvider::Hsm => {
+            value.starts_with("pkcs11:") || value.starts_with("pkcs11://")
+        }
+        ProductionHardeningSigningKeyProvider::EphemeralLocalValidation
+        | ProductionHardeningSigningKeyProvider::LocalFile => false,
     }
 }
 
-fn f5_worm_failure(
-    failures: &mut Vec<F5WormArchivePolicyFailure>,
+fn production_hardening_signing_execution_failure(
+    failures: &mut Vec<ProductionHardeningSigningExecutionFailure>,
     field: impl Into<String>,
     message: impl Into<String>,
 ) {
-    failures.push(F5WormArchivePolicyFailure {
+    failures.push(ProductionHardeningSigningExecutionFailure {
         field: field.into(),
         message: message.into(),
     });
 }
 
-fn f5_worm_execution_failure(
-    failures: &mut Vec<F5WormArchiveExecutionFailure>,
+fn production_hardening_signing_execution_uri_matches_provider(
+    provider: ProductionHardeningSigningExecutionProvider,
+    value: &str,
+) -> bool {
+    match provider {
+        ProductionHardeningSigningExecutionProvider::Pkcs11Hsm
+        | ProductionHardeningSigningExecutionProvider::ExternalHsm => {
+            value.starts_with("pkcs11:") || value.starts_with("pkcs11://")
+        }
+        ProductionHardeningSigningExecutionProvider::CloudKms => {
+            value.starts_with("awskms://")
+                || value.starts_with("azurekms://")
+                || value.starts_with("gcpkms://")
+                || value.starts_with("hashivault://")
+                || value.starts_with("kms://")
+        }
+        ProductionHardeningSigningExecutionProvider::EphemeralLocalValidation
+        | ProductionHardeningSigningExecutionProvider::LocalFile => false,
+    }
+}
+
+fn production_hardening_worm_failure(
+    failures: &mut Vec<ProductionHardeningWormArchivePolicyFailure>,
     field: impl Into<String>,
     message: impl Into<String>,
 ) {
-    failures.push(F5WormArchiveExecutionFailure {
+    failures.push(ProductionHardeningWormArchivePolicyFailure {
         field: field.into(),
         message: message.into(),
     });
 }
 
-fn f5_worm_uri_matches_provider(provider: F5WormProvider, value: &str) -> bool {
+fn production_hardening_worm_execution_failure(
+    failures: &mut Vec<ProductionHardeningWormArchiveExecutionFailure>,
+    field: impl Into<String>,
+    message: impl Into<String>,
+) {
+    failures.push(ProductionHardeningWormArchiveExecutionFailure {
+        field: field.into(),
+        message: message.into(),
+    });
+}
+
+fn production_hardening_worm_uri_matches_provider(
+    provider: ProductionHardeningWormProvider,
+    value: &str,
+) -> bool {
     match provider {
-        F5WormProvider::S3ObjectLock => value.starts_with("s3://"),
-        F5WormProvider::GcsBucketLock => value.starts_with("gs://"),
-        F5WormProvider::AzureImmutableBlob => value.starts_with("azblob://"),
-        F5WormProvider::CloudflareR2BucketLock => value.starts_with("cloudflare-r2://"),
-        F5WormProvider::LocalFilesystem => false,
+        ProductionHardeningWormProvider::S3ObjectLock => value.starts_with("s3://"),
+        ProductionHardeningWormProvider::GcsBucketLock => value.starts_with("gs://"),
+        ProductionHardeningWormProvider::AzureImmutableBlob => value.starts_with("azblob://"),
+        ProductionHardeningWormProvider::CloudflareR2BucketLock => {
+            value.starts_with("cloudflare-r2://")
+        }
+        ProductionHardeningWormProvider::LocalFilesystem => false,
     }
 }
 
-fn f5_worm_endpoint_matches_provider(provider: F5WormProvider, value: &str) -> bool {
+fn production_hardening_worm_endpoint_matches_provider(
+    provider: ProductionHardeningWormProvider,
+    value: &str,
+) -> bool {
     match provider {
-        F5WormProvider::S3ObjectLock => {
+        ProductionHardeningWormProvider::S3ObjectLock => {
             value.starts_with("s3://")
                 || value.starts_with("https://")
                 || value.starts_with("http://")
         }
-        F5WormProvider::GcsBucketLock => {
+        ProductionHardeningWormProvider::GcsBucketLock => {
             value.starts_with("gs://") || value.starts_with("https://")
         }
-        F5WormProvider::AzureImmutableBlob => {
+        ProductionHardeningWormProvider::AzureImmutableBlob => {
             value.starts_with("azblob://") || value.starts_with("https://")
         }
-        F5WormProvider::CloudflareR2BucketLock => {
+        ProductionHardeningWormProvider::CloudflareR2BucketLock => {
             value.starts_with("cloudflare-r2://") || value.starts_with("https://")
         }
-        F5WormProvider::LocalFilesystem => false,
+        ProductionHardeningWormProvider::LocalFilesystem => false,
     }
 }
 
-fn f5_service_mesh_failure(
-    failures: &mut Vec<F5ServiceMeshLiveEvidenceFailure>,
+fn production_hardening_service_mesh_failure(
+    failures: &mut Vec<ProductionHardeningServiceMeshLiveEvidenceFailure>,
     field: impl Into<String>,
     message: impl Into<String>,
 ) {
-    failures.push(F5ServiceMeshLiveEvidenceFailure {
+    failures.push(ProductionHardeningServiceMeshLiveEvidenceFailure {
         field: field.into(),
         message: message.into(),
     });
 }
 
-fn f5_operator_controller_failure(
-    failures: &mut Vec<F5OperatorControllerFailure>,
+fn production_hardening_operator_controller_failure(
+    failures: &mut Vec<ProductionHardeningOperatorControllerFailure>,
     field: impl Into<String>,
     message: impl Into<String>,
 ) {
-    failures.push(F5OperatorControllerFailure {
+    failures.push(ProductionHardeningOperatorControllerFailure {
         field: field.into(),
         message: message.into(),
     });
 }
 
-fn f5_chaos_performance_failure(
-    failures: &mut Vec<F5ChaosPerformanceFailure>,
+fn production_hardening_chaos_performance_failure(
+    failures: &mut Vec<ProductionHardeningChaosPerformanceFailure>,
     field: impl Into<String>,
     message: impl Into<String>,
 ) {
-    failures.push(F5ChaosPerformanceFailure {
+    failures.push(ProductionHardeningChaosPerformanceFailure {
         field: field.into(),
         message: message.into(),
     });
 }
 
-fn f5_external_provider_qualification_failure(
-    failures: &mut Vec<F5ExternalProviderQualificationFailure>,
+fn production_hardening_external_provider_qualification_failure(
+    failures: &mut Vec<ProductionHardeningExternalProviderQualificationFailure>,
     field: impl Into<String>,
     message: impl Into<String>,
 ) {
-    failures.push(F5ExternalProviderQualificationFailure {
+    failures.push(ProductionHardeningExternalProviderQualificationFailure {
         field: field.into(),
         message: message.into(),
     });
 }
 
-fn f5_external_provider_missing_requirement_message(
-    requirement: F5ExternalProviderQualificationRequirement,
+fn production_hardening_external_provider_missing_requirement_message(
+    requirement: ProductionHardeningExternalProviderQualificationRequirement,
 ) -> &'static str {
     match requirement {
-        F5ExternalProviderQualificationRequirement::CloudKmsOrExternalHsmSigning => {
+        ProductionHardeningExternalProviderQualificationRequirement::CloudKmsOrExternalHsmSigning => {
             "cloud KMS or external hardware HSM signing qualification is required"
         }
-        F5ExternalProviderQualificationRequirement::CloudWormObjectLockArchive => {
+        ProductionHardeningExternalProviderQualificationRequirement::CloudWormObjectLockArchive => {
             "real cloud WORM/object-lock provider qualification is required"
         }
-        F5ExternalProviderQualificationRequirement::CloudRegistryPromotionRetention => {
+        ProductionHardeningExternalProviderQualificationRequirement::CloudRegistryPromotionRetention => {
             "real cloud registry promotion/retention qualification is required"
         }
-        F5ExternalProviderQualificationRequirement::ManagedServiceMesh => {
+        ProductionHardeningExternalProviderQualificationRequirement::ManagedServiceMesh => {
             "managed service-mesh provider qualification is required"
         }
     }
 }
 
-fn f5_is_accepted_external_provider(
-    requirement: F5ExternalProviderQualificationRequirement,
+fn production_hardening_is_accepted_external_provider(
+    requirement: ProductionHardeningExternalProviderQualificationRequirement,
     provider: &str,
 ) -> bool {
     let provider = provider.trim().to_ascii_lowercase();
@@ -6927,7 +7139,7 @@ fn f5_is_accepted_external_provider(
     }
 
     match requirement {
-        F5ExternalProviderQualificationRequirement::CloudKmsOrExternalHsmSigning => matches!(
+        ProductionHardeningExternalProviderQualificationRequirement::CloudKmsOrExternalHsmSigning => matches!(
             provider.as_str(),
             "aws_kms"
                 | "aws_cloudhsm"
@@ -6940,7 +7152,7 @@ fn f5_is_accepted_external_provider(
                 | "thales_hsm"
                 | "yubihsm"
         ),
-        F5ExternalProviderQualificationRequirement::CloudWormObjectLockArchive => matches!(
+        ProductionHardeningExternalProviderQualificationRequirement::CloudWormObjectLockArchive => matches!(
             provider.as_str(),
             "aws_s3_object_lock"
                 | "s3_object_lock"
@@ -6951,7 +7163,7 @@ fn f5_is_accepted_external_provider(
                 | "azure_immutable_blob"
                 | "azure_blob_immutability_policy"
         ),
-        F5ExternalProviderQualificationRequirement::CloudRegistryPromotionRetention => matches!(
+        ProductionHardeningExternalProviderQualificationRequirement::CloudRegistryPromotionRetention => matches!(
             provider.as_str(),
             "aws_ecr"
                 | "gcp_artifact_registry"
@@ -6961,7 +7173,7 @@ fn f5_is_accepted_external_provider(
                 | "ghcr"
                 | "quay"
         ),
-        F5ExternalProviderQualificationRequirement::ManagedServiceMesh => matches!(
+        ProductionHardeningExternalProviderQualificationRequirement::ManagedServiceMesh => matches!(
             provider.as_str(),
             "gke_anthos_service_mesh"
                 | "anthos_service_mesh"
@@ -6976,9 +7188,9 @@ fn f5_is_accepted_external_provider(
     }
 }
 
-fn f5_is_service_account_principal(value: &str) -> bool {
+fn production_hardening_is_service_account_principal(value: &str) -> bool {
     let value = value.trim();
-    if value == "*" || f5_is_anonymous_principal(value) {
+    if value == "*" || production_hardening_is_anonymous_principal(value) {
         return false;
     }
 
@@ -7001,70 +7213,70 @@ fn f5_is_service_account_principal(value: &str) -> bool {
     )
 }
 
-fn f4_merge_evidence_ids(left: Vec<String>, right: Vec<String>) -> Vec<String> {
+fn runtime_guardrails_merge_evidence_ids(left: Vec<String>, right: Vec<String>) -> Vec<String> {
     let mut merged = BTreeSet::new();
     merged.extend(left);
     merged.extend(right);
     merged.into_iter().collect()
 }
 
-fn f4_gvisor_failure(
+fn runtime_guardrails_gvisor_failure(
     evidence_id: Option<String>,
     message: impl Into<String>,
-) -> F4GvisorMetadataEvidenceGateFailure {
-    F4GvisorMetadataEvidenceGateFailure {
+) -> RuntimeGuardrailsGvisorMetadataEvidenceGateFailure {
+    RuntimeGuardrailsGvisorMetadataEvidenceGateFailure {
         evidence_id,
         message: message.into(),
     }
 }
 
-fn f4_kubernetes_agent_sandbox_failure(
+fn runtime_guardrails_kubernetes_agent_sandbox_failure(
     evidence_id: Option<String>,
     message: impl Into<String>,
-) -> F4KubernetesAgentSandboxEvidenceGateFailure {
-    F4KubernetesAgentSandboxEvidenceGateFailure {
+) -> RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateFailure {
+    RuntimeGuardrailsKubernetesAgentSandboxEvidenceGateFailure {
         evidence_id,
         message: message.into(),
     }
 }
 
-fn f4_kata_boundary_failure(
+fn runtime_guardrails_kata_boundary_failure(
     evidence_id: Option<String>,
     message: impl Into<String>,
-) -> F4KataBoundaryEvidenceGateFailure {
-    F4KataBoundaryEvidenceGateFailure {
+) -> RuntimeGuardrailsKataBoundaryEvidenceGateFailure {
+    RuntimeGuardrailsKataBoundaryEvidenceGateFailure {
         evidence_id,
         message: message.into(),
     }
 }
 
-fn f4_is_gvisor_handler(value: &str) -> bool {
+fn runtime_guardrails_is_gvisor_handler(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
     normalized.contains("runsc") || normalized.contains("gvisor")
 }
 
-fn f4_is_kata_handler(value: &str) -> bool {
+fn runtime_guardrails_is_kata_handler(value: &str) -> bool {
     value.to_ascii_lowercase().contains("kata")
 }
 
-fn f4_optional_nonempty(value: &Option<String>) -> bool {
+fn runtime_guardrails_optional_nonempty(value: &Option<String>) -> bool {
     value
         .as_deref()
         .map(|text| !text.trim().is_empty())
         .unwrap_or(false)
 }
 
-fn f4_subject_observed(subjects: &[String], needle: &str) -> bool {
+fn runtime_guardrails_subject_observed(subjects: &[String], needle: &str) -> bool {
     subjects
         .iter()
         .any(|subject| subject.to_ascii_lowercase().contains(needle))
 }
 
-fn f3_local_seccomp_execution_failure(
+fn policy_guardrails_local_seccomp_execution_failure(
     evidence_id: Option<String>,
     message: impl Into<String>,
-) -> F3LocalSeccompExecutionFailure {
-    F3LocalSeccompExecutionFailure {
+) -> PolicyGuardrailsLocalSeccompExecutionFailure {
+    PolicyGuardrailsLocalSeccompExecutionFailure {
         evidence_id,
         message: message.into(),
     }
@@ -7078,10 +7290,10 @@ fn evidence_id_opt(evidence_id: &str) -> Option<String> {
     }
 }
 
-fn f3_bpf_lsm_prerequisite_failure(
+fn policy_guardrails_bpf_lsm_prerequisite_failure(
     message: impl Into<String>,
-) -> F3BpfLsmPrototypePrerequisiteFailure {
-    F3BpfLsmPrototypePrerequisiteFailure {
+) -> PolicyGuardrailsBpfLsmPrototypePrerequisiteFailure {
+    PolicyGuardrailsBpfLsmPrototypePrerequisiteFailure {
         message: message.into(),
     }
 }

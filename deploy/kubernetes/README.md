@@ -1,11 +1,11 @@
 # Kubernetes / Agent Sandbox Examples
 
-These manifests document the M6 integration target. They are examples for
+These manifests document the KubernetesMetadata integration target. They are examples for
 platform teams that already run Kubernetes Agent Sandbox or RuntimeClass-backed
 sandboxes. Adjust API versions and handlers to the Agent Sandbox release and
 node runtime installed in your cluster.
 
-M6 is metadata-only: Apolysis does not yet include a controller, admission
+KubernetesMetadata is metadata-only: Apolysis does not yet include a controller, admission
 webhook, or live Kubernetes client. Capture a pod snapshot and pass it to the
 observer:
 
@@ -15,8 +15,8 @@ kubectl get pod <pod> -n <namespace> -o yaml > .apolysis/k8s-pod.yaml
 APOLYSIS_BPF_LSM_AVAILABLE=0 cargo run -p apolysis-cli -- observe \
   --backend fixture \
   --input tests/fixtures/raw-kernel-events.txt \
-  --session session-m6-k8s \
-  --policy tests/fixtures/policies/m5-block-policy.yaml \
+  --session session-kubernetes-metadata-k8s \
+  --policy tests/fixtures/policies/policy-feedback-block-policy.yaml \
   --output .apolysis/kubernetes-timeline.jsonl \
   --feedback-dir .sandbox \
   --kubernetes-metadata .apolysis/k8s-pod.yaml
@@ -31,9 +31,9 @@ Recommended baseline:
 - Label pods with the Agent Sandbox name so Apolysis can correlate timeline
   events to the higher-level sandbox identity.
 
-## F5 Production-Hardening Baseline
+## ProductionHardening Production-Hardening Baseline
 
-`apolysisd-production-baseline.yaml` is the first F5 production-hardening
+`apolysisd-production-baseline.yaml` is the first ProductionHardening production-hardening
 deployment baseline for running `apolysisd` as a node-local DaemonSet. It keeps
 production-facing kernel blocking disabled, uses explicit Linux capabilities
 instead of `privileged: true`, mounts runtime sockets read-only, sets bounded
@@ -44,7 +44,7 @@ Prometheus metrics on the pod-local metrics port.
 Validate the manifest before live deployment:
 
 ```bash
-make test-f5-production-hardening
+make test-production-hardening
 kubectl apply --dry-run=client --validate=false \
   -f deploy/kubernetes/apolysisd-production-baseline.yaml
 ```
@@ -52,7 +52,7 @@ kubectl apply --dry-run=client --validate=false \
 Run the live k3s deployment gate only on a validation host:
 
 ```bash
-APOLYSIS_CONFIRM_F5_LIVE_DEPLOYMENT=1 make test-f5-live-deployment
+APOLYSIS_CONFIRM_PRODUCTION_HARDENING_LIVE_DEPLOYMENT=1 make test-production-hardening-live-deployment
 ```
 
 The live gate builds a local image, imports it into k3s containerd, deploys the
@@ -70,7 +70,7 @@ vulnerability scan against the staged payload, and verifies the resulting
 checksums and signatures:
 
 ```bash
-make test-f5-supply-chain
+make test-production-hardening-supply-chain
 ```
 
 `deploy/helm/apolysis` packages the same node-local daemon shape as a
@@ -80,5 +80,5 @@ runtime metadata RBAC, a default-deny NetworkPolicy, a metrics Service with
 mTLS handoff annotations, and a narrow metrics ingress allowlist.
 
 ```bash
-make test-f5-helm-production
+make test-production-hardening-helm-production
 ```

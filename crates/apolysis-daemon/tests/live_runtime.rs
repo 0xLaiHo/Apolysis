@@ -17,7 +17,10 @@ async fn live_daemon_observer_tracks_two_cgroups_and_excludes_untracked_work() {
     let object = root.join("target/ebpf/apolysis_observer.bpf.o");
     let observer =
         DaemonObserver::load(DaemonObserverConfig::new(&object)).expect("load daemon observer");
-    let temporary = std::env::temp_dir().join(format!("apolysis-f2-live-{}", std::process::id()));
+    let temporary = std::env::temp_dir().join(format!(
+        "apolysis-runtime-foundation-live-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&temporary);
     std::fs::create_dir_all(&temporary).expect("create temporary directory");
     let executable_a = temporary.join("apolf2a");
@@ -29,8 +32,8 @@ async fn live_daemon_observer_tracks_two_cgroups_and_excludes_untracked_work() {
 
     let cgroup_parent = current_cgroup_path();
     let suffix = format!("{}-{}", std::process::id(), now_ms());
-    let cgroup_a = cgroup_parent.join(format!("apolysis-f2-a-{suffix}"));
-    let cgroup_b = cgroup_parent.join(format!("apolysis-f2-b-{suffix}"));
+    let cgroup_a = cgroup_parent.join(format!("apolysis-runtime-foundation-a-{suffix}"));
+    let cgroup_b = cgroup_parent.join(format!("apolysis-runtime-foundation-b-{suffix}"));
     std::fs::create_dir(&cgroup_a).expect("create cgroup A");
     std::fs::create_dir(&cgroup_b).expect("create cgroup B");
     let cleanup = LiveCleanup {

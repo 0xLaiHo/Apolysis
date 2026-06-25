@@ -2,7 +2,7 @@
 
 //! JSONL storage primitives for Apolysis.
 //!
-//! M1 stores timeline data in append-only JSONL because it is transparent,
+//! TimelineStore stores timeline data in append-only JSONL because it is transparent,
 //! shell-friendly, and easy to preserve as evidence during early eBPF work.
 
 use std::fs::File;

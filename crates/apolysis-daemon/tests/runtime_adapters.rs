@@ -25,18 +25,18 @@ use apolysis_daemon::{
     containerd_workload_from_snapshot, crictl_marked_container_candidates_from_ps_and_pods,
     crictl_marked_container_ids_from_ps, docker_container_pid_from_engine_inspect,
     docker_snapshot_from_engine_inspect, docker_workload_from_snapshot,
-    f4_runtime_adapter_evidence_from_workload, kubernetes_marked_pod_snapshots_from_api_list,
-    kubernetes_pod_snapshot_from_api_object, kubernetes_workload_from_pod_snapshot,
-    run_runtime_adapter_with_policy, AdapterBackoffPolicy, ContainerdCriRuntimeAdapter,
-    ContainerdTaskSnapshot, CriRuntimeClient, DaemonConfig, DaemonState, DockerContainerSnapshot,
-    DockerEngineClient, DockerEnginePollingRuntimeAdapter, DockerEngineRuntimeAdapter,
-    KubernetesCliClient, KubernetesCliRuntimeAdapter, KubernetesPodSnapshot, RuntimeAdapterBackend,
-    RuntimeWorkload, APOLYSIS_SESSION_ANNOTATION,
+    kubernetes_marked_pod_snapshots_from_api_list, kubernetes_pod_snapshot_from_api_object,
+    kubernetes_workload_from_pod_snapshot, run_runtime_adapter_with_policy,
+    runtime_guardrails_runtime_adapter_evidence_from_workload, AdapterBackoffPolicy,
+    ContainerdCriRuntimeAdapter, ContainerdTaskSnapshot, CriRuntimeClient, DaemonConfig,
+    DaemonState, DockerContainerSnapshot, DockerEngineClient, DockerEnginePollingRuntimeAdapter,
+    DockerEngineRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
+    KubernetesPodSnapshot, RuntimeAdapterBackend, RuntimeWorkload, APOLYSIS_SESSION_ANNOTATION,
 };
 use apolysis_validation::{
-    F4GvisorMetadataEvidenceReport, F4KataBoundaryEvidenceReport,
-    F4KubernetesAgentSandboxEvidenceReport, F4RuntimeAdapterEvidenceSource,
-    F4RuntimeGuardrailTarget,
+    RuntimeGuardrailsGvisorMetadataEvidenceReport, RuntimeGuardrailsKataBoundaryEvidenceReport,
+    RuntimeGuardrailsKubernetesAgentSandboxEvidenceReport,
+    RuntimeGuardrailsRuntimeAdapterEvidenceSource, RuntimeGuardrailsRuntimeGuardrailTarget,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -45,38 +45,41 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-static F4_ENV_LOCK: Mutex<()> = Mutex::new(());
-const F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT: &str = "APOLYSIS_F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT";
-const F4_GVISOR_METADATA_EVIDENCE_OUTPUT: &str = "APOLYSIS_F4_GVISOR_METADATA_EVIDENCE_OUTPUT";
-const F4_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT: &str =
-    "APOLYSIS_F4_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT";
-const F4_KATA_BOUNDARY_EVIDENCE_OUTPUT: &str = "APOLYSIS_F4_KATA_BOUNDARY_EVIDENCE_OUTPUT";
-const F4_EVIDENCE_OUTPUT_ENV_VARS: &[&str] = &[
-    F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT,
-    F4_GVISOR_METADATA_EVIDENCE_OUTPUT,
-    F4_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT,
-    F4_KATA_BOUNDARY_EVIDENCE_OUTPUT,
+static RUNTIME_GUARDRAILS_ENV_LOCK: Mutex<()> = Mutex::new(());
+const RUNTIME_GUARDRAILS_RUNTIME_ADAPTER_EVIDENCE_OUTPUT: &str =
+    "APOLYSIS_RUNTIME_GUARDRAILS_RUNTIME_ADAPTER_EVIDENCE_OUTPUT";
+const RUNTIME_GUARDRAILS_GVISOR_METADATA_EVIDENCE_OUTPUT: &str =
+    "APOLYSIS_RUNTIME_GUARDRAILS_GVISOR_METADATA_EVIDENCE_OUTPUT";
+const RUNTIME_GUARDRAILS_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT: &str =
+    "APOLYSIS_RUNTIME_GUARDRAILS_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT";
+const RUNTIME_GUARDRAILS_KATA_BOUNDARY_EVIDENCE_OUTPUT: &str =
+    "APOLYSIS_RUNTIME_GUARDRAILS_KATA_BOUNDARY_EVIDENCE_OUTPUT";
+const RUNTIME_GUARDRAILS_EVIDENCE_OUTPUT_ENV_VARS: &[&str] = &[
+    RUNTIME_GUARDRAILS_RUNTIME_ADAPTER_EVIDENCE_OUTPUT,
+    RUNTIME_GUARDRAILS_GVISOR_METADATA_EVIDENCE_OUTPUT,
+    RUNTIME_GUARDRAILS_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT,
+    RUNTIME_GUARDRAILS_KATA_BOUNDARY_EVIDENCE_OUTPUT,
 ];
 
-struct F4EvidenceOutputEnvGuard {
+struct RuntimeGuardrailsEvidenceOutputEnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
-impl F4EvidenceOutputEnvGuard {
+impl RuntimeGuardrailsEvidenceOutputEnvGuard {
     fn new() -> Self {
-        let guard = F4_ENV_LOCK
+        let guard = RUNTIME_GUARDRAILS_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for env_var in F4_EVIDENCE_OUTPUT_ENV_VARS {
+        for env_var in RUNTIME_GUARDRAILS_EVIDENCE_OUTPUT_ENV_VARS {
             std::env::remove_var(env_var);
         }
         Self { _lock: guard }
     }
 }
 
-impl Drop for F4EvidenceOutputEnvGuard {
+impl Drop for RuntimeGuardrailsEvidenceOutputEnvGuard {
     fn drop(&mut self) {
-        for env_var in F4_EVIDENCE_OUTPUT_ENV_VARS {
+        for env_var in RUNTIME_GUARDRAILS_EVIDENCE_OUTPUT_ENV_VARS {
             std::env::remove_var(env_var);
         }
     }
@@ -521,10 +524,13 @@ async fn live_docker_engine_adapter_discovers_labelled_container() {
         if let Some(runtime) = runtime {
             assert_eq!(workload.runtime_handler.as_deref(), Some(runtime));
         }
-        record_f4_runtime_adapter_evidence(&workload, f4_live_adapter_evidence_id(&workload))
-            .expect("write live Docker F4 runtime adapter evidence");
-        record_f4_strong_runtime_metadata_evidence(&workload)
-            .expect("write live Docker strong-runtime F4 metadata evidence");
+        record_runtime_guardrails_runtime_adapter_evidence(
+            &workload,
+            runtime_guardrails_live_adapter_evidence_id(&workload),
+        )
+        .expect("write live Docker RuntimeGuardrails runtime adapter evidence");
+        record_runtime_guardrails_strong_runtime_metadata_evidence(&workload)
+            .expect("write live Docker strong-runtime RuntimeGuardrails metadata evidence");
 
         drop(cleanup);
     }
@@ -1184,16 +1190,19 @@ async fn live_kubernetes_cli_adapter_discovers_annotated_pods() {
             workload.runtime_handler.as_deref(),
             runtime_class.as_deref()
         );
-        record_f4_runtime_adapter_evidence(&workload, f4_live_adapter_evidence_id(&workload))
-            .expect("write live Kubernetes F4 runtime adapter evidence");
-        record_f4_strong_runtime_metadata_evidence(&workload)
-            .expect("write live Kubernetes strong-runtime F4 metadata evidence");
-        record_f4_kubernetes_agent_sandbox_evidence(
+        record_runtime_guardrails_runtime_adapter_evidence(
+            &workload,
+            runtime_guardrails_live_adapter_evidence_id(&workload),
+        )
+        .expect("write live Kubernetes RuntimeGuardrails runtime adapter evidence");
+        record_runtime_guardrails_strong_runtime_metadata_evidence(&workload)
+            .expect("write live Kubernetes strong-runtime RuntimeGuardrails metadata evidence");
+        record_runtime_guardrails_kubernetes_agent_sandbox_evidence(
             &workload,
             live_kubernetes_agent_sandbox_metadata(&kubectl, &namespace, &pod_name)
                 .expect("live Kubernetes Agent Sandbox metadata"),
         )
-        .expect("write live Kubernetes Agent Sandbox F4 evidence");
+        .expect("write live Kubernetes Agent Sandbox RuntimeGuardrails evidence");
         drop(cleanup);
     }
 }
@@ -1306,60 +1315,70 @@ async fn next_workload_for_session<B: RuntimeAdapterBackend>(
     }
 }
 
-fn record_f4_runtime_adapter_evidence(
+fn record_runtime_guardrails_runtime_adapter_evidence(
     workload: &RuntimeWorkload,
     evidence_id: impl Into<String>,
 ) -> Result<(), String> {
-    let evidence = f4_runtime_adapter_evidence_from_workload(
+    let evidence = runtime_guardrails_runtime_adapter_evidence_from_workload(
         workload,
         evidence_id,
-        F4RuntimeAdapterEvidenceSource::LiveHost,
+        RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost,
     )?;
-    append_f4_jsonl(F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT, &evidence)
+    append_runtime_guardrails_jsonl(
+        RUNTIME_GUARDRAILS_RUNTIME_ADAPTER_EVIDENCE_OUTPUT,
+        &evidence,
+    )
 }
 
-fn record_f4_strong_runtime_metadata_evidence(workload: &RuntimeWorkload) -> Result<(), String> {
-    match f4_live_runtime_name(workload.runtime_handler.as_deref()) {
-        "gvisor" if std::env::var_os(F4_GVISOR_METADATA_EVIDENCE_OUTPUT).is_some() => {
+fn record_runtime_guardrails_strong_runtime_metadata_evidence(
+    workload: &RuntimeWorkload,
+) -> Result<(), String> {
+    match runtime_guardrails_live_runtime_name(workload.runtime_handler.as_deref()) {
+        "gvisor"
+            if std::env::var_os(RUNTIME_GUARDRAILS_GVISOR_METADATA_EVIDENCE_OUTPUT).is_some() =>
+        {
             let subjects = live_host_process_subjects(&["runsc", "sentry", "gofer"])?;
-            record_f4_gvisor_metadata_evidence(workload, subjects)
+            record_runtime_guardrails_gvisor_metadata_evidence(workload, subjects)
         }
-        "kata" if std::env::var_os(F4_KATA_BOUNDARY_EVIDENCE_OUTPUT).is_some() => {
+        "kata" if std::env::var_os(RUNTIME_GUARDRAILS_KATA_BOUNDARY_EVIDENCE_OUTPUT).is_some() => {
             let subjects = live_host_process_subjects(&["kata", "qemu", "vmm"])?;
-            record_f4_kata_boundary_evidence(workload, subjects)
+            record_runtime_guardrails_kata_boundary_evidence(workload, subjects)
         }
         _ => Ok(()),
     }
 }
 
-fn record_f4_gvisor_metadata_evidence(
+fn record_runtime_guardrails_gvisor_metadata_evidence(
     workload: &RuntimeWorkload,
     host_event_subjects: Vec<String>,
 ) -> Result<(), String> {
-    if std::env::var_os(F4_GVISOR_METADATA_EVIDENCE_OUTPUT).is_none() {
+    if std::env::var_os(RUNTIME_GUARDRAILS_GVISOR_METADATA_EVIDENCE_OUTPUT).is_none() {
         return Ok(());
     }
-    if f4_live_runtime_name(workload.runtime_handler.as_deref()) != "gvisor" {
+    if runtime_guardrails_live_runtime_name(workload.runtime_handler.as_deref()) != "gvisor" {
         return Ok(());
     }
     let host_event_subjects = canonical_gvisor_subjects(host_event_subjects);
-    let evidence = F4GvisorMetadataEvidenceReport {
+    let evidence = RuntimeGuardrailsGvisorMetadataEvidenceReport {
         evidence_id: format!(
             "live-{}-gvisor-runsc-sentry-gofer",
-            f4_live_adapter_name(workload.adapter)
+            runtime_guardrails_live_adapter_name(workload.adapter)
         ),
-        source: F4RuntimeAdapterEvidenceSource::LiveHost,
-        runtime_adapter_evidence_id: f4_live_adapter_evidence_id(workload),
+        source: RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost,
+        runtime_adapter_evidence_id: runtime_guardrails_live_adapter_evidence_id(workload),
         session_id: workload.session_id.clone(),
         runtime_handler: workload.runtime_handler.clone(),
-        runsc_observed: f4_subject_observed(&host_event_subjects, "runsc"),
-        sentry_observed: f4_subject_observed(&host_event_subjects, "sentry"),
-        gofer_observed: f4_subject_observed(&host_event_subjects, "gofer"),
+        runsc_observed: runtime_guardrails_subject_observed(&host_event_subjects, "runsc"),
+        sentry_observed: runtime_guardrails_subject_observed(&host_event_subjects, "sentry"),
+        gofer_observed: runtime_guardrails_subject_observed(&host_event_subjects, "gofer"),
         host_event_subjects,
         host_semantics_collapsed: true,
         guest_semantics_claimed: false,
     };
-    append_f4_jsonl(F4_GVISOR_METADATA_EVIDENCE_OUTPUT, &evidence)
+    append_runtime_guardrails_jsonl(
+        RUNTIME_GUARDRAILS_GVISOR_METADATA_EVIDENCE_OUTPUT,
+        &evidence,
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1373,21 +1392,21 @@ struct KubernetesAgentSandboxLiveMetadata {
     pod_uid: Option<String>,
 }
 
-fn record_f4_kubernetes_agent_sandbox_evidence(
+fn record_runtime_guardrails_kubernetes_agent_sandbox_evidence(
     workload: &RuntimeWorkload,
     metadata: KubernetesAgentSandboxLiveMetadata,
 ) -> Result<(), String> {
-    if std::env::var_os(F4_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT).is_none() {
+    if std::env::var_os(RUNTIME_GUARDRAILS_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT).is_none() {
         return Ok(());
     }
-    let runtime_name = f4_live_runtime_name(workload.runtime_handler.as_deref());
+    let runtime_name = runtime_guardrails_live_runtime_name(workload.runtime_handler.as_deref());
     if runtime_name == "runc" {
         return Ok(());
     }
-    let evidence = F4KubernetesAgentSandboxEvidenceReport {
+    let evidence = RuntimeGuardrailsKubernetesAgentSandboxEvidenceReport {
         evidence_id: format!("live-kubernetes-agent-sandbox-{runtime_name}"),
-        source: F4RuntimeAdapterEvidenceSource::LiveHost,
-        runtime_adapter_evidence_id: f4_live_adapter_evidence_id(workload),
+        source: RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost,
+        runtime_adapter_evidence_id: runtime_guardrails_live_adapter_evidence_id(workload),
         session_id: workload.session_id.clone(),
         pod_name: metadata.pod_name,
         namespace: metadata.namespace,
@@ -1399,42 +1418,45 @@ fn record_f4_kubernetes_agent_sandbox_evidence(
         host_boundary_visibility: true,
         guest_semantics_claimed: false,
     };
-    append_f4_jsonl(F4_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT, &evidence)
+    append_runtime_guardrails_jsonl(
+        RUNTIME_GUARDRAILS_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT,
+        &evidence,
+    )
 }
 
-fn record_f4_kata_boundary_evidence(
+fn record_runtime_guardrails_kata_boundary_evidence(
     workload: &RuntimeWorkload,
     host_event_subjects: Vec<String>,
 ) -> Result<(), String> {
-    if std::env::var_os(F4_KATA_BOUNDARY_EVIDENCE_OUTPUT).is_none() {
+    if std::env::var_os(RUNTIME_GUARDRAILS_KATA_BOUNDARY_EVIDENCE_OUTPUT).is_none() {
         return Ok(());
     }
-    if f4_live_runtime_name(workload.runtime_handler.as_deref()) != "kata" {
+    if runtime_guardrails_live_runtime_name(workload.runtime_handler.as_deref()) != "kata" {
         return Ok(());
     }
     let host_event_subjects = canonical_kata_subjects(host_event_subjects);
-    let evidence = F4KataBoundaryEvidenceReport {
+    let evidence = RuntimeGuardrailsKataBoundaryEvidenceReport {
         evidence_id: format!(
             "live-{}-kata-shim-vmm-boundary",
-            f4_live_adapter_name(workload.adapter)
+            runtime_guardrails_live_adapter_name(workload.adapter)
         ),
-        source: F4RuntimeAdapterEvidenceSource::LiveHost,
-        runtime_adapter_evidence_id: f4_live_adapter_evidence_id(workload),
+        source: RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost,
+        runtime_adapter_evidence_id: runtime_guardrails_live_adapter_evidence_id(workload),
         session_id: workload.session_id.clone(),
         runtime_handler: workload.runtime_handler.clone(),
-        shim_observed: f4_subject_observed(&host_event_subjects, "shim")
-            && f4_subject_observed(&host_event_subjects, "kata"),
-        vmm_observed: f4_subject_observed(&host_event_subjects, "qemu")
-            || f4_subject_observed(&host_event_subjects, "vmm"),
+        shim_observed: runtime_guardrails_subject_observed(&host_event_subjects, "shim")
+            && runtime_guardrails_subject_observed(&host_event_subjects, "kata"),
+        vmm_observed: runtime_guardrails_subject_observed(&host_event_subjects, "qemu")
+            || runtime_guardrails_subject_observed(&host_event_subjects, "vmm"),
         host_event_subjects,
         host_boundary_visibility: true,
         guest_collector_required: true,
         guest_semantics_claimed: false,
     };
-    append_f4_jsonl(F4_KATA_BOUNDARY_EVIDENCE_OUTPUT, &evidence)
+    append_runtime_guardrails_jsonl(RUNTIME_GUARDRAILS_KATA_BOUNDARY_EVIDENCE_OUTPUT, &evidence)
 }
 
-fn append_f4_jsonl<T: Serialize>(env_var: &str, value: &T) -> Result<(), String> {
+fn append_runtime_guardrails_jsonl<T: Serialize>(env_var: &str, value: &T) -> Result<(), String> {
     let Ok(output_path) = std::env::var(env_var) else {
         return Ok(());
     };
@@ -1518,21 +1540,21 @@ fn canonical_kata_subjects(host_event_subjects: Vec<String>) -> Vec<String> {
     subjects.into_iter().collect()
 }
 
-fn f4_subject_observed(subjects: &[String], needle: &str) -> bool {
+fn runtime_guardrails_subject_observed(subjects: &[String], needle: &str) -> bool {
     subjects
         .iter()
         .any(|subject| subject.to_ascii_lowercase().contains(needle))
 }
 
-fn f4_live_adapter_evidence_id(workload: &RuntimeWorkload) -> String {
+fn runtime_guardrails_live_adapter_evidence_id(workload: &RuntimeWorkload) -> String {
     format!(
         "live-{}-{}-cgroup",
-        f4_live_adapter_name(workload.adapter),
-        f4_live_runtime_name(workload.runtime_handler.as_deref())
+        runtime_guardrails_live_adapter_name(workload.adapter),
+        runtime_guardrails_live_runtime_name(workload.runtime_handler.as_deref())
     )
 }
 
-fn f4_live_adapter_name(adapter: AdapterKind) -> &'static str {
+fn runtime_guardrails_live_adapter_name(adapter: AdapterKind) -> &'static str {
     match adapter {
         AdapterKind::Docker => "docker",
         AdapterKind::Containerd => "containerd",
@@ -1541,7 +1563,7 @@ fn f4_live_adapter_name(adapter: AdapterKind) -> &'static str {
     }
 }
 
-fn f4_live_runtime_name(runtime_handler: Option<&str>) -> &'static str {
+fn runtime_guardrails_live_runtime_name(runtime_handler: Option<&str>) -> &'static str {
     let handler = runtime_handler.unwrap_or("runc").to_ascii_lowercase();
     if handler.contains("runsc") || handler.contains("gvisor") {
         "gvisor"
@@ -1614,8 +1636,8 @@ fn containerd_task_snapshot_becomes_runtime_workload_for_standalone_and_k3s() {
 }
 
 #[test]
-fn runtime_workload_becomes_f4_runtime_adapter_evidence() {
-    let docker = f4_runtime_adapter_evidence_from_workload(
+fn runtime_workload_becomes_runtime_guardrails_runtime_adapter_evidence() {
+    let docker = runtime_guardrails_runtime_adapter_evidence_from_workload(
         &RuntimeWorkload {
             adapter: AdapterKind::Docker,
             session_id: "session-docker".to_string(),
@@ -1625,11 +1647,14 @@ fn runtime_workload_becomes_f4_runtime_adapter_evidence() {
             runtime_handler: Some("runc".to_string()),
         },
         "live-docker-runc-cgroup",
-        F4RuntimeAdapterEvidenceSource::LiveHost,
+        RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost,
     )
     .expect("docker evidence");
 
-    assert_eq!(docker.runtime, F4RuntimeGuardrailTarget::Docker);
+    assert_eq!(
+        docker.runtime,
+        RuntimeGuardrailsRuntimeGuardrailTarget::Docker
+    );
     assert_eq!(docker.adapter, "docker");
     assert_eq!(docker.evidence_id, "live-docker-runc-cgroup");
     assert_eq!(docker.runtime_handler.as_deref(), Some("runc"));
@@ -1638,7 +1663,7 @@ fn runtime_workload_becomes_f4_runtime_adapter_evidence() {
     assert!(docker.host_boundary_visibility);
     assert!(!docker.guest_semantics_claimed);
 
-    let gvisor = f4_runtime_adapter_evidence_from_workload(
+    let gvisor = runtime_guardrails_runtime_adapter_evidence_from_workload(
         &RuntimeWorkload {
             adapter: AdapterKind::Containerd,
             session_id: "session-gvisor".to_string(),
@@ -1648,15 +1673,18 @@ fn runtime_workload_becomes_f4_runtime_adapter_evidence() {
             runtime_handler: Some("io.containerd.runsc.v1".to_string()),
         },
         "live-containerd-gvisor-cgroup",
-        F4RuntimeAdapterEvidenceSource::LiveHost,
+        RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost,
     )
     .expect("gvisor evidence");
 
-    assert_eq!(gvisor.runtime, F4RuntimeGuardrailTarget::Gvisor);
+    assert_eq!(
+        gvisor.runtime,
+        RuntimeGuardrailsRuntimeGuardrailTarget::Gvisor
+    );
     assert!(gvisor.host_boundary_visibility);
     assert!(!gvisor.guest_semantics_claimed);
 
-    let kata = f4_runtime_adapter_evidence_from_workload(
+    let kata = runtime_guardrails_runtime_adapter_evidence_from_workload(
         &RuntimeWorkload {
             adapter: AdapterKind::Kubernetes,
             session_id: "session-kata".to_string(),
@@ -1666,20 +1694,20 @@ fn runtime_workload_becomes_f4_runtime_adapter_evidence() {
             runtime_handler: Some("kata".to_string()),
         },
         "live-kubernetes-kata-boundary",
-        F4RuntimeAdapterEvidenceSource::LiveHost,
+        RuntimeGuardrailsRuntimeAdapterEvidenceSource::LiveHost,
     )
     .expect("kata evidence");
 
-    assert_eq!(kata.runtime, F4RuntimeGuardrailTarget::Kata);
+    assert_eq!(kata.runtime, RuntimeGuardrailsRuntimeGuardrailTarget::Kata);
     assert!(kata.host_boundary_visibility);
     assert!(!kata.guest_semantics_claimed);
 }
 
 #[test]
-fn live_adapter_workload_writes_f4_runtime_adapter_evidence_output() {
-    let _env_guard = F4EvidenceOutputEnvGuard::new();
-    let output = temp_file_path("f4-runtime-adapter-evidence.jsonl");
-    std::env::set_var(F4_RUNTIME_ADAPTER_EVIDENCE_OUTPUT, &output);
+fn live_adapter_workload_writes_runtime_guardrails_runtime_adapter_evidence_output() {
+    let _env_guard = RuntimeGuardrailsEvidenceOutputEnvGuard::new();
+    let output = temp_file_path("runtime-guardrails-runtime-adapter-evidence.jsonl");
+    std::env::set_var(RUNTIME_GUARDRAILS_RUNTIME_ADAPTER_EVIDENCE_OUTPUT, &output);
     let workload = RuntimeWorkload {
         adapter: AdapterKind::Docker,
         session_id: "session-output".to_string(),
@@ -1689,8 +1717,8 @@ fn live_adapter_workload_writes_f4_runtime_adapter_evidence_output() {
         runtime_handler: Some("runc".to_string()),
     };
 
-    record_f4_runtime_adapter_evidence(&workload, "live-docker-output-cgroup")
-        .expect("write F4 evidence output");
+    record_runtime_guardrails_runtime_adapter_evidence(&workload, "live-docker-output-cgroup")
+        .expect("write RuntimeGuardrails evidence output");
 
     let line = std::fs::read_to_string(&output).expect("read evidence output");
     let report: serde_json::Value = serde_json::from_str(line.trim()).expect("parse evidence");
@@ -1703,17 +1731,24 @@ fn live_adapter_workload_writes_f4_runtime_adapter_evidence_output() {
 }
 
 #[test]
-fn live_adapter_workload_writes_f4_runtime_metadata_evidence_outputs() {
-    let _env_guard = F4EvidenceOutputEnvGuard::new();
-    let gvisor_output = temp_file_path("f4-gvisor-metadata-evidence.jsonl");
-    let kubernetes_output = temp_file_path("f4-kubernetes-agent-sandbox-evidence.jsonl");
-    let kata_output = temp_file_path("f4-kata-boundary-evidence.jsonl");
-    std::env::set_var(F4_GVISOR_METADATA_EVIDENCE_OUTPUT, &gvisor_output);
+fn live_adapter_workload_writes_runtime_guardrails_runtime_metadata_evidence_outputs() {
+    let _env_guard = RuntimeGuardrailsEvidenceOutputEnvGuard::new();
+    let gvisor_output = temp_file_path("runtime-guardrails-gvisor-metadata-evidence.jsonl");
+    let kubernetes_output =
+        temp_file_path("runtime-guardrails-kubernetes-agent-sandbox-evidence.jsonl");
+    let kata_output = temp_file_path("runtime-guardrails-kata-boundary-evidence.jsonl");
     std::env::set_var(
-        F4_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT,
+        RUNTIME_GUARDRAILS_GVISOR_METADATA_EVIDENCE_OUTPUT,
+        &gvisor_output,
+    );
+    std::env::set_var(
+        RUNTIME_GUARDRAILS_KUBERNETES_AGENT_SANDBOX_EVIDENCE_OUTPUT,
         &kubernetes_output,
     );
-    std::env::set_var(F4_KATA_BOUNDARY_EVIDENCE_OUTPUT, &kata_output);
+    std::env::set_var(
+        RUNTIME_GUARDRAILS_KATA_BOUNDARY_EVIDENCE_OUTPUT,
+        &kata_output,
+    );
 
     let gvisor = RuntimeWorkload {
         adapter: AdapterKind::Containerd,
@@ -1723,7 +1758,7 @@ fn live_adapter_workload_writes_f4_runtime_metadata_evidence_outputs() {
         image: Some("docker.io/library/alpine:3.20".to_string()),
         runtime_handler: Some("io.containerd.runsc.v1".to_string()),
     };
-    record_f4_gvisor_metadata_evidence(
+    record_runtime_guardrails_gvisor_metadata_evidence(
         &gvisor,
         vec![
             "runsc".to_string(),
@@ -1741,7 +1776,7 @@ fn live_adapter_workload_writes_f4_runtime_metadata_evidence_outputs() {
         image: Some("docker.io/library/alpine:3.20".to_string()),
         runtime_handler: Some("apolysis-gvisor-output".to_string()),
     };
-    record_f4_kubernetes_agent_sandbox_evidence(
+    record_runtime_guardrails_kubernetes_agent_sandbox_evidence(
         &kubernetes,
         KubernetesAgentSandboxLiveMetadata {
             pod_name: "apolysis-gvisor-output".to_string(),
@@ -1763,7 +1798,7 @@ fn live_adapter_workload_writes_f4_runtime_metadata_evidence_outputs() {
         image: Some("docker.io/library/alpine:3.20".to_string()),
         runtime_handler: Some("io.containerd.kata.v2".to_string()),
     };
-    record_f4_kata_boundary_evidence(
+    record_runtime_guardrails_kata_boundary_evidence(
         &kata,
         vec![
             "containerd-shim-kata-v2".to_string(),
@@ -2683,10 +2718,13 @@ async fn live_cri_adapter_matrix(
             workload.runtime_handler,
             expected_cri_runtime_type(runtime)
         );
-        record_f4_runtime_adapter_evidence(&workload, f4_live_adapter_evidence_id(&workload))
-            .expect("write live CRI F4 runtime adapter evidence");
-        record_f4_strong_runtime_metadata_evidence(&workload)
-            .expect("write live CRI strong-runtime F4 metadata evidence");
+        record_runtime_guardrails_runtime_adapter_evidence(
+            &workload,
+            runtime_guardrails_live_adapter_evidence_id(&workload),
+        )
+        .expect("write live CRI RuntimeGuardrails runtime adapter evidence");
+        record_runtime_guardrails_strong_runtime_metadata_evidence(&workload)
+            .expect("write live CRI strong-runtime RuntimeGuardrails metadata evidence");
         drop(cleanup);
     }
 }
@@ -2762,10 +2800,13 @@ async fn live_k3s_cri_adapter_matrix() {
             workload.runtime_handler,
             expected_cri_runtime_type(expected_runtime)
         );
-        record_f4_runtime_adapter_evidence(&workload, f4_live_adapter_evidence_id(&workload))
-            .expect("write live k3s CRI F4 runtime adapter evidence");
-        record_f4_strong_runtime_metadata_evidence(&workload)
-            .expect("write live k3s CRI strong-runtime F4 metadata evidence");
+        record_runtime_guardrails_runtime_adapter_evidence(
+            &workload,
+            runtime_guardrails_live_adapter_evidence_id(&workload),
+        )
+        .expect("write live k3s CRI RuntimeGuardrails runtime adapter evidence");
+        record_runtime_guardrails_strong_runtime_metadata_evidence(&workload)
+            .expect("write live k3s CRI strong-runtime RuntimeGuardrails metadata evidence");
         drop(cleanup);
         cleanup_cri_workloads_for_session(
             std::path::Path::new("crictl"),

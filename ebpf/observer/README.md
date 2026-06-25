@@ -1,6 +1,6 @@
 # Apolysis Observer eBPF
 
-This directory holds the F1 audit-only observer program. The runtime path is:
+This directory holds the AuditObserver audit-only observer program. The runtime path is:
 
 1. build a CO-RE object from `apolysis_observer.bpf.c`;
 2. load it from Rust with the Aya-backed loader plan;

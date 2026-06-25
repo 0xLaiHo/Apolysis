@@ -2,7 +2,7 @@
 
 //! Local runtime execution and process attribution for Apolysis.
 //!
-//! M3 still runs in audit mode: it records local and Docker runtime evidence,
+//! RuntimeAudit still runs in audit mode: it records local and Docker runtime evidence,
 //! but does not claim to enforce kernel-level isolation. This crate keeps
 //! runtime adapters behind a thin CLI before Kubernetes and eBPF backends are
 //! added.
@@ -748,7 +748,7 @@ fn depth_from_root(pid: u32, root_pid: u32, by_pid: &HashMap<u32, ProcessInfo>) 
 
 fn kill_pid(pid: u32) {
     // Ignore ESRCH and EPERM here. The timeout path reports the policy decision
-    // in the timeline; M2 does not yet expose per-PID kill diagnostics.
+    // in the timeline; RuntimeControls does not yet expose per-PID kill diagnostics.
     let _ = unsafe { kill(pid as i32, SIGKILL) };
 }
 

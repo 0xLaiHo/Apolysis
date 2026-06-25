@@ -133,7 +133,7 @@ fn assert_finding(
 
 fn effect(kind: EffectKind, resource: &str) -> ObservedEffect {
     ObservedEffect {
-        session_id: "session-f2".to_string(),
+        session_id: "session-runtime_foundation".to_string(),
         evidence_ref: "event-17".to_string(),
         kind,
         actor: resource.to_string(),
@@ -156,7 +156,7 @@ fn intent(
         schema_version: 1,
         tenant_id: apolysis_accountability::DEFAULT_TENANT_ID.to_string(),
         retention_tier: apolysis_accountability::RetentionTier::Standard,
-        session_id: "session-f2".to_string(),
+        session_id: "session-runtime_foundation".to_string(),
         expires_at_unix_ms: u64::MAX,
         declared_actions,
         allowed_resources,

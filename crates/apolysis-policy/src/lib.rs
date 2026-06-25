@@ -2,7 +2,7 @@
 
 //! Policy parsing and decision logic for Apolysis.
 //!
-//! The M5 reader supports the small YAML/JSON policy subset used by the
+//! The PolicyFeedback reader supports the small YAML/JSON policy subset used by the
 //! repository fixtures.  The engine keeps `Block` distinct from `Kill` and only
 //! maps `Block` to a BPF-LSM backend when capability detection says that backend
 //! is actually available.
