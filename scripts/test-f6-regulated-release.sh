@@ -151,6 +151,37 @@ retained_package_step = run_step(
     "apolysis-f6-retained-evidence-package-report.json",
 )
 retained_package_doc = load_json(retained_package_step["report_file"])
+external_retention_archive_sha = os.environ.get("APOLYSIS_F6_EXTERNAL_RETENTION_ARCHIVE_SHA256", "") or str(
+    retained_package_doc.get("source_archive_sha256", "")
+)
+
+external_retention_step = run_step(
+    "external-retention",
+    [str(repo_root / "scripts/test-f6-external-retention.sh")],
+    {
+        "APOLYSIS_F6_EXTERNAL_RETENTION_OUTPUT_DIR": str(output_dir / "external-retention"),
+        "APOLYSIS_REQUIRE_F6_EXTERNAL_RETENTION": "0",
+        "APOLYSIS_F6_RETAINED_EVIDENCE_PACKAGE_REPORT": str(retained_package_step["report"]),
+        "APOLYSIS_F6_EXTERNAL_RETENTION_EVIDENCE": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_RETENTION_EVIDENCE", ""
+        ),
+        "APOLYSIS_F6_EXTERNAL_RETENTION_PROVIDER": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_RETENTION_PROVIDER", ""
+        ),
+        "APOLYSIS_F6_EXTERNAL_RETENTION_MODE": os.environ.get("APOLYSIS_F6_EXTERNAL_RETENTION_MODE", ""),
+        "APOLYSIS_F6_EXTERNAL_RETENTION_URI": os.environ.get("APOLYSIS_F6_EXTERNAL_RETENTION_URI", ""),
+        "APOLYSIS_F6_EXTERNAL_RETENTION_VERSION_ID": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_RETENTION_VERSION_ID", ""
+        ),
+        "APOLYSIS_F6_EXTERNAL_RETENTION_UNTIL": os.environ.get("APOLYSIS_F6_EXTERNAL_RETENTION_UNTIL", ""),
+        "APOLYSIS_F6_EXTERNAL_RETENTION_CONTROL_PLANE": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_RETENTION_CONTROL_PLANE", ""
+        ),
+        "APOLYSIS_F6_EXTERNAL_RETENTION_ARCHIVE_SHA256": external_retention_archive_sha,
+    },
+    "apolysis-f6-external-retention-report.json",
+)
+external_retention_doc = load_json(external_retention_step["report_file"])
 
 steps = {
     "provider_execution_plan": {
@@ -219,6 +250,21 @@ steps = {
         "secret_scan_findings": retained_package_doc.get("secret_scan_findings") or [],
         "missing_requirements": retained_package_doc.get("missing_requirements") or [],
     },
+    "external_retention": {
+        "exit_code": external_retention_step["exit_code"],
+        "report": external_retention_step["report"],
+        "external_retention_ready": bool(external_retention_doc.get("external_retention_ready")),
+        "provider": external_retention_doc.get("provider", ""),
+        "retention_mode": external_retention_doc.get("retention_mode", ""),
+        "object_uri": external_retention_doc.get("object_uri", ""),
+        "object_version_id": external_retention_doc.get("object_version_id", ""),
+        "retention_until": external_retention_doc.get("retention_until", ""),
+        "source_archive_sha256": external_retention_doc.get("source_archive_sha256", ""),
+        "external_archive_sha256": external_retention_doc.get("external_archive_sha256", ""),
+        "manifest": external_retention_doc.get("manifest", ""),
+        "secret_scan_findings": external_retention_doc.get("secret_scan_findings") or [],
+        "missing_requirements": external_retention_doc.get("missing_requirements") or [],
+    },
 }
 
 provider_execution_plan_ready = steps["provider_execution_plan"]["provider_execution_plan_ready"]
@@ -231,6 +277,7 @@ closure_completion_requested = steps["final_provider_closure"]["run_final_provid
 closure_completion_passed = steps["final_provider_closure"]["completion_passed"]
 evidence_package_ready = steps["evidence_package"]["evidence_package_ready"]
 retained_evidence_package_ready = steps["retained_evidence_package"]["retained_evidence_package_ready"]
+external_retention_ready = steps["external_retention"]["external_retention_ready"]
 
 missing_requirements: list[str] = []
 for name, step in steps.items():
@@ -258,6 +305,8 @@ if not evidence_package_ready:
     missing_requirements.append("evidence_package")
 if not retained_evidence_package_ready:
     missing_requirements.append("retained_evidence_package")
+if not external_retention_ready:
+    missing_requirements.append("external_retention")
 
 missing_requirements = list(dict.fromkeys(missing_requirements))
 regulated_release_ready = (
@@ -271,12 +320,13 @@ regulated_release_ready = (
     and closure_ready
     and evidence_package_ready
     and retained_evidence_package_ready
+    and external_retention_ready
 )
 passed = regulated_release_ready or not require_ready
 
 report = {
     "schema_version": 1,
-    "phase": "F6.7",
+    "phase": "F6.8",
     "audit_completed": True,
     "passed": passed,
     "fail_closed_required": require_ready,
@@ -290,6 +340,7 @@ report = {
     "final_provider_closure_ready": closure_ready,
     "evidence_package_ready": evidence_package_ready,
     "retained_evidence_package_ready": retained_evidence_package_ready,
+    "external_retention_ready": external_retention_ready,
     "run_final_provider_closure": run_final_closure,
     "completion_passed": closure_completion_passed,
     "missing_requirements": [] if regulated_release_ready else missing_requirements,
@@ -303,12 +354,13 @@ report = {
         "The F6 final provider closure gate maps F6 closure execution controls to scripts/test-f5-final-provider-closure.sh.",
         "The F6 evidence package gate wraps the historical F5 final external-provider bundle builder and requires a no-secret package scan.",
         "The F6 retained evidence package gate validates archive checksums and copies the evidence package into the configured retention root.",
+        "The F6 external retention gate validates non-local WORM/object-lock retention metadata for the retained evidence package.",
         "Default audit mode does not dispatch GitHub workflows and does not call AWS or HSM signing APIs unless downstream gates are explicitly configured to do so.",
-        "Required mode fails closed until retained live KMS or external hardware HSM signing evidence, imported provider artifacts, final closure, a passing evidence package, and retained evidence package handoff are present.",
+        "Required mode fails closed until retained live KMS or external hardware HSM signing evidence, imported provider artifacts, final closure, a passing evidence package, retained evidence package handoff, and external WORM/object-lock retention metadata are present.",
     ],
     "next_commands": {
         "audit": "./scripts/test-f6-regulated-release.sh",
-        "required_from_imported_artifacts": "APOLYSIS_F6_SIGNING_EVIDENCE=<signing-evidence> APOLYSIS_F6_SIGNING_REPORT=<signing-report> APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=local_artifact_root APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT=<artifact-root> APOLYSIS_F6_RETAINED_EVIDENCE_PACKAGE_ROOT=<retention-root> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
+        "required_from_imported_artifacts": "APOLYSIS_F6_SIGNING_EVIDENCE=<signing-evidence> APOLYSIS_F6_SIGNING_REPORT=<signing-report> APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=local_artifact_root APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT=<artifact-root> APOLYSIS_F6_RETAINED_EVIDENCE_PACKAGE_ROOT=<retention-root> APOLYSIS_F6_EXTERNAL_RETENTION_EVIDENCE=<external-retention.json> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
         "download_then_close": "APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=workflow_download APOLYSIS_CONFIRM_F6_PROVIDER_ARTIFACT_DOWNLOAD=1 APOLYSIS_F6_PROVIDER_WORKFLOW_RUN_ID=<run-id> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
     },
     "observed_at_unix_ms": int(time.time() * 1000),
