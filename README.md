@@ -68,9 +68,9 @@ that reuse the historical provider gates without renaming their artifact
 contracts. It now has retained live AWS KMS signing evidence, a F6 evidence
 package gate that wraps the final external-provider bundle builder, and a
 retained evidence package handoff gate, plus an external WORM/object-lock
-retention metadata gate, immutable registry retention metadata gate, and
-managed-mesh evidence decision gate; it remains open for live provider readback
-before a formal regulated release.
+retention metadata gate, immutable registry retention metadata gate,
+managed-mesh evidence decision gate, and live provider readback evidence gate;
+it remains open for final regulated-release sign-off.
 
 ## 🚀 Runtime Scenarios
 
@@ -303,9 +303,9 @@ artifact import, final provider closure, and signing evidence gates, and
 now has retained live AWS KMS signing evidence, a F6 evidence package gate
 that wraps the final external-provider bundle builder, and a retained evidence
 package handoff gate, plus an external WORM/object-lock retention metadata
-gate, immutable registry retention metadata gate, and managed-mesh evidence
-decision gate. It remains open for live provider readback before a formal
-regulated release.
+gate, immutable registry retention metadata gate, managed-mesh evidence
+decision gate, and live provider readback evidence gate. It remains open for
+final regulated-release sign-off.
 
 Implementation milestones:
 
@@ -329,7 +329,7 @@ Focused roadmap:
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
 | F5 | Production Runtime Accountability Beta: bounded Kubernetes deployment, live k3s/VKE validation, metrics, recovery, tenant-aware retention/query, runtime metadata correlation, and service-mesh identity evidence where available | ✅ **Completed** |
-| F6 | Regulated Release and Evidence Integrity: aggregate audit gate, provider execution planning, provider artifact import, final closure orchestration, retained live AWS KMS signing evidence, F6 evidence package gate, retained evidence package handoff, external WORM/object-lock retention metadata, immutable registry retention metadata, managed-mesh evidence decision gate, and final external-provider bundle closure | 🚧 **In Progress** |
+| F6 | Regulated Release and Evidence Integrity: aggregate audit gate, provider execution planning, provider artifact import, final closure orchestration, retained live AWS KMS signing evidence, F6 evidence package gate, retained evidence package handoff, external WORM/object-lock retention metadata, immutable registry retention metadata, managed-mesh evidence decision gate, live provider readback evidence gate, and final external-provider bundle closure | 🚧 **In Progress** |
 
 ## 📜 License
 

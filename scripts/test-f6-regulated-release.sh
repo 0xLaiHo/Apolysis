@@ -254,6 +254,91 @@ managed_mesh_decision_step = run_step(
 )
 managed_mesh_decision_doc = load_json(managed_mesh_decision_step["report_file"])
 
+live_provider_readback_step = run_step(
+    "live-provider-readback",
+    [str(repo_root / "scripts/test-f6-live-provider-readback.sh")],
+    {
+        "APOLYSIS_F6_LIVE_PROVIDER_READBACK_OUTPUT_DIR": str(output_dir / "live-provider-readback"),
+        "APOLYSIS_REQUIRE_F6_LIVE_PROVIDER_READBACK": "0",
+        "APOLYSIS_F6_EXTERNAL_RETENTION_REPORT": str(external_retention_step["report"]),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_RETENTION_REPORT": str(immutable_registry_step["report"]),
+        "APOLYSIS_F6_EXTERNAL_RETENTION_READBACK_EVIDENCE": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_RETENTION_READBACK_EVIDENCE", ""
+        ),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_READBACK_EVIDENCE": os.environ.get(
+            "APOLYSIS_F6_IMMUTABLE_REGISTRY_READBACK_EVIDENCE", ""
+        ),
+        "APOLYSIS_F6_EXTERNAL_READBACK_PROVIDER": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_READBACK_PROVIDER", ""
+        )
+        or str(external_retention_doc.get("provider", "")),
+        "APOLYSIS_F6_EXTERNAL_READBACK_URI": os.environ.get("APOLYSIS_F6_EXTERNAL_READBACK_URI", "")
+        or str(external_retention_doc.get("object_uri", "")),
+        "APOLYSIS_F6_EXTERNAL_READBACK_VERSION_ID": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_READBACK_VERSION_ID", ""
+        )
+        or str(external_retention_doc.get("object_version_id", "")),
+        "APOLYSIS_F6_EXTERNAL_READBACK_ARCHIVE_SHA256": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_READBACK_ARCHIVE_SHA256", ""
+        )
+        or str(external_retention_doc.get("external_archive_sha256", "")),
+        "APOLYSIS_F6_EXTERNAL_READBACK_RETENTION_MODE": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_READBACK_RETENTION_MODE", ""
+        )
+        or str(external_retention_doc.get("retention_mode", "")),
+        "APOLYSIS_F6_EXTERNAL_READBACK_RETENTION_UNTIL": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_READBACK_RETENTION_UNTIL", ""
+        )
+        or str(external_retention_doc.get("retention_until", "")),
+        "APOLYSIS_F6_EXTERNAL_READBACK_CONTROL_PLANE": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_READBACK_CONTROL_PLANE", ""
+        )
+        or str(external_retention_doc.get("provider_control_plane", "")),
+        "APOLYSIS_F6_REGISTRY_READBACK_PROVIDER": os.environ.get(
+            "APOLYSIS_F6_REGISTRY_READBACK_PROVIDER", ""
+        )
+        or str(immutable_registry_doc.get("provider", "")),
+        "APOLYSIS_F6_REGISTRY_READBACK_URI": os.environ.get("APOLYSIS_F6_REGISTRY_READBACK_URI", "")
+        or str(immutable_registry_doc.get("registry_uri", "")),
+        "APOLYSIS_F6_REGISTRY_READBACK_IMAGE_REF": os.environ.get(
+            "APOLYSIS_F6_REGISTRY_READBACK_IMAGE_REF", ""
+        )
+        or str(immutable_registry_doc.get("image_ref", "")),
+        "APOLYSIS_F6_REGISTRY_READBACK_IMAGE_DIGEST": os.environ.get(
+            "APOLYSIS_F6_REGISTRY_READBACK_IMAGE_DIGEST", ""
+        )
+        or str(immutable_registry_doc.get("image_digest", "")),
+        "APOLYSIS_F6_REGISTRY_READBACK_POLICY_ID": os.environ.get(
+            "APOLYSIS_F6_REGISTRY_READBACK_POLICY_ID", ""
+        )
+        or str(immutable_registry_doc.get("policy_id", "")),
+        "APOLYSIS_F6_REGISTRY_READBACK_CONTROL_PLANE": os.environ.get(
+            "APOLYSIS_F6_REGISTRY_READBACK_CONTROL_PLANE", ""
+        )
+        or str(immutable_registry_doc.get("provider_control_plane", "")),
+        "APOLYSIS_F6_EXTERNAL_READBACK_VERIFIED": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_READBACK_VERIFIED", ""
+        ),
+        "APOLYSIS_F6_EXTERNAL_READBACK_RETENTION_VERIFIED": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_READBACK_RETENTION_VERIFIED", ""
+        ),
+        "APOLYSIS_F6_EXTERNAL_READBACK_DELETE_DENIED": os.environ.get(
+            "APOLYSIS_F6_EXTERNAL_READBACK_DELETE_DENIED", ""
+        ),
+        "APOLYSIS_F6_REGISTRY_READBACK_DIGEST_VERIFIED": os.environ.get(
+            "APOLYSIS_F6_REGISTRY_READBACK_DIGEST_VERIFIED", ""
+        ),
+        "APOLYSIS_F6_REGISTRY_READBACK_IMMUTABILITY_VERIFIED": os.environ.get(
+            "APOLYSIS_F6_REGISTRY_READBACK_IMMUTABILITY_VERIFIED", ""
+        ),
+        "APOLYSIS_F6_REGISTRY_READBACK_MUTATION_DENIED": os.environ.get(
+            "APOLYSIS_F6_REGISTRY_READBACK_MUTATION_DENIED", ""
+        ),
+    },
+    "apolysis-f6-live-provider-readback-report.json",
+)
+live_provider_readback_doc = load_json(live_provider_readback_step["report_file"])
+
 steps = {
     "provider_execution_plan": {
         "exit_code": plan_step["exit_code"],
@@ -368,6 +453,24 @@ steps = {
         "secret_scan_findings": managed_mesh_decision_doc.get("secret_scan_findings") or [],
         "missing_requirements": managed_mesh_decision_doc.get("missing_requirements") or [],
     },
+    "live_provider_readback": {
+        "exit_code": live_provider_readback_step["exit_code"],
+        "report": live_provider_readback_step["report"],
+        "live_provider_readback_ready": bool(
+            live_provider_readback_doc.get("live_provider_readback_ready")
+        ),
+        "external_retention_readback_ready": bool(
+            live_provider_readback_doc.get("external_retention_readback_ready")
+        ),
+        "immutable_registry_readback_ready": bool(
+            live_provider_readback_doc.get("immutable_registry_readback_ready")
+        ),
+        "external_retention": live_provider_readback_doc.get("external_retention") or {},
+        "immutable_registry": live_provider_readback_doc.get("immutable_registry") or {},
+        "manifest": live_provider_readback_doc.get("manifest", ""),
+        "secret_scan_findings": live_provider_readback_doc.get("secret_scan_findings") or [],
+        "missing_requirements": live_provider_readback_doc.get("missing_requirements") or [],
+    },
 }
 
 provider_execution_plan_ready = steps["provider_execution_plan"]["provider_execution_plan_ready"]
@@ -383,6 +486,7 @@ retained_evidence_package_ready = steps["retained_evidence_package"]["retained_e
 external_retention_ready = steps["external_retention"]["external_retention_ready"]
 immutable_registry_ready = steps["immutable_registry"]["immutable_registry_ready"]
 managed_mesh_decision_ready = steps["managed_mesh_decision"]["managed_mesh_decision_ready"]
+live_provider_readback_ready = steps["live_provider_readback"]["live_provider_readback_ready"]
 
 missing_requirements: list[str] = []
 for name, step in steps.items():
@@ -416,6 +520,8 @@ if not immutable_registry_ready:
     missing_requirements.append("immutable_registry")
 if not managed_mesh_decision_ready:
     missing_requirements.append("managed_mesh_decision")
+if not live_provider_readback_ready:
+    missing_requirements.append("live_provider_readback")
 
 missing_requirements = list(dict.fromkeys(missing_requirements))
 regulated_release_ready = (
@@ -432,12 +538,13 @@ regulated_release_ready = (
     and external_retention_ready
     and immutable_registry_ready
     and managed_mesh_decision_ready
+    and live_provider_readback_ready
 )
 passed = regulated_release_ready or not require_ready
 
 report = {
     "schema_version": 1,
-    "phase": "F6.10",
+    "phase": "F6.11",
     "audit_completed": True,
     "passed": passed,
     "fail_closed_required": require_ready,
@@ -454,6 +561,7 @@ report = {
     "external_retention_ready": external_retention_ready,
     "immutable_registry_ready": immutable_registry_ready,
     "managed_mesh_decision_ready": managed_mesh_decision_ready,
+    "live_provider_readback_ready": live_provider_readback_ready,
     "run_final_provider_closure": run_final_closure,
     "completion_passed": closure_completion_passed,
     "missing_requirements": [] if regulated_release_ready else missing_requirements,
@@ -470,12 +578,13 @@ report = {
         "The F6 external retention gate validates non-local WORM/object-lock retention metadata for the retained evidence package.",
         "The F6 immutable registry retention gate validates digest-pinned immutable registry metadata for release images.",
         "The F6 managed mesh decision gate records whether retained provider-backed mesh evidence is accepted for regulated release.",
+        "The F6 live provider readback gate validates retained provider-side readback evidence for external retention and immutable registry controls.",
         "Default audit mode does not dispatch GitHub workflows and does not call AWS or HSM signing APIs unless downstream gates are explicitly configured to do so.",
-        "Required mode fails closed until retained live KMS or external hardware HSM signing evidence, imported provider artifacts, final closure, a passing evidence package, retained evidence package handoff, external WORM/object-lock retention metadata, immutable registry metadata, and managed mesh decision evidence are present.",
+        "Required mode fails closed until retained live KMS or external hardware HSM signing evidence, imported provider artifacts, final closure, a passing evidence package, retained evidence package handoff, external WORM/object-lock retention metadata, immutable registry metadata, managed mesh decision evidence, and live provider readback evidence are present.",
     ],
     "next_commands": {
         "audit": "./scripts/test-f6-regulated-release.sh",
-        "required_from_imported_artifacts": "APOLYSIS_F6_SIGNING_EVIDENCE=<signing-evidence> APOLYSIS_F6_SIGNING_REPORT=<signing-report> APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=local_artifact_root APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT=<artifact-root> APOLYSIS_F6_RETAINED_EVIDENCE_PACKAGE_ROOT=<retention-root> APOLYSIS_F6_EXTERNAL_RETENTION_EVIDENCE=<external-retention.json> APOLYSIS_F6_IMMUTABLE_REGISTRY_EVIDENCE=<immutable-registry.json> APOLYSIS_F6_MANAGED_MESH_EVIDENCE=<managed-mesh-evidence.json> APOLYSIS_F6_MANAGED_MESH_REPORT=<managed-mesh-report.json> APOLYSIS_F6_MANAGED_MESH_DECISION=<decision> APOLYSIS_F6_MANAGED_MESH_DECISION_RATIONALE=<rationale> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
+        "required_from_imported_artifacts": "APOLYSIS_F6_SIGNING_EVIDENCE=<signing-evidence> APOLYSIS_F6_SIGNING_REPORT=<signing-report> APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=local_artifact_root APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT=<artifact-root> APOLYSIS_F6_RETAINED_EVIDENCE_PACKAGE_ROOT=<retention-root> APOLYSIS_F6_EXTERNAL_RETENTION_EVIDENCE=<external-retention.json> APOLYSIS_F6_IMMUTABLE_REGISTRY_EVIDENCE=<immutable-registry.json> APOLYSIS_F6_MANAGED_MESH_EVIDENCE=<managed-mesh-evidence.json> APOLYSIS_F6_MANAGED_MESH_REPORT=<managed-mesh-report.json> APOLYSIS_F6_MANAGED_MESH_DECISION=<decision> APOLYSIS_F6_MANAGED_MESH_DECISION_RATIONALE=<rationale> APOLYSIS_F6_EXTERNAL_RETENTION_READBACK_EVIDENCE=<external-readback.json> APOLYSIS_F6_IMMUTABLE_REGISTRY_READBACK_EVIDENCE=<registry-readback.json> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
         "download_then_close": "APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=workflow_download APOLYSIS_CONFIRM_F6_PROVIDER_ARTIFACT_DOWNLOAD=1 APOLYSIS_F6_PROVIDER_WORKFLOW_RUN_ID=<run-id> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
     },
     "observed_at_unix_ms": int(time.time() * 1000),
