@@ -48,6 +48,13 @@ allowed_closure = {"audit", "final_provider_closure"}
 def bool_env(name: str) -> bool:
     return bool(os.environ.get(name, ""))
 
+def env_value(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name, "")
+        if value:
+            return value
+    return ""
+
 def tool(name: str) -> dict:
     path = shutil.which(name) or ""
     return {"available": bool(path), "path": path}
@@ -88,11 +95,13 @@ external_hsm_ready = (
     )
 )
 
+retained_signing_evidence = env_value("APOLYSIS_F6_SIGNING_EVIDENCE", "APOLYSIS_F5_SIGNING_EVIDENCE")
+retained_signing_report = env_value("APOLYSIS_F6_SIGNING_REPORT", "APOLYSIS_F5_SIGNING_REPORT")
 retained_signing_ready = (
-    bool_env("APOLYSIS_F5_SIGNING_EVIDENCE")
-    and bool_env("APOLYSIS_F5_SIGNING_REPORT")
-    and Path(os.environ["APOLYSIS_F5_SIGNING_EVIDENCE"]).is_file()
-    and Path(os.environ["APOLYSIS_F5_SIGNING_REPORT"]).is_file()
+    bool(retained_signing_evidence)
+    and bool(retained_signing_report)
+    and Path(retained_signing_evidence).is_file()
+    and Path(retained_signing_report).is_file()
 )
 
 signing_candidates = {
@@ -221,8 +230,8 @@ report = {
             or os.environ.get("APOLYSIS_F5_EXTERNAL_HSM_ALLOW_INTERACTIVE_PIN", "0") == "1",
         },
         "retained_signing": {
-            "evidence_path_present": bool_env("APOLYSIS_F5_SIGNING_EVIDENCE"),
-            "report_path_present": bool_env("APOLYSIS_F5_SIGNING_REPORT"),
+            "evidence_path_present": bool(retained_signing_evidence),
+            "report_path_present": bool(retained_signing_report),
             "evidence_files_exist": retained_signing_ready,
         },
     },

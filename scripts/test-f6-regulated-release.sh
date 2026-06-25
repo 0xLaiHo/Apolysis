@@ -81,13 +81,13 @@ plan_step = run_step(
 plan_doc = load_json(plan_step["report_file"])
 
 signing_step = run_step(
-    "signing-provider-readiness",
-    [str(repo_root / "scripts/test-f5-signing-provider-readiness.sh")],
+    "signing-evidence",
+    [str(repo_root / "scripts/test-f6-signing-evidence.sh")],
     {
-        "APOLYSIS_F5_SIGNING_PROVIDER_READINESS_OUTPUT_DIR": str(output_dir / "signing-provider-readiness"),
-        "APOLYSIS_REQUIRE_F5_SIGNING_PROVIDER_READINESS": "0",
+        "APOLYSIS_F6_SIGNING_EVIDENCE_OUTPUT_DIR": str(output_dir / "signing-evidence"),
+        "APOLYSIS_REQUIRE_F6_SIGNING_EVIDENCE": "0",
     },
-    "apolysis-f5-signing-provider-readiness-report.json",
+    "apolysis-f6-signing-evidence-report.json",
 )
 signing_doc = load_json(signing_step["report_file"])
 
@@ -104,13 +104,13 @@ artifact_import_doc = load_json(artifact_import_step["report_file"])
 
 closure_step = run_step(
     "final-provider-closure",
-    [str(repo_root / "scripts/test-f5-final-provider-closure.sh")],
+    [str(repo_root / "scripts/test-f6-final-provider-closure.sh")],
     {
-        "APOLYSIS_F5_FINAL_PROVIDER_CLOSURE_OUTPUT_DIR": str(output_dir / "final-provider-closure"),
-        "APOLYSIS_REQUIRE_F5_FINAL_PROVIDER_CLOSURE": "0",
-        "APOLYSIS_RUN_F5_FINAL_PROVIDER_COMPLETION": "1" if run_final_closure else "0",
+        "APOLYSIS_F6_FINAL_PROVIDER_CLOSURE_OUTPUT_DIR": str(output_dir / "final-provider-closure"),
+        "APOLYSIS_REQUIRE_F6_FINAL_PROVIDER_CLOSURE": "0",
+        "APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE": "1" if run_final_closure else "0",
     },
-    "apolysis-f5-final-provider-closure-report.json",
+    "apolysis-f6-final-provider-closure-report.json",
 )
 closure_doc = load_json(closure_step["report_file"])
 
@@ -123,12 +123,14 @@ steps = {
         "selected_artifact_source": plan_doc.get("selected_artifact_source", ""),
         "missing_requirements": plan_doc.get("missing_requirements") or [],
     },
-    "signing_provider_readiness": {
+    "signing_evidence": {
         "exit_code": signing_step["exit_code"],
         "report": signing_step["report"],
+        "signing_evidence_ready": bool(signing_doc.get("signing_evidence_ready")),
         "signing_provider_ready": bool(signing_doc.get("signing_provider_ready")),
         "retained_signing_evidence_ready": bool(signing_doc.get("retained_signing_evidence_ready")),
         "ready_to_execute_live_signing": bool(signing_doc.get("ready_to_execute_live_signing")),
+        "selected_signing_provider": signing_doc.get("selected_signing_provider", ""),
         "missing_requirements": signing_doc.get("missing_requirements") or [],
     },
     "provider_artifact_import": {
@@ -148,14 +150,18 @@ steps = {
         "exit_code": closure_step["exit_code"],
         "report": closure_step["report"],
         "final_provider_closure_ready": bool(closure_doc.get("final_provider_closure_ready")),
-        "run_final_provider_completion": bool(closure_doc.get("run_final_provider_completion")),
+        "artifact_handoff_ready": bool(closure_doc.get("artifact_handoff_ready")),
+        "run_final_provider_completion": bool(
+            closure_doc.get("run_final_provider_closure") or closure_doc.get("run_final_provider_completion")
+        ),
         "completion_passed": bool(closure_doc.get("completion_passed")),
+        "selected_artifact_source": closure_doc.get("selected_artifact_source", ""),
         "missing_requirements": closure_doc.get("missing_requirements") or [],
     },
 }
 
 provider_execution_plan_ready = steps["provider_execution_plan"]["provider_execution_plan_ready"]
-signing_ready = steps["signing_provider_readiness"]["signing_provider_ready"]
+signing_ready = steps["signing_evidence"]["signing_evidence_ready"]
 artifact_import_ready = steps["provider_artifact_import"]["provider_artifact_import_ready"]
 workflow_artifact_import_ready = steps["provider_artifact_import"]["provider_workflow_artifact_import_ready"]
 bundle_env_ready = steps["provider_artifact_import"]["bundle_env_ready"]
@@ -201,13 +207,14 @@ passed = regulated_release_ready or not require_ready
 
 report = {
     "schema_version": 1,
-    "phase": "F6.3",
+    "phase": "F6.5",
     "audit_completed": True,
     "passed": passed,
     "fail_closed_required": require_ready,
     "regulated_release_ready": regulated_release_ready,
     "provider_execution_plan_ready": provider_execution_plan_ready,
-    "signing_provider_ready": signing_ready,
+    "signing_evidence_ready": signing_ready,
+    "signing_provider_ready": bool(signing_doc.get("signing_provider_ready")),
     "provider_artifact_import_ready": artifact_import_ready,
     "provider_workflow_artifact_import_ready": workflow_artifact_import_ready,
     "bundle_env_ready": bundle_env_ready,
@@ -220,7 +227,9 @@ report = {
         "No secret values are recorded in this report.",
         "F6 regulated release reuses historical F5 provider gates without renaming their artifact contracts.",
         "The F6 provider execution plan gate records provider and artifact-source choices before required execution.",
+        "The F6 signing evidence gate maps F6 signing controls to scripts/test-f5-signing-provider-readiness.sh and requires retained live-provider evidence for regulated release readiness.",
         "The F6 provider artifact import gate maps F6 source selection to scripts/test-f5-provider-workflow-artifact-import.sh before final closure.",
+        "The F6 final provider closure gate maps F6 closure execution controls to scripts/test-f5-final-provider-closure.sh.",
         "Default audit mode does not dispatch GitHub workflows and does not call AWS or HSM signing APIs unless downstream gates are explicitly configured to do so.",
         "Required mode fails closed until retained live KMS or external hardware HSM signing evidence and a passing final external-provider bundle are present.",
     ],

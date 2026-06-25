@@ -62,11 +62,12 @@ failure recovery, tenant-aware retention/query, Helm packaging, runtime
 metadata correlation, and service-mesh identity evidence where available. The
 provider-signing and external-provider bundle work built during the old F5
 track is retained as F6 foundation work. F6 Regulated Release and Evidence
-Integrity has started with aggregate audit, provider execution planning, and
-provider artifact import gates that reuse the historical provider gates without
-renaming their artifact contracts; it remains open for real cloud KMS or
-external hardware HSM signing, external WORM/object-lock evidence, immutable
-registry evidence, and a passing final external-provider bundle.
+Integrity has started with aggregate audit, provider execution planning,
+provider artifact import, final provider closure, and signing evidence gates
+that reuse the historical provider gates without renaming their artifact
+contracts; it remains open for real cloud KMS or external hardware HSM
+signing, external WORM/object-lock evidence, immutable registry evidence, and a
+passing final external-provider bundle.
 
 ## 🚀 Runtime Scenarios
 
@@ -294,10 +295,10 @@ Beta is complete for production-adjacent runtime accountability: bounded
 Kubernetes deployment, live k3s/VKE validation, operational metrics, recovery,
 tenant-aware retention/query, runtime metadata correlation, and service-mesh
 identity evidence where available. F6 Regulated Release and Evidence Integrity
-has started with aggregate audit, provider execution planning, and provider
-artifact import gates, and remains open for real KMS/HSM signing, external
-WORM/object-lock, immutable registry, and final external-provider bundle
-evidence.
+has started with aggregate audit, provider execution planning, provider
+artifact import, final provider closure, and signing evidence gates, and
+remains open for real KMS/HSM signing, external WORM/object-lock, immutable
+registry, and final external-provider bundle evidence.
 
 Implementation milestones:
 
@@ -321,7 +322,7 @@ Focused roadmap:
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
 | F5 | Production Runtime Accountability Beta: bounded Kubernetes deployment, live k3s/VKE validation, metrics, recovery, tenant-aware retention/query, runtime metadata correlation, and service-mesh identity evidence where available | ✅ **Completed** |
-| F6 | Regulated Release and Evidence Integrity: aggregate audit gate, provider execution planning, provider artifact import orchestration, real KMS/HSM signing, external WORM/object-lock evidence, immutable registry evidence, and final external-provider bundle closure | 🚧 **In Progress** |
+| F6 | Regulated Release and Evidence Integrity: aggregate audit gate, provider execution planning, provider artifact import, final closure orchestration, signing evidence readiness, real KMS/HSM signing, external WORM/object-lock evidence, immutable registry evidence, and final external-provider bundle closure | 🚧 **In Progress** |
 
 ## 📜 License
 
