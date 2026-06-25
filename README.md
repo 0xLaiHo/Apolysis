@@ -55,54 +55,18 @@ strong-isolation claims, boundary-only VM-backed runtimes, and validated
 Docker/containerd/Kubernetes adapter evidence. It also adds live gVisor
 runsc/sentry/gofer metadata evidence, Kubernetes Agent Sandbox metadata
 evidence, Kata boundary-only evidence, and a live-runtime evidence bundle gate
-that binds F4 claims to retained F2 runtime adapter matrix artifacts. F5 has
-started with a production-hardening baseline for a bounded Kubernetes
-DaemonSet/RBAC deployment surface and a live k3s rollout/restore validation
-gate for the node-local daemon, including live metrics scrape validation and
-live DaemonSet restart, k3s CRI socket outage recovery, queue pressure, and
-unwritable-store recovery evidence. It now also includes a local release
-supply-chain bundle gate for signed artifacts, SBOM, provenance, and
-high/critical vulnerability scan evidence, plus Helm-rendered tenant-isolated
-deployment packaging with metrics mTLS handoff annotations and a narrow
-metrics NetworkPolicy allowlist, and a local OCI registry/archive gate for
-release image publishing, SBOM attachment, and read-only archive evidence. The
-Helm packaging now also renders optional Istio strict mTLS and metrics
-AuthorizationPolicy resources for service-account-scoped metrics access. The
-daemon API now also carries tenant IDs and retention tiers on session intents
-and supports tenant-scoped session query/list responses plus local retention
-purge dry-run/apply enforcement for retained daemon state. F5 now also includes
-a release promotion policy gate and live OCI registry promotion execution for
-digest-locked production promotion, retention windows, rollback tags, and
-bounded registry access principals, plus a KMS/HSM signing profile gate for
-production signer eligibility and an HSM-compatible PKCS#11 signing execution
-gate plus opt-in AWS KMS and external HSM live signing gates, an external WORM/object-lock
-archive policy gate with live S3-compatible Object Lock API execution, and a
-live Istio service-mesh admission/handshake evidence gate, plus live operator/controller
-reconciliation validation, live k3s and Vultr VKE managed-Kubernetes
-chaos/performance validation, and a
-fail-closed external provider qualification bundle gate with live Cloudflare
-R2 Bucket Lock WORM evidence and live Docker Hub immutable-tag registry
-promotion evidence, plus retained external provider bundle artifact
-verification, final external provider bundle assembly, and an opt-in managed
-Cloud Service Mesh provider qualification gate, plus a Vultr VKE 3-node
-cluster readiness gate for subsequent live Kubernetes validation and a Vultr
-VKE Istio live provider qualification path for final-bundle managed
-service-mesh evidence, and a final provider readiness audit that fail-closes
-when required live-provider evidence is missing and rejects accepted-looking
-fixtures without live-provider evidence source, plus a signing-provider
-readiness preflight for retained signing evidence, AWS KMS prerequisites, and
-external HSM prerequisites, an opt-in AWS KMS signer bootstrap gate for
-inspect/ensure handoff to live signing, a manual workflow path that can run
-that AWS KMS bootstrap before F5.25 signing, a provider workflow readiness gate
-for GitHub secret/variable setup and web/headless-token auth handoff, an AWS
-OIDC role/KMS policy inspect/ensure handoff gate, a provider workflow dispatch
-dry-run/confirmed execution gate, a provider workflow artifact import gate, a
-final provider closure gate, and a final provider completion gate that binds
-that readiness audit to a passing final external provider bundle, a manual
-GitHub Actions workflow for running the remaining live provider evidence gates
-with repository secrets, and a final provider bundle environment preparation
-helper with workflow bundle assembly, retained provider artifact package
-handoff, and retained provider workflow alternatives.
+that binds F4 claims to retained F2 runtime adapter matrix artifacts. F5 is now
+scoped as a Production Runtime Accountability Beta and is complete at that
+boundary: bounded Kubernetes deployment, live k3s/VKE validation, metrics,
+failure recovery, tenant-aware retention/query, Helm packaging, runtime
+metadata correlation, and service-mesh identity evidence where available. The
+provider-signing and external-provider bundle work built during the old F5
+track is retained as F6 foundation work. F6 Regulated Release and Evidence
+Integrity has started with aggregate audit, provider execution planning, and
+provider artifact import gates that reuse the historical provider gates without
+renaming their artifact contracts; it remains open for real cloud KMS or
+external hardware HSM signing, external WORM/object-lock evidence, immutable
+registry evidence, and a passing final external-provider bundle.
 
 ## 🚀 Runtime Scenarios
 
@@ -325,43 +289,15 @@ tests/fixtures/     Local/Docker command fixtures and expected timeline fragment
 
 Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
 Independent Observability MVP, F2 Accountability Beta, F3 Limited Guardrails,
-and F4 Runtime Adapter Depth are complete. F5 Production Hardening is in
-progress, with a Kubernetes DaemonSet/RBAC deployment baseline, local manifest
-hardening gate, live k3s deployment validation gate, and production DaemonSet
-metrics, resilience, queue pressure, storage-failure, and release
-supply-chain validation, plus Helm production packaging for tenant-isolated
-node-local deployments and local OCI registry/archive validation for release
-artifacts, plus rendered service-mesh identity policy validation for metrics
-access, tenant-scoped query/retention metadata, and local retention purge
-enforcement in the daemon API, plus release promotion policy validation for
-production registry retention and access controls plus live OCI registry
-promotion execution validation, and KMS/HSM signing profile validation plus
-HSM-compatible PKCS#11 signing execution, external WORM/object-lock archive
-policy validation plus live S3-compatible Object Lock API execution
-validation, live Istio service-mesh admission/handshake validation, and live
-operator/controller reconciliation validation plus live k3s and Vultr VKE
-managed-Kubernetes chaos/performance validation, fail-closed external provider
-qualification bundle validation, and
-live Cloudflare R2 Bucket Lock WORM evidence plus live Docker Hub immutable-tag
-registry promotion evidence and retained external provider bundle artifact
-verification, plus opt-in AWS KMS and external HSM live signing gates and final external
-provider bundle assembly, and an opt-in managed Cloud Service Mesh provider
-qualification gate, plus a Vultr VKE 3-node cluster readiness gate and final
-provider readiness audit with live-provider fixture rejection, a Vultr VKE
-Istio live provider qualification path for final-bundle managed service-mesh
-evidence, a final provider completion gate, a manual final provider evidence
-workflow, and a final provider bundle environment preparation helper with
-workflow bundle assembly, retained provider artifact package handoff, and
-retained provider workflow alternatives, plus signing-provider readiness
-preflight for retained signing evidence, AWS KMS prerequisites, and external
-HSM prerequisites, and opt-in AWS KMS signer bootstrap for inspect/ensure
-handoff to live signing with workflow bootstrap orchestration, plus provider
-workflow readiness web/headless-token auth handoff auditing for the remaining
-GitHub Actions setup, AWS OIDC role/KMS policy inspect/ensure handoff, and
-provider workflow dispatch dry-run/confirmed execution with workflow artifact
-import and final closure orchestration. The
-remaining F5 production-provider gap is real cloud KMS or external hardware HSM
-signing evidence.
+and F4 Runtime Adapter Depth are complete. F5 Production Runtime Accountability
+Beta is complete for production-adjacent runtime accountability: bounded
+Kubernetes deployment, live k3s/VKE validation, operational metrics, recovery,
+tenant-aware retention/query, runtime metadata correlation, and service-mesh
+identity evidence where available. F6 Regulated Release and Evidence Integrity
+has started with aggregate audit, provider execution planning, and provider
+artifact import gates, and remains open for real KMS/HSM signing, external
+WORM/object-lock, immutable registry, and final external-provider bundle
+evidence.
 
 Implementation milestones:
 
@@ -384,7 +320,8 @@ Focused roadmap:
 | F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
-| F5 | Production Hardening: DaemonSet privilege budget, multi-tenant storage/query/retention metadata, mTLS/RBAC, signed artifacts, SBOM/provenance, KMS/HSM signing profile validation, PKCS#11 signing execution, opt-in AWS KMS and external HSM live signing, signing-provider readiness preflight, AWS KMS signer bootstrap and workflow orchestration, provider workflow readiness web/headless-token auth handoff auditing, AWS OIDC role/KMS policy inspect/ensure handoff, provider workflow dispatch dry-run/confirmed execution and artifact import, final provider closure gate, Helm, registry/archive/promotion/WORM policy and API execution validation including live OCI promotion, service-mesh identity/live handshake validation, opt-in managed Cloud Service Mesh provider qualification, Vultr VKE Istio live provider qualification for managed service-mesh evidence, live operator/controller reconciliation validation, live k3s and Vultr VKE managed-Kubernetes chaos/performance validation, Vultr VKE 3-node readiness, final provider readiness audit with live-provider fixture rejection, final provider completion gate, manual provider evidence workflow, final provider bundle environment preparation, workflow bundle assembly, retained provider artifact package handoff, retained provider workflow alternatives, fail-closed external provider qualification bundle validation with retained artifact SHA verification and final bundle assembly, live Cloudflare R2 Bucket Lock WORM evidence, live Docker Hub immutable-tag registry promotion evidence, and remaining live execution of external KMS/HSM signing evidence | 🚧 **In Progress** |
+| F5 | Production Runtime Accountability Beta: bounded Kubernetes deployment, live k3s/VKE validation, metrics, recovery, tenant-aware retention/query, runtime metadata correlation, and service-mesh identity evidence where available | ✅ **Completed** |
+| F6 | Regulated Release and Evidence Integrity: aggregate audit gate, provider execution planning, provider artifact import orchestration, real KMS/HSM signing, external WORM/object-lock evidence, immutable registry evidence, and final external-provider bundle closure | 🚧 **In Progress** |
 
 ## 📜 License
 

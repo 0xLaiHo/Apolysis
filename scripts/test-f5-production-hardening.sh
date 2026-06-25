@@ -42,6 +42,9 @@ provider_workflow_readiness_gate="$repo_root/scripts/test-f5-provider-workflow-r
 provider_workflow_dispatch_gate="$repo_root/scripts/test-f5-provider-workflow-dispatch.sh"
 provider_workflow_artifact_import_gate="$repo_root/scripts/test-f5-provider-workflow-artifact-import.sh"
 final_provider_closure_gate="$repo_root/scripts/test-f5-final-provider-closure.sh"
+f6_provider_execution_plan_gate="$repo_root/scripts/test-f6-provider-execution-plan.sh"
+f6_provider_artifact_import_gate="$repo_root/scripts/test-f6-provider-artifact-import.sh"
+f6_regulated_release_gate="$repo_root/scripts/test-f6-regulated-release.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
 makefile="$repo_root/Makefile"
@@ -312,6 +315,21 @@ if [[ ! -s "$final_provider_closure_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$f6_regulated_release_gate" ]]; then
+    echo "missing F6 regulated release aggregate gate: $f6_regulated_release_gate" >&2
+    exit 1
+fi
+
+if [[ ! -s "$f6_provider_execution_plan_gate" ]]; then
+    echo "missing F6.2 provider execution plan gate: $f6_provider_execution_plan_gate" >&2
+    exit 1
+fi
+
+if [[ ! -s "$f6_provider_artifact_import_gate" ]]; then
+    echo "missing F6.3 provider artifact import gate: $f6_provider_artifact_import_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -479,6 +497,21 @@ grep -q '^test-f5-provider-workflow-artifact-import:' "$makefile" || {
 
 grep -q '^test-f5-final-provider-closure:' "$makefile" || {
     echo "missing Makefile target: test-f5-final-provider-closure" >&2
+    exit 1
+}
+
+grep -q '^test-f6-regulated-release:' "$makefile" || {
+    echo "missing Makefile target: test-f6-regulated-release" >&2
+    exit 1
+}
+
+grep -q '^test-f6-provider-execution-plan:' "$makefile" || {
+    echo "missing Makefile target: test-f6-provider-execution-plan" >&2
+    exit 1
+}
+
+grep -q '^test-f6-provider-artifact-import:' "$makefile" || {
+    echo "missing Makefile target: test-f6-provider-artifact-import" >&2
     exit 1
 }
 
@@ -2084,6 +2117,146 @@ grep -q 'apolysis-f5-final-provider-closure-report' "$final_provider_closure_gat
 
 grep -q 'No secret values are recorded' "$final_provider_closure_gate" || {
     echo "F5.47 final provider closure gate must avoid recording secret values" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F6_REGULATED_RELEASE' "$f6_regulated_release_gate" || {
+    echo "F6 regulated release gate must expose fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'test-f5-signing-provider-readiness.sh' "$f6_regulated_release_gate" || {
+    echo "F6 regulated release gate must reuse signing-provider readiness evidence" >&2
+    exit 1
+}
+
+grep -q 'test-f5-provider-workflow-artifact-import.sh' "$f6_regulated_release_gate" || {
+    echo "F6 regulated release gate must reuse provider artifact import evidence" >&2
+    exit 1
+}
+
+grep -q 'test-f5-final-provider-closure.sh' "$f6_regulated_release_gate" || {
+    echo "F6 regulated release gate must drive final provider closure" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f6-regulated-release-report' "$f6_regulated_release_gate" || {
+    echo "F6 regulated release gate must retain a machine-readable report" >&2
+    exit 1
+}
+
+grep -q 'No secret values are recorded' "$f6_regulated_release_gate" || {
+    echo "F6 regulated release gate must avoid recording secret values" >&2
+    exit 1
+}
+
+grep -q 'test-f6-provider-execution-plan.sh' "$f6_regulated_release_gate" || {
+    echo "F6 regulated release gate must run the F6 provider execution plan audit" >&2
+    exit 1
+}
+
+grep -q 'test-f6-provider-artifact-import.sh' "$f6_regulated_release_gate" || {
+    echo "F6 regulated release gate must run the F6 provider artifact import audit" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F6_PROVIDER_EXECUTION_PLAN' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must expose fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F6_SIGNING_PROVIDER' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must select a signing provider" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F6_ARTIFACT_SOURCE' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must select a provider artifact source" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must understand F6.3 local artifact root input" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F6_PROVIDER_WORKFLOW_RUN_ID' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must understand F6.3 workflow run input" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F6_RETAINED_PROVIDER_ARTIFACT_PACKAGE' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must understand F6.3 retained package input" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f6-provider-execution-plan-report' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must retain a machine-readable report" >&2
+    exit 1
+}
+
+grep -q 'aws_kms' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must support AWS KMS signing path" >&2
+    exit 1
+}
+
+grep -q 'external_hsm' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must support external HSM signing path" >&2
+    exit 1
+}
+
+grep -q 'workflow_download' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must support workflow artifact download source" >&2
+    exit 1
+}
+
+grep -q 'retained_package' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must support retained package artifact source" >&2
+    exit 1
+}
+
+grep -q 'No secret values are recorded' "$f6_provider_execution_plan_gate" || {
+    echo "F6.2 provider execution plan gate must avoid recording secret values" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_REQUIRE_F6_PROVIDER_ARTIFACT_IMPORT' "$f6_provider_artifact_import_gate" || {
+    echo "F6.3 provider artifact import gate must expose fail-closed required mode" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE' "$f6_provider_artifact_import_gate" || {
+    echo "F6.3 provider artifact import gate must select a provider artifact source" >&2
+    exit 1
+}
+
+grep -q 'test-f5-provider-workflow-artifact-import.sh' "$f6_provider_artifact_import_gate" || {
+    echo "F6.3 provider artifact import gate must wrap the historical F5.46 import gate" >&2
+    exit 1
+}
+
+grep -q 'apolysis-f6-provider-artifact-import-report' "$f6_provider_artifact_import_gate" || {
+    echo "F6.3 provider artifact import gate must retain a machine-readable report" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT' "$f6_provider_artifact_import_gate" || {
+    echo "F6.3 provider artifact import gate must accept an F6 local artifact root" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F6_PROVIDER_WORKFLOW_RUN_ID' "$f6_provider_artifact_import_gate" || {
+    echo "F6.3 provider artifact import gate must accept an F6 workflow run id" >&2
+    exit 1
+}
+
+grep -q 'APOLYSIS_F6_RETAINED_PROVIDER_ARTIFACT_PACKAGE' "$f6_provider_artifact_import_gate" || {
+    echo "F6.3 provider artifact import gate must accept an F6 retained package" >&2
+    exit 1
+}
+
+grep -q 'No secret values are recorded' "$f6_provider_artifact_import_gate" || {
+    echo "F6.3 provider artifact import gate must avoid recording secret values" >&2
     exit 1
 }
 
