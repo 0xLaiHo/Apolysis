@@ -1,134 +1,129 @@
 # Apolysis
 
-🌐 [English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.md) | [Simplified Chinese](README.zh-CN.md)
 
-**Apolysis** is an environment-owned runtime accountability layer for opaque or
-semi-trusted AI Agent workloads. It is designed to collect independent
-OS/runtime evidence beneath the agent harness, correlate that evidence with the
-agent's declared intent and isolation boundary, and provide the policy surface
-needed to notify, review, or eventually enforce risky side effects.
+Apolysis is a Linux runtime accountability layer for AI agent workloads. It
+collects environment-owned evidence below the agent harness, correlates that
+evidence with declared intent and runtime metadata, and writes audit records
+that can be reviewed independently of the agent or tool runner.
 
-## 🧭 What Apolysis Is
+Apolysis is designed for teams that run coding agents, automation agents, or
+untrusted generated code and need a durable answer to a simple question:
+what did this session actually do on the host or runtime?
 
-Apolysis is not a replacement for Docker, gVisor, Kata Containers,
-Firecracker, E2B, Daytona, Modal Sandboxes, or Kubernetes Agent Sandbox.
-It is also not an agent harness, MCP gateway, approval UI, or general-purpose
-container runtime. Instead, it sits below the harness and above or beside
-execution runtimes, focusing on the missing agent-security layer:
-**environment-owned side-effect verification**.
+## Why Apolysis
 
-The key assumption is that harness logs are not a sufficient source of truth.
-Modern agent harnesses include prompt loops, planning/retry logic, tool
-routing, MCP clients, permission modes, approval gates, hooks, memory, logs,
-credential handling, and sometimes default sandbox settings. When that harness
-is opaque, third-party, hosted, or allowed to spawn arbitrary subprocesses, the
-environment operator needs OS/runtime facts that do not depend on the harness
-reporting honestly or completely.
+Agent harness logs are useful, but they are not a complete source of truth. A
+harness may hide retries, spawn subprocesses, route tools through plugins,
+handle credentials, or run with broad filesystem and network access. Apolysis
+keeps the evidence boundary outside that harness.
 
-The long-term architecture has three layers:
+Apolysis focuses on three responsibilities:
 
-1. 🔐 **Intent authorization**: what the agent should do, usually mediated by
-   the harness through MCP, tool gateways, OAuth scopes, and approvals.
-2. 🧱 **Execution isolation**: what the agent can touch, provided by containers,
-   VMs, namespaces, network policy, filesystem mounts, and runtime limits.
-3. 🔎 **Side-effect verification**: what actually happened, captured through
-   process lineage, file access, network connects, credential reads, policy
-   decisions, and feedback.
+- Record process, file, network, runtime, and policy evidence in an append-only
+  JSONL timeline.
+- Correlate local processes, Docker containers, Kubernetes metadata, and
+  runtime isolation signals with a single agent session.
+- Provide policy decisions and operator feedback without overstating what the
+  runtime can enforce.
 
-When all three layers agree, the platform can trust the session with higher
-confidence. When they diverge, Apolysis treats OS/runtime evidence as the
-starting point for investigation and future enforcement.
+It is not a replacement for Docker, gVisor, Kata Containers, Firecracker,
+Kubernetes, an MCP gateway, or an approval UI. It complements those systems by
+recording side effects and runtime context from the environment's point of
+view.
 
-F0 (M1-M7) completes the first PoC baseline for the third layer. It records
-local sessions, process-tree attribution, Docker runtime metadata, Kubernetes
-pod metadata, fixture ring-buffer events, raw kernel-event records, canonical
-side-effect events, policy violations, downgrade metadata, feedback files,
-visibility assessments, and JSONL timelines. F1 now implements a scoped, live,
-audit-only eBPF observer with a CO-RE build, Aya loader, process/file/network
-events, loss diagnostics, and persistence-time redaction. Its privileged
-live-host validation is complete. F3 keeps production-facing kernel blocking
-disabled by default while validating narrow local seccomp and BPF-LSM
-pre-operation block prototypes with operator-approved enablement and rollback
-audit records. F4 is complete for runtime adapter depth: it separates supported
-audit/review/kill paths, local-only block prototypes, metadata-only
-strong-isolation claims, boundary-only VM-backed runtimes, and validated
-Docker/containerd/Kubernetes adapter evidence. It also adds live gVisor
-runsc/sentry/gofer metadata evidence, Kubernetes Agent Sandbox metadata
-evidence, Kata boundary-only evidence, and a live-runtime evidence bundle gate
-that binds F4 claims to retained F2 runtime adapter matrix artifacts. F5 is now
-scoped as a Production Runtime Accountability Beta and is complete at that
-boundary: bounded Kubernetes deployment, live k3s/VKE validation, metrics,
-failure recovery, tenant-aware retention/query, Helm packaging, runtime
-metadata correlation, and service-mesh identity evidence where available. The
-provider-signing and external-provider bundle work built during the old F5
-track is retained as F6 foundation work. F6 Regulated Release and Evidence
-Integrity is complete: it reuses the historical provider gates without renaming
-their artifact contracts and adds retained live AWS KMS signing evidence, a F6
-evidence package gate, retained evidence package handoff, external
-WORM/object-lock retention metadata, immutable registry retention metadata,
-managed-mesh evidence decision, live provider readback evidence, and final
-release sign-off.
+## Capabilities
 
-## 🚀 Runtime Scenarios
+- Local command wrapper that tracks a session from process start to exit.
+- Docker runtime adapter with conservative defaults, labels, resource limits,
+  and container metadata capture.
+- Fixture and live eBPF observer backends for process, file, network, and
+  credential-related events.
+- Policy evaluation with `Notify`, `Review`, `Kill`, and explicitly downgraded
+  `Block` behavior when kernel support is unavailable.
+- Kubernetes and Agent Sandbox metadata parsing for Pod, namespace,
+  RuntimeClass, service account, and node context.
+- Strong-isolation visibility assessment for runtimes where host-side evidence
+  does not capture guest semantics.
+- Node-local daemon, health model, metrics, recovery checks, and Kubernetes
+  deployment assets.
+- Evidence packaging, retention, signing, registry, and release-readiness
+  validation scripts for regulated environments.
 
-- 🧑‍💻 **Local coding agents**: wrap commands such as Codex, Claude Code, Aider, or
-  local automation scripts and emit a JSONL timeline.
-- 🧪 **AI-generated code execution**: prepare policy and event schemas before
-  running untrusted code inside Docker or stronger runtimes.
-- 🔁 **CI/CD audit**: record which process was launched and how policy decisions
-  would be represented in an append-only timeline.
-- ☁️ **Cloud-native agent platforms**: prepare the schema and runtime adapter
-  boundaries needed for future Kubernetes Agent Sandbox, gVisor, and Kata
-  integrations.
+## Architecture
 
-## 🧩 How Apolysis Differs From Existing Sandboxes
+Apolysis keeps intent, isolation, and evidence as separate layers:
 
-| Product / Runtime | Primary focus | Apolysis difference |
-| --- | --- | --- |
-| Docker | Reproducible container execution | Docker is treated as a baseline adapter, not a strong security boundary. |
-| gVisor | User-space kernel isolation for containers | Apolysis will correlate runtime metadata with agent side effects and policy decisions. |
-| Kata Containers | VM-backed Kubernetes pod isolation | Apolysis will document host/guest visibility gaps and decide where guest collectors are needed. |
-| Firecracker | Low-overhead microVM primitive | Apolysis reserves a future adapter instead of building a microVM platform in the MVP. |
-| E2B / Daytona / Modal | Managed sandbox execution environments | Apolysis focuses on runtime evidence, policy decisions, and agent feedback across environments. |
-| Kubernetes Agent Sandbox | Cloud-native agent workload lifecycle | Apolysis can become an observation and policy layer for those workloads. |
-| AgentSight / ActPlane | eBPF observability / eBPF enforcement research | Apolysis adapts those ideas into a Rust project with runtime adapters, schemas, and staged enforcement. |
+- Intent authorization: what the agent or operator says should happen.
+- Execution isolation: what the runtime allows the workload to touch.
+- Side-effect verification: what the operating system and runtime show actually
+  happened.
 
-## 🛠️ Build And Run
+The repository is split into small Rust crates:
 
-Requirements for the current F0 baseline and F1 implementation:
+- `apolysis-cli`: command-line entry point for running and observing sessions.
+- `apolysis-core`: shared schemas and JSONL record types.
+- `apolysis-runtime`: local and Docker runtime adapters.
+- `apolysis-observer`: fixture and live observer backends.
+- `apolysis-policy`: policy parser and decision logic.
+- `apolysis-store`: append-only JSONL writer and hash-chain support.
+- `apolysis-kubernetes`: Kubernetes and Agent Sandbox metadata parsing.
+- `apolysis-visibility`: strong-isolation visibility assessment.
+- `apolysis-accountability`: session, finding, queue, and health contracts.
+- `apolysis-daemon`: node-local Unix socket service.
+- `apolysis-feedback`: agent-facing feedback files.
 
-- 🦀 Rust stable toolchain
-- 📦 Cargo
-- 🐧 Linux development shell for process-tree attribution through `/proc`
-- 🐳 Docker CLI/daemon for real Docker runs; tests use a local Docker stub
-- 🧬 eBPF development uses `clang`, `llvm-strip`, `bpftool`, BTF, and elevated
-  capabilities; normal tests use fixture ring-buffer records and do not need root
+## Requirements
 
-🔨 Build Rust and the CO-RE object:
+- Linux development host.
+- Rust stable toolchain and Cargo.
+- Docker CLI and daemon for Docker runtime execution.
+- For live eBPF observation: `clang`, `llvm-strip`, `bpftool`, kernel BTF, and
+  the required Linux capabilities or root privileges.
+
+Most unit and fixture tests do not require root.
+
+## Build
+
+Build the workspace and eBPF object:
 
 ```bash
 make build
 ```
 
-✅ Run tests:
+Build only the eBPF object:
+
+```bash
+make build-ebpf
+```
+
+Format and lint:
+
+```bash
+cargo fmt --all
+make lint
+```
+
+## Test
+
+Run the default Rust test suite:
 
 ```bash
 make test
 ```
 
-🧹 Run Clippy:
+Run the capability-aware live observer smoke test on a host prepared for eBPF:
 
 ```bash
-make lint
+make test-live
 ```
 
-🎨 Format:
+Production and release validation scripts are exposed as Make targets. They are
+intended for operator workflows and CI jobs that need explicit evidence gates.
 
-```bash
-cargo fmt --all
-```
+## Run A Local Session
 
-▶️ Run the local command wrapper:
+Run a command and write a JSONL timeline:
 
 ```bash
 cargo run -p apolysis-cli -- run \
@@ -137,17 +132,18 @@ cargo run -p apolysis-cli -- run \
   -- echo hello
 ```
 
-📄 Inspect the generated JSONL timeline:
+Inspect the result:
 
 ```bash
 cat .apolysis/timeline.jsonl
 ```
 
-Expected M2 records include `session_started`, `runtime_metadata`, `exec`, and
-`process_exit`. A timeout emits a `policy_violation` with
-`runtime.max_seconds` and terminates the local process tree.
+The timeline includes session lifecycle records, runtime metadata, executed
+processes, policy decisions, and process exit status.
 
-🐳 Run through the M3 Docker adapter:
+## Run With Docker
+
+Run the same command inside Docker:
 
 ```bash
 cargo run -p apolysis-cli -- run \
@@ -158,7 +154,7 @@ cargo run -p apolysis-cli -- run \
   -- echo hello
 ```
 
-Use gVisor's `runsc` runtime when it is installed:
+Use an alternate OCI runtime, such as gVisor `runsc`, when it is installed:
 
 ```bash
 cargo run -p apolysis-cli -- run \
@@ -171,35 +167,38 @@ cargo run -p apolysis-cli -- run \
 ```
 
 The Docker adapter injects `APOLYSIS_SESSION_ID`, writes Apolysis labels, uses
-`--read-only`, `--network none`, `--cap-drop ALL`, `no-new-privileges`,
-`--pids-limit`, `--cpus`, and `--memory`, and emits container image, selected
-OCI runtime, mounts, network mode, container id, and cgroup mapping metadata.
+read-only filesystem and network-deny defaults, drops capabilities, applies
+resource limits, and records container image, OCI runtime, mounts, network mode,
+container ID, and cgroup mapping metadata.
 
-🔎 Run the M4 audit-only observer pipeline with fixture ring-buffer records:
+## Observe Fixture Events
+
+Use fixture input when developing policies, schemas, or timeline processing
+without requiring privileged kernel access:
 
 ```bash
 cargo run -p apolysis-cli -- observe \
   --backend fixture \
   --input tests/fixtures/raw-kernel-events.txt \
-  --session session-m4-demo \
+  --session demo-fixture \
   --policy policies/local-dev.yaml \
   --output .apolysis/observer-timeline.jsonl
 ```
 
-The observer writes both `raw_kernel_event` records and analyzed canonical
-events. The M4 event set covers `exec`, `open/openat/openat2`, `creat`,
-`truncate`, `unlink`, `rename`, network `connect`, and credential path reads.
-The default runner plan enables process/system runners and keeps stdio plus
-SSL/HTTP uprobes disabled until later milestones.
+The observer writes raw kernel-event records and canonical side-effect events.
+The fixture set covers process execution, file operations, network connects,
+and credential-path reads.
 
-🧬 Run the F1 live audit-only observer on a capable Linux host:
+## Observe Live Host Activity
+
+On a capable Linux host, build the eBPF object and run the live observer:
 
 ```bash
 make build-ebpf
 make build
 sudo -E ./target/debug/apolysis observe \
   --backend live \
-  --session session-f1-live \
+  --session demo-live \
   --policy policies/local-dev.yaml \
   --output .apolysis/live-timeline.jsonl \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
@@ -207,129 +206,71 @@ sudo -E ./target/debug/apolysis observe \
   --workspace-root "$PWD"
 ```
 
-Use `make test-live` for the capability-aware smoke test. The live backend is
-audit-only and does not perform pre-operation blocking.
+The live backend is audit-oriented. Pre-operation blocking is only available in
+narrow, explicitly enabled prototypes and should not be represented as a
+general production enforcement guarantee.
 
-🛡️ Run the M5 policy-feedback path:
+## Kubernetes Deployment Assets
 
-```bash
-APOLYSIS_BPF_LSM_AVAILABLE=0 cargo run -p apolysis-cli -- observe \
-  --backend fixture \
-  --input tests/fixtures/raw-kernel-events.txt \
-  --session session-m5-demo \
-  --policy tests/fixtures/policies/m5-block-policy.yaml \
-  --output .apolysis/policy-timeline.jsonl \
-  --feedback-dir .sandbox
-```
-
-When a policy requests `block` but BPF-LSM is unavailable, Apolysis writes an
-explicit `unavailable:downgrade:block->notify` metadata event, emits
-`policy_violation` records with `tracepoint_notify`, and updates
-`.sandbox/last-violation.txt` for future Claude/Codex hook integration.
-
-☸️ Add M6 Kubernetes / Agent Sandbox metadata to an observer session:
-
-```bash
-APOLYSIS_BPF_LSM_AVAILABLE=0 cargo run -p apolysis-cli -- observe \
-  --backend fixture \
-  --input tests/fixtures/raw-kernel-events.txt \
-  --session session-m6-k8s \
-  --policy tests/fixtures/policies/m5-block-policy.yaml \
-  --output .apolysis/kubernetes-timeline.jsonl \
-  --feedback-dir .sandbox \
-  --kubernetes-metadata tests/fixtures/kubernetes/agent-sandbox-gvisor-pod.yaml
-```
-
-M6 consumes captured pod metadata, not the live Kubernetes API. It emits Pod,
-namespace, service account, RuntimeClass, node, service-account-token, and
-Agent Sandbox identity records, then keeps the M5 policy-feedback contract on
-the same timeline.
-
-🧪 Run the M7 strong-isolation visibility validator:
-
-```bash
-cargo run -p apolysis-cli -- visibility \
-  --scenario kubernetes-kata \
-  --input tests/fixtures/visibility/kubernetes-kata-host-events.txt \
-  --output .apolysis/visibility-kata.jsonl \
-  --kubernetes-metadata tests/fixtures/kubernetes/agent-sandbox-kata-pod.yaml
-```
-
-The validator compares host-side observer fixtures for Docker default,
-Docker+gVisor, Kubernetes+gVisor, Kubernetes+Kata, and Firecracker boundary
-scenarios. It records whether host semantics collapsed, whether runtime
-metadata is required, and whether a guest-side collector is required.
-
-## 📁 Repository Layout
+Kubernetes manifests and Helm assets live under `deploy/`:
 
 ```text
-crates/
-  apolysis-accountability/ F2 intent, session, finding, queue, and health contracts.
-  apolysis-core/    Shared schema and JSONL records.
-  apolysis-daemon/  Node-local `apolysisd` Unix socket service.
-  apolysis-feedback/ Agent-facing violation feedback files.
-  apolysis-kubernetes/ Kubernetes and Agent Sandbox metadata parser.
-  apolysis-observer/ Raw kernel event observer and policy evaluation pipeline.
-  apolysis-policy/  YAML/JSON policy parser and decision logic.
-  apolysis-runtime/ Local runner and Docker runtime adapter.
-  apolysis-store/   Append-only JSONL timeline writer.
-  apolysis-visibility/ Strong-isolation visibility assessment model.
-  apolysis-cli/     Local `apolysis run` command wrapper.
-ebpf/
-  include/          Observer ring-buffer ABI shared with userspace.
-  observer/         GPL-2.0-only F1 eBPF observer source.
-target/ebpf/        Generated CO-RE build output.
-deploy/kubernetes/ RuntimeClass, NetworkPolicy, and Agent Sandbox examples.
-policies/
-  local-dev.yaml    Default audit policy.
-  docker-baseline.yaml Docker adapter baseline policy.
-tests/fixtures/     Local/Docker command fixtures and expected timeline fragments.
+deploy/kubernetes/
+deploy/helm/apolysis/
+deploy/container/
+deploy/systemd/
 ```
 
-## 🗺️ Feature Plan And Progress
+The Kubernetes deployment assets include RBAC, NetworkPolicy, DaemonSet,
+RuntimeClass examples, service mesh policy examples, and production-oriented
+container hardening checks.
 
-Current status: Apolysis is a PoC / audit-first prototype. F0 (M1-M7), F1
-Independent Observability MVP, F2 Accountability Beta, F3 Limited Guardrails,
-and F4 Runtime Adapter Depth are complete. F5 Production Runtime Accountability
-Beta is complete for production-adjacent runtime accountability: bounded
-Kubernetes deployment, live k3s/VKE validation, operational metrics, recovery,
-tenant-aware retention/query, runtime metadata correlation, and service-mesh
-identity evidence where available. F6 Regulated Release and Evidence Integrity
-is complete with aggregate audit, provider execution planning, provider
-artifact import, final provider closure, signing evidence, retained evidence
-package handoff, external retention metadata, immutable registry metadata,
-managed-mesh decision evidence, live provider readback evidence, and final
-release sign-off.
+## Repository Layout
 
-Implementation milestones:
+```text
+crates/              Rust workspace crates.
+ebpf/                eBPF source and shared observer ABI.
+deploy/              Kubernetes, Helm, container, and systemd assets.
+policies/            Example audit policies.
+scripts/             Build, validation, release, and evidence gates.
+tests/fixtures/      Fixture events, policies, metadata, and expected output.
+docs/                Focused technical notes.
+```
 
-| Milestone | Scope | Status |
-| --- | --- | --- |
-| M1 | Rust workspace, core schema, policy parser, JSONL store, local CLI wrapper, README | ✅ **Completed** |
-| M2 | Local process session model, process-tree attribution, timeout notify, richer fixtures | ✅ **Completed** |
-| M3 | Docker adapter with safe defaults, optional OCI runtime, and container metadata | ✅ **Completed** |
-| M4 | Audit-only observer pipeline, raw kernel event schema, eBPF ring-buffer ABI, exec/file/network canonicalization | ✅ **Completed** |
-| M5 | Policy engine integration, `Notify`/`Block`/`Kill`/`Review`, feedback hook | ✅ **Completed** |
-| M6 | Kubernetes / Agent Sandbox metadata integration | ✅ **Completed** |
-| M7 | gVisor/Kata/Firecracker host-visibility validation and guest collector decision model | ✅ **Completed** |
+Generated build artifacts and local evidence output belong under `target/` or
+`.apolysis/` and should not be committed.
 
-Focused roadmap:
+## Security Model
 
-| Phase | Scope | Status |
-| --- | --- | --- |
-| F0 | PoC baseline: M1-M7 schema, adapters, fixture observer, feedback, Kubernetes metadata, strong-isolation visibility modeling | ✅ **Completed** |
-| F1 | Independent Observability MVP: live audit-only eBPF observer, CO-RE/Aya loader, process/file/network/credential timeline, loss accounting, redaction | ✅ **Completed** |
-| F2 | Accountability Beta: `apolysisd`, cross-layer comparison, Docker/containerd/Kubernetes metadata correlation, `Notify`/`Review` findings, feedback, metrics, local timeline integrity | ✅ **Completed** |
-| F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
-| F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
-| F5 | Production Runtime Accountability Beta: bounded Kubernetes deployment, live k3s/VKE validation, metrics, recovery, tenant-aware retention/query, runtime metadata correlation, and service-mesh identity evidence where available | ✅ **Completed** |
-| F6 | Regulated Release and Evidence Integrity: aggregate audit gate, provider execution planning, provider artifact import, final closure orchestration, retained live AWS KMS signing evidence, F6 evidence package gate, retained evidence package handoff, external WORM/object-lock retention metadata, immutable registry retention metadata, managed-mesh evidence decision gate, live provider readback evidence gate, final external-provider bundle closure, and final release sign-off | ✅ **Completed** |
+Apolysis records evidence. It does not make an unsafe runtime safe by itself.
+Runtime isolation remains the responsibility of the configured container, VM,
+Kubernetes, or host policy boundary.
 
-## 📜 License
+Important defaults and constraints:
+
+- Treat Docker as a baseline runtime adapter, not as a strong isolation claim.
+- Do not claim guest-level visibility for VM-backed runtimes from host-only
+  evidence.
+- Do not claim broad pre-operation blocking unless the exact kernel path and
+  rollback behavior have been validated.
+- Keep credentials, kubeconfigs, provider tokens, signing material, and captured
+  private workload data out of committed artifacts.
+
+## Documentation
+
+- `docs/visibility-validation.md` explains host and guest visibility limits.
+- `deploy/kubernetes/README.md` documents Kubernetes deployment assets.
+- `ebpf/observer/README.md` documents the observer eBPF program.
+
+Detailed roadmap, research notes, validation history, and release-readiness
+records are maintained outside the top-level README so this file can stay
+focused on using and operating the project.
+
+## License
 
 Apolysis userspace components are licensed under Apache-2.0. See
 [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-Future kernel-loaded eBPF programs under `ebpf/` are licensed under
-GPL-2.0-only where required by Linux kernel BPF licensing rules. See
+Kernel-loaded eBPF programs under `ebpf/` are licensed under GPL-2.0-only where
+required by Linux kernel BPF licensing rules. See
 [LICENSES/GPL-2.0-only.txt](LICENSES/GPL-2.0-only.txt).
