@@ -183,6 +183,47 @@ external_retention_step = run_step(
 )
 external_retention_doc = load_json(external_retention_step["report_file"])
 
+immutable_registry_step = run_step(
+    "immutable-registry-retention",
+    [str(repo_root / "scripts/test-f6-immutable-registry-retention.sh")],
+    {
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_RETENTION_OUTPUT_DIR": str(
+            output_dir / "immutable-registry-retention"
+        ),
+        "APOLYSIS_REQUIRE_F6_IMMUTABLE_REGISTRY_RETENTION": "0",
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_EVIDENCE": os.environ.get(
+            "APOLYSIS_F6_IMMUTABLE_REGISTRY_EVIDENCE", ""
+        ),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_PROVIDER": os.environ.get(
+            "APOLYSIS_F6_IMMUTABLE_REGISTRY_PROVIDER", ""
+        ),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_URI": os.environ.get(
+            "APOLYSIS_F6_IMMUTABLE_REGISTRY_URI", ""
+        ),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_IMAGE_REF": os.environ.get(
+            "APOLYSIS_F6_IMMUTABLE_REGISTRY_IMAGE_REF", ""
+        ),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_IMAGE_DIGEST": os.environ.get(
+            "APOLYSIS_F6_IMMUTABLE_REGISTRY_IMAGE_DIGEST", ""
+        ),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_ENABLED": os.environ.get(
+            "APOLYSIS_F6_IMMUTABLE_REGISTRY_ENABLED", ""
+        ),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_MODE": os.environ.get("APOLYSIS_F6_IMMUTABLE_REGISTRY_MODE", ""),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_POLICY_ID": os.environ.get(
+            "APOLYSIS_F6_IMMUTABLE_REGISTRY_POLICY_ID", ""
+        ),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_RETENTION_UNTIL": os.environ.get(
+            "APOLYSIS_F6_IMMUTABLE_REGISTRY_RETENTION_UNTIL", ""
+        ),
+        "APOLYSIS_F6_IMMUTABLE_REGISTRY_CONTROL_PLANE": os.environ.get(
+            "APOLYSIS_F6_IMMUTABLE_REGISTRY_CONTROL_PLANE", ""
+        ),
+    },
+    "apolysis-f6-immutable-registry-retention-report.json",
+)
+immutable_registry_doc = load_json(immutable_registry_step["report_file"])
+
 steps = {
     "provider_execution_plan": {
         "exit_code": plan_step["exit_code"],
@@ -265,6 +306,22 @@ steps = {
         "secret_scan_findings": external_retention_doc.get("secret_scan_findings") or [],
         "missing_requirements": external_retention_doc.get("missing_requirements") or [],
     },
+    "immutable_registry": {
+        "exit_code": immutable_registry_step["exit_code"],
+        "report": immutable_registry_step["report"],
+        "immutable_registry_ready": bool(immutable_registry_doc.get("immutable_registry_ready")),
+        "provider": immutable_registry_doc.get("provider", ""),
+        "registry_uri": immutable_registry_doc.get("registry_uri", ""),
+        "image_ref": immutable_registry_doc.get("image_ref", ""),
+        "image_digest": immutable_registry_doc.get("image_digest", ""),
+        "immutability_enabled": bool(immutable_registry_doc.get("immutability_enabled")),
+        "immutability_mode": immutable_registry_doc.get("immutability_mode", ""),
+        "policy_id": immutable_registry_doc.get("policy_id", ""),
+        "retention_until": immutable_registry_doc.get("retention_until", ""),
+        "manifest": immutable_registry_doc.get("manifest", ""),
+        "secret_scan_findings": immutable_registry_doc.get("secret_scan_findings") or [],
+        "missing_requirements": immutable_registry_doc.get("missing_requirements") or [],
+    },
 }
 
 provider_execution_plan_ready = steps["provider_execution_plan"]["provider_execution_plan_ready"]
@@ -278,6 +335,7 @@ closure_completion_passed = steps["final_provider_closure"]["completion_passed"]
 evidence_package_ready = steps["evidence_package"]["evidence_package_ready"]
 retained_evidence_package_ready = steps["retained_evidence_package"]["retained_evidence_package_ready"]
 external_retention_ready = steps["external_retention"]["external_retention_ready"]
+immutable_registry_ready = steps["immutable_registry"]["immutable_registry_ready"]
 
 missing_requirements: list[str] = []
 for name, step in steps.items():
@@ -307,6 +365,8 @@ if not retained_evidence_package_ready:
     missing_requirements.append("retained_evidence_package")
 if not external_retention_ready:
     missing_requirements.append("external_retention")
+if not immutable_registry_ready:
+    missing_requirements.append("immutable_registry")
 
 missing_requirements = list(dict.fromkeys(missing_requirements))
 regulated_release_ready = (
@@ -321,12 +381,13 @@ regulated_release_ready = (
     and evidence_package_ready
     and retained_evidence_package_ready
     and external_retention_ready
+    and immutable_registry_ready
 )
 passed = regulated_release_ready or not require_ready
 
 report = {
     "schema_version": 1,
-    "phase": "F6.8",
+    "phase": "F6.9",
     "audit_completed": True,
     "passed": passed,
     "fail_closed_required": require_ready,
@@ -341,6 +402,7 @@ report = {
     "evidence_package_ready": evidence_package_ready,
     "retained_evidence_package_ready": retained_evidence_package_ready,
     "external_retention_ready": external_retention_ready,
+    "immutable_registry_ready": immutable_registry_ready,
     "run_final_provider_closure": run_final_closure,
     "completion_passed": closure_completion_passed,
     "missing_requirements": [] if regulated_release_ready else missing_requirements,
@@ -355,12 +417,13 @@ report = {
         "The F6 evidence package gate wraps the historical F5 final external-provider bundle builder and requires a no-secret package scan.",
         "The F6 retained evidence package gate validates archive checksums and copies the evidence package into the configured retention root.",
         "The F6 external retention gate validates non-local WORM/object-lock retention metadata for the retained evidence package.",
+        "The F6 immutable registry retention gate validates digest-pinned immutable registry metadata for release images.",
         "Default audit mode does not dispatch GitHub workflows and does not call AWS or HSM signing APIs unless downstream gates are explicitly configured to do so.",
-        "Required mode fails closed until retained live KMS or external hardware HSM signing evidence, imported provider artifacts, final closure, a passing evidence package, retained evidence package handoff, and external WORM/object-lock retention metadata are present.",
+        "Required mode fails closed until retained live KMS or external hardware HSM signing evidence, imported provider artifacts, final closure, a passing evidence package, retained evidence package handoff, external WORM/object-lock retention metadata, and immutable registry metadata are present.",
     ],
     "next_commands": {
         "audit": "./scripts/test-f6-regulated-release.sh",
-        "required_from_imported_artifacts": "APOLYSIS_F6_SIGNING_EVIDENCE=<signing-evidence> APOLYSIS_F6_SIGNING_REPORT=<signing-report> APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=local_artifact_root APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT=<artifact-root> APOLYSIS_F6_RETAINED_EVIDENCE_PACKAGE_ROOT=<retention-root> APOLYSIS_F6_EXTERNAL_RETENTION_EVIDENCE=<external-retention.json> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
+        "required_from_imported_artifacts": "APOLYSIS_F6_SIGNING_EVIDENCE=<signing-evidence> APOLYSIS_F6_SIGNING_REPORT=<signing-report> APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=local_artifact_root APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT=<artifact-root> APOLYSIS_F6_RETAINED_EVIDENCE_PACKAGE_ROOT=<retention-root> APOLYSIS_F6_EXTERNAL_RETENTION_EVIDENCE=<external-retention.json> APOLYSIS_F6_IMMUTABLE_REGISTRY_EVIDENCE=<immutable-registry.json> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
         "download_then_close": "APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=workflow_download APOLYSIS_CONFIRM_F6_PROVIDER_ARTIFACT_DOWNLOAD=1 APOLYSIS_F6_PROVIDER_WORKFLOW_RUN_ID=<run-id> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
     },
     "observed_at_unix_ms": int(time.time() * 1000),
