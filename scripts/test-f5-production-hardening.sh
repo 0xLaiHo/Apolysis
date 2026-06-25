@@ -46,6 +46,7 @@ f6_provider_execution_plan_gate="$repo_root/scripts/test-f6-provider-execution-p
 f6_provider_artifact_import_gate="$repo_root/scripts/test-f6-provider-artifact-import.sh"
 f6_final_provider_closure_gate="$repo_root/scripts/test-f6-final-provider-closure.sh"
 f6_signing_evidence_gate="$repo_root/scripts/test-f6-signing-evidence.sh"
+f6_evidence_package_gate="$repo_root/scripts/test-f6-evidence-package.sh"
 f6_regulated_release_gate="$repo_root/scripts/test-f6-regulated-release.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
@@ -342,6 +343,11 @@ if [[ ! -s "$f6_signing_evidence_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$f6_evidence_package_gate" ]]; then
+    echo "missing F6.6 evidence package gate: $f6_evidence_package_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -534,6 +540,21 @@ grep -q '^test-f6-final-provider-closure:' "$makefile" || {
 
 grep -q '^test-f6-signing-evidence:' "$makefile" || {
     echo "missing Makefile target: test-f6-signing-evidence" >&2
+    exit 1
+}
+
+grep -q '^test-f6-evidence-package:' "$makefile" || {
+    echo "missing Makefile target: test-f6-evidence-package" >&2
+    exit 1
+}
+
+grep -q 'test-f6-evidence-package.sh' "$f6_regulated_release_gate" || {
+    echo "F6 aggregate must call the F6.6 evidence package gate" >&2
+    exit 1
+}
+
+grep -q 'evidence_package_ready' "$f6_regulated_release_gate" || {
+    echo "F6 aggregate report must include evidence package readiness" >&2
     exit 1
 }
 

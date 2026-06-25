@@ -65,9 +65,10 @@ track is retained as F6 foundation work. F6 Regulated Release and Evidence
 Integrity has started with aggregate audit, provider execution planning,
 provider artifact import, final provider closure, and signing evidence gates
 that reuse the historical provider gates without renaming their artifact
-contracts; it remains open for real cloud KMS or external hardware HSM
-signing, external WORM/object-lock evidence, immutable registry evidence, and a
-passing final external-provider bundle.
+contracts. It now has retained live AWS KMS signing evidence and a F6 evidence
+package gate that wraps the final external-provider bundle builder; it remains
+open for external WORM/object-lock, immutable registry, and managed-mesh
+evidence decisions before a formal regulated release.
 
 ## 🚀 Runtime Scenarios
 
@@ -297,8 +298,10 @@ tenant-aware retention/query, runtime metadata correlation, and service-mesh
 identity evidence where available. F6 Regulated Release and Evidence Integrity
 has started with aggregate audit, provider execution planning, provider
 artifact import, final provider closure, and signing evidence gates, and
-remains open for real KMS/HSM signing, external WORM/object-lock, immutable
-registry, and final external-provider bundle evidence.
+now has retained live AWS KMS signing evidence and a F6 evidence package gate
+that wraps the final external-provider bundle builder. It remains open for
+external WORM/object-lock, immutable registry, and managed-mesh evidence
+decisions before a formal regulated release.
 
 Implementation milestones:
 
@@ -322,7 +325,7 @@ Focused roadmap:
 | F3 | Limited Guardrails: truthful `Notify`/`Review`/`Kill`, narrow BPF-LSM/seccomp `Block` prototypes only where pre-op prevention is proven | ✅ **Completed** |
 | F4 | Runtime Adapter Depth: Docker/containerd baseline, gVisor metadata adapter, Kubernetes Agent Sandbox metadata, Kata boundary-only mode, Firecracker research prototype | ✅ **Completed** |
 | F5 | Production Runtime Accountability Beta: bounded Kubernetes deployment, live k3s/VKE validation, metrics, recovery, tenant-aware retention/query, runtime metadata correlation, and service-mesh identity evidence where available | ✅ **Completed** |
-| F6 | Regulated Release and Evidence Integrity: aggregate audit gate, provider execution planning, provider artifact import, final closure orchestration, signing evidence readiness, real KMS/HSM signing, external WORM/object-lock evidence, immutable registry evidence, and final external-provider bundle closure | 🚧 **In Progress** |
+| F6 | Regulated Release and Evidence Integrity: aggregate audit gate, provider execution planning, provider artifact import, final closure orchestration, retained live AWS KMS signing evidence, F6 evidence package gate, external WORM/object-lock evidence, immutable registry evidence, managed-mesh evidence decision, and final external-provider bundle closure | 🚧 **In Progress** |
 
 ## 📜 License
 

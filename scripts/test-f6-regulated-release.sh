@@ -114,6 +114,17 @@ closure_step = run_step(
 )
 closure_doc = load_json(closure_step["report_file"])
 
+package_step = run_step(
+    "evidence-package",
+    [str(repo_root / "scripts/test-f6-evidence-package.sh")],
+    {
+        "APOLYSIS_F6_EVIDENCE_PACKAGE_OUTPUT_DIR": str(output_dir / "evidence-package"),
+        "APOLYSIS_REQUIRE_F6_EVIDENCE_PACKAGE": "0",
+    },
+    "apolysis-f6-evidence-package-report.json",
+)
+package_doc = load_json(package_step["report_file"])
+
 steps = {
     "provider_execution_plan": {
         "exit_code": plan_step["exit_code"],
@@ -158,6 +169,16 @@ steps = {
         "selected_artifact_source": closure_doc.get("selected_artifact_source", ""),
         "missing_requirements": closure_doc.get("missing_requirements") or [],
     },
+    "evidence_package": {
+        "exit_code": package_step["exit_code"],
+        "report": package_step["report"],
+        "evidence_package_ready": bool(package_doc.get("evidence_package_ready")),
+        "packaged_entry_count": int(package_doc.get("packaged_entry_count") or 0),
+        "archive": package_doc.get("archive", ""),
+        "archive_sha256": package_doc.get("archive_sha256", ""),
+        "secret_scan_findings": package_doc.get("secret_scan_findings") or [],
+        "missing_requirements": package_doc.get("missing_requirements") or [],
+    },
 }
 
 provider_execution_plan_ready = steps["provider_execution_plan"]["provider_execution_plan_ready"]
@@ -168,6 +189,7 @@ bundle_env_ready = steps["provider_artifact_import"]["bundle_env_ready"]
 closure_ready = steps["final_provider_closure"]["final_provider_closure_ready"]
 closure_completion_requested = steps["final_provider_closure"]["run_final_provider_completion"]
 closure_completion_passed = steps["final_provider_closure"]["completion_passed"]
+evidence_package_ready = steps["evidence_package"]["evidence_package_ready"]
 
 missing_requirements: list[str] = []
 for name, step in steps.items():
@@ -191,6 +213,8 @@ if run_final_closure and not closure_completion_passed:
     missing_requirements.append("final_provider_completion")
 if not closure_ready:
     missing_requirements.append("final_provider_closure")
+if not evidence_package_ready:
+    missing_requirements.append("evidence_package")
 
 missing_requirements = list(dict.fromkeys(missing_requirements))
 regulated_release_ready = (
@@ -202,12 +226,13 @@ regulated_release_ready = (
     and closure_completion_requested
     and closure_completion_passed
     and closure_ready
+    and evidence_package_ready
 )
 passed = regulated_release_ready or not require_ready
 
 report = {
     "schema_version": 1,
-    "phase": "F6.5",
+    "phase": "F6.6",
     "audit_completed": True,
     "passed": passed,
     "fail_closed_required": require_ready,
@@ -219,6 +244,7 @@ report = {
     "provider_workflow_artifact_import_ready": workflow_artifact_import_ready,
     "bundle_env_ready": bundle_env_ready,
     "final_provider_closure_ready": closure_ready,
+    "evidence_package_ready": evidence_package_ready,
     "run_final_provider_closure": run_final_closure,
     "completion_passed": closure_completion_passed,
     "missing_requirements": [] if regulated_release_ready else missing_requirements,
@@ -230,12 +256,13 @@ report = {
         "The F6 signing evidence gate maps F6 signing controls to scripts/test-f5-signing-provider-readiness.sh and requires retained live-provider evidence for regulated release readiness.",
         "The F6 provider artifact import gate maps F6 source selection to scripts/test-f5-provider-workflow-artifact-import.sh before final closure.",
         "The F6 final provider closure gate maps F6 closure execution controls to scripts/test-f5-final-provider-closure.sh.",
+        "The F6 evidence package gate wraps the historical F5 final external-provider bundle builder and requires a no-secret package scan.",
         "Default audit mode does not dispatch GitHub workflows and does not call AWS or HSM signing APIs unless downstream gates are explicitly configured to do so.",
-        "Required mode fails closed until retained live KMS or external hardware HSM signing evidence and a passing final external-provider bundle are present.",
+        "Required mode fails closed until retained live KMS or external hardware HSM signing evidence, imported provider artifacts, final closure, and a passing evidence package are present.",
     ],
     "next_commands": {
         "audit": "./scripts/test-f6-regulated-release.sh",
-        "required_from_imported_artifacts": "APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=local_artifact_root APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT=<artifact-root> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
+        "required_from_imported_artifacts": "APOLYSIS_F6_SIGNING_EVIDENCE=<signing-evidence> APOLYSIS_F6_SIGNING_REPORT=<signing-report> APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=local_artifact_root APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT=<artifact-root> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
         "download_then_close": "APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=workflow_download APOLYSIS_CONFIRM_F6_PROVIDER_ARTIFACT_DOWNLOAD=1 APOLYSIS_F6_PROVIDER_WORKFLOW_RUN_ID=<run-id> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
     },
     "observed_at_unix_ms": int(time.time() * 1000),
