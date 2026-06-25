@@ -50,6 +50,7 @@ f6_evidence_package_gate="$repo_root/scripts/test-f6-evidence-package.sh"
 f6_retained_evidence_package_gate="$repo_root/scripts/test-f6-retained-evidence-package.sh"
 f6_external_retention_gate="$repo_root/scripts/test-f6-external-retention.sh"
 f6_immutable_registry_retention_gate="$repo_root/scripts/test-f6-immutable-registry-retention.sh"
+f6_managed_mesh_decision_gate="$repo_root/scripts/test-f6-managed-mesh-decision.sh"
 f6_regulated_release_gate="$repo_root/scripts/test-f6-regulated-release.sh"
 helm_chart="$repo_root/deploy/helm/apolysis"
 helm_gate="$repo_root/scripts/test-f5-helm-production.sh"
@@ -366,6 +367,11 @@ if [[ ! -s "$f6_immutable_registry_retention_gate" ]]; then
     exit 1
 fi
 
+if [[ ! -s "$f6_managed_mesh_decision_gate" ]]; then
+    echo "missing F6.10 managed mesh decision gate: $f6_managed_mesh_decision_gate" >&2
+    exit 1
+fi
+
 grep -q '^test-f5-live-deployment:' "$makefile" || {
     echo "missing Makefile target: test-f5-live-deployment" >&2
     exit 1
@@ -581,6 +587,11 @@ grep -q '^test-f6-immutable-registry-retention:' "$makefile" || {
     exit 1
 }
 
+grep -q '^test-f6-managed-mesh-decision:' "$makefile" || {
+    echo "missing Makefile target: test-f6-managed-mesh-decision" >&2
+    exit 1
+}
+
 grep -q 'test-f6-evidence-package.sh' "$f6_regulated_release_gate" || {
     echo "F6 aggregate must call the F6.6 evidence package gate" >&2
     exit 1
@@ -618,6 +629,16 @@ grep -q 'test-f6-immutable-registry-retention.sh' "$f6_regulated_release_gate" |
 
 grep -q 'immutable_registry_ready' "$f6_regulated_release_gate" || {
     echo "F6 aggregate report must include immutable registry readiness" >&2
+    exit 1
+}
+
+grep -q 'test-f6-managed-mesh-decision.sh' "$f6_regulated_release_gate" || {
+    echo "F6 aggregate must call the F6.10 managed mesh decision gate" >&2
+    exit 1
+}
+
+grep -q 'managed_mesh_decision_ready' "$f6_regulated_release_gate" || {
+    echo "F6 aggregate report must include managed mesh decision readiness" >&2
     exit 1
 }
 
