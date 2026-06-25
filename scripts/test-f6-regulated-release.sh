@@ -488,46 +488,47 @@ immutable_registry_ready = steps["immutable_registry"]["immutable_registry_ready
 managed_mesh_decision_ready = steps["managed_mesh_decision"]["managed_mesh_decision_ready"]
 live_provider_readback_ready = steps["live_provider_readback"]["live_provider_readback_ready"]
 
-missing_requirements: list[str] = []
+source_missing_requirements: list[str] = []
 for name, step in steps.items():
     if int(step["exit_code"]) != 0:
-        missing_requirements.append(f"{name}_audit_succeeded")
+        source_missing_requirements.append(f"{name}_audit_succeeded")
 if not provider_execution_plan_ready:
-    missing_requirements.append("provider_execution_plan")
+    source_missing_requirements.append("provider_execution_plan")
 if not signing_ready:
-    missing_requirements.append("retained_live_kms_or_external_hsm_signing_evidence")
+    source_missing_requirements.append("retained_live_kms_or_external_hsm_signing_evidence")
 if not artifact_import_ready:
-    missing_requirements.append("provider_artifact_import")
+    source_missing_requirements.append("provider_artifact_import")
 if not workflow_artifact_import_ready:
-    missing_requirements.append("provider_workflow_artifact_import")
+    source_missing_requirements.append("provider_workflow_artifact_import")
 if not bundle_env_ready:
-    missing_requirements.append("final_provider_bundle_env")
+    source_missing_requirements.append("final_provider_bundle_env")
 if not run_final_closure:
-    missing_requirements.append("APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE")
+    source_missing_requirements.append("APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE")
 if run_final_closure and not closure_completion_requested:
-    missing_requirements.append("final_provider_completion_requested")
+    source_missing_requirements.append("final_provider_completion_requested")
 if run_final_closure and not closure_completion_passed:
-    missing_requirements.append("final_provider_completion")
+    source_missing_requirements.append("final_provider_completion")
 if not closure_ready:
-    missing_requirements.append("final_provider_closure")
+    source_missing_requirements.append("final_provider_closure")
 if not evidence_package_ready:
-    missing_requirements.append("evidence_package")
+    source_missing_requirements.append("evidence_package")
 if not retained_evidence_package_ready:
-    missing_requirements.append("retained_evidence_package")
+    source_missing_requirements.append("retained_evidence_package")
 if not external_retention_ready:
-    missing_requirements.append("external_retention")
+    source_missing_requirements.append("external_retention")
 if not immutable_registry_ready:
-    missing_requirements.append("immutable_registry")
+    source_missing_requirements.append("immutable_registry")
 if not managed_mesh_decision_ready:
-    missing_requirements.append("managed_mesh_decision")
+    source_missing_requirements.append("managed_mesh_decision")
 if not live_provider_readback_ready:
-    missing_requirements.append("live_provider_readback")
+    source_missing_requirements.append("live_provider_readback")
 
-missing_requirements = list(dict.fromkeys(missing_requirements))
-regulated_release_ready = (
+source_missing_requirements = list(dict.fromkeys(source_missing_requirements))
+pre_signoff_regulated_release_ready = (
     provider_execution_plan_ready
     and signing_ready
     and artifact_import_ready
+    and workflow_artifact_import_ready
     and bundle_env_ready
     and run_final_closure
     and closure_completion_requested
@@ -540,15 +541,15 @@ regulated_release_ready = (
     and managed_mesh_decision_ready
     and live_provider_readback_ready
 )
-passed = regulated_release_ready or not require_ready
 
-report = {
+source_report_path = output_dir / "apolysis-f6-regulated-release-source-report.json"
+source_report = {
     "schema_version": 1,
     "phase": "F6.11",
     "audit_completed": True,
-    "passed": passed,
+    "passed": pre_signoff_regulated_release_ready or not require_ready,
     "fail_closed_required": require_ready,
-    "regulated_release_ready": regulated_release_ready,
+    "regulated_release_ready": pre_signoff_regulated_release_ready,
     "provider_execution_plan_ready": provider_execution_plan_ready,
     "signing_evidence_ready": signing_ready,
     "signing_provider_ready": bool(signing_doc.get("signing_provider_ready")),
@@ -564,6 +565,93 @@ report = {
     "live_provider_readback_ready": live_provider_readback_ready,
     "run_final_provider_closure": run_final_closure,
     "completion_passed": closure_completion_passed,
+    "missing_requirements": [] if pre_signoff_regulated_release_ready else source_missing_requirements,
+    "steps": steps,
+    "notes": [
+        "No secret values are recorded in this source report.",
+        "This F6.11 source report is used by the F6.12 final release sign-off gate.",
+    ],
+    "observed_at_unix_ms": int(time.time() * 1000),
+}
+source_report_path.write_text(json.dumps(source_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+final_signoff_step = run_step(
+    "final-release-signoff",
+    [str(repo_root / "scripts/test-f6-final-release-signoff.sh")],
+    {
+        "APOLYSIS_F6_FINAL_RELEASE_SIGNOFF_OUTPUT_DIR": str(output_dir / "final-release-signoff"),
+        "APOLYSIS_REQUIRE_F6_FINAL_RELEASE_SIGNOFF": "0",
+        "APOLYSIS_F6_REGULATED_RELEASE_SOURCE_REPORT": str(source_report_path),
+        "APOLYSIS_F6_FINAL_RELEASE_SIGNOFF": os.environ.get("APOLYSIS_F6_FINAL_RELEASE_SIGNOFF", ""),
+        "APOLYSIS_F6_FINAL_SIGNOFF_ARTIFACT": os.environ.get("APOLYSIS_F6_FINAL_SIGNOFF_ARTIFACT", ""),
+        "APOLYSIS_F6_FINAL_SIGNOFF_APPROVER": os.environ.get("APOLYSIS_F6_FINAL_SIGNOFF_APPROVER", ""),
+        "APOLYSIS_F6_FINAL_RELEASE_APPROVER": os.environ.get("APOLYSIS_F6_FINAL_RELEASE_APPROVER", ""),
+        "APOLYSIS_F6_FINAL_SIGNOFF_DECISION": os.environ.get("APOLYSIS_F6_FINAL_SIGNOFF_DECISION", ""),
+        "APOLYSIS_F6_FINAL_RELEASE_DECISION": os.environ.get("APOLYSIS_F6_FINAL_RELEASE_DECISION", ""),
+        "APOLYSIS_F6_FINAL_SIGNOFF_RATIONALE": os.environ.get("APOLYSIS_F6_FINAL_SIGNOFF_RATIONALE", ""),
+        "APOLYSIS_F6_FINAL_RELEASE_RATIONALE": os.environ.get("APOLYSIS_F6_FINAL_RELEASE_RATIONALE", ""),
+        "APOLYSIS_F6_FINAL_SIGNOFF_APPROVED_AT": os.environ.get("APOLYSIS_F6_FINAL_SIGNOFF_APPROVED_AT", ""),
+        "APOLYSIS_F6_FINAL_RELEASE_APPROVED_AT": os.environ.get("APOLYSIS_F6_FINAL_RELEASE_APPROVED_AT", ""),
+        "APOLYSIS_F6_FINAL_SIGNOFF_NO_SECRET_MATERIAL_RECORDED": os.environ.get(
+            "APOLYSIS_F6_FINAL_SIGNOFF_NO_SECRET_MATERIAL_RECORDED", ""
+        ),
+        "APOLYSIS_F6_FINAL_RELEASE_NO_SECRET_MATERIAL_RECORDED": os.environ.get(
+            "APOLYSIS_F6_FINAL_RELEASE_NO_SECRET_MATERIAL_RECORDED", ""
+        ),
+    },
+    "apolysis-f6-final-release-signoff-report.json",
+)
+final_signoff_doc = load_json(final_signoff_step["report_file"])
+steps["final_release_signoff"] = {
+    "exit_code": final_signoff_step["exit_code"],
+    "report": final_signoff_step["report"],
+    "final_release_signoff_ready": bool(final_signoff_doc.get("final_release_signoff_ready")),
+    "decision": final_signoff_doc.get("decision", ""),
+    "approver": final_signoff_doc.get("approver", ""),
+    "approved_at": final_signoff_doc.get("approved_at", ""),
+    "source_regulated_release_report": final_signoff_doc.get("source_regulated_release_report", ""),
+    "source_report_sha256": final_signoff_doc.get("source_report_sha256", ""),
+    "manifest": final_signoff_doc.get("manifest", ""),
+    "secret_scan_findings": final_signoff_doc.get("secret_scan_findings") or [],
+    "missing_requirements": final_signoff_doc.get("missing_requirements") or [],
+}
+final_release_signoff_ready = steps["final_release_signoff"]["final_release_signoff_ready"]
+
+missing_requirements = list(source_missing_requirements)
+if int(final_signoff_step["exit_code"]) != 0:
+    missing_requirements.append("final_release_signoff_audit_succeeded")
+if not final_release_signoff_ready:
+    missing_requirements.append("final_release_signoff")
+
+missing_requirements = list(dict.fromkeys(missing_requirements))
+regulated_release_ready = pre_signoff_regulated_release_ready and final_release_signoff_ready
+passed = regulated_release_ready or not require_ready
+
+report = {
+    "schema_version": 1,
+    "phase": "F6.12",
+    "audit_completed": True,
+    "passed": passed,
+    "fail_closed_required": require_ready,
+    "regulated_release_ready": regulated_release_ready,
+    "pre_signoff_regulated_release_ready": pre_signoff_regulated_release_ready,
+    "provider_execution_plan_ready": provider_execution_plan_ready,
+    "signing_evidence_ready": signing_ready,
+    "signing_provider_ready": bool(signing_doc.get("signing_provider_ready")),
+    "provider_artifact_import_ready": artifact_import_ready,
+    "provider_workflow_artifact_import_ready": workflow_artifact_import_ready,
+    "bundle_env_ready": bundle_env_ready,
+    "final_provider_closure_ready": closure_ready,
+    "evidence_package_ready": evidence_package_ready,
+    "retained_evidence_package_ready": retained_evidence_package_ready,
+    "external_retention_ready": external_retention_ready,
+    "immutable_registry_ready": immutable_registry_ready,
+    "managed_mesh_decision_ready": managed_mesh_decision_ready,
+    "live_provider_readback_ready": live_provider_readback_ready,
+    "final_release_signoff_ready": final_release_signoff_ready,
+    "run_final_provider_closure": run_final_closure,
+    "completion_passed": closure_completion_passed,
+    "regulated_release_source_report": str(source_report_path),
     "missing_requirements": [] if regulated_release_ready else missing_requirements,
     "steps": steps,
     "notes": [
@@ -579,12 +667,13 @@ report = {
         "The F6 immutable registry retention gate validates digest-pinned immutable registry metadata for release images.",
         "The F6 managed mesh decision gate records whether retained provider-backed mesh evidence is accepted for regulated release.",
         "The F6 live provider readback gate validates retained provider-side readback evidence for external retention and immutable registry controls.",
+        "The F6 final release sign-off gate validates the final regulated-release closure summary against the aggregate evidence.",
         "Default audit mode does not dispatch GitHub workflows and does not call AWS or HSM signing APIs unless downstream gates are explicitly configured to do so.",
-        "Required mode fails closed until retained live KMS or external hardware HSM signing evidence, imported provider artifacts, final closure, a passing evidence package, retained evidence package handoff, external WORM/object-lock retention metadata, immutable registry metadata, managed mesh decision evidence, and live provider readback evidence are present.",
+        "Required mode fails closed until retained live KMS or external hardware HSM signing evidence, imported provider artifacts, final closure, a passing evidence package, retained evidence package handoff, external WORM/object-lock retention metadata, immutable registry metadata, managed mesh decision evidence, live provider readback evidence, and final release sign-off are present.",
     ],
     "next_commands": {
         "audit": "./scripts/test-f6-regulated-release.sh",
-        "required_from_imported_artifacts": "APOLYSIS_F6_SIGNING_EVIDENCE=<signing-evidence> APOLYSIS_F6_SIGNING_REPORT=<signing-report> APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=local_artifact_root APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT=<artifact-root> APOLYSIS_F6_RETAINED_EVIDENCE_PACKAGE_ROOT=<retention-root> APOLYSIS_F6_EXTERNAL_RETENTION_EVIDENCE=<external-retention.json> APOLYSIS_F6_IMMUTABLE_REGISTRY_EVIDENCE=<immutable-registry.json> APOLYSIS_F6_MANAGED_MESH_EVIDENCE=<managed-mesh-evidence.json> APOLYSIS_F6_MANAGED_MESH_REPORT=<managed-mesh-report.json> APOLYSIS_F6_MANAGED_MESH_DECISION=<decision> APOLYSIS_F6_MANAGED_MESH_DECISION_RATIONALE=<rationale> APOLYSIS_F6_EXTERNAL_RETENTION_READBACK_EVIDENCE=<external-readback.json> APOLYSIS_F6_IMMUTABLE_REGISTRY_READBACK_EVIDENCE=<registry-readback.json> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
+        "required_from_imported_artifacts": "APOLYSIS_F6_SIGNING_EVIDENCE=<signing-evidence> APOLYSIS_F6_SIGNING_REPORT=<signing-report> APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=local_artifact_root APOLYSIS_F6_PROVIDER_ARTIFACT_ROOT=<artifact-root> APOLYSIS_F6_RETAINED_EVIDENCE_PACKAGE_ROOT=<retention-root> APOLYSIS_F6_EXTERNAL_RETENTION_EVIDENCE=<external-retention.json> APOLYSIS_F6_IMMUTABLE_REGISTRY_EVIDENCE=<immutable-registry.json> APOLYSIS_F6_MANAGED_MESH_EVIDENCE=<managed-mesh-evidence.json> APOLYSIS_F6_MANAGED_MESH_REPORT=<managed-mesh-report.json> APOLYSIS_F6_MANAGED_MESH_DECISION=<decision> APOLYSIS_F6_MANAGED_MESH_DECISION_RATIONALE=<rationale> APOLYSIS_F6_EXTERNAL_RETENTION_READBACK_EVIDENCE=<external-readback.json> APOLYSIS_F6_IMMUTABLE_REGISTRY_READBACK_EVIDENCE=<registry-readback.json> APOLYSIS_F6_FINAL_SIGNOFF_APPROVER=<approver> APOLYSIS_F6_FINAL_SIGNOFF_DECISION=approve_regulated_release APOLYSIS_F6_FINAL_SIGNOFF_APPROVED_AT=<timestamp> APOLYSIS_F6_FINAL_SIGNOFF_RATIONALE=<rationale> APOLYSIS_F6_FINAL_SIGNOFF_NO_SECRET_MATERIAL_RECORDED=1 APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
         "download_then_close": "APOLYSIS_F6_PROVIDER_ARTIFACT_SOURCE=workflow_download APOLYSIS_CONFIRM_F6_PROVIDER_ARTIFACT_DOWNLOAD=1 APOLYSIS_F6_PROVIDER_WORKFLOW_RUN_ID=<run-id> APOLYSIS_RUN_F6_FINAL_PROVIDER_CLOSURE=1 APOLYSIS_REQUIRE_F6_REGULATED_RELEASE=1 ./scripts/test-f6-regulated-release.sh",
     },
     "observed_at_unix_ms": int(time.time() * 1000),
