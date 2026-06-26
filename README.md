@@ -266,6 +266,8 @@ Important defaults and constraints:
 ## Documentation
 
 - `docs/visibility-validation.md` explains host and guest visibility limits.
+- `docs/release-validation-handoff.md` documents regulated-release validation
+  handoff and reproducible evidence-package inputs.
 - `deploy/kubernetes/README.md` documents Kubernetes deployment assets.
 - `ebpf/observer/README.md` documents the observer eBPF program.
 

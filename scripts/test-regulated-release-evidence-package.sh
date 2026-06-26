@@ -23,6 +23,7 @@ require_command python3
 
 python3 - "$repo_root" "$output_dir" "$report" "$require_ready" <<'PY'
 import hashlib
+import gzip
 import json
 import os
 import re
@@ -69,6 +70,38 @@ def sha256_file(path: Path) -> str:
 
 def rel_ref(path: Path, root: Path) -> str:
     return str(path.relative_to(root))
+
+def generation_timestamp_unix_ms() -> int:
+    for name in (
+        "APOLYSIS_REGULATED_RELEASE_EVIDENCE_PACKAGE_TIMESTAMP_UNIX_MS",
+        "APOLYSIS_PRODUCTION_HARDENING_FINAL_EXTERNAL_BUNDLE_TIMESTAMP_UNIX_MS",
+    ):
+        value = os.environ.get(name, "")
+        if value:
+            timestamp = int(value)
+            if timestamp <= 0:
+                raise SystemExit(f"{name} must be a positive Unix timestamp in milliseconds")
+            return timestamp
+    source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH", "")
+    if source_date_epoch:
+        timestamp = int(source_date_epoch) * 1000
+        if timestamp <= 0:
+            raise SystemExit("SOURCE_DATE_EPOCH must be a positive Unix timestamp in seconds")
+        return timestamp
+    return int(time.time() * 1000)
+
+def add_reproducible_tar_file(archive: tarfile.TarFile, path: Path, root: Path, mtime: int) -> None:
+    info = tarfile.TarInfo(rel_ref(path, root))
+    stat = path.stat()
+    info.size = stat.st_size
+    info.mtime = mtime
+    info.mode = 0o755 if stat.st_mode & 0o111 else 0o644
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    with path.open("rb") as handle:
+        archive.addfile(info, handle)
 
 def first_text_value(doc: dict, *keys: str) -> str:
     for key in keys:
@@ -169,9 +202,14 @@ downstream_exit_code = 0
 downstream_doc: dict = {}
 secret_findings: list[dict] = []
 package_entries: list[dict] = []
+generated_at_unix_ms = generation_timestamp_unix_ms()
 
 if not missing_requirements:
     env = os.environ.copy()
+    env.setdefault(
+        "APOLYSIS_PRODUCTION_HARDENING_FINAL_EXTERNAL_BUNDLE_TIMESTAMP_UNIX_MS",
+        str(generated_at_unix_ms),
+    )
     env.update(
         {
             "APOLYSIS_PRODUCTION_HARDENING_FINAL_EXTERNAL_BUNDLE_OUTPUT_DIR": str(downstream_dir),
@@ -259,9 +297,18 @@ if not missing_requirements:
                         }
                     )
 
-        with tarfile.open(archive_path, "w:gz") as archive:
-            for path in sorted(bundle_root.rglob("*")):
-                archive.add(path, arcname=rel_ref(path, bundle_root))
+        archive_mtime = generated_at_unix_ms // 1000
+        with archive_path.open("wb") as archive_file:
+            with gzip.GzipFile(
+                filename="",
+                mode="wb",
+                fileobj=archive_file,
+                mtime=archive_mtime,
+            ) as gzip_file:
+                with tarfile.open(fileobj=gzip_file, mode="w") as archive:
+                    for path in sorted(bundle_root.rglob("*")):
+                        if path.is_file():
+                            add_reproducible_tar_file(archive, path, bundle_root, archive_mtime)
         archive_sha = sha256_file(archive_path)
         archive_sha_path.write_text(f"{archive_sha}  {archive_path.name}\n", encoding="utf-8")
     else:
@@ -274,7 +321,6 @@ else:
 if secret_findings:
     missing_requirements.append("no_secret_material_in_evidence_package")
 
-generated_at_unix_ms = int(time.time() * 1000)
 package_manifest = {
     "schema_version": 1,
     "phase": "regulated-release.evidence-package",

@@ -226,6 +226,8 @@ Apolysis 记录 evidence。它不会单独把不安全的 runtime 变安全。Ru
 ## 文档
 
 - `docs/visibility-validation.md` 说明 host 和 guest visibility limits。
+- `docs/release-validation-handoff.md` 说明 regulated-release validation
+  handoff 和可重复 evidence-package 输入。
 - `deploy/kubernetes/README.md` 说明 Kubernetes deployment assets。
 - `ebpf/observer/README.md` 说明 observer eBPF program。
 

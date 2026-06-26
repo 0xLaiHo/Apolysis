@@ -88,8 +88,29 @@ managed_mesh_evidence_sha="$(copy_artifact "$managed_mesh_evidence" "$managed_me
 managed_mesh_report_sha="$(copy_artifact "$managed_mesh_report" "$managed_mesh_report_ref")"
 
 generated_at_unix_ms="$(python3 - <<'PY'
+import os
 import time
-print(int(time.time() * 1000))
+
+for name in (
+    "APOLYSIS_PRODUCTION_HARDENING_FINAL_EXTERNAL_BUNDLE_TIMESTAMP_UNIX_MS",
+    "APOLYSIS_REGULATED_RELEASE_EVIDENCE_PACKAGE_TIMESTAMP_UNIX_MS",
+):
+    value = os.environ.get(name, "")
+    if value:
+        timestamp = int(value)
+        if timestamp <= 0:
+            raise SystemExit(f"{name} must be a positive Unix timestamp in milliseconds")
+        print(timestamp)
+        raise SystemExit(0)
+
+source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH", "")
+if source_date_epoch:
+    timestamp = int(source_date_epoch) * 1000
+    if timestamp <= 0:
+        raise SystemExit("SOURCE_DATE_EPOCH must be a positive Unix timestamp in seconds")
+    print(timestamp)
+else:
+    print(int(time.time() * 1000))
 PY
 )"
 
