@@ -120,6 +120,14 @@ make test-live
 
 Production and release validation scripts are exposed as Make targets. They are
 intended for operator workflows and CI jobs that need explicit evidence gates.
+The no-secret handoff gate checks that release-validation runbooks and roadmap
+status remain aligned, and the preflight fixture gate checks the retained
+evidence readiness report plus evidence index generation path:
+
+```bash
+make test-release-validation-handoff
+make test-release-validation-preflight
+```
 
 ## Run A Local Session
 
@@ -230,7 +238,11 @@ container hardening checks.
 The repository includes validation scripts for regulated environments that need
 external signing, immutable archive retention, registry promotion, and managed
 service-mesh evidence. These scripts write local evidence under `target/` and
-are intended to be run with explicitly scoped provider credentials.
+are intended to be run with explicitly scoped provider credentials. The
+release-validation handoff gate is safe to run without provider credentials and
+checks the runbook, reproducibility inputs, and privacy expectations. The
+release-validation preflight gate validates retained evidence inputs and writes
+an evidence index for operator handoff.
 
 ## Repository Layout
 

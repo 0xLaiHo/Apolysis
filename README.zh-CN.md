@@ -99,7 +99,12 @@ make test
 make test-live
 ```
 
-Production 和 release validation scripts 通过 Make targets 暴露，适合需要显式 evidence gates 的 operator workflow 和 CI job。
+Production 和 release validation scripts 通过 Make targets 暴露，适合需要显式 evidence gates 的 operator workflow 和 CI job。无密钥 handoff gate 会检查 release-validation runbook 和 roadmap 状态是否仍保持一致；preflight fixture gate 会检查 retained evidence readiness report 和 evidence index 生成路径：
+
+```bash
+make test-release-validation-handoff
+make test-release-validation-preflight
+```
 
 ## 运行本地 Session
 
@@ -196,7 +201,7 @@ Kubernetes deployment assets 包括 RBAC、NetworkPolicy、DaemonSet、RuntimeCl
 
 ## 发布验证
 
-仓库包含面向 regulated environment 的验证脚本，用于生成外部签名、不可变归档留存、registry promotion 和 managed service-mesh evidence。这些脚本将本地 evidence 写入 `target/`，运行时应使用明确限定权限范围的 provider credentials。
+仓库包含面向 regulated environment 的验证脚本，用于生成外部签名、不可变归档留存、registry promotion 和 managed service-mesh evidence。这些脚本将本地 evidence 写入 `target/`，运行时应使用明确限定权限范围的 provider credentials。Release-validation handoff gate 不需要 provider credentials，可检查 runbook、可重复输入和隐私约束。Release-validation preflight gate 会验证 retained evidence 输入，并为 operator handoff 写出 evidence index。
 
 ## 仓库结构
 
