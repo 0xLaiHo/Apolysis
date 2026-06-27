@@ -25,6 +25,13 @@ evidence:
 make test-release-validation-handoff
 ```
 
+Run the repo-local CI contract check before changing the release-validation
+GitHub Actions workflow:
+
+```bash
+make test-release-validation-ci
+```
+
 Run the release-validation preflight gate before publishing or transferring a
 retained evidence set. Required mode fails closed unless every retained input,
 live-provider readback, final sign-off field, and secret-scan expectation is
