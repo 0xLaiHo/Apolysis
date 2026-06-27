@@ -6,6 +6,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workflow="$repo_root/.github/workflows/release-validation.yml"
 makefile="$repo_root/Makefile"
+mkdir -p "$repo_root/target"
 output_root="${APOLYSIS_RELEASE_VALIDATION_CI_TEST_OUTPUT_DIR:-$(mktemp -d "$repo_root/target/release-validation-ci-test.XXXXXX")}"
 mkdir -p "$output_root"
 output_root="$(cd "$output_root" && pwd)"

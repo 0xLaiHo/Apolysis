@@ -5,6 +5,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 preflight_script="$repo_root/scripts/release-validation-preflight.sh"
+mkdir -p "$repo_root/target"
 output_root="${APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_TEST_OUTPUT_DIR:-$(mktemp -d "$repo_root/target/release-validation-preflight-test.XXXXXX")}"
 mkdir -p "$output_root"
 output_root="$(cd "$output_root" && pwd)"
