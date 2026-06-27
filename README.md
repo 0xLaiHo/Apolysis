@@ -142,23 +142,58 @@ workload data.
 
 ### Audit a local agent command
 
-Use this pattern for a CI worker, coding-agent wrapper, or automation runner
-when the process runs directly on a Linux host:
+Use this live-observer pattern when a coding agent is already running on a
+Linux host and you want operator-owned evidence for the next tool actions. This
+example mirrors a local Codex audit: the Node wrapper was PID `1419187`, the
+Codex vendor process was PID `1419194`, and Apolysis observed the vendor
+process while the agent ran read-only commands.
 
 ```bash
-mkdir -p .apolysis/prod-local
+mkdir -p .apolysis/codex-live
 
-cargo run -p apolysis-cli -- run \
+pgrep -af codex
+
+sudo -E ./target/debug/apolysis observe \
+  --backend live \
+  --session codex-local-audit \
   --policy policies/local-dev.yaml \
-  --output .apolysis/prod-local/timeline.jsonl \
-  -- bash -lc 'python3 tests/fixtures/child.py'
-
-jq -c 'select(.event_type=="session_started" or .event_type=="exec" or .event_type=="process_exit")' \
-  .apolysis/prod-local/timeline.jsonl
+  --output .apolysis/codex-live/timeline.vendor.jsonl \
+  --bpf-object target/ebpf/apolysis_observer.bpf.o \
+  --scope-pid 1419194 \
+  --workspace-root "$PWD" \
+  --duration-seconds 300
 ```
 
-Use the resulting JSONL timeline during review to see the session lifecycle,
-process tree, policy decisions, and exit status from the host's point of view.
+Run the workload in the audited agent session while the observer is active:
+
+```bash
+pwd
+ls
+ls crates/apolysis-observer/src
+cat Cargo.toml
+cat ebpf/observer/README.md
+stat crates/apolysis-observer/src/live.rs
+sed -n '401,432p' crates/apolysis-observer/src/live.rs
+rg -n 'APOLYSIS_TRACKED_PIDS|scope-pid|ProcessTree|observer-scope|raw_events' \
+  crates/apolysis-observer/src crates/apolysis-cli/src ebpf/observer README.md README.zh-CN.md
+```
+
+Review the resulting timeline:
+
+```bash
+wc -l .apolysis/codex-live/timeline.vendor.jsonl
+
+jq -r '.event_type // .event_name // .kind // .record_type' \
+  .apolysis/codex-live/timeline.vendor.jsonl | sort | uniq -c
+
+jq -c 'select(.event_type=="network_connect" or .event_type=="process_exit" or .event_name=="connect")' \
+  .apolysis/codex-live/timeline.vendor.jsonl
+```
+
+Use the current vendor process PID for `--scope-pid`; a PID from a previous
+session is usually stale. For an already-running agent, attaching to the
+long-lived vendor process captures Codex runtime activity such as proxy
+connections and short-lived process exits from the host's point of view.
 
 ### Run an agent in Docker or gVisor
 
