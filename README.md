@@ -132,6 +132,164 @@ make test-release-validation-preflight
 make test-release-validation-ci
 ```
 
+## Production Usage Examples
+
+Use these examples when you want to run Apolysis as an operator-owned evidence
+layer around real agent work. They keep generated timelines and validation
+reports in ignored `.apolysis/` or `target/` paths. Do not commit those outputs,
+kubeconfigs, provider credentials, signing material, or captured private
+workload data.
+
+### Audit a local agent command
+
+Use this pattern for a CI worker, coding-agent wrapper, or automation runner
+when the process runs directly on a Linux host:
+
+```bash
+mkdir -p .apolysis/prod-local
+
+cargo run -p apolysis-cli -- run \
+  --policy policies/local-dev.yaml \
+  --output .apolysis/prod-local/timeline.jsonl \
+  -- bash -lc 'python3 tests/fixtures/child.py'
+
+jq -c 'select(.event_type=="session_started" or .event_type=="exec" or .event_type=="process_exit")' \
+  .apolysis/prod-local/timeline.jsonl
+```
+
+Use the resulting JSONL timeline during review to see the session lifecycle,
+process tree, policy decisions, and exit status from the host's point of view.
+
+### Run an agent in Docker or gVisor
+
+Use Docker when you want Apolysis to start the workload with conservative
+container defaults and record the resulting runtime metadata:
+
+```bash
+mkdir -p .apolysis/prod-docker
+
+cargo run -p apolysis-cli -- run \
+  --runtime docker \
+  --image alpine:3.20 \
+  --policy policies/docker-baseline.yaml \
+  --output .apolysis/prod-docker/timeline.jsonl \
+  -- sh -lc 'echo "agent-session:$APOLYSIS_SESSION_ID"'
+
+jq -c 'select(.event_type=="runtime_metadata" or .event_type=="process_exit")' \
+  .apolysis/prod-docker/timeline.jsonl
+```
+
+If gVisor `runsc` is installed, keep the same policy and select the OCI runtime
+explicitly:
+
+```bash
+cargo run -p apolysis-cli -- run \
+  --runtime docker \
+  --docker-runtime runsc \
+  --image alpine:3.20 \
+  --policy policies/docker-baseline.yaml \
+  --output .apolysis/prod-docker/runsc-timeline.jsonl \
+  -- sh -lc 'echo "agent-session:$APOLYSIS_SESSION_ID"'
+```
+
+Apolysis records the container image, OCI runtime, cgroup mapping, network
+mode, mounts, resource limits, and Apolysis session labels. Treat Docker as a
+baseline runtime adapter; use gVisor, Kata, Firecracker, Kubernetes, or another
+runtime boundary for stronger isolation claims.
+
+### Attach Kubernetes or Agent Sandbox metadata
+
+Apolysis does not yet ship a Kubernetes controller or admission webhook. In
+production, capture the pod metadata owned by your platform and attach it to
+the observed session so the timeline includes pod, namespace, service account,
+RuntimeClass, node, and Agent Sandbox identity:
+
+```bash
+mkdir -p .apolysis/prod-kubernetes
+
+kubectl get pod <agent-pod> -n <namespace> -o yaml \
+  > .apolysis/prod-kubernetes/pod.yaml
+
+cargo run -p apolysis-cli -- observe \
+  --backend fixture \
+  --input tests/fixtures/raw-kernel-events.txt \
+  --session prod-kubernetes-agent \
+  --policy tests/fixtures/policies/policy-feedback-block-policy.yaml \
+  --output .apolysis/prod-kubernetes/timeline.jsonl \
+  --feedback-dir .sandbox \
+  --kubernetes-metadata .apolysis/prod-kubernetes/pod.yaml
+
+jq -c 'select(.actor=="kubernetes" or .resource=="agent-sandbox" or .record_type=="policy_violation")' \
+  .apolysis/prod-kubernetes/timeline.jsonl
+```
+
+For agent pods, prefer `runtimeClassName: gvisor` or `runtimeClassName:
+kata-qemu`, disable service-account token automount unless the agent needs API
+access, and pair the pod with a default-deny `NetworkPolicy` plus narrow allow
+rules.
+
+### Deploy the node-local daemon with Helm
+
+Use the Helm chart when the cluster should run `apolysisd` as a node-local
+DaemonSet with bounded capabilities, read-only runtime socket mounts,
+tenant-scoped state paths, health probes, low-cardinality metrics, NetworkPolicy
+defaults, and optional Istio mTLS handoff annotations:
+
+```bash
+helm lint deploy/helm/apolysis \
+  --set tenant.id=platform-prod \
+  --set namespace.name=apolysis-system
+
+helm template apolysis deploy/helm/apolysis \
+  --namespace apolysis-system \
+  --set tenant.id=platform-prod \
+  --set namespace.name=apolysis-system \
+  --set image.repository=ghcr.io/0xlaiho/apolysis \
+  --set image.tag=0.1.0 \
+  --set mesh.istio.enabled=true \
+  --set 'mesh.istio.metricsAuthorizationPolicy.allowedPrincipals[0]=cluster.local/ns/monitoring/sa/prometheus' \
+  | kubectl apply --dry-run=client --validate=false -f -
+
+helm upgrade --install apolysis deploy/helm/apolysis \
+  --namespace apolysis-system \
+  --create-namespace \
+  --set tenant.id=platform-prod \
+  --set namespace.name=apolysis-system \
+  --set image.repository=ghcr.io/0xlaiho/apolysis \
+  --set image.tag=0.1.0
+
+kubectl -n apolysis-system rollout status daemonset/apolysis
+kubectl -n apolysis-system port-forward svc/apolysis-metrics 9909:9909
+curl -s http://127.0.0.1:9909/metrics | grep '^apolysis_'
+```
+
+Run `make test-production-hardening-helm-production` before changing chart
+defaults. Run live Kubernetes gates only in a validation cluster that you are
+prepared to mutate.
+
+### Validate a regulated release handoff
+
+Use the release-validation gates when a release operator needs retained
+evidence for signing, immutable archive retention, registry promotion,
+managed service mesh, and final sign-off:
+
+```bash
+make test-release-validation-handoff
+make test-release-validation-ci
+
+APOLYSIS_REQUIRE_RELEASE_VALIDATION_PREFLIGHT=1 \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_PROVIDER_ROOT=<provider-root> \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_AGGREGATE_REPORT=<aggregate-report.json> \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_EXTERNAL_RETENTION_READBACK_EVIDENCE=<external-readback.json> \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_IMMUTABLE_REGISTRY_READBACK_EVIDENCE=<registry-readback.json> \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_FINAL_SIGNOFF=<final-signoff.json> \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_INDEX=target/release-validation/operator-evidence-index.json \
+  ./scripts/release-validation-preflight.sh
+```
+
+Required-mode preflight fails closed until every retained input, provider
+readback, final sign-off field, and secret-scan expectation is present.
+
 ## Run A Local Session
 
 Run a command and write a JSONL timeline:

@@ -107,6 +107,157 @@ make test-release-validation-preflight
 make test-release-validation-ci
 ```
 
+## 生产使用示例
+
+当你希望把 Apolysis 作为由 operator 掌握的 evidence layer 包在真实 agent
+workload 外侧时，可以直接使用下面这些示例。生成的 timeline 和验证报告应放在被
+ignore 的 `.apolysis/` 或 `target/` 路径下。不要提交这些输出、kubeconfig、
+provider credentials、signing material 或包含 private workload data 的捕获内容。
+
+### 审计本地 agent 命令
+
+当 CI worker、coding-agent wrapper 或自动化 runner 直接运行在 Linux host 上时，
+使用这个模式：
+
+```bash
+mkdir -p .apolysis/prod-local
+
+cargo run -p apolysis-cli -- run \
+  --policy policies/local-dev.yaml \
+  --output .apolysis/prod-local/timeline.jsonl \
+  -- bash -lc 'python3 tests/fixtures/child.py'
+
+jq -c 'select(.event_type=="session_started" or .event_type=="exec" or .event_type=="process_exit")' \
+  .apolysis/prod-local/timeline.jsonl
+```
+
+生成的 JSONL timeline 可用于 review：从 host 视角查看 session lifecycle、process
+tree、policy decisions 和 exit status。
+
+### 在 Docker 或 gVisor 中运行 agent
+
+当你希望 Apolysis 用保守 container 默认值启动 workload，并记录 runtime metadata
+时，使用 Docker runtime：
+
+```bash
+mkdir -p .apolysis/prod-docker
+
+cargo run -p apolysis-cli -- run \
+  --runtime docker \
+  --image alpine:3.20 \
+  --policy policies/docker-baseline.yaml \
+  --output .apolysis/prod-docker/timeline.jsonl \
+  -- sh -lc 'echo "agent-session:$APOLYSIS_SESSION_ID"'
+
+jq -c 'select(.event_type=="runtime_metadata" or .event_type=="process_exit")' \
+  .apolysis/prod-docker/timeline.jsonl
+```
+
+如果已经安装 gVisor `runsc`，保留同一份 policy，并显式选择 OCI runtime：
+
+```bash
+cargo run -p apolysis-cli -- run \
+  --runtime docker \
+  --docker-runtime runsc \
+  --image alpine:3.20 \
+  --policy policies/docker-baseline.yaml \
+  --output .apolysis/prod-docker/runsc-timeline.jsonl \
+  -- sh -lc 'echo "agent-session:$APOLYSIS_SESSION_ID"'
+```
+
+Apolysis 会记录 container image、OCI runtime、cgroup mapping、network mode、
+mounts、resource limits 和 Apolysis session labels。Docker 应被视为 baseline
+runtime adapter；更强隔离声明应来自 gVisor、Kata、Firecracker、Kubernetes 或其他
+runtime boundary。
+
+### 关联 Kubernetes 或 Agent Sandbox metadata
+
+Apolysis 当前还不自带 Kubernetes controller 或 admission webhook。生产使用时，
+由平台侧捕获 pod metadata，并把它附加到被观测的 session 上，让 timeline 包含
+pod、namespace、service account、RuntimeClass、node 和 Agent Sandbox identity：
+
+```bash
+mkdir -p .apolysis/prod-kubernetes
+
+kubectl get pod <agent-pod> -n <namespace> -o yaml \
+  > .apolysis/prod-kubernetes/pod.yaml
+
+cargo run -p apolysis-cli -- observe \
+  --backend fixture \
+  --input tests/fixtures/raw-kernel-events.txt \
+  --session prod-kubernetes-agent \
+  --policy tests/fixtures/policies/policy-feedback-block-policy.yaml \
+  --output .apolysis/prod-kubernetes/timeline.jsonl \
+  --feedback-dir .sandbox \
+  --kubernetes-metadata .apolysis/prod-kubernetes/pod.yaml
+
+jq -c 'select(.actor=="kubernetes" or .resource=="agent-sandbox" or .record_type=="policy_violation")' \
+  .apolysis/prod-kubernetes/timeline.jsonl
+```
+
+Agent pod 建议使用 `runtimeClassName: gvisor` 或 `runtimeClassName: kata-qemu`；
+除非 agent 明确需要 Kubernetes API，否则关闭 service-account token automount；同时搭配
+default-deny `NetworkPolicy` 和按工具收窄的 allow rules。
+
+### 使用 Helm 部署 node-local daemon
+
+当集群需要以 node-local DaemonSet 运行 `apolysisd` 时，使用 Helm chart。它会渲染有边界的
+capabilities、只读 runtime socket mounts、tenant-scoped state paths、health probes、
+低 cardinality metrics、NetworkPolicy 默认值，以及可选的 Istio mTLS handoff annotations：
+
+```bash
+helm lint deploy/helm/apolysis \
+  --set tenant.id=platform-prod \
+  --set namespace.name=apolysis-system
+
+helm template apolysis deploy/helm/apolysis \
+  --namespace apolysis-system \
+  --set tenant.id=platform-prod \
+  --set namespace.name=apolysis-system \
+  --set image.repository=ghcr.io/0xlaiho/apolysis \
+  --set image.tag=0.1.0 \
+  --set mesh.istio.enabled=true \
+  --set 'mesh.istio.metricsAuthorizationPolicy.allowedPrincipals[0]=cluster.local/ns/monitoring/sa/prometheus' \
+  | kubectl apply --dry-run=client --validate=false -f -
+
+helm upgrade --install apolysis deploy/helm/apolysis \
+  --namespace apolysis-system \
+  --create-namespace \
+  --set tenant.id=platform-prod \
+  --set namespace.name=apolysis-system \
+  --set image.repository=ghcr.io/0xlaiho/apolysis \
+  --set image.tag=0.1.0
+
+kubectl -n apolysis-system rollout status daemonset/apolysis
+kubectl -n apolysis-system port-forward svc/apolysis-metrics 9909:9909
+curl -s http://127.0.0.1:9909/metrics | grep '^apolysis_'
+```
+
+修改 chart 默认值前，先运行 `make test-production-hardening-helm-production`。只有在可以接受
+cluster mutation 的验证集群中，才运行 live Kubernetes gates。
+
+### 验证 regulated release handoff
+
+当 release operator 需要保留 signing、不可变归档留存、registry promotion、managed
+service mesh 和 final sign-off evidence 时，使用 release-validation gates：
+
+```bash
+make test-release-validation-handoff
+make test-release-validation-ci
+
+APOLYSIS_REQUIRE_RELEASE_VALIDATION_PREFLIGHT=1 \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_PROVIDER_ROOT=<provider-root> \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_AGGREGATE_REPORT=<aggregate-report.json> \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_EXTERNAL_RETENTION_READBACK_EVIDENCE=<external-readback.json> \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_IMMUTABLE_REGISTRY_READBACK_EVIDENCE=<registry-readback.json> \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_FINAL_SIGNOFF=<final-signoff.json> \
+APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_INDEX=target/release-validation/operator-evidence-index.json \
+  ./scripts/release-validation-preflight.sh
+```
+
+Required-mode preflight 会 fail closed，直到 retained inputs、provider readback、
+final sign-off fields 和 secret-scan expectations 全部满足。
+
 ## 运行本地 Session
 
 运行一个命令并写出 JSONL timeline：
