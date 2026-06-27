@@ -99,7 +99,7 @@ make test
 make test-live
 ```
 
-Production 和 release validation scripts 通过 Make targets 暴露，适合需要显式 evidence gates 的 operator workflow 和 CI job。无密钥 handoff gate 会检查 release-validation runbook 和 roadmap 状态是否仍保持一致；preflight fixture gate 会检查 retained evidence readiness report 和 evidence index 生成路径；CI contract gate 会检查 release-validation GitHub Actions workflow 保持 repo-local 且不需要 credentials：
+Production 和 release validation scripts 通过 Make targets 暴露，适合需要显式 evidence gates 的 operator workflow 和 CI job。无密钥 handoff gate 会检查 release-validation runbook 和 roadmap 状态是否仍保持一致；preflight fixture gate 会检查 retained evidence readiness report 和 evidence index 生成路径；CI contract gate 会检查 release-validation GitHub Actions workflow 保持 repo-local、不需要 credentials，并保留稳定 evidence artifacts：
 
 ```bash
 make test-release-validation-handoff

@@ -32,6 +32,20 @@ GitHub Actions workflow:
 make test-release-validation-ci
 ```
 
+When the `Release Validation` GitHub Actions workflow passes, keep the run URL
+and download these stable artifacts for release review:
+
+- `release-validation-preflight-evidence`: preflight report and evidence index
+  from `target/release-validation-ci/preflight/green/`.
+- `release-validation-final-signoff-evidence`: final sign-off report and
+  manifest from `target/release-validation-ci/final-signoff/`.
+- `release-validation-production-hardening-evidence`: production-hardening
+  manifest gate log from `target/release-validation-ci/production-hardening/`.
+
+These workflow artifacts are evidence handoff outputs, not source files. Do not
+commit downloaded artifacts, and do not add provider credentials, kubeconfigs,
+or signing material to the workflow.
+
 Run the release-validation preflight gate before publishing or transferring a
 retained evidence set. Required mode fails closed unless every retained input,
 live-provider readback, final sign-off field, and secret-scan expectation is

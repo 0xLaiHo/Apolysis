@@ -33,7 +33,19 @@ jobs:
         run: make test-release-validation-handoff
 
       - name: Run preflight fixture gate
+        env:
+          APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_TEST_OUTPUT_DIR: target/release-validation-ci/preflight
         run: make test-release-validation-preflight
+
+      - name: Upload preflight evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-validation-preflight-evidence
+          path: |
+            target/release-validation-ci/preflight/green/apolysis-release-validation-preflight-report.json
+            target/release-validation-ci/preflight/green/apolysis-release-validation-evidence-index.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Prepare final signoff fixture source
         run: |
@@ -78,7 +90,28 @@ jobs:
         env:
           APOLYSIS_REQUIRE_REGULATED_RELEASE_FINAL_RELEASE_SIGNOFF: "1"
           APOLYSIS_REGULATED_RELEASE_REPORT: target/release-validation-ci/source-report.json
+          APOLYSIS_REGULATED_RELEASE_FINAL_RELEASE_SIGNOFF_OUTPUT_DIR: target/release-validation-ci/final-signoff
         run: make test-regulated-release-final-release-signoff
 
+      - name: Upload final signoff evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-validation-final-signoff-evidence
+          path: target/release-validation-ci/final-signoff
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Run production hardening manifest gate
-        run: make test-production-hardening
+        run: |
+          set -o pipefail
+          mkdir -p target/release-validation-ci/production-hardening
+          make test-production-hardening 2>&1 \
+            | tee target/release-validation-ci/production-hardening/production-hardening-manifest-gate.log
+
+      - name: Upload production hardening evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-validation-production-hardening-evidence
+          path: target/release-validation-ci/production-hardening
+          if-no-files-found: error
+          retention-days: 30

@@ -124,7 +124,7 @@ The no-secret handoff gate checks that release-validation runbooks and roadmap
 status remain aligned, and the preflight fixture gate checks the retained
 evidence readiness report plus evidence index generation path. The CI contract
 gate checks that the release-validation GitHub Actions workflow stays
-repo-local and credential-free:
+repo-local, credential-free, and retains stable evidence artifacts:
 
 ```bash
 make test-release-validation-handoff
