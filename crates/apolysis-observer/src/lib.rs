@@ -16,7 +16,7 @@ mod scope;
 
 pub use live::{
     enable_multi_cgroup_scope, observe_live, raw_event_from_record, update_tracked_cgroup,
-    DaemonKernelEvent, DaemonObserver, DaemonObserverBatch, DaemonObserverConfig,
+    AgentRunRequest, DaemonKernelEvent, DaemonObserver, DaemonObserverBatch, DaemonObserverConfig,
     DaemonObserverCounters, LiveObserveRequest, LiveScope, ObserverBatchDecoder,
 };
 pub use redaction::{redact_raw_event_for_persistence, RedactedValue, Redactor};
@@ -81,6 +81,7 @@ pub struct ObserveResult {
     pub canonical_events: usize,
     pub backend: ObserverBackend,
     pub mode: ObserverMode,
+    pub agent_exit_code: Option<i32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -263,6 +264,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
         canonical_events: canonical_count,
         backend: ObserverBackend::FixtureRingBuffer,
         mode: ObserverMode::AuditOnly,
+        agent_exit_code: None,
     })
 }
 
