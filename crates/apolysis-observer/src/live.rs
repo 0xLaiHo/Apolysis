@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -40,6 +42,40 @@ impl LiveScope {
             Self::ProcessTree(pid) => format!("mode:process_tree,root_pid:{pid}"),
         }
     }
+}
+
+pub fn discover_process_tree_scope_pids(
+    root_pid: u32,
+    proc_root: impl AsRef<Path>,
+) -> Result<Vec<u32>, String> {
+    if root_pid == 0 {
+        return Err("process-tree root PID must be non-zero".to_string());
+    }
+
+    let proc_root = proc_root.as_ref();
+    let mut pids = BTreeSet::from([root_pid]);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let snapshot = pids.iter().copied().collect::<Vec<_>>();
+
+        for pid in &snapshot {
+            for tid in proc_task_ids(proc_root, *pid) {
+                changed |= pids.insert(tid);
+                for child in proc_task_children(proc_root, *pid, tid) {
+                    changed |= pids.insert(child);
+                }
+            }
+        }
+
+        for (pid, ppid) in proc_parent_pairs(proc_root)? {
+            if pids.contains(&ppid) {
+                changed |= pids.insert(pid);
+            }
+        }
+    }
+
+    Ok(pids.into_iter().collect())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -737,11 +773,63 @@ fn configure_scope(ebpf: &mut Ebpf, scope: &LiveScope) -> Result<(), String> {
             .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_PIDS".to_string())?;
         let mut tracked = HashMap::<_, u32, u8>::try_from(tracked_map)
             .map_err(|error| format!("invalid APOLYSIS_TRACKED_PIDS map: {error}"))?;
-        tracked
-            .insert(root_pid, 1, 0)
-            .map_err(|error| format!("failed to seed process-tree scope: {error}"))?;
+        for pid in discover_process_tree_scope_pids(*root_pid, "/proc")? {
+            tracked
+                .insert(pid, 1, 0)
+                .map_err(|error| format!("failed to seed process-tree scope pid {pid}: {error}"))?;
+        }
     }
     Ok(())
+}
+
+fn proc_task_ids(proc_root: &Path, pid: u32) -> Vec<u32> {
+    let task_root = proc_root.join(pid.to_string()).join("task");
+    let Ok(entries) = fs::read_dir(task_root) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .collect()
+}
+
+fn proc_task_children(proc_root: &Path, pid: u32, tid: u32) -> Vec<u32> {
+    let children_path = proc_root
+        .join(pid.to_string())
+        .join("task")
+        .join(tid.to_string())
+        .join("children");
+    let Ok(children) = fs::read_to_string(children_path) else {
+        return Vec::new();
+    };
+    children
+        .split_whitespace()
+        .filter_map(|child| child.parse::<u32>().ok())
+        .collect()
+}
+
+fn proc_parent_pairs(proc_root: &Path) -> Result<Vec<(u32, u32)>, String> {
+    let entries = fs::read_dir(proc_root)
+        .map_err(|error| format!("failed to scan proc root {}: {error}", proc_root.display()))?;
+    let mut pairs = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
+        let stat_path = entry.path().join("stat");
+        let Ok(stat) = fs::read_to_string(stat_path) else {
+            continue;
+        };
+        if let Some(ppid) = parse_proc_stat_ppid(&stat) {
+            pairs.push((pid, ppid));
+        }
+    }
+    Ok(pairs)
+}
+
+fn parse_proc_stat_ppid(stat: &str) -> Option<u32> {
+    let after_comm = stat.rsplit_once(") ")?.1;
+    after_comm.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Configure the observer to accept events from a dynamically managed cgroup set.

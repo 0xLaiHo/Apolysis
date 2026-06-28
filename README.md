@@ -146,6 +146,8 @@ Use this live-observer pattern when you want Apolysis to launch a local coding
 agent and own the observed root PID. The operator no longer has to run `ps` or
 choose among multiple Codex processes; `--agent-run -- <command>` starts the
 agent under the live observer and records supervisor metadata in the timeline.
+Managed launch seeds the process-tree scope from the agent root, its threads,
+and discoverable descendants before attach.
 
 ```bash
 mkdir -p .apolysis/codex-live
