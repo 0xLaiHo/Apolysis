@@ -14,7 +14,7 @@ apolysis-store = { path = "../apolysis-store" }
 aya.workspace = true
 libc.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "process", "rt", "signal", "time"] }
 
 [lib]
 path = "src/lib.rs"

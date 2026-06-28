@@ -142,58 +142,43 @@ workload data.
 
 ### Audit a local agent command
 
-Use this live-observer pattern when a coding agent is already running on a
-Linux host and you want operator-owned evidence for the next tool actions. This
-example mirrors a local Codex audit: the Node wrapper was PID `1419187`, the
-Codex vendor process was PID `1419194`, and Apolysis observed the vendor
-process while the agent ran read-only commands.
+Use this live-observer pattern when you want Apolysis to launch a local coding
+agent and own the observed root PID. The operator no longer has to run `ps` or
+choose among multiple Codex processes; `--agent-run -- <command>` starts the
+agent under the live observer and records supervisor metadata in the timeline.
 
 ```bash
 mkdir -p .apolysis/codex-live
-
-pgrep -af codex
 
 sudo -E ./target/debug/apolysis observe \
   --backend live \
   --session codex-local-audit \
   --policy policies/local-dev.yaml \
-  --output .apolysis/codex-live/timeline.vendor.jsonl \
+  --output .apolysis/codex-live/timeline.agent-run.jsonl \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
-  --scope-pid 1419194 \
   --workspace-root "$PWD" \
-  --duration-seconds 300
-```
-
-Run the workload in the audited agent session while the observer is active:
-
-```bash
-pwd
-ls
-ls crates/apolysis-observer/src
-cat Cargo.toml
-cat ebpf/observer/README.md
-stat crates/apolysis-observer/src/live.rs
-sed -n '401,432p' crates/apolysis-observer/src/live.rs
-rg -n 'APOLYSIS_TRACKED_PIDS|scope-pid|ProcessTree|observer-scope|raw_events' \
-  crates/apolysis-observer/src crates/apolysis-cli/src ebpf/observer README.md README.zh-CN.md
+  --agent-kind codex \
+  --agent-run -- codex resume <codex-session-id>
 ```
 
 Review the resulting timeline:
 
 ```bash
-wc -l .apolysis/codex-live/timeline.vendor.jsonl
+wc -l .apolysis/codex-live/timeline.agent-run.jsonl
+
+jq -c 'select(.resource=="agent-supervisor-mode" or .resource=="agent-kind" or .resource=="agent-root-pid" or .resource=="agent-command" or .resource=="observer-scope")' \
+  .apolysis/codex-live/timeline.agent-run.jsonl
 
 jq -r '.event_type // .event_name // .kind // .record_type' \
-  .apolysis/codex-live/timeline.vendor.jsonl | sort | uniq -c
+  .apolysis/codex-live/timeline.agent-run.jsonl | sort | uniq -c
 
 jq -c 'select(.event_type=="network_connect" or .event_type=="process_exit" or .event_name=="connect")' \
-  .apolysis/codex-live/timeline.vendor.jsonl
+  .apolysis/codex-live/timeline.agent-run.jsonl
 ```
 
-Use the current vendor process PID for `--scope-pid`; a PID from a previous
-session is usually stale. For an already-running agent, attaching to the
-long-lived vendor process captures Codex runtime activity such as proxy
-connections and short-lived process exits from the host's point of view.
+Manual `--scope-pid` remains available as a low-level diagnostic fallback for
+already-running processes, but production examples should prefer managed launch
+or an explicit agent registration file.
 
 ### Run an agent in Docker or gVisor
 

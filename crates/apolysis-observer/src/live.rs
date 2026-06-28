@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apolysis_core::{
-    CanonicalEvent, EventSource, ObserverDiagnostic, ObserverDiagnosticKind, RawKernelEvent,
+    actors, resources, CanonicalEvent, EventSource, EventType, ObserverDiagnostic,
+    ObserverDiagnosticKind, RawKernelEvent,
 };
 use apolysis_feedback::FeedbackWriter;
 use apolysis_policy::PolicyRuntimeCapabilities;
@@ -13,6 +15,7 @@ use aya::maps::{Array, HashMap, MapData, RingBuf};
 use aya::programs::TracePoint;
 use aya::{Ebpf, EbpfLoader, Pod};
 use tokio::io::unix::AsyncFd;
+use tokio::process::Child;
 
 use crate::abi::{
     KernelEventKind, KernelEventRecord, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED,
@@ -40,13 +43,45 @@ impl LiveScope {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentRunRequest {
+    pub kind: String,
+    pub command: Vec<String>,
+}
+
+impl AgentRunRequest {
+    pub fn new(kind: impl Into<String>, command: Vec<String>) -> Result<Self, String> {
+        let kind = kind.into();
+        if kind.trim().is_empty() {
+            return Err("agent kind must not be empty".to_string());
+        }
+        if command.is_empty() {
+            return Err("agent command must not be empty".to_string());
+        }
+        Ok(Self { kind, command })
+    }
+
+    fn executable(&self) -> &str {
+        &self.command[0]
+    }
+
+    fn args(&self) -> &[String] {
+        &self.command[1..]
+    }
+
+    fn redacted_command(&self) -> String {
+        redact_command(&self.command).join(" ")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveObserveRequest {
     pub object_path: PathBuf,
     pub output_path: PathBuf,
     pub policy_path: PathBuf,
     pub session_id: String,
     pub feedback_dir: Option<PathBuf>,
-    pub scope: LiveScope,
+    pub scope: Option<LiveScope>,
+    pub agent_run: Option<AgentRunRequest>,
     pub duration: Option<Duration>,
     pub workspace_root: PathBuf,
 }
@@ -59,8 +94,35 @@ impl LiveObserveRequest {
                 self.object_path.display()
             ));
         }
+        match (&self.scope, &self.agent_run) {
+            (Some(_), None) | (None, Some(_)) => {}
+            (None, None) => {
+                return Err("live observer requires either a scope or --agent-run".to_string());
+            }
+            (Some(_), Some(_)) => {
+                return Err(
+                    "--agent-run cannot be combined with --scope-pid or --scope-cgroup".to_string(),
+                );
+            }
+        }
         Ok(())
     }
+}
+
+#[derive(Debug)]
+struct ManagedAgentChild {
+    child: Child,
+    metadata: ManagedAgentMetadata,
+}
+
+#[derive(Debug)]
+struct ManagedAgentMetadata {
+    kind: String,
+    root_pid: u32,
+    executable: String,
+    command: String,
+    workspace_root: String,
+    start_time_ticks: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -194,8 +256,12 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         policy.startup_downgrade(&capabilities),
         &mut store,
     )?;
-    write_scope_metadata(&request, &mut store)?;
-    if let Err(error) = validate_live_prerequisites(&request.scope, &loader_plan) {
+    let prerequisite_scope = request
+        .scope
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| LiveScope::ProcessTree(std::process::id()));
+    if let Err(error) = validate_live_prerequisites(&prerequisite_scope, &loader_plan) {
         append_diagnostic(
             &request.session_id,
             ObserverDiagnosticKind::AttachFailure,
@@ -209,9 +275,24 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         return Err(format!("live observer prerequisite failed: {error}"));
     }
 
+    let mut managed_agent = if let Some(agent_run) = request.agent_run.as_ref() {
+        let managed = spawn_managed_agent(agent_run, &request.workspace_root)?;
+        write_agent_supervisor_metadata(&request.session_id, &managed.metadata, &mut store)?;
+        Some(managed)
+    } else {
+        None
+    };
+    let scope = managed_agent
+        .as_ref()
+        .map(|agent| LiveScope::ProcessTree(agent.metadata.root_pid))
+        .or_else(|| request.scope.clone())
+        .expect("live request validation requires a scope or managed agent");
+    write_scope_metadata(&request.session_id, &scope, &mut store)?;
+
     let mut ebpf = match EbpfLoader::new().load_file(&loader_plan.object_path) {
         Ok(ebpf) => ebpf,
         Err(error) => {
+            terminate_managed_agent(managed_agent.as_mut()).await;
             append_diagnostic(
                 &request.session_id,
                 ObserverDiagnosticKind::VerifierFailure,
@@ -225,8 +306,22 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             return Err(format!("BPF load or verifier failure: {error:#}"));
         }
     };
-    configure_scope(&mut ebpf, &request.scope)?;
+    if let Err(error) = configure_scope(&mut ebpf, &scope) {
+        terminate_managed_agent(managed_agent.as_mut()).await;
+        append_diagnostic(
+            &request.session_id,
+            ObserverDiagnosticKind::AttachFailure,
+            1,
+            &error,
+            &mut store,
+        )?;
+        store
+            .flush()
+            .map_err(|flush| format!("failed to flush scope diagnostic: {flush}"))?;
+        return Err(error);
+    }
     if let Err(error) = attach_tracepoints(&mut ebpf, &loader_plan) {
+        terminate_managed_agent(managed_agent.as_mut()).await;
         let kind = if error.contains("verifier") {
             ObserverDiagnosticKind::VerifierFailure
         } else {
@@ -257,9 +352,26 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     let mut decode_failures = 0_u64;
     let mut truncations = 0_u64;
     let redactor = Redactor::new(&request.session_id, &request.workspace_root);
+    let mut agent_exit_status: Option<ExitStatus> = None;
+    let mut agent_drain_deadline: Option<tokio::time::Instant> = None;
 
     loop {
-        let batch = if let Some(deadline) = deadline {
+        if agent_exit_status.is_none() {
+            if let Some(agent) = managed_agent.as_mut() {
+                if let Some(status) = agent
+                    .child
+                    .try_wait()
+                    .map_err(|error| format!("failed to poll managed agent exit: {error}"))?
+                {
+                    agent_drain_deadline =
+                        Some(tokio::time::Instant::now() + Duration::from_millis(300));
+                    agent_exit_status = Some(status);
+                }
+            }
+        }
+
+        let effective_deadline = earliest_deadline(deadline, agent_drain_deadline);
+        let batch = if let Some(deadline) = effective_deadline {
             tokio::select! {
                 result = read_ring_batch(&mut async_ring) => Some(result?),
                 result = &mut shutdown => {
@@ -274,6 +386,9 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 result = &mut shutdown => {
                     result?;
                     None
+                },
+                _ = tokio::time::sleep(Duration::from_millis(100)), if managed_agent.is_some() && agent_exit_status.is_none() => {
+                    Some(Vec::new())
                 }
             }
         };
@@ -325,6 +440,10 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             )?;
             canonical_count += 1;
         }
+    }
+
+    if let Some(status) = agent_exit_status {
+        write_agent_exit_metadata(&request.session_id, status_exit_code(status), &mut store)?;
     }
 
     let counters = read_observer_counters(&mut ebpf)?;
@@ -384,7 +503,199 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         canonical_events: canonical_count,
         backend: ObserverBackend::AyaRingBuffer,
         mode: ObserverMode::AuditOnly,
+        agent_exit_code: agent_exit_status.map(status_exit_code),
     })
+}
+
+fn spawn_managed_agent(
+    request: &AgentRunRequest,
+    workspace_root: &Path,
+) -> Result<ManagedAgentChild, String> {
+    let mut command = tokio::process::Command::new(request.executable());
+    command
+        .args(request.args())
+        .current_dir(workspace_root)
+        .kill_on_drop(true);
+    let child = command.spawn().map_err(|error| {
+        format!(
+            "failed to start managed agent command '{}': {error}",
+            request.redacted_command()
+        )
+    })?;
+    let root_pid = child
+        .id()
+        .ok_or_else(|| "managed agent child pid is unavailable".to_string())?;
+    let metadata = ManagedAgentMetadata {
+        kind: request.kind.clone(),
+        root_pid,
+        executable: request.executable().to_string(),
+        command: request.redacted_command(),
+        workspace_root: workspace_root.display().to_string(),
+        start_time_ticks: read_process_start_time_ticks(root_pid),
+    };
+    Ok(ManagedAgentChild { child, metadata })
+}
+
+async fn terminate_managed_agent(agent: Option<&mut ManagedAgentChild>) {
+    if let Some(agent) = agent {
+        let _ = agent.child.start_kill();
+        let _ = agent.child.wait().await;
+    }
+}
+
+fn write_agent_supervisor_metadata(
+    session_id: &str,
+    metadata: &ManagedAgentMetadata,
+    store: &mut JsonlStore,
+) -> Result<(), String> {
+    for (resource, action) in [
+        (
+            resources::AGENT_SUPERVISOR_MODE,
+            "apolysis_managed_launch".to_string(),
+        ),
+        (resources::AGENT_KIND, metadata.kind.clone()),
+        (resources::AGENT_ROOT_PID, metadata.root_pid.to_string()),
+        (resources::AGENT_COMMAND, metadata.command.clone()),
+        (resources::AGENT_EXECUTABLE, metadata.executable.clone()),
+        (
+            resources::AGENT_WORKSPACE_ROOT,
+            metadata.workspace_root.clone(),
+        ),
+        (
+            resources::AGENT_START_TIME,
+            metadata
+                .start_time_ticks
+                .map(|ticks| format!("start_time_ticks:{ticks}"))
+                .unwrap_or_else(|| "start_time_ticks:unavailable".to_string()),
+        ),
+    ] {
+        write_runtime_metadata_event(session_id, actors::OBSERVER, resource, action, store)?;
+    }
+    Ok(())
+}
+
+fn write_agent_exit_metadata(
+    session_id: &str,
+    exit_code: i32,
+    store: &mut JsonlStore,
+) -> Result<(), String> {
+    write_runtime_metadata_event(
+        session_id,
+        actors::OBSERVER,
+        resources::AGENT_EXIT_STATUS,
+        format!("exit:{exit_code}"),
+        store,
+    )
+}
+
+fn write_runtime_metadata_event(
+    session_id: &str,
+    actor: &str,
+    resource: &str,
+    action: impl Into<String>,
+    store: &mut JsonlStore,
+) -> Result<(), String> {
+    let event = CanonicalEvent::new(
+        session_id,
+        EventSource::RuntimeMetadata,
+        EventType::RuntimeMetadata,
+        std::process::id(),
+        0,
+        actor,
+        resource,
+        action,
+    );
+    store
+        .append(&event)
+        .map_err(|error| format!("failed to write live observer metadata: {error}"))
+}
+
+fn earliest_deadline(
+    first: Option<tokio::time::Instant>,
+    second: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.min(second)),
+        (Some(first), None) => Some(first),
+        (None, Some(second)) => Some(second),
+        (None, None) => None,
+    }
+}
+
+fn status_exit_code(status: ExitStatus) -> i32 {
+    status.code().unwrap_or(1)
+}
+
+fn read_process_start_time_ticks(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(") ")?.1;
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+fn redact_command(command: &[String]) -> Vec<String> {
+    let mut redacted = Vec::with_capacity(command.len());
+    let mut redact_next = false;
+    for arg in command {
+        if redact_next {
+            redacted.push("<redacted>".to_string());
+            redact_next = false;
+            continue;
+        }
+
+        if secret_flag(arg) {
+            redacted.push(arg.clone());
+            redact_next = true;
+            continue;
+        }
+
+        if let Some((key, _)) = arg.split_once('=') {
+            if secret_word(key) {
+                redacted.push(format!("{key}=<redacted>"));
+                continue;
+            }
+        }
+
+        if looks_like_secret_value(arg) {
+            redacted.push("<redacted>".to_string());
+        } else {
+            redacted.push(shell_display_arg(arg));
+        }
+    }
+    redacted
+}
+
+fn secret_flag(value: &str) -> bool {
+    value.starts_with("--") && secret_word(value.trim_start_matches('-'))
+}
+
+fn secret_word(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "api-key",
+        "apikey",
+    ]
+    .iter()
+    .any(|word| normalized.contains(word))
+}
+
+fn looks_like_secret_value(value: &str) -> bool {
+    value.starts_with("sk-") || value.starts_with("ghp_") || value.starts_with("github_pat_")
+}
+
+fn shell_display_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 async fn shutdown_signal() -> Result<(), String> {
@@ -520,18 +831,19 @@ async fn read_ring_batch(ring: &mut AsyncFd<RingBuf<MapData>>) -> Result<Vec<Vec
 }
 
 fn write_scope_metadata(
-    request: &LiveObserveRequest,
+    session_id: &str,
+    scope: &LiveScope,
     store: &mut JsonlStore,
 ) -> Result<(), String> {
     let event = apolysis_core::CanonicalEvent::new(
-        &request.session_id,
+        session_id,
         apolysis_core::EventSource::RuntimeMetadata,
         apolysis_core::EventType::RuntimeMetadata,
         std::process::id(),
         0,
         apolysis_core::actors::OBSERVER,
         apolysis_core::resources::OBSERVER_SCOPE,
-        request.scope.metadata_value(),
+        scope.metadata_value(),
     );
     store
         .append(&event)
@@ -775,5 +1087,50 @@ mod tests {
             .contains("/workspace/.env"));
         assert!(persisted_raw.resource.starts_with("path_token:"));
         assert!(persisted_raw.raw_payload.contains("redacted:resource"));
+    }
+
+    #[test]
+    fn managed_agent_command_metadata_redacts_secret_values() {
+        let request = AgentRunRequest::new(
+            "codex",
+            vec![
+                "codex".to_string(),
+                "resume".to_string(),
+                "--api-key".to_string(),
+                "sk-test-secret".to_string(),
+                "TOKEN=plain-secret".to_string(),
+            ],
+        )
+        .expect("agent run request");
+
+        let command = request.redacted_command();
+
+        assert!(command.contains("codex resume --api-key <redacted>"));
+        assert!(command.contains("TOKEN=<redacted>"));
+        assert!(!command.contains("sk-test-secret"));
+        assert!(!command.contains("plain-secret"));
+    }
+
+    #[test]
+    fn live_request_rejects_managed_agent_and_manual_scope_together() {
+        let request = LiveObserveRequest {
+            object_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+            output_path: PathBuf::from("target/test.jsonl"),
+            policy_path: PathBuf::from("policies/local-dev.yaml"),
+            session_id: "session-agent-scope-conflict".to_string(),
+            feedback_dir: None,
+            scope: Some(LiveScope::ProcessTree(42)),
+            agent_run: Some(
+                AgentRunRequest::new("codex", vec!["codex".to_string()])
+                    .expect("agent run request"),
+            ),
+            duration: None,
+            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        };
+
+        assert_eq!(
+            request.validate(),
+            Err("--agent-run cannot be combined with --scope-pid or --scope-cgroup".to_string())
+        );
     }
 }

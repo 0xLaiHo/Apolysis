@@ -5,7 +5,8 @@ mod cli;
 use std::time::Duration;
 
 use apolysis_observer::{
-    observe_fixture, observe_live, FixtureObserveRequest, LiveObserveRequest, LiveScope,
+    observe_fixture, observe_live, AgentRunRequest, FixtureObserveRequest, LiveObserveRequest,
+    LiveScope,
 };
 use apolysis_runtime::{run_docker, run_local, DockerRunRequest, LocalRunRequest};
 use apolysis_visibility::{assess_visibility, RuntimeVisibilityProfile, VisibilityInput};
@@ -108,7 +109,7 @@ async fn observe_command(args: Vec<String>) -> Result<i32, String> {
             Ok(0)
         }
         ObserverBackendSelection::Live => {
-            observe_live(LiveObserveRequest {
+            let result = observe_live(LiveObserveRequest {
                 object_path: request
                     .bpf_object_path
                     .expect("live request validation requires a BPF object")
@@ -117,9 +118,8 @@ async fn observe_command(args: Vec<String>) -> Result<i32, String> {
                 policy_path: request.policy_path.into(),
                 session_id: request.session_id,
                 feedback_dir: request.feedback_dir.map(Into::into),
-                scope: request
-                    .live_scope
-                    .expect("live request validation requires a scope"),
+                scope: request.live_scope,
+                agent_run: request.agent_run,
                 duration: request.duration_seconds.map(Duration::from_secs),
                 workspace_root: request.workspace_root.map(Into::into).unwrap_or(
                     std::env::current_dir().map_err(|error| {
@@ -128,7 +128,7 @@ async fn observe_command(args: Vec<String>) -> Result<i32, String> {
                 ),
             })
             .await?;
-            Ok(0)
+            Ok(result.agent_exit_code.unwrap_or(0))
         }
     }
 }
@@ -258,6 +258,7 @@ struct ObserveRequest {
     kubernetes_metadata_path: Option<String>,
     bpf_object_path: Option<String>,
     live_scope: Option<LiveScope>,
+    agent_run: Option<AgentRunRequest>,
     duration_seconds: Option<u64>,
     workspace_root: Option<String>,
 }
@@ -293,6 +294,8 @@ impl ObserveRequest {
         let mut bpf_object_path = None;
         let mut scope_cgroup = None;
         let mut scope_pid = None;
+        let mut agent_kind = None;
+        let mut agent_command = None;
         let mut duration_seconds = None;
         let mut workspace_root = None;
         let mut i = 1;
@@ -339,6 +342,32 @@ impl ObserveRequest {
                     i += 1;
                     scope_pid = parse_option::<u32>(&args, i, options::SCOPE_PID)?;
                 }
+                options::AGENT_KIND => {
+                    i += 1;
+                    agent_kind = args.get(i).cloned();
+                }
+                options::AGENT_RUN => {
+                    i += 1;
+                    if args.get(i).map(String::as_str) != Some(options::COMMAND_SEPARATOR) {
+                        return Err(format!(
+                            "missing {} after {}\n{}",
+                            options::COMMAND_SEPARATOR,
+                            options::AGENT_RUN,
+                            usage()
+                        ));
+                    }
+                    let command = args[(i + 1)..].to_vec();
+                    if command.is_empty() {
+                        return Err(format!(
+                            "missing command after {} {}\n{}",
+                            options::AGENT_RUN,
+                            options::COMMAND_SEPARATOR,
+                            usage()
+                        ));
+                    }
+                    agent_command = Some(command);
+                    break;
+                }
                 options::DURATION_SECONDS => {
                     i += 1;
                     duration_seconds = parse_option::<u64>(&args, i, options::DURATION_SECONDS)?;
@@ -361,10 +390,40 @@ impl ObserveRequest {
             unknown => return Err(format!("unknown observer backend '{unknown}'\n{}", usage())),
         };
 
+        let agent_run = match (agent_kind, agent_command) {
+            (Some(kind), Some(command)) => Some(AgentRunRequest::new(kind, command)?),
+            (Some(_), None) => {
+                return Err(format!(
+                    "{} requires {}\n{}",
+                    options::AGENT_KIND,
+                    options::AGENT_RUN,
+                    usage()
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(format!(
+                    "missing {} for {}\n{}",
+                    options::AGENT_KIND,
+                    options::AGENT_RUN,
+                    usage()
+                ));
+            }
+            (None, None) => None,
+        };
+
+        if agent_run.is_some() && (scope_cgroup.is_some() || scope_pid.is_some()) {
+            return Err(format!(
+                "{} cannot be combined with {} or {}",
+                options::AGENT_RUN,
+                options::SCOPE_PID,
+                options::SCOPE_CGROUP
+            ));
+        }
+
         let live_scope = match (scope_cgroup, scope_pid) {
             (Some(id), None) => Some(LiveScope::Cgroup(id)),
             (None, Some(pid)) => Some(LiveScope::ProcessTree(pid)),
-            (None, None) if backend == ObserverBackendSelection::Live => {
+            (None, None) if backend == ObserverBackendSelection::Live && agent_run.is_none() => {
                 return Err(
                     "live observer requires exactly one of --scope-cgroup or --scope-pid"
                         .to_string(),
@@ -383,6 +442,7 @@ impl ObserveRequest {
             ObserverBackendSelection::Fixture => {
                 if bpf_object_path.is_some()
                     || live_scope.is_some()
+                    || agent_run.is_some()
                     || duration_seconds.is_some()
                     || workspace_root.is_some()
                 {
@@ -421,6 +481,7 @@ impl ObserveRequest {
             kubernetes_metadata_path,
             bpf_object_path,
             live_scope,
+            agent_run,
             duration_seconds,
             workspace_root,
         })

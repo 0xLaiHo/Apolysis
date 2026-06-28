@@ -87,6 +87,22 @@ pub mod resources {
     pub const OBSERVER_RUNNERS: &str = "observer-runners";
     /// Live observer session scope metadata.
     pub const OBSERVER_SCOPE: &str = "observer-scope";
+    /// Managed agent supervisor mode metadata.
+    pub const AGENT_SUPERVISOR_MODE: &str = "agent-supervisor-mode";
+    /// Managed agent kind metadata.
+    pub const AGENT_KIND: &str = "agent-kind";
+    /// Managed agent root PID metadata.
+    pub const AGENT_ROOT_PID: &str = "agent-root-pid";
+    /// Managed agent command metadata.
+    pub const AGENT_COMMAND: &str = "agent-command";
+    /// Managed agent executable metadata.
+    pub const AGENT_EXECUTABLE: &str = "agent-executable";
+    /// Managed agent workspace root metadata.
+    pub const AGENT_WORKSPACE_ROOT: &str = "agent-workspace-root";
+    /// Managed agent kernel start time metadata.
+    pub const AGENT_START_TIME: &str = "agent-start-time";
+    /// Managed agent exit status metadata.
+    pub const AGENT_EXIT_STATUS: &str = "agent-exit-status";
     /// BPF-LSM capability metadata.
     pub const BPF_LSM: &str = "bpf-lsm";
     /// Kubernetes pod name metadata.

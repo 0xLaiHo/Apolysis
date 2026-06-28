@@ -335,6 +335,153 @@ fn observe_live_validates_the_bpf_object_before_loading() {
 }
 
 #[test]
+fn observe_live_accepts_agent_run_without_operator_pid() {
+    let output = temp_jsonl("apolysis-observe-agent-run");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-agent-run",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/does-not-exist.bpf.o",
+            "--workspace-root",
+            workspace_root().to_str().expect("utf-8 workspace root"),
+            "--agent-kind",
+            "codex",
+            "--agent-run",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .output()
+        .expect("run apolysis observe live with managed agent");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("BPF object does not exist"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("live observer requires exactly one of --scope-cgroup or --scope-pid"),
+        "agent-run should supply the live process-tree scope after launch: {stderr}"
+    );
+}
+
+#[test]
+fn observe_live_rejects_agent_run_with_scope_pid() {
+    let output = temp_jsonl("apolysis-observe-agent-run-scope-pid");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-agent-run-scope-pid",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/does-not-exist.bpf.o",
+            "--scope-pid",
+            &std::process::id().to_string(),
+            "--agent-kind",
+            "codex",
+            "--agent-run",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .output()
+        .expect("run apolysis observe live with conflicting pid scope");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("--agent-run cannot be combined with --scope-pid or --scope-cgroup"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn observe_live_rejects_agent_run_with_scope_cgroup() {
+    let output = temp_jsonl("apolysis-observe-agent-run-scope-cgroup");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-agent-run-scope-cgroup",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/does-not-exist.bpf.o",
+            "--scope-cgroup",
+            "42",
+            "--agent-kind",
+            "codex",
+            "--agent-run",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .output()
+        .expect("run apolysis observe live with conflicting cgroup scope");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("--agent-run cannot be combined with --scope-pid or --scope-cgroup"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn observe_live_rejects_agent_run_without_command() {
+    let output = temp_jsonl("apolysis-observe-agent-run-empty");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-agent-run-empty",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/does-not-exist.bpf.o",
+            "--agent-kind",
+            "codex",
+            "--agent-run",
+            "--",
+        ])
+        .output()
+        .expect("run apolysis observe live with empty managed command");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("missing command after --agent-run --"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
 #[ignore = "requires Linux BTF, tracepoints, cgroup v2, CAP_BPF, and CAP_PERFMON"]
 fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     use std::io::Write as _;
