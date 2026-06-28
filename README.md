@@ -148,6 +148,8 @@ choose among multiple Codex processes; `--agent-run -- <command>` starts the
 agent under the live observer and records supervisor metadata in the timeline.
 Managed launch seeds the process-tree scope from the agent root, its threads,
 and discoverable descendants before attach.
+For managed launch, `--duration-seconds` is an upper bound: the observer drains
+and records agent exit metadata when the agent finishes earlier.
 
 ```bash
 mkdir -p .apolysis/codex-live

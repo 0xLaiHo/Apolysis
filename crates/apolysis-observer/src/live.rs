@@ -414,6 +414,9 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                     result?;
                     None
                 },
+                _ = tokio::time::sleep(Duration::from_millis(100)), if managed_agent.is_some() && agent_exit_status.is_none() => {
+                    Some(Vec::new())
+                },
                 _ = tokio::time::sleep_until(deadline) => None,
             }
         } else {
