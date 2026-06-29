@@ -80,11 +80,22 @@ static __always_inline bool pid_is_tracked(unsigned int pid)
     return bpf_map_lookup_elem(&APOLYSIS_TRACKED_PIDS, &pid) != 0;
 }
 
+static __always_inline bool current_pid_tree_is_tracked(void)
+{
+    unsigned long long pid_tgid;
+    unsigned int tgid;
+    unsigned int tid;
+
+    pid_tgid = bpf_get_current_pid_tgid();
+    tgid = pid_tgid >> 32;
+    tid = pid_tgid;
+    return pid_is_tracked(tgid) || pid_is_tracked(tid);
+}
+
 static __always_inline bool current_is_in_scope(void)
 {
     struct apolysis_scope_config *config = scope_config();
     unsigned long long cgroup_id;
-    unsigned int pid;
 
     if (!config)
         return false;
@@ -100,8 +111,7 @@ static __always_inline bool current_is_in_scope(void)
     if (config->mode != APOLYSIS_SCOPE_PID_TREE)
         return false;
 
-    pid = bpf_get_current_pid_tgid() >> 32;
-    return pid_is_tracked(pid);
+    return current_pid_tree_is_tracked();
 }
 
 static __always_inline unsigned int current_parent_pid(void)
@@ -201,7 +211,7 @@ int apolysis_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
         return 0;
 
     if (config->mode == APOLYSIS_SCOPE_PID_TREE) {
-        if (!pid_is_tracked(ctx->parent_pid))
+        if (!pid_is_tracked(ctx->parent_pid) && !current_pid_tree_is_tracked())
             return 0;
         child_pid = ctx->child_pid;
         if (bpf_map_update_elem(&APOLYSIS_TRACKED_PIDS, &child_pid, &tracked, BPF_NOEXIST))
