@@ -20,8 +20,8 @@ use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
 
 use crate::abi::{
-    KernelEventKind, KernelEventRecord, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED,
-    FLAG_RESOURCE_TRUNCATED,
+    KernelEventKind, KernelEventRecord, FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR,
+    FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
 };
 use crate::capabilities::validate_live_prerequisites;
 use crate::{
@@ -976,6 +976,13 @@ fn redact_for_persistence(
             append_marker(&mut persisted_raw.raw_payload, "redacted:payload");
         }
     }
+    if canonical.event_type == apolysis_core::EventType::Exec && !raw.raw_payload.is_empty() {
+        let (payload, redacted) = redact_exec_payload_for_persistence(&raw.raw_payload, redactor);
+        persisted_raw.raw_payload = payload;
+        if redacted {
+            append_marker(&mut persisted_raw.raw_payload, "redacted:payload");
+        }
+    }
     (persisted_raw, persisted_canonical)
 }
 
@@ -984,6 +991,90 @@ fn append_marker(payload: &mut String, marker: &str) {
         payload.push(',');
     }
     payload.push_str(marker);
+}
+
+fn redact_exec_payload_for_persistence(payload: &str, redactor: &Redactor) -> (String, bool) {
+    let (argv, markers) = payload.split_once(',').unwrap_or((payload, ""));
+    let Some(argv) = argv.strip_prefix("argv:") else {
+        return (payload.to_string(), false);
+    };
+
+    let mut redacted = false;
+    let mut redact_next = false;
+    let mut args = Vec::new();
+    for arg in argv.split_whitespace() {
+        if redact_next {
+            args.push("<redacted>".to_string());
+            redacted = true;
+            redact_next = false;
+            continue;
+        }
+
+        if secret_flag(arg) {
+            args.push(arg.to_string());
+            redact_next = true;
+            continue;
+        }
+
+        if let Some((key, value)) = arg.split_once('=') {
+            if secret_word(key) {
+                args.push(format!("{key}=<redacted>"));
+                redacted = true;
+                continue;
+            }
+            let (value, value_redacted) = redact_argv_resource(value, redactor);
+            if value_redacted {
+                args.push(format!("{key}={value}"));
+                redacted = true;
+                continue;
+            }
+        }
+
+        if looks_like_secret_value(arg) {
+            args.push("<redacted>".to_string());
+            redacted = true;
+            continue;
+        }
+
+        let (arg, arg_redacted) = redact_argv_resource(arg, redactor);
+        args.push(arg);
+        redacted |= arg_redacted;
+    }
+
+    let mut persisted = format!("argv:{}", args.join(" "));
+    if !markers.is_empty() {
+        persisted.push(',');
+        persisted.push_str(markers);
+    }
+    (persisted, redacted)
+}
+
+fn redact_argv_resource(value: &str, redactor: &Redactor) -> (String, bool) {
+    if !looks_like_path_argument(value) {
+        return (value.to_string(), false);
+    }
+    let event_type = if looks_like_credential_path(value) {
+        apolysis_core::EventType::CredentialRead
+    } else {
+        apolysis_core::EventType::FileOpen
+    };
+    let redacted = redactor.redact_resource(event_type, value);
+    (redacted.value, redacted.redacted)
+}
+
+fn looks_like_path_argument(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~/")
+}
+
+fn looks_like_credential_path(value: &str) -> bool {
+    value.ends_with("/.env")
+        || value.contains("/.env.")
+        || value.contains("/.ssh/")
+        || value.contains("/.aws/")
+        || value.contains("/var/run/secrets/")
 }
 
 pub struct ObserverBatchDecoder {
@@ -1083,6 +1174,9 @@ pub fn raw_event_from_record(
     let mut markers = Vec::new();
     if record.flags & FLAG_RESOURCE_TRUNCATED != 0 {
         markers.push("resource_truncated:true");
+    }
+    if record.flags & FLAG_ARGV_TRUNCATED != 0 {
+        markers.push("argv_truncated:true");
     }
     if record.flags & FLAG_PAYLOAD_TRUNCATED != 0 {
         markers.push("payload_truncated:true");
@@ -1200,6 +1294,47 @@ mod tests {
         assert!(command.contains("TOKEN=<redacted>"));
         assert!(!command.contains("sk-test-secret"));
         assert!(!command.contains("plain-secret"));
+    }
+
+    #[test]
+    fn persisted_exec_payload_redacts_argv_credentials_and_sensitive_paths() {
+        let raw = RawKernelEvent::new(
+            1,
+            "session-a",
+            EventSource::KernelTracepoint,
+            "sched_process_exec",
+            101,
+            100,
+            1000,
+            1000,
+            "codex",
+            "/usr/bin/codex",
+            "exec",
+            None,
+            Some("42".to_string()),
+            "argv:/usr/bin/codex exec --api-key sk-test-secret /workspace/.env /workspace/src/main.rs",
+        );
+        let canonical = CanonicalEvent::new(
+            "session-a",
+            EventSource::KernelTracepoint,
+            EventType::Exec,
+            101,
+            100,
+            "codex",
+            "/usr/bin/codex",
+            "exec",
+        );
+        let redactor = crate::Redactor::new("session-a", "/workspace");
+
+        let (persisted_raw, _persisted_canonical) =
+            redact_for_persistence(&raw, &canonical, &redactor);
+
+        assert!(persisted_raw.raw_payload.contains("--api-key <redacted>"));
+        assert!(persisted_raw.raw_payload.contains("path_token:"));
+        assert!(persisted_raw.raw_payload.contains("/workspace/src/main.rs"));
+        assert!(persisted_raw.raw_payload.contains("redacted:payload"));
+        assert!(!persisted_raw.raw_payload.contains("sk-test-secret"));
+        assert!(!persisted_raw.raw_payload.contains("/workspace/.env"));
     }
 
     #[test]

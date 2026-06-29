@@ -37,8 +37,8 @@ view.
 - Local command wrapper that tracks a session from process start to exit.
 - Docker runtime adapter with conservative defaults, labels, resource limits,
   and container metadata capture.
-- Fixture and live eBPF observer backends for process, file, network, and
-  credential-related events.
+- Fixture and live eBPF observer backends for process, bounded exec argv, file,
+  network, and credential-related events.
 - Policy evaluation with `Notify`, `Review`, `Kill`, and explicitly downgraded
   `Block` behavior when kernel support is unavailable.
 - Kubernetes and Agent Sandbox metadata parsing for Pod, namespace,
@@ -178,7 +178,16 @@ jq -r '.event_type // .event_name // .kind // .record_type' \
 
 jq -c 'select(.event_type=="network_connect" or .event_type=="process_exit" or .event_name=="connect")' \
   .apolysis/codex-live/timeline.agent-run.jsonl
+
+jq -c 'select(.event_type=="exec" or .event_name=="sched_process_exec") | {record_type,event_name,event_type,pid,actor,resource,raw_payload}' \
+  .apolysis/codex-live/timeline.agent-run.jsonl
 ```
+
+Live exec records keep the executable path as the canonical `resource` and
+store bounded, redacted argv evidence on the matching raw `sched_process_exec`
+record. Sensitive argv values and credential-looking paths are redacted before
+persistence; truncation is marked with `argv_truncated:true` or
+`payload_truncated:true` when limits are reached.
 
 Manual `--scope-pid` remains available as a low-level diagnostic fallback for
 already-running processes, but production examples should prefer managed launch

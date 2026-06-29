@@ -162,6 +162,8 @@ impl AyaLoaderPlan {
             tracepoints: vec![
                 TracepointAttach::new("sched", "sched_process_exec"),
                 TracepointAttach::new("sched", "sched_process_exit"),
+                TracepointAttach::new("syscalls", "sys_enter_execve"),
+                TracepointAttach::new("syscalls", "sys_enter_execveat"),
                 TracepointAttach::new("syscalls", "sys_enter_openat"),
                 TracepointAttach::new("syscalls", "sys_enter_openat2"),
                 TracepointAttach::new("syscalls", "sys_enter_creat"),
@@ -513,7 +515,7 @@ mod tests {
         let plan = AyaLoaderPlan::audit_observer_default("target/ebpf/apolysis_observer.bpf.o");
 
         assert_eq!(plan.ring_buffer_map, "APOLYSIS_EVENTS");
-        assert_eq!(plan.tracepoints.len(), 10);
+        assert_eq!(plan.tracepoints.len(), 12);
         assert_eq!(
             plan.tracepoints
                 .iter()
@@ -533,6 +535,12 @@ mod tests {
         assert!(plan
             .tracepoints
             .contains(&TracepointAttach::new("syscalls", "sys_enter_connect")));
+        assert!(plan
+            .tracepoints
+            .contains(&TracepointAttach::new("syscalls", "sys_enter_execve")));
+        assert!(plan
+            .tracepoints
+            .contains(&TracepointAttach::new("syscalls", "sys_enter_execveat")));
     }
 
     #[test]

@@ -63,6 +63,8 @@ if [[ "$mode" == "live" ]]; then
 sched/sched_process_fork
 sched/sched_process_exec
 sched/sched_process_exit
+syscalls/sys_enter_execve
+syscalls/sys_enter_execveat
 syscalls/sys_enter_openat
 syscalls/sys_enter_openat2
 syscalls/sys_enter_creat
