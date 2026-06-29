@@ -11,6 +11,14 @@ char LICENSE[] SEC("license") = "GPL";
 #define APOLYSIS_O_ACCMODE 00000003
 #define APOLYSIS_O_CREAT 00000100
 #define APOLYSIS_O_TRUNC 00001000
+#define APOLYSIS_EXEC_ARGC_LIMIT 8
+#define APOLYSIS_EXEC_ARG_LEN 32
+
+struct apolysis_pending_exec {
+    unsigned int flags;
+    char resource[APOLYSIS_RESOURCE_LEN];
+    char payload[APOLYSIS_PAYLOAD_LEN];
+};
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -30,6 +38,20 @@ struct {
     __type(key, unsigned int);
     __type(value, unsigned char);
 } APOLYSIS_TRACKED_PIDS SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, unsigned int);
+    __type(value, struct apolysis_pending_exec);
+} APOLYSIS_PENDING_EXECS SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, unsigned int);
+    __type(value, struct apolysis_pending_exec);
+} APOLYSIS_EXEC_SCRATCH SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -177,6 +199,100 @@ static __always_inline void read_kernel_path(struct apolysis_kernel_event *event
         event->flags |= APOLYSIS_FLAG_RESOURCE_TRUNCATED;
 }
 
+static __always_inline void read_pending_user_path(struct apolysis_pending_exec *pending,
+                                                   const char *path)
+{
+    long length;
+
+    length = bpf_probe_read_user_str(pending->resource, sizeof(pending->resource), path);
+    if (length == sizeof(pending->resource))
+        pending->flags |= APOLYSIS_FLAG_RESOURCE_TRUNCATED;
+}
+
+static __always_inline void append_exec_argv_arg(struct apolysis_pending_exec *pending,
+                                                 unsigned int *offset,
+                                                 const char *arg)
+{
+    long length;
+
+    if (*offset >= sizeof(pending->payload) - APOLYSIS_EXEC_ARG_LEN) {
+        pending->flags |= APOLYSIS_FLAG_ARGV_TRUNCATED | APOLYSIS_FLAG_PAYLOAD_TRUNCATED;
+        return;
+    }
+
+    if (*offset > 5) {
+        pending->payload[*offset] = ' ';
+        *offset += 1;
+    }
+
+    length = bpf_probe_read_user_str(pending->payload + *offset, APOLYSIS_EXEC_ARG_LEN, arg);
+    if (length < 0) {
+        pending->flags |= APOLYSIS_FLAG_ARGV_TRUNCATED;
+        return;
+    }
+
+    if (length == APOLYSIS_EXEC_ARG_LEN) {
+        pending->flags |= APOLYSIS_FLAG_ARGV_TRUNCATED | APOLYSIS_FLAG_PAYLOAD_TRUNCATED;
+        *offset += APOLYSIS_EXEC_ARG_LEN - 1;
+        return;
+    }
+
+    if (length > 0)
+        *offset += length - 1;
+}
+
+static __always_inline void read_exec_argv(struct apolysis_pending_exec *pending,
+                                           const char *const *argv)
+{
+    const char *arg = 0;
+    unsigned int offset = 5;
+    int i;
+
+    __builtin_memcpy(pending->payload, "argv:", 5);
+
+#pragma unroll
+    for (i = 0; i < APOLYSIS_EXEC_ARGC_LIMIT; i++) {
+        if (bpf_probe_read_user(&arg, sizeof(arg), &argv[i]) < 0) {
+            pending->flags |= APOLYSIS_FLAG_ARGV_TRUNCATED;
+            return;
+        }
+        if (!arg)
+            return;
+        append_exec_argv_arg(pending, &offset, arg);
+    }
+
+    if (bpf_probe_read_user(&arg, sizeof(arg), &argv[APOLYSIS_EXEC_ARGC_LIMIT]) == 0 && arg)
+        pending->flags |= APOLYSIS_FLAG_ARGV_TRUNCATED;
+}
+
+static __always_inline int capture_exec_enter(const char *filename,
+                                              const char *const *argv)
+{
+    struct apolysis_pending_exec *pending;
+    unsigned long long pid_tgid;
+    unsigned int pid;
+    unsigned int scratch_key = 0;
+
+    if (!current_is_in_scope())
+        return 0;
+
+    pending = bpf_map_lookup_elem(&APOLYSIS_EXEC_SCRATCH, &scratch_key);
+    if (!pending) {
+        count_map_pressure();
+        return 0;
+    }
+
+    __builtin_memset(pending, 0, sizeof(*pending));
+    read_pending_user_path(pending, filename);
+    read_exec_argv(pending, argv);
+
+    pid_tgid = bpf_get_current_pid_tgid();
+    pid = pid_tgid >> 32;
+    if (bpf_map_update_elem(&APOLYSIS_PENDING_EXECS, &pid, pending, BPF_ANY))
+        count_map_pressure();
+    return 0;
+}
+
 static __always_inline unsigned int open_event_kind(unsigned long long flags)
 {
     if (flags & APOLYSIS_O_CREAT)
@@ -235,17 +351,42 @@ SEC("tracepoint/sched/sched_process_exec")
 int apolysis_sched_process_exec(struct trace_event_raw_sched_process_exec *ctx)
 {
     struct apolysis_kernel_event *event;
+    struct apolysis_pending_exec *pending;
     const char *filename;
+    unsigned int pid;
 
     event = reserve_event(APOLYSIS_EVENT_EXEC);
     if (!event)
         return 0;
 
     filename = (const char *)ctx + (ctx->__data_loc_filename & 0xffff);
-    read_kernel_path(event, filename);
+    pid = event->pid;
+    pending = bpf_map_lookup_elem(&APOLYSIS_PENDING_EXECS, &pid);
+    if (pending) {
+        __builtin_memcpy(event->resource, pending->resource, sizeof(event->resource));
+        __builtin_memcpy(event->payload, pending->payload, sizeof(event->payload));
+        event->flags |= pending->flags;
+        bpf_map_delete_elem(&APOLYSIS_PENDING_EXECS, &pid);
+    } else {
+        read_kernel_path(event, filename);
+    }
     copy_action(event, "exec", 5);
     bpf_ringbuf_submit(event, 0);
     return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_execve")
+int apolysis_sys_enter_execve(struct trace_event_raw_sys_enter *ctx)
+{
+    return capture_exec_enter((const char *)ctx->args[0],
+                              (const char *const *)ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_execveat")
+int apolysis_sys_enter_execveat(struct trace_event_raw_sys_enter *ctx)
+{
+    return capture_exec_enter((const char *)ctx->args[1],
+                              (const char *const *)ctx->args[2]);
 }
 
 SEC("tracepoint/sched/sched_process_exit")

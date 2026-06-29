@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_observer::abi::{
-    KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN, FLAG_PAYLOAD_SOCKADDR,
-    KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
+    KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN, FLAG_ARGV_TRUNCATED,
+    FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN,
+    RESOURCE_LEN,
 };
 use apolysis_observer::raw_event_from_record;
 
@@ -98,6 +99,26 @@ fn live_connect_record_decodes_ipv4_sockaddr() {
     assert_eq!(raw.event_name, "connect");
     assert_eq!(raw.resource, "1.1.1.1:443");
     assert_eq!(raw.raw_payload, "family:inet");
+}
+
+#[test]
+fn live_exec_record_preserves_argv_payload_and_truncation_markers() {
+    let mut record = empty_record(KernelEventKind::Exec);
+    record.flags = FLAG_ARGV_TRUNCATED | FLAG_PAYLOAD_TRUNCATED;
+    write_fixed(&mut record.comm, b"sed");
+    write_fixed(&mut record.resource, b"/usr/bin/sed");
+    write_fixed(&mut record.action, b"exec");
+    write_fixed(&mut record.payload, b"argv:/usr/bin/sed -n 1,8p README.md");
+
+    let raw = raw_event_from_record(&record, "session-live", 1).expect("convert exec record");
+
+    assert_eq!(raw.event_name, "sched_process_exec");
+    assert_eq!(raw.resource, "/usr/bin/sed");
+    assert_eq!(raw.action, "exec");
+    assert_eq!(
+        raw.raw_payload,
+        "argv:/usr/bin/sed -n 1,8p README.md,argv_truncated:true,payload_truncated:true"
+    );
 }
 
 fn write_fixed(target: &mut [u8], value: &[u8]) {

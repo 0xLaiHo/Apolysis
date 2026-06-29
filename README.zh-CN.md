@@ -26,7 +26,8 @@ Apolysis 不是 Docker、gVisor、Kata Containers、Firecracker、Kubernetes、M
 
 - 本地命令 wrapper，跟踪 session 从进程启动到退出的完整过程。
 - Docker runtime adapter，包含保守默认值、labels、resource limits 和 container metadata capture。
-- Fixture 和 live eBPF observer backend，用于 process、file、network 和 credential-related events。
+- Fixture 和 live eBPF observer backend，用于 process、有界 exec argv、file、network
+  和 credential-related events。
 - Policy evaluation，支持 `Notify`、`Review`、`Kill`，并在 kernel support 不可用时显式降级 `Block` 行为。
 - Kubernetes 和 Agent Sandbox metadata parsing，覆盖 Pod、namespace、RuntimeClass、service account 和 node context。
 - Strong-isolation visibility assessment，用于 host-side evidence 无法覆盖 guest semantics 的 runtime。
@@ -151,7 +152,15 @@ jq -r '.event_type // .event_name // .kind // .record_type' \
 
 jq -c 'select(.event_type=="network_connect" or .event_type=="process_exit" or .event_name=="connect")' \
   .apolysis/codex-live/timeline.agent-run.jsonl
+
+jq -c 'select(.event_type=="exec" or .event_name=="sched_process_exec") | {record_type,event_name,event_type,pid,actor,resource,raw_payload}' \
+  .apolysis/codex-live/timeline.agent-run.jsonl
 ```
+
+Live exec record 会把 executable path 保留为 canonical `resource`，并把有界、
+已脱敏的 argv evidence 写在对应的 raw `sched_process_exec` record 上。敏感 argv
+值和疑似 credential path 会在持久化前脱敏；达到限制时会写出
+`argv_truncated:true` 或 `payload_truncated:true` marker。
 
 手动 `--scope-pid` 仍保留为 already-running process 的底层 diagnostic fallback；
 生产示例应优先使用 managed launch 或显式 agent registration file。

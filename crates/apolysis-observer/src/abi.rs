@@ -10,6 +10,7 @@ pub const KERNEL_EVENT_RECORD_LEN: usize = 40 + COMM_LEN + RESOURCE_LEN + ACTION
 pub const FLAG_RESOURCE_TRUNCATED: u32 = 1 << 0;
 pub const FLAG_PAYLOAD_TRUNCATED: u32 = 1 << 1;
 pub const FLAG_PAYLOAD_SOCKADDR: u32 = 1 << 2;
+pub const FLAG_ARGV_TRUNCATED: u32 = 1 << 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]

@@ -24,6 +24,7 @@ enum apolysis_event_flags {
     APOLYSIS_FLAG_RESOURCE_TRUNCATED = 1 << 0,
     APOLYSIS_FLAG_PAYLOAD_TRUNCATED = 1 << 1,
     APOLYSIS_FLAG_PAYLOAD_SOCKADDR = 1 << 2,
+    APOLYSIS_FLAG_ARGV_TRUNCATED = 1 << 3,
 };
 
 enum apolysis_scope_mode {
