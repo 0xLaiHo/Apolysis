@@ -137,6 +137,73 @@ fn observe_fixture_emits_policy_violations_and_feedback_file() {
 }
 
 #[test]
+fn observe_fixture_links_raw_canonical_and_policy_records_by_event_id() {
+    let output = temp_jsonl("apolysis-observe-correlation");
+    let _ = std::fs::remove_file(&output);
+
+    let status = apolysis_command()
+        .env("APOLYSIS_BPF_LSM_AVAILABLE", "0")
+        .args([
+            "observe",
+            "--backend",
+            "fixture",
+            "--input",
+            "tests/fixtures/raw-kernel-events.txt",
+            "--session",
+            "session-event-correlation",
+            "--policy",
+            "tests/fixtures/policies/policy-feedback-block-policy.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+        ])
+        .status()
+        .expect("run apolysis observe with correlation schema");
+
+    assert!(status.success());
+    let timeline = std::fs::read_to_string(&output).expect("read observer timeline");
+    let raw_connect = timeline
+        .lines()
+        .find(|line| {
+            line.contains(r#""record_type":"raw_kernel_event""#)
+                && line.contains(r#""event_name":"connect""#)
+        })
+        .expect("raw connect event");
+    let event_id = json_string_field(raw_connect, "event_id").expect("raw event id");
+
+    let canonical_connect = timeline
+        .lines()
+        .find(|line| {
+            line.contains(r#""record_type":"event""#)
+                && line.contains(r#""event_type":"network_connect""#)
+                && line.contains(&format!(r#""raw_event_id":"{event_id}""#))
+        })
+        .expect("canonical network event linked to raw connect");
+    assert!(canonical_connect.contains(r#""pid":4101"#));
+
+    let violation = timeline
+        .lines()
+        .find(|line| {
+            line.contains(r#""record_type":"policy_violation""#)
+                && line.contains(r#""rule_id":"network.allow_egress""#)
+                && line.contains(&format!(r#""observed_event_id":"{event_id}""#))
+        })
+        .expect("policy violation linked to raw connect");
+    assert!(violation.contains(r#""decision":"notify""#));
+
+    let metadata = timeline
+        .lines()
+        .find(|line| {
+            line.contains(r#""record_type":"enforcement_metadata""#)
+                && line.contains(r#""rule_id":"network.allow_egress""#)
+                && line.contains(&format!(r#""observed_event_id":"{event_id}""#))
+        })
+        .expect("enforcement metadata linked to raw connect");
+    assert!(metadata.contains(r#""observed_event_timestamp_unix_ms":1780328000004"#));
+
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
 fn observe_fixture_emits_kill_containment_metadata() {
     let output = temp_jsonl("apolysis-observe-kill-metadata");
     let _ = std::fs::remove_file(&output);
@@ -591,6 +658,14 @@ fn workspace_root() -> std::path::PathBuf {
 
 fn temp_jsonl(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}.jsonl", std::process::id()))
+}
+
+fn json_string_field(line: &str, field: &str) -> Option<String> {
+    let needle = format!(r#""{field}":"#);
+    let start = line.find(&needle)? + needle.len();
+    let rest = line.get(start..)?.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest.get(..end)?.to_string())
 }
 
 fn temp_dir(prefix: &str) -> std::path::PathBuf {

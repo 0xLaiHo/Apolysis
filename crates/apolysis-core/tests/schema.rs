@@ -57,6 +57,7 @@ fn enforcement_metadata_json_line_records_timing_and_capability_context() {
     assert!(line.contains(r#""side_effect_race_window_ms":120"#));
     assert!(line.contains(r#""rule_id":"credentials.deny_read""#));
     assert!(line.contains(r#""downgrade_reason":null"#));
+    assert!(line.contains(r#""observed_event_id":null"#));
 }
 
 #[test]
@@ -129,6 +130,7 @@ fn canonical_event_json_line_escapes_strings_and_records_actor_resource_action()
     assert!(line.contains(r#"bash -c \"echo hi\""#));
     assert!(line.contains(r#""container_id":null"#));
     assert!(line.contains(r#""cgroup_id":null"#));
+    assert!(line.contains(r#""raw_event_id":null"#));
 }
 
 #[test]
@@ -198,6 +200,7 @@ fn raw_kernel_event_json_line_keeps_raw_payload_and_runtime_identity() {
     assert!(line.contains(r#""raw_payload":"flags=O_RDONLY""#));
     assert!(line.contains(r#""container_id":"container-a""#));
     assert!(line.contains(r#""cgroup_id":"42""#));
+    assert!(line.contains(r#""event_id":null"#));
 }
 
 #[test]
@@ -217,4 +220,5 @@ fn policy_violation_json_line_records_decision_and_backend() {
     assert!(line.contains(r#""decision":"notify""#));
     assert!(line.contains(r#""enforcement_backend":"audit_only""#));
     assert!(line.contains(r#""rule_id":"deny-credentials""#));
+    assert!(line.contains(r#""observed_event_id":null"#));
 }
