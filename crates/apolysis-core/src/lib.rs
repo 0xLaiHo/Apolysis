@@ -205,6 +205,7 @@ pub struct CanonicalEvent {
     pub session_id: String,
     pub event_source: EventSource,
     pub event_type: EventType,
+    pub raw_event_id: Option<String>,
     pub pid: u32,
     pub ppid: u32,
     pub actor: String,
@@ -232,6 +233,7 @@ impl CanonicalEvent {
             session_id: session_id.into(),
             event_source,
             event_type,
+            raw_event_id: None,
             pid,
             ppid,
             actor: actor.into(),
@@ -245,6 +247,12 @@ impl CanonicalEvent {
     /// Override the event timestamp, primarily for replayed kernel fixtures.
     pub fn with_timestamp(mut self, timestamp_unix_ms: u128) -> Self {
         self.timestamp_unix_ms = timestamp_unix_ms;
+        self
+    }
+
+    /// Link this canonical record to the raw kernel event that produced it.
+    pub fn with_raw_event_id(mut self, raw_event_id: impl Into<String>) -> Self {
+        self.raw_event_id = Some(raw_event_id.into());
         self
     }
 
@@ -279,12 +287,13 @@ impl JsonLine for CanonicalEvent {
             .unwrap_or_else(|| "null".to_string());
 
         format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"raw_event_id\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{}}}",
             json_string(records::EVENT),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
             json_string(self.event_source.as_str()),
             json_string(self.event_type.as_str()),
+            optional_json_string(self.raw_event_id.as_deref()),
             self.pid,
             self.ppid,
             json_string(&self.actor),
@@ -302,6 +311,7 @@ pub struct RawKernelEvent {
     pub session_id: String,
     pub event_source: EventSource,
     pub event_name: String,
+    pub event_id: Option<String>,
     pub pid: u32,
     pub ppid: u32,
     pub uid: u32,
@@ -338,6 +348,7 @@ impl RawKernelEvent {
             session_id: session_id.into(),
             event_source,
             event_name: event_name.into(),
+            event_id: None,
             pid,
             ppid,
             uid,
@@ -349,6 +360,12 @@ impl RawKernelEvent {
             cgroup_id,
             raw_payload: raw_payload.into(),
         }
+    }
+
+    /// Attach a stable event identifier for joining raw and derived records.
+    pub fn with_event_id(mut self, event_id: impl Into<String>) -> Self {
+        self.event_id = Some(event_id.into());
+        self
     }
 
     /// Render this raw kernel event as a JSONL record.
@@ -371,12 +388,13 @@ impl JsonLine for RawKernelEvent {
             .unwrap_or_else(|| "null".to_string());
 
         format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{},\"raw_payload\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"event_id\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{},\"raw_payload\":{}}}",
             json_string(records::RAW_KERNEL_EVENT),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
             json_string(self.event_source.as_str()),
             json_string(&self.event_name),
+            optional_json_string(self.event_id.as_deref()),
             self.pid,
             self.ppid,
             self.uid,
@@ -464,6 +482,7 @@ impl JsonLine for ObserverDiagnostic {
 pub struct PolicyViolation {
     pub timestamp_unix_ms: u128,
     pub session_id: String,
+    pub observed_event_id: Option<String>,
     pub rule_id: String,
     pub decision: PolicyDecision,
     pub reason: String,
@@ -487,6 +506,7 @@ impl PolicyViolation {
         Self {
             timestamp_unix_ms: now_unix_ms(),
             session_id: session_id.into(),
+            observed_event_id: None,
             rule_id: rule_id.into(),
             decision,
             reason: reason.into(),
@@ -494,6 +514,12 @@ impl PolicyViolation {
             target: target.into(),
             enforcement_backend,
         }
+    }
+
+    /// Link this policy decision to the observed raw event that caused it.
+    pub fn with_observed_event_id(mut self, observed_event_id: impl Into<String>) -> Self {
+        self.observed_event_id = Some(observed_event_id.into());
+        self
     }
 
     /// Render this violation as a JSONL record.
@@ -505,10 +531,11 @@ impl PolicyViolation {
 impl JsonLine for PolicyViolation {
     fn to_json_line(&self) -> String {
         format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"rule_id\":{},\"decision\":{},\"reason\":{},\"pid\":{},\"target\":{},\"enforcement_backend\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"observed_event_id\":{},\"rule_id\":{},\"decision\":{},\"reason\":{},\"pid\":{},\"target\":{},\"enforcement_backend\":{}}}",
             json_string(records::POLICY_VIOLATION),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
+            optional_json_string(self.observed_event_id.as_deref()),
             json_string(&self.rule_id),
             json_string(self.decision.as_str()),
             json_string(&self.reason),
@@ -524,6 +551,7 @@ pub struct EnforcementMetadata {
     pub timestamp_unix_ms: u128,
     pub session_id: String,
     pub rule_id: Option<String>,
+    pub observed_event_id: Option<String>,
     pub requested_decision: PolicyDecision,
     pub effective_decision: PolicyDecision,
     pub enforcement_backend: EnforcementBackend,
@@ -553,6 +581,7 @@ impl EnforcementMetadata {
             timestamp_unix_ms: now_unix_ms(),
             session_id: session_id.into(),
             rule_id: None,
+            observed_event_id: None,
             requested_decision,
             effective_decision,
             enforcement_backend,
@@ -569,6 +598,11 @@ impl EnforcementMetadata {
 
     pub fn with_rule_id(mut self, rule_id: impl Into<String>) -> Self {
         self.rule_id = Some(rule_id.into());
+        self
+    }
+
+    pub fn with_observed_event_id(mut self, observed_event_id: impl Into<String>) -> Self {
+        self.observed_event_id = Some(observed_event_id.into());
         self
     }
 
@@ -602,11 +636,12 @@ impl EnforcementMetadata {
 impl JsonLine for EnforcementMetadata {
     fn to_json_line(&self) -> String {
         format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"rule_id\":{},\"requested_decision\":{},\"effective_decision\":{},\"enforcement_backend\":{},\"timing\":{},\"runtime\":{},\"action\":{},\"preoperation_prevention\":{},\"observed_event_timestamp_unix_ms\":{},\"decision_latency_ms\":{},\"side_effect_race_window_ms\":{},\"downgrade_reason\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"rule_id\":{},\"observed_event_id\":{},\"requested_decision\":{},\"effective_decision\":{},\"enforcement_backend\":{},\"timing\":{},\"runtime\":{},\"action\":{},\"preoperation_prevention\":{},\"observed_event_timestamp_unix_ms\":{},\"decision_latency_ms\":{},\"side_effect_race_window_ms\":{},\"downgrade_reason\":{}}}",
             json_string(records::ENFORCEMENT_METADATA),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
             optional_json_string(self.rule_id.as_deref()),
+            optional_json_string(self.observed_event_id.as_deref()),
             json_string(self.requested_decision.as_str()),
             json_string(self.effective_decision.as_str()),
             json_string(self.enforcement_backend.as_str()),

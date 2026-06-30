@@ -204,6 +204,26 @@ impl TracepointAttach {
     }
 }
 
+pub(crate) struct EventIdSequence {
+    session_id: String,
+    next: u64,
+}
+
+impl EventIdSequence {
+    pub(crate) fn new(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            next: 1,
+        }
+    }
+
+    pub(crate) fn next_raw_event_id(&mut self) -> String {
+        let event_id = format!("{}:event:{:016x}", self.session_id, self.next);
+        self.next += 1;
+        event_id
+    }
+}
+
 /// Replay a raw observer fixture into raw, canonical, and policy timeline records.
 pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, String> {
     let policy = load_policy(&request.policy_path)?;
@@ -230,6 +250,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
         .map_err(|error| format!("failed to read observer fixture: {error}"))?;
     let mut raw_count = 0;
     let mut canonical_count = 0;
+    let mut event_ids = EventIdSequence::new(&request.session_id);
 
     for raw_line in input.lines() {
         let raw_line = raw_line.trim();
@@ -237,7 +258,8 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
             continue;
         }
 
-        let raw = parse_fixture_raw_event(raw_line, &request.session_id)?;
+        let raw = parse_fixture_raw_event(raw_line, &request.session_id)?
+            .with_event_id(event_ids.next_raw_event_id());
         store
             .append(&raw)
             .map_err(|error| format!("failed to write raw kernel event: {error}"))?;
@@ -366,7 +388,7 @@ fn append_policy_evaluation(
         .decision
         .reason()
         .ok_or_else(|| "policy violation missing reason".to_string())?;
-    let violation = PolicyViolation::new(
+    let mut violation = PolicyViolation::new(
         &canonical.session_id,
         rule_id,
         evaluation.decision.core_decision(),
@@ -375,6 +397,9 @@ fn append_policy_evaluation(
         persisted_target.unwrap_or(&canonical.resource),
         evaluation.enforcement_backend.clone(),
     );
+    if let Some(raw_event_id) = canonical.raw_event_id.as_deref() {
+        violation = violation.with_observed_event_id(raw_event_id);
+    }
     store
         .append(&violation)
         .map_err(|error| format!("failed to write policy violation: {error}"))?;
@@ -383,7 +408,7 @@ fn append_policy_evaluation(
         .downgrade
         .as_ref()
         .map(|downgrade| downgrade.reason.clone());
-    let metadata = EnforcementMetadata::new(
+    let mut metadata = EnforcementMetadata::new(
         &canonical.session_id,
         evaluation.requested.core_decision(),
         evaluation.effective.core_decision(),
@@ -396,6 +421,9 @@ fn append_policy_evaluation(
     .with_rule_id(rule_id)
     .with_downgrade_reason(downgrade_reason)
     .with_measurement(canonical.timestamp_unix_ms, now_unix_ms());
+    if let Some(raw_event_id) = canonical.raw_event_id.as_deref() {
+        metadata = metadata.with_observed_event_id(raw_event_id);
+    }
     store
         .append(&metadata)
         .map_err(|error| format!("failed to write enforcement metadata: {error}"))?;
@@ -426,7 +454,7 @@ fn canonicalize(raw: &RawKernelEvent, policy: &Policy) -> CanonicalEvent {
         _ => EventType::RuntimeMetadata,
     };
 
-    CanonicalEvent::new(
+    let mut event = CanonicalEvent::new(
         &raw.session_id,
         EventSource::KernelTracepoint,
         event_type,
@@ -437,7 +465,11 @@ fn canonicalize(raw: &RawKernelEvent, policy: &Policy) -> CanonicalEvent {
         &raw.action,
     )
     .with_timestamp(raw.timestamp_unix_ms)
-    .with_runtime_identity(raw.container_id.clone(), raw.cgroup_id.clone())
+    .with_runtime_identity(raw.container_id.clone(), raw.cgroup_id.clone());
+    if let Some(raw_event_id) = raw.event_id.as_deref() {
+        event = event.with_raw_event_id(raw_event_id);
+    }
+    event
 }
 
 fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEvent, String> {

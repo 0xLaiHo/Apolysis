@@ -26,7 +26,7 @@ use crate::abi::{
 use crate::capabilities::validate_live_prerequisites;
 use crate::{
     append_policy_evaluation, canonicalize, load_policy, write_observer_metadata, AyaLoaderPlan,
-    ObserveResult, ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor,
+    EventIdSequence, ObserveResult, ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -387,6 +387,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     let mut canonical_count = 0;
     let mut decode_failures = 0_u64;
     let mut truncations = 0_u64;
+    let mut event_ids = EventIdSequence::new(&request.session_id);
     let redactor = Redactor::new(&request.session_id, &request.workspace_root);
     let mut agent_exit_status: Option<ExitStatus> = None;
     let mut agent_drain_deadline: Option<tokio::time::Instant> = None;
@@ -452,7 +453,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 &request.session_id,
                 calibration.to_unix_ms(record.timestamp_ns),
             ) {
-                Ok(raw) => raw,
+                Ok(raw) => raw.with_event_id(event_ids.next_raw_event_id()),
                 Err(_) => {
                     decode_failures += 1;
                     continue;

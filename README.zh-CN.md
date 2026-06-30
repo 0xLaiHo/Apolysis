@@ -155,12 +155,23 @@ jq -c 'select(.event_type=="network_connect" or .event_type=="process_exit" or .
 
 jq -c 'select(.event_type=="exec" or .event_name=="sched_process_exec") | {record_type,event_name,event_type,pid,actor,resource,raw_payload}' \
   .apolysis/codex-live/timeline.agent-run.jsonl
+
+jq -c 'select(.record_type=="raw_kernel_event" and .event_id!=null) | {event_id,event_name,pid,resource,raw_payload}' \
+  .apolysis/codex-live/timeline.agent-run.jsonl | head
+
+jq -c 'select(.record_type=="event" and .raw_event_id!=null) | {raw_event_id,event_type,pid,resource}' \
+  .apolysis/codex-live/timeline.agent-run.jsonl | head
+
+jq -c 'select((.record_type=="policy_violation" or .record_type=="enforcement_metadata") and .observed_event_id!=null) | {record_type,rule_id,observed_event_id,decision,effective_decision}' \
+  .apolysis/codex-live/timeline.agent-run.jsonl | head
 ```
 
 Live exec record 会把 executable path 保留为 canonical `resource`，并把有界、
 已脱敏的 argv evidence 写在对应的 raw `sched_process_exec` record 上。敏感 argv
 值和疑似 credential path 会在持久化前脱敏；达到限制时会写出
-`argv_truncated:true` 或 `payload_truncated:true` marker。
+`argv_truncated:true` 或 `payload_truncated:true` marker。Raw kernel record
+包含 `event_id`；canonical record 包含 `raw_event_id`；由具体 observed event
+生成的 policy 和 enforcement record 会包含 `observed_event_id`。
 
 手动 `--scope-pid` 仍保留为 already-running process 的底层 diagnostic fallback；
 生产示例应优先使用 managed launch 或显式 agent registration file。

@@ -181,13 +181,25 @@ jq -c 'select(.event_type=="network_connect" or .event_type=="process_exit" or .
 
 jq -c 'select(.event_type=="exec" or .event_name=="sched_process_exec") | {record_type,event_name,event_type,pid,actor,resource,raw_payload}' \
   .apolysis/codex-live/timeline.agent-run.jsonl
+
+jq -c 'select(.record_type=="raw_kernel_event" and .event_id!=null) | {event_id,event_name,pid,resource,raw_payload}' \
+  .apolysis/codex-live/timeline.agent-run.jsonl | head
+
+jq -c 'select(.record_type=="event" and .raw_event_id!=null) | {raw_event_id,event_type,pid,resource}' \
+  .apolysis/codex-live/timeline.agent-run.jsonl | head
+
+jq -c 'select((.record_type=="policy_violation" or .record_type=="enforcement_metadata") and .observed_event_id!=null) | {record_type,rule_id,observed_event_id,decision,effective_decision}' \
+  .apolysis/codex-live/timeline.agent-run.jsonl | head
 ```
 
 Live exec records keep the executable path as the canonical `resource` and
 store bounded, redacted argv evidence on the matching raw `sched_process_exec`
 record. Sensitive argv values and credential-looking paths are redacted before
 persistence; truncation is marked with `argv_truncated:true` or
-`payload_truncated:true` when limits are reached.
+`payload_truncated:true` when limits are reached. Raw kernel records include
+`event_id`; canonical records include `raw_event_id`; policy and enforcement
+records include `observed_event_id` when they are generated from a specific
+observed event.
 
 Manual `--scope-pid` remains available as a low-level diagnostic fallback for
 already-running processes, but production examples should prefer managed launch
