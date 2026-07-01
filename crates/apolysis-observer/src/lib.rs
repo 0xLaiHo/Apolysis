@@ -11,6 +11,7 @@
 pub mod abi;
 pub mod capabilities;
 mod live;
+mod process_context;
 mod redaction;
 mod scope;
 
@@ -34,6 +35,8 @@ use apolysis_feedback::FeedbackWriter;
 use apolysis_kubernetes::KubernetesMetadata;
 use apolysis_policy::{DecisionDowngrade, Policy, PolicyRuntimeCapabilities};
 use apolysis_store::JsonlStore;
+
+use crate::process_context::ProcessContextTable;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixtureObserveRequest {
@@ -251,6 +254,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
     let mut raw_count = 0;
     let mut canonical_count = 0;
     let mut event_ids = EventIdSequence::new(&request.session_id);
+    let mut process_context = ProcessContextTable::default();
 
     for raw_line in input.lines() {
         let raw_line = raw_line.trim();
@@ -265,7 +269,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
             .map_err(|error| format!("failed to write raw kernel event: {error}"))?;
         raw_count += 1;
 
-        let canonical = canonicalize(&raw, &policy);
+        let canonical = process_context.observe(&raw, canonicalize(&raw, &policy));
         store
             .append(&canonical)
             .map_err(|error| format!("failed to write canonical event: {error}"))?;

@@ -188,6 +188,9 @@ jq -c 'select(.record_type=="raw_kernel_event" and .event_id!=null) | {event_id,
 jq -c 'select(.record_type=="event" and .raw_event_id!=null) | {raw_event_id,event_type,pid,resource}' \
   .apolysis/codex-live/timeline.agent-run.jsonl | head
 
+jq -c 'select(.record_type=="event" and .process_command!=null) | {event_type,pid,resource,process_command,process_executable,process_started_at_unix_ms,raw_event_id}' \
+  .apolysis/codex-live/timeline.agent-run.jsonl | head
+
 jq -c 'select((.record_type=="policy_violation" or .record_type=="enforcement_metadata") and .observed_event_id!=null) | {record_type,rule_id,observed_event_id,decision,effective_decision}' \
   .apolysis/codex-live/timeline.agent-run.jsonl | head
 ```
@@ -199,7 +202,10 @@ persistence; truncation is marked with `argv_truncated:true` or
 `payload_truncated:true` when limits are reached. Raw kernel records include
 `event_id`; canonical records include `raw_event_id`; policy and enforcement
 records include `observed_event_id` when they are generated from a specific
-observed event.
+observed event. When a successful exec has been observed for a PID, later
+canonical exec, file, network, and process-exit records can include the
+redacted `process_command`, `process_executable`, and
+`process_started_at_unix_ms` context for that process.
 
 Manual `--scope-pid` remains available as a low-level diagnostic fallback for
 already-running processes, but production examples should prefer managed launch
