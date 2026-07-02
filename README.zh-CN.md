@@ -438,6 +438,10 @@ Apolysis 记录 evidence。它不会单独把不安全的 runtime 变安全。Ru
 
 详细 roadmap、research notes、validation history 和 release-readiness records 不放在顶层 README 中，以便 README 保持面向使用和运维的核心内容。
 
+## 方向
+
+Apolysis 的定位是面向 AI agent workload 的飞行记录仪：由环境拥有者安装，独立于 harness 日志。当前方向按依赖顺序为：归因收尾与可采用的 release 打包，然后是 harness intent 关联，然后是规模化硬化，最后是单一窄验证执行路径。细节见与本仓库并行维护的 roadmap 文档。
+
 ## 许可证
 
 Apolysis userspace components 使用 Apache-2.0。详见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。

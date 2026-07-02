@@ -499,6 +499,15 @@ Detailed roadmap, research notes, validation history, and release-readiness
 records are maintained outside the top-level README so this file can stay
 focused on using and operating the project.
 
+## Direction
+
+Apolysis positions itself as a flight recorder for AI agent workloads:
+installed by the environment owner, independent of harness logs. The current
+direction, in dependency order, is attribution closure and adoptable release
+packaging, then harness intent correlation, then scale hardening, then a
+single narrow validated enforcement path. Details live in the roadmap
+documents maintained alongside this repository.
+
 ## License
 
 Apolysis userspace components are licensed under Apache-2.0. See
