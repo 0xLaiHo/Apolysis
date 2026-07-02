@@ -165,12 +165,48 @@ sudo -E ./target/debug/apolysis observe \
   --agent-run -- codex resume <codex-session-id>
 ```
 
+If another trusted supervisor has already started the agent, have that
+supervisor write an explicit registration file instead of asking the operator
+to choose a PID by process name:
+
+```json
+{
+  "agent_kind": "codex",
+  "pid": 12345,
+  "start_time_ticks": 987654321,
+  "workspace_root": "/srv/agents/repo",
+  "executable": "/home/agent/.nvm/versions/node/bin/codex",
+  "command_fingerprint": "sha256:<hex>",
+  "command": "codex resume <codex-session-id>"
+}
+```
+
+Then attach with the registration file. Apolysis compares the recorded
+`start_time_ticks` with `/proc/<pid>/stat` before attach and fails closed if
+the PID has been reused:
+
+```bash
+sudo -E ./target/debug/apolysis observe \
+  --backend live \
+  --session codex-local-audit \
+  --policy policies/local-dev.yaml \
+  --output .apolysis/codex-live/timeline.agent-registration.jsonl \
+  --bpf-object target/ebpf/apolysis_observer.bpf.o \
+  --workspace-root "$PWD" \
+  --agent-registration .apolysis/codex-live/agent-registration.json
+```
+
+A diagnostic-only discovery fallback is available for local troubleshooting:
+`--agent-kind codex --agent-discover`. It scores candidates by kind, workspace,
+session id, executable path, command line, and parent chain, and refuses to
+attach when more than one candidate remains.
+
 Review the resulting timeline:
 
 ```bash
 wc -l .apolysis/codex-live/timeline.agent-run.jsonl
 
-jq -c 'select(.resource=="agent-supervisor-mode" or .resource=="agent-kind" or .resource=="agent-root-pid" or .resource=="agent-command" or .resource=="observer-scope")' \
+jq -c 'select(.resource=="agent-supervisor-mode" or .resource=="agent-kind" or .resource=="agent-root-pid" or .resource=="agent-command" or .resource=="agent-command-fingerprint" or .resource=="observer-scope")' \
   .apolysis/codex-live/timeline.agent-run.jsonl
 
 jq -r '.event_type // .event_name // .kind // .record_type' \

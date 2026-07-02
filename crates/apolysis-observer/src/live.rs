@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -16,6 +17,8 @@ use apolysis_store::JsonlStore;
 use aya::maps::{Array, HashMap, MapData, RingBuf};
 use aya::programs::TracePoint;
 use aya::{Ebpf, EbpfLoader, Pod};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
 
@@ -110,6 +113,108 @@ impl AgentRunRequest {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct AgentRegistration {
+    #[serde(alias = "agent_kind")]
+    pub kind: String,
+    pub pid: u32,
+    pub start_time_ticks: u64,
+    pub workspace_root: PathBuf,
+    pub executable: String,
+    pub command_fingerprint: String,
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+impl AgentRegistration {
+    pub fn from_json_file(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let input = fs::read_to_string(path).map_err(|error| {
+            format!(
+                "failed to read agent registration {}: {error}",
+                path.display()
+            )
+        })?;
+        let registration = serde_json::from_str::<Self>(&input).map_err(|error| {
+            format!(
+                "failed to parse agent registration {}: {error}",
+                path.display()
+            )
+        })?;
+        registration.validate()?;
+        Ok(registration)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.kind.trim().is_empty() {
+            return Err("agent registration kind must not be empty".to_string());
+        }
+        if self.pid == 0 {
+            return Err("agent registration pid must be non-zero".to_string());
+        }
+        if self.start_time_ticks == 0 {
+            return Err("agent registration start_time_ticks must be non-zero".to_string());
+        }
+        if !self.workspace_root.is_absolute() {
+            return Err("agent registration workspace_root must be absolute".to_string());
+        }
+        if self.executable.trim().is_empty() {
+            return Err("agent registration executable must not be empty".to_string());
+        }
+        if self.command_fingerprint.trim().is_empty() {
+            return Err("agent registration command_fingerprint must not be empty".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn validate_proc_identity(&self, proc_root: impl AsRef<Path>) -> Result<(), String> {
+        self.validate()?;
+        let actual = read_process_start_time_ticks_at(proc_root, self.pid).ok_or_else(|| {
+            format!(
+                "agent registration PID identity is unavailable before attach: pid={}",
+                self.pid
+            )
+        })?;
+        if actual != self.start_time_ticks {
+            return Err(format!(
+                "agent registration rejected possible PID reuse: pid={},expected_start_time_ticks={},actual_start_time_ticks={actual}",
+                self.pid, self.start_time_ticks
+            ));
+        }
+        Ok(())
+    }
+
+    fn into_metadata(self, supervisor_mode: impl Into<String>) -> AgentScopeMetadata {
+        AgentScopeMetadata {
+            supervisor_mode: supervisor_mode.into(),
+            kind: self.kind,
+            root_pid: self.pid,
+            executable: self.executable,
+            command: self
+                .command
+                .unwrap_or_else(|| format!("fingerprint:{}", self.command_fingerprint)),
+            command_fingerprint: Some(self.command_fingerprint),
+            workspace_root: self.workspace_root.display().to_string(),
+            start_time_ticks: Some(self.start_time_ticks),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentDiscoveryRequest {
+    pub kind: String,
+}
+
+impl AgentDiscoveryRequest {
+    pub fn new(kind: impl Into<String>) -> Result<Self, String> {
+        let kind = kind.into();
+        if kind.trim().is_empty() {
+            return Err("agent kind must not be empty".to_string());
+        }
+        Ok(Self { kind })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveObserveRequest {
     pub object_path: PathBuf,
@@ -119,6 +224,8 @@ pub struct LiveObserveRequest {
     pub feedback_dir: Option<PathBuf>,
     pub scope: Option<LiveScope>,
     pub agent_run: Option<AgentRunRequest>,
+    pub agent_registration_path: Option<PathBuf>,
+    pub agent_discovery: Option<AgentDiscoveryRequest>,
     pub duration: Option<Duration>,
     pub workspace_root: PathBuf,
 }
@@ -131,16 +238,43 @@ impl LiveObserveRequest {
                 self.object_path.display()
             ));
         }
-        match (&self.scope, &self.agent_run) {
-            (Some(_), None) | (None, Some(_)) => {}
-            (None, None) => {
-                return Err("live observer requires either a scope or --agent-run".to_string());
-            }
-            (Some(_), Some(_)) => {
-                return Err(
-                    "--agent-run cannot be combined with --scope-pid or --scope-cgroup".to_string(),
-                );
-            }
+        if self.agent_run.is_some() && self.scope.is_some() {
+            return Err(
+                "--agent-run cannot be combined with --scope-pid or --scope-cgroup".to_string(),
+            );
+        }
+        if self.agent_registration_path.is_some() && self.scope.is_some() {
+            return Err(
+                "--agent-registration cannot be combined with --scope-pid or --scope-cgroup"
+                    .to_string(),
+            );
+        }
+        if self.agent_discovery.is_some() && self.scope.is_some() {
+            return Err(
+                "--agent-discover cannot be combined with --scope-pid or --scope-cgroup"
+                    .to_string(),
+            );
+        }
+        if self.agent_run.is_some()
+            && (self.agent_registration_path.is_some() || self.agent_discovery.is_some())
+        {
+            return Err(
+                "--agent-run cannot be combined with --agent-registration or --agent-discover"
+                    .to_string(),
+            );
+        }
+        if self.agent_registration_path.is_some() && self.agent_discovery.is_some() {
+            return Err(
+                "--agent-registration cannot be combined with --agent-discover".to_string(),
+            );
+        }
+
+        let scope_modes = usize::from(self.scope.is_some())
+            + usize::from(self.agent_run.is_some())
+            + usize::from(self.agent_registration_path.is_some())
+            + usize::from(self.agent_discovery.is_some());
+        if scope_modes != 1 {
+            return Err(live_scope_requirement());
         }
         Ok(())
     }
@@ -149,15 +283,17 @@ impl LiveObserveRequest {
 #[derive(Debug)]
 struct ManagedAgentChild {
     child: Child,
-    metadata: ManagedAgentMetadata,
+    metadata: AgentScopeMetadata,
 }
 
 #[derive(Debug)]
-struct ManagedAgentMetadata {
+struct AgentScopeMetadata {
+    supervisor_mode: String,
     kind: String,
     root_pid: u32,
     executable: String,
     command: String,
+    command_fingerprint: Option<String>,
     workspace_root: String,
     start_time_ticks: Option<u64>,
 }
@@ -293,10 +429,31 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         policy.startup_downgrade(&capabilities),
         &mut store,
     )?;
+    let registered_agent = match resolve_registered_agent(&request) {
+        Ok(agent) => agent,
+        Err(error) => {
+            append_diagnostic(
+                &request.session_id,
+                ObserverDiagnosticKind::AttachFailure,
+                1,
+                &error,
+                &mut store,
+            )?;
+            store.flush().map_err(|flush| {
+                format!("failed to flush agent registration diagnostic: {flush}")
+            })?;
+            return Err(error);
+        }
+    };
     let prerequisite_scope = request
         .scope
         .as_ref()
         .cloned()
+        .or_else(|| {
+            registered_agent
+                .as_ref()
+                .map(|agent| LiveScope::ProcessTree(agent.root_pid))
+        })
         .unwrap_or_else(|| LiveScope::ProcessTree(std::process::id()));
     if let Err(error) = validate_live_prerequisites(&prerequisite_scope, &loader_plan) {
         append_diagnostic(
@@ -319,9 +476,17 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     } else {
         None
     };
+    if let Some(agent) = registered_agent.as_ref() {
+        write_agent_supervisor_metadata(&request.session_id, agent, &mut store)?;
+    }
     let scope = managed_agent
         .as_ref()
         .map(|agent| LiveScope::ProcessTree(agent.metadata.root_pid))
+        .or_else(|| {
+            registered_agent
+                .as_ref()
+                .map(|agent| LiveScope::ProcessTree(agent.root_pid))
+        })
         .or_else(|| request.scope.clone())
         .expect("live request validation requires a scope or managed agent");
     write_scope_metadata(&request.session_id, &scope, &mut store)?;
@@ -549,6 +714,88 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     })
 }
 
+fn resolve_registered_agent(
+    request: &LiveObserveRequest,
+) -> Result<Option<AgentScopeMetadata>, String> {
+    if let Some(path) = request.agent_registration_path.as_deref() {
+        let registration = AgentRegistration::from_json_file(path)?;
+        registration.validate_proc_identity("/proc")?;
+        return Ok(Some(registration.into_metadata("external_registration")));
+    }
+
+    if let Some(discovery) = request.agent_discovery.as_ref() {
+        let registration = discover_agent_registration(
+            discovery,
+            "/proc",
+            &request.session_id,
+            &request.workspace_root,
+        )?;
+        registration.validate_proc_identity("/proc")?;
+        return Ok(Some(registration.into_metadata("proc_discovery")));
+    }
+
+    Ok(None)
+}
+
+pub fn discover_agent_registration(
+    request: &AgentDiscoveryRequest,
+    proc_root: impl AsRef<Path>,
+    session_id: &str,
+    workspace_root: &Path,
+) -> Result<AgentRegistration, String> {
+    let proc_root = proc_root.as_ref();
+    let identities = read_proc_identities(proc_root)?;
+    let by_pid = identities
+        .iter()
+        .map(|identity| (identity.pid, identity.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut candidates = identities
+        .into_iter()
+        .filter_map(|identity| {
+            let score = score_discovery_candidate(
+                &identity,
+                &by_pid,
+                &request.kind,
+                session_id,
+                workspace_root,
+            );
+            (score > 0).then_some(AgentDiscoveryCandidate { identity, score })
+        })
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        return Err(format!(
+            "agent discovery found no matching {} process",
+            request.kind
+        ));
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.identity.pid.cmp(&right.identity.pid))
+    });
+    let top_score = candidates[0].score;
+    let top = candidates
+        .iter()
+        .filter(|candidate| candidate.score == top_score)
+        .collect::<Vec<_>>();
+    if top.len() != 1 {
+        return Err(format!(
+            "agent discovery is ambiguous; refusing to attach: {}",
+            top.iter()
+                .map(|candidate| candidate.summary())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+
+    Ok(top[0]
+        .identity
+        .to_registration(&request.kind, workspace_root))
+}
+
 fn spawn_managed_agent(
     request: &AgentRunRequest,
     workspace_root: &Path,
@@ -567,11 +814,13 @@ fn spawn_managed_agent(
     let root_pid = child
         .id()
         .ok_or_else(|| "managed agent child pid is unavailable".to_string())?;
-    let metadata = ManagedAgentMetadata {
+    let metadata = AgentScopeMetadata {
+        supervisor_mode: "apolysis_managed_launch".to_string(),
         kind: request.kind.clone(),
         root_pid,
         executable: request.executable().to_string(),
         command: request.redacted_command(),
+        command_fingerprint: Some(command_fingerprint_from_args(&request.command)),
         workspace_root: workspace_root.display().to_string(),
         start_time_ticks: read_process_start_time_ticks(root_pid),
     };
@@ -587,13 +836,13 @@ async fn terminate_managed_agent(agent: Option<&mut ManagedAgentChild>) {
 
 fn write_agent_supervisor_metadata(
     session_id: &str,
-    metadata: &ManagedAgentMetadata,
+    metadata: &AgentScopeMetadata,
     store: &mut JsonlStore,
 ) -> Result<(), String> {
-    for (resource, action) in [
+    let mut entries = vec![
         (
             resources::AGENT_SUPERVISOR_MODE,
-            "apolysis_managed_launch".to_string(),
+            metadata.supervisor_mode.clone(),
         ),
         (resources::AGENT_KIND, metadata.kind.clone()),
         (resources::AGENT_ROOT_PID, metadata.root_pid.to_string()),
@@ -610,7 +859,11 @@ fn write_agent_supervisor_metadata(
                 .map(|ticks| format!("start_time_ticks:{ticks}"))
                 .unwrap_or_else(|| "start_time_ticks:unavailable".to_string()),
         ),
-    ] {
+    ];
+    if let Some(fingerprint) = metadata.command_fingerprint.as_ref() {
+        entries.push((resources::AGENT_COMMAND_FINGERPRINT, fingerprint.clone()));
+    }
+    for (resource, action) in entries {
         write_runtime_metadata_event(session_id, actors::OBSERVER, resource, action, store)?;
     }
     Ok(())
@@ -669,9 +922,228 @@ fn status_exit_code(status: ExitStatus) -> i32 {
 }
 
 fn read_process_start_time_ticks(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    read_process_start_time_ticks_at("/proc", pid)
+}
+
+fn read_process_start_time_ticks_at(proc_root: impl AsRef<Path>, pid: u32) -> Option<u64> {
+    let stat = read_proc_stat(proc_root.as_ref(), pid)?;
+    parse_proc_stat_start_time_ticks(&stat)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProcIdentity {
+    pid: u32,
+    ppid: u32,
+    start_time_ticks: u64,
+    comm: String,
+    executable: String,
+    cwd: Option<PathBuf>,
+    command_args: Vec<String>,
+    command_fingerprint: String,
+}
+
+impl ProcIdentity {
+    fn command(&self) -> String {
+        if self.command_args.is_empty() {
+            self.comm.clone()
+        } else {
+            redact_command(&self.command_args).join(" ")
+        }
+    }
+
+    fn command_for_matching(&self) -> String {
+        if self.command_args.is_empty() {
+            self.comm.clone()
+        } else {
+            self.command_args.join(" ")
+        }
+    }
+
+    fn to_registration(&self, kind: &str, workspace_root: &Path) -> AgentRegistration {
+        AgentRegistration {
+            kind: kind.to_string(),
+            pid: self.pid,
+            start_time_ticks: self.start_time_ticks,
+            workspace_root: workspace_root.to_path_buf(),
+            executable: if self.executable.is_empty() {
+                self.comm.clone()
+            } else {
+                self.executable.clone()
+            },
+            command_fingerprint: self.command_fingerprint.clone(),
+            command: Some(self.command()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentDiscoveryCandidate {
+    identity: ProcIdentity,
+    score: u32,
+}
+
+impl AgentDiscoveryCandidate {
+    fn summary(&self) -> String {
+        format!(
+            "pid={},score={},executable={},command={}",
+            self.identity.pid,
+            self.score,
+            self.identity.executable,
+            self.identity.command()
+        )
+    }
+}
+
+fn read_proc_identities(proc_root: &Path) -> Result<Vec<ProcIdentity>, String> {
+    let entries = fs::read_dir(proc_root)
+        .map_err(|error| format!("failed to scan proc root {}: {error}", proc_root.display()))?;
+    let mut identities = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
+        let Some(stat) = read_proc_stat(proc_root, pid) else {
+            continue;
+        };
+        let Some(ppid) = parse_proc_stat_ppid(&stat) else {
+            continue;
+        };
+        let Some(start_time_ticks) = parse_proc_stat_start_time_ticks(&stat) else {
+            continue;
+        };
+        let comm = parse_proc_stat_comm(&stat).unwrap_or_else(|| pid.to_string());
+        let command_args = read_proc_cmdline(proc_root, pid);
+        let executable = fs::read_link(proc_root.join(pid.to_string()).join("exe"))
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let cwd = fs::read_link(proc_root.join(pid.to_string()).join("cwd")).ok();
+        let fingerprint_input = if command_args.is_empty() {
+            comm.as_bytes().to_vec()
+        } else {
+            command_args.join("\0").into_bytes()
+        };
+        identities.push(ProcIdentity {
+            pid,
+            ppid,
+            start_time_ticks,
+            comm,
+            executable,
+            cwd,
+            command_args,
+            command_fingerprint: command_fingerprint(&fingerprint_input),
+        });
+    }
+    Ok(identities)
+}
+
+fn score_discovery_candidate(
+    identity: &ProcIdentity,
+    by_pid: &BTreeMap<u32, ProcIdentity>,
+    kind: &str,
+    session_id: &str,
+    workspace_root: &Path,
+) -> u32 {
+    let kind = kind.to_ascii_lowercase();
+    let executable = identity.executable.to_ascii_lowercase();
+    let command = identity.command_for_matching();
+    let command_lower = command.to_ascii_lowercase();
+    let comm = identity.comm.to_ascii_lowercase();
+    let workspace = workspace_root.display().to_string();
+    let workspace_match = identity.cwd.as_deref() == Some(workspace_root)
+        || (!workspace.is_empty() && command.contains(&workspace));
+    let session_match = !session_id.is_empty() && command.contains(session_id);
+    let executable_kind_match = !identity.executable.is_empty() && executable.contains(&kind);
+    let command_kind_match = command_lower.contains(&kind) || comm.contains(&kind);
+    let parent_chain_kind_match = parent_chain_contains_kind(identity, by_pid, &kind);
+
+    if !(executable_kind_match
+        || command_kind_match
+        || (workspace_match && session_match)
+        || parent_chain_kind_match)
+    {
+        return 0;
+    }
+
+    let mut score = 0;
+    if executable_kind_match {
+        score += 4;
+    }
+    if command_kind_match {
+        score += 3;
+    }
+    if workspace_match {
+        score += 2;
+    }
+    if session_match {
+        score += 2;
+    }
+    if parent_chain_kind_match {
+        score += 1;
+    }
+    score
+}
+
+fn parent_chain_contains_kind(
+    identity: &ProcIdentity,
+    by_pid: &BTreeMap<u32, ProcIdentity>,
+    kind: &str,
+) -> bool {
+    let mut ppid = identity.ppid;
+    let mut visited = BTreeSet::new();
+    while ppid != 0 && visited.insert(ppid) {
+        let Some(parent) = by_pid.get(&ppid) else {
+            return false;
+        };
+        let executable = parent.executable.to_ascii_lowercase();
+        let command = parent.command_for_matching().to_ascii_lowercase();
+        let comm = parent.comm.to_ascii_lowercase();
+        if executable.contains(kind) || command.contains(kind) || comm.contains(kind) {
+            return true;
+        }
+        ppid = parent.ppid;
+    }
+    false
+}
+
+fn read_proc_stat(proc_root: &Path, pid: u32) -> Option<String> {
+    fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()
+}
+
+fn read_proc_cmdline(proc_root: &Path, pid: u32) -> Vec<String> {
+    let bytes = fs::read(proc_root.join(pid.to_string()).join("cmdline")).unwrap_or_default();
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| String::from_utf8(value.to_vec()).ok())
+        .collect()
+}
+
+fn parse_proc_stat_comm(stat: &str) -> Option<String> {
+    let start = stat.find(" (")? + 2;
+    let end = stat.rfind(") ")?;
+    stat.get(start..end).map(ToString::to_string)
+}
+
+fn parse_proc_stat_start_time_ticks(stat: &str) -> Option<u64> {
     let after_comm = stat.rsplit_once(") ")?.1;
     after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+fn command_fingerprint_from_args(args: &[String]) -> String {
+    command_fingerprint(args.join("\0").as_bytes())
+}
+
+fn command_fingerprint(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::from("sha256:");
+    for byte in digest {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
+}
+
+fn live_scope_requirement() -> String {
+    "live observer requires exactly one of --scope-cgroup, --scope-pid, --agent-run, --agent-registration, or --agent-discover".to_string()
 }
 
 fn redact_command(command: &[String]) -> Vec<String> {
@@ -1298,6 +1770,7 @@ fn decode_sockaddr(bytes: &[u8]) -> Result<(String, &'static str), String> {
 mod tests {
     use super::*;
     use apolysis_core::{CanonicalEvent, EventType};
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn persisted_live_events_redact_credentials_before_jsonl_output() {
@@ -1548,6 +2021,130 @@ mod tests {
     }
 
     #[test]
+    fn agent_registration_rejects_pid_reuse_by_start_time() {
+        let proc_root = temp_proc_root("agent-registration-reuse");
+        write_fake_proc(
+            &proc_root,
+            FakeProc {
+                pid: 101,
+                ppid: 1,
+                start_time_ticks: 9_001,
+                comm: "codex",
+                executable: "/usr/bin/codex",
+                cwd: "/workspace/apolysis",
+                argv: &["codex", "resume", "session-a"],
+            },
+        );
+        let registration = AgentRegistration {
+            kind: "codex".to_string(),
+            pid: 101,
+            start_time_ticks: 9_999,
+            workspace_root: PathBuf::from("/workspace/apolysis"),
+            executable: "/usr/bin/codex".to_string(),
+            command_fingerprint: "sha256:test".to_string(),
+            command: None,
+        };
+
+        let error = registration
+            .validate_proc_identity(&proc_root)
+            .expect_err("registration with stale start time must fail closed");
+
+        assert!(error.contains("PID reuse"));
+        assert!(error.contains("pid=101"));
+        assert!(error.contains("expected_start_time_ticks=9999"));
+        assert!(error.contains("actual_start_time_ticks=9001"));
+
+        let _ = std::fs::remove_dir_all(&proc_root);
+    }
+
+    #[test]
+    fn agent_discovery_fails_closed_on_ambiguous_candidates() {
+        let proc_root = temp_proc_root("agent-discovery-ambiguous");
+        for pid in [201, 202] {
+            write_fake_proc(
+                &proc_root,
+                FakeProc {
+                    pid,
+                    ppid: 1,
+                    start_time_ticks: 7_000 + pid as u64,
+                    comm: "codex",
+                    executable: "/usr/bin/codex",
+                    cwd: "/workspace/apolysis",
+                    argv: &["codex", "resume", "session-a"],
+                },
+            );
+        }
+        let request = AgentDiscoveryRequest::new("codex").expect("discovery request");
+
+        let error = discover_agent_registration(
+            &request,
+            &proc_root,
+            "session-a",
+            Path::new("/workspace/apolysis"),
+        )
+        .expect_err("ambiguous discovery must fail closed");
+
+        assert!(error.contains("agent discovery is ambiguous"));
+        assert!(error.contains("pid=201"));
+        assert!(error.contains("pid=202"));
+
+        let _ = std::fs::remove_dir_all(&proc_root);
+    }
+
+    #[test]
+    fn agent_discovery_selects_unique_highest_scored_candidate() {
+        let proc_root = temp_proc_root("agent-discovery-unique");
+        write_fake_proc(
+            &proc_root,
+            FakeProc {
+                pid: 301,
+                ppid: 1,
+                start_time_ticks: 8_001,
+                comm: "codex",
+                executable: "/usr/bin/codex",
+                cwd: "/workspace/apolysis",
+                argv: &["codex", "resume", "session-target"],
+            },
+        );
+        write_fake_proc(
+            &proc_root,
+            FakeProc {
+                pid: 302,
+                ppid: 1,
+                start_time_ticks: 8_002,
+                comm: "codex",
+                executable: "/usr/bin/codex",
+                cwd: "/tmp/other",
+                argv: &["codex", "resume", "other-session"],
+            },
+        );
+        let request = AgentDiscoveryRequest::new("codex").expect("discovery request");
+
+        let registration = discover_agent_registration(
+            &request,
+            &proc_root,
+            "session-target",
+            Path::new("/workspace/apolysis"),
+        )
+        .expect("unique discovery candidate");
+
+        assert_eq!(registration.pid, 301);
+        assert_eq!(registration.start_time_ticks, 8_001);
+        assert_eq!(
+            registration.workspace_root,
+            PathBuf::from("/workspace/apolysis")
+        );
+        assert_eq!(registration.executable, "/usr/bin/codex");
+        assert!(registration.command_fingerprint.starts_with("sha256:"));
+        assert_eq!(
+            registration.command.as_deref(),
+            Some("codex resume session-target")
+        );
+
+        let _ = std::fs::remove_dir_all(&proc_root);
+    }
+
+    #[test]
     fn live_request_rejects_managed_agent_and_manual_scope_together() {
         let request = LiveObserveRequest {
             object_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
@@ -1560,6 +2157,8 @@ mod tests {
                 AgentRunRequest::new("codex", vec!["codex".to_string()])
                     .expect("agent run request"),
             ),
+            agent_registration_path: None,
+            agent_discovery: None,
             duration: None,
             workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
         };
@@ -1568,5 +2167,44 @@ mod tests {
             request.validate(),
             Err("--agent-run cannot be combined with --scope-pid or --scope-cgroup".to_string())
         );
+    }
+
+    struct FakeProc<'a> {
+        pid: u32,
+        ppid: u32,
+        start_time_ticks: u64,
+        comm: &'a str,
+        executable: &'a str,
+        cwd: &'a str,
+        argv: &'a [&'a str],
+    }
+
+    fn temp_proc_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("apolysis-{name}-{}", std::process::id()))
+    }
+
+    fn write_fake_proc(proc_root: &Path, process: FakeProc<'_>) {
+        let pid_root = proc_root.join(process.pid.to_string());
+        std::fs::create_dir_all(&pid_root).expect("create fake proc pid");
+        std::fs::write(
+            pid_root.join("stat"),
+            fake_proc_stat(
+                process.pid,
+                process.ppid,
+                process.comm,
+                process.start_time_ticks,
+            ),
+        )
+        .expect("write fake proc stat");
+        std::fs::write(pid_root.join("cmdline"), process.argv.join("\0"))
+            .expect("write fake proc cmdline");
+        symlink(process.executable, pid_root.join("exe")).expect("fake proc exe symlink");
+        symlink(process.cwd, pid_root.join("cwd")).expect("fake proc cwd symlink");
+    }
+
+    fn fake_proc_stat(pid: u32, ppid: u32, comm: &str, start_time_ticks: u64) -> String {
+        format!(
+            "{pid} ({comm}) S {ppid} 1 1 0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 {start_time_ticks} 0 0\n"
+        )
     }
 }

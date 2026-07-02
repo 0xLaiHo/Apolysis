@@ -371,7 +371,9 @@ fn observe_live_requires_exactly_one_session_scope() {
     assert!(!result.status.success());
     let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("live observer requires exactly one of --scope-cgroup or --scope-pid"),
+        stderr.contains(
+            "live observer requires exactly one of --scope-cgroup, --scope-pid, --agent-run, --agent-registration, or --agent-discover"
+        ),
         "unexpected stderr: {stderr}"
     );
 }
@@ -484,6 +486,84 @@ fn observe_live_accepts_agent_run_without_operator_pid() {
 }
 
 #[test]
+fn observe_live_accepts_agent_registration_without_operator_pid() {
+    let output = temp_jsonl("apolysis-observe-agent-registration");
+    let registration = temp_jsonl("apolysis-agent-registration");
+    write_current_process_registration(&registration);
+
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-agent-registration",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/does-not-exist.bpf.o",
+            "--workspace-root",
+            workspace_root().to_str().expect("utf-8 workspace root"),
+            "--agent-registration",
+            registration.to_str().expect("utf-8 registration path"),
+        ])
+        .output()
+        .expect("run apolysis observe live with registered agent");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("BPF object does not exist"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("live observer requires exactly one of"),
+        "agent registration should supply the live process-tree scope: {stderr}"
+    );
+
+    let _ = std::fs::remove_file(&registration);
+}
+
+#[test]
+fn observe_live_accepts_agent_discovery_without_operator_pid() {
+    let output = temp_jsonl("apolysis-observe-agent-discovery");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-agent-discovery",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/does-not-exist.bpf.o",
+            "--workspace-root",
+            workspace_root().to_str().expect("utf-8 workspace root"),
+            "--agent-kind",
+            "codex",
+            "--agent-discover",
+        ])
+        .output()
+        .expect("run apolysis observe live with agent discovery");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("BPF object does not exist"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("live observer requires exactly one of"),
+        "agent discovery should supply the live process-tree scope: {stderr}"
+    );
+}
+
+#[test]
 fn observe_live_rejects_agent_run_with_scope_pid() {
     let output = temp_jsonl("apolysis-observe-agent-run-scope-pid");
     let result = apolysis_command()
@@ -516,6 +596,77 @@ fn observe_live_rejects_agent_run_with_scope_pid() {
     let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
     assert!(
         stderr.contains("--agent-run cannot be combined with --scope-pid or --scope-cgroup"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn observe_live_rejects_agent_registration_with_scope_pid() {
+    let output = temp_jsonl("apolysis-observe-agent-registration-scope-pid");
+    let registration = temp_jsonl("apolysis-agent-registration-scope-pid");
+    write_current_process_registration(&registration);
+
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-agent-registration-scope-pid",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/does-not-exist.bpf.o",
+            "--scope-pid",
+            &std::process::id().to_string(),
+            "--agent-registration",
+            registration.to_str().expect("utf-8 registration path"),
+        ])
+        .output()
+        .expect("run apolysis observe live with conflicting registration scope");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr
+            .contains("--agent-registration cannot be combined with --scope-pid or --scope-cgroup"),
+        "unexpected stderr: {stderr}"
+    );
+
+    let _ = std::fs::remove_file(&registration);
+}
+
+#[test]
+fn observe_live_rejects_agent_discovery_with_scope_pid() {
+    let output = temp_jsonl("apolysis-observe-agent-discovery-scope-pid");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-agent-discovery-scope-pid",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/does-not-exist.bpf.o",
+            "--scope-pid",
+            &std::process::id().to_string(),
+            "--agent-kind",
+            "codex",
+            "--agent-discover",
+        ])
+        .output()
+        .expect("run apolysis observe live with conflicting discovery scope");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("--agent-discover cannot be combined with --scope-pid or --scope-cgroup"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -711,6 +862,39 @@ fn json_string_field(line: &str, field: &str) -> Option<String> {
 
 fn temp_dir(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()))
+}
+
+fn write_current_process_registration(path: &std::path::Path) {
+    let start_time_ticks = current_start_time_ticks();
+    let executable = std::env::current_exe().expect("current executable");
+    let workspace_root = workspace_root();
+    let payload = format!(
+        r#"{{
+  "agent_kind": "codex",
+  "pid": {},
+  "start_time_ticks": {},
+  "workspace_root": "{}",
+  "executable": "{}",
+  "command_fingerprint": "sha256:test-fixture"
+}}"#,
+        std::process::id(),
+        start_time_ticks,
+        workspace_root.display(),
+        executable.display()
+    );
+    std::fs::write(path, payload).expect("write agent registration");
+}
+
+fn current_start_time_ticks() -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", std::process::id()))
+        .expect("read current proc stat");
+    let after_comm = stat.rsplit_once(") ").expect("proc stat comm").1;
+    after_comm
+        .split_whitespace()
+        .nth(19)
+        .expect("proc start time")
+        .parse()
+        .expect("numeric proc start time")
 }
 
 fn assert_expected_fragments(timeline: &str, relative_path: &str) {
