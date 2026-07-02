@@ -16,10 +16,11 @@ mod redaction;
 mod scope;
 
 pub use live::{
-    discover_process_tree_scope_pids, enable_multi_cgroup_scope, observe_live,
-    raw_event_from_record, update_tracked_cgroup, AgentRunRequest, DaemonKernelEvent,
-    DaemonObserver, DaemonObserverBatch, DaemonObserverConfig, DaemonObserverCounters,
-    LiveObserveRequest, LiveScope, ObserverBatchDecoder,
+    discover_agent_registration, discover_process_tree_scope_pids, enable_multi_cgroup_scope,
+    observe_live, raw_event_from_record, update_tracked_cgroup, AgentDiscoveryRequest,
+    AgentRegistration, AgentRunRequest, DaemonKernelEvent, DaemonObserver, DaemonObserverBatch,
+    DaemonObserverConfig, DaemonObserverCounters, LiveObserveRequest, LiveScope,
+    ObserverBatchDecoder,
 };
 pub use redaction::{redact_raw_event_for_persistence, RedactedValue, Redactor};
 pub use scope::{ScopeSet, ScopeSetError, MAX_TRACKED_CGROUPS};

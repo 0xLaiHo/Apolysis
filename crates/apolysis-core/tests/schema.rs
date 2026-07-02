@@ -19,6 +19,10 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
     assert_eq!(actors::DOCKER, "docker");
     assert_eq!(runtimes::FIRECRACKER, "firecracker");
     assert_eq!(resources::PROCESS, "process");
+    assert_eq!(
+        resources::AGENT_COMMAND_FINGERPRINT,
+        "agent-command-fingerprint"
+    );
     assert_eq!(actions::START, "start");
     assert_eq!(actions::EXEC, "exec");
     assert_eq!(env::SESSION_ID, "APOLYSIS_SESSION_ID");

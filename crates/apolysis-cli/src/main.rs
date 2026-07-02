@@ -5,8 +5,8 @@ mod cli;
 use std::time::Duration;
 
 use apolysis_observer::{
-    observe_fixture, observe_live, AgentRunRequest, FixtureObserveRequest, LiveObserveRequest,
-    LiveScope,
+    observe_fixture, observe_live, AgentDiscoveryRequest, AgentRunRequest, FixtureObserveRequest,
+    LiveObserveRequest, LiveScope,
 };
 use apolysis_runtime::{run_docker, run_local, DockerRunRequest, LocalRunRequest};
 use apolysis_visibility::{assess_visibility, RuntimeVisibilityProfile, VisibilityInput};
@@ -120,6 +120,8 @@ async fn observe_command(args: Vec<String>) -> Result<i32, String> {
                 feedback_dir: request.feedback_dir.map(Into::into),
                 scope: request.live_scope,
                 agent_run: request.agent_run,
+                agent_registration_path: request.agent_registration_path.map(Into::into),
+                agent_discovery: request.agent_discovery,
                 duration: request.duration_seconds.map(Duration::from_secs),
                 workspace_root: request.workspace_root.map(Into::into).unwrap_or(
                     std::env::current_dir().map_err(|error| {
@@ -259,6 +261,8 @@ struct ObserveRequest {
     bpf_object_path: Option<String>,
     live_scope: Option<LiveScope>,
     agent_run: Option<AgentRunRequest>,
+    agent_registration_path: Option<String>,
+    agent_discovery: Option<AgentDiscoveryRequest>,
     duration_seconds: Option<u64>,
     workspace_root: Option<String>,
 }
@@ -296,6 +300,8 @@ impl ObserveRequest {
         let mut scope_pid = None;
         let mut agent_kind = None;
         let mut agent_command = None;
+        let mut agent_registration_path = None;
+        let mut agent_discover = false;
         let mut duration_seconds = None;
         let mut workspace_root = None;
         let mut i = 1;
@@ -368,6 +374,15 @@ impl ObserveRequest {
                     agent_command = Some(command);
                     break;
                 }
+                options::AGENT_REGISTRATION => {
+                    i += 1;
+                    agent_registration_path = Some(args.get(i).cloned().ok_or_else(|| {
+                        format!("missing {} value\n{}", options::AGENT_REGISTRATION, usage())
+                    })?);
+                }
+                options::AGENT_DISCOVER => {
+                    agent_discover = true;
+                }
                 options::DURATION_SECONDS => {
                     i += 1;
                     duration_seconds = parse_option::<u64>(&args, i, options::DURATION_SECONDS)?;
@@ -390,9 +405,9 @@ impl ObserveRequest {
             unknown => return Err(format!("unknown observer backend '{unknown}'\n{}", usage())),
         };
 
-        let agent_run = match (agent_kind, agent_command) {
+        let agent_run = match (agent_kind.clone(), agent_command) {
             (Some(kind), Some(command)) => Some(AgentRunRequest::new(kind, command)?),
-            (Some(_), None) => {
+            (Some(_), None) if !agent_discover => {
                 return Err(format!(
                     "{} requires {}\n{}",
                     options::AGENT_KIND,
@@ -400,6 +415,7 @@ impl ObserveRequest {
                     usage()
                 ));
             }
+            (Some(_), None) => None,
             (None, Some(_)) => {
                 return Err(format!(
                     "missing {} for {}\n{}",
@@ -410,6 +426,19 @@ impl ObserveRequest {
             }
             (None, None) => None,
         };
+        let agent_discovery = if agent_discover {
+            let kind = agent_kind.ok_or_else(|| {
+                format!(
+                    "missing {} for {}\n{}",
+                    options::AGENT_KIND,
+                    options::AGENT_DISCOVER,
+                    usage()
+                )
+            })?;
+            Some(AgentDiscoveryRequest::new(kind)?)
+        } else {
+            None
+        };
 
         if agent_run.is_some() && (scope_cgroup.is_some() || scope_pid.is_some()) {
             return Err(format!(
@@ -419,21 +448,51 @@ impl ObserveRequest {
                 options::SCOPE_CGROUP
             ));
         }
+        if agent_registration_path.is_some() && (scope_cgroup.is_some() || scope_pid.is_some()) {
+            return Err(format!(
+                "{} cannot be combined with {} or {}",
+                options::AGENT_REGISTRATION,
+                options::SCOPE_PID,
+                options::SCOPE_CGROUP
+            ));
+        }
+        if agent_discovery.is_some() && (scope_cgroup.is_some() || scope_pid.is_some()) {
+            return Err(format!(
+                "{} cannot be combined with {} or {}",
+                options::AGENT_DISCOVER,
+                options::SCOPE_PID,
+                options::SCOPE_CGROUP
+            ));
+        }
+        if agent_run.is_some() && (agent_registration_path.is_some() || agent_discovery.is_some()) {
+            return Err(format!(
+                "{} cannot be combined with {} or {}",
+                options::AGENT_RUN,
+                options::AGENT_REGISTRATION,
+                options::AGENT_DISCOVER
+            ));
+        }
+        if agent_registration_path.is_some() && agent_discovery.is_some() {
+            return Err(format!(
+                "{} cannot be combined with {}",
+                options::AGENT_REGISTRATION,
+                options::AGENT_DISCOVER
+            ));
+        }
 
         let live_scope = match (scope_cgroup, scope_pid) {
             (Some(id), None) => Some(LiveScope::Cgroup(id)),
             (None, Some(pid)) => Some(LiveScope::ProcessTree(pid)),
-            (None, None) if backend == ObserverBackendSelection::Live && agent_run.is_none() => {
-                return Err(
-                    "live observer requires exactly one of --scope-cgroup or --scope-pid"
-                        .to_string(),
-                );
+            (None, None)
+                if backend == ObserverBackendSelection::Live
+                    && agent_run.is_none()
+                    && agent_registration_path.is_none()
+                    && agent_discovery.is_none() =>
+            {
+                return Err(live_scope_requirement());
             }
             (Some(_), Some(_)) => {
-                return Err(
-                    "live observer requires exactly one of --scope-cgroup or --scope-pid"
-                        .to_string(),
-                );
+                return Err(live_scope_requirement());
             }
             (None, None) => None,
         };
@@ -443,6 +502,8 @@ impl ObserveRequest {
                 if bpf_object_path.is_some()
                     || live_scope.is_some()
                     || agent_run.is_some()
+                    || agent_registration_path.is_some()
+                    || agent_discovery.is_some()
                     || duration_seconds.is_some()
                     || workspace_root.is_some()
                 {
@@ -482,10 +543,16 @@ impl ObserveRequest {
             bpf_object_path,
             live_scope,
             agent_run,
+            agent_registration_path,
+            agent_discovery,
             duration_seconds,
             workspace_root,
         })
     }
+}
+
+fn live_scope_requirement() -> String {
+    "live observer requires exactly one of --scope-cgroup, --scope-pid, --agent-run, --agent-registration, or --agent-discover".to_string()
 }
 
 fn parse_option<T>(args: &[String], index: usize, option: &str) -> Result<Option<T>, String>

@@ -42,6 +42,7 @@ rg -q '"resource":"agent-supervisor-mode".*"action":"apolysis_managed_launch"' "
 rg -q '"resource":"agent-kind".*"action":"shell"' "$output"
 rg -q '"resource":"agent-root-pid"' "$output"
 rg -q '"resource":"observer-scope".*"mode:process_tree,root_pid:' "$output"
+rg -q '"resource":"agent-command-fingerprint".*"action":"sha256:' "$output"
 rg -q '"resource":"agent-exit-status".*"action":"exit:0"' "$output"
 
 echo "local-agent-command-attribution live gate passed: $output"

@@ -95,6 +95,8 @@ pub mod resources {
     pub const AGENT_ROOT_PID: &str = "agent-root-pid";
     /// Managed agent command metadata.
     pub const AGENT_COMMAND: &str = "agent-command";
+    /// Managed or registered agent command fingerprint metadata.
+    pub const AGENT_COMMAND_FINGERPRINT: &str = "agent-command-fingerprint";
     /// Managed agent executable metadata.
     pub const AGENT_EXECUTABLE: &str = "agent-executable";
     /// Managed agent workspace root metadata.

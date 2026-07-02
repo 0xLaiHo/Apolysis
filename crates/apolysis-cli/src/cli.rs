@@ -63,6 +63,10 @@ pub(crate) mod options {
     pub(crate) const AGENT_KIND: &str = "--agent-kind";
     /// Start an agent command under Apolysis-managed live observation.
     pub(crate) const AGENT_RUN: &str = "--agent-run";
+    /// Attach to an already-running agent from an explicit registration file.
+    pub(crate) const AGENT_REGISTRATION: &str = "--agent-registration";
+    /// Diagnostic-only discovery fallback for already-running local agents.
+    pub(crate) const AGENT_DISCOVER: &str = "--agent-discover";
     /// Optional deterministic observer runtime.
     pub(crate) const DURATION_SECONDS: &str = "--duration-seconds";
     /// Workspace root whose file paths may be persisted without tokenization.
@@ -77,7 +81,7 @@ pub(crate) const DEFAULT_TIMELINE_PATH: &str = ".apolysis/timeline.jsonl";
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
     format!(
-        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]) [{workspace_root} <path>] [{duration_seconds} <n>] [{feedback_dir} <path>]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]",
+        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{feedback_dir} <path>]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]",
         run = commands::RUN,
         observe = commands::OBSERVE,
         visibility = commands::VISIBILITY,
@@ -101,6 +105,8 @@ pub(crate) fn usage() -> String {
         scope_pid = options::SCOPE_PID,
         agent_kind = options::AGENT_KIND,
         agent_run = options::AGENT_RUN,
+        agent_registration = options::AGENT_REGISTRATION,
+        agent_discover = options::AGENT_DISCOVER,
         duration_seconds = options::DURATION_SECONDS,
         workspace_root = options::WORKSPACE_ROOT,
         scenario = options::SCENARIO,
