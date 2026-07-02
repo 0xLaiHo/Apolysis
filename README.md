@@ -86,6 +86,40 @@ The versioned JSONL record contract is documented in
 
 Most unit and fixture tests do not require root.
 
+## Release Artifacts
+
+Tagged releases attach a Linux artifact bundle that contains the `apolysis`
+CLI, the CO-RE `apolysis_observer.bpf.o` object, a release manifest, and a
+detached SHA-256 checksum:
+
+```bash
+version=v0.2.0
+target=x86_64-unknown-linux-gnu
+asset="apolysis-${version}-${target}.tar.gz"
+
+gh release download "$version" \
+  --repo 0xLaiHo/Apolysis \
+  --pattern "$asset*" \
+  --pattern apolysis-release-manifest.json
+
+sha256sum -c "$asset.sha256"
+tar -xzf "$asset"
+```
+
+After extraction, use the bundled BPF object with live observation:
+
+```bash
+sudo -E "./apolysis-${version}-${target}/bin/apolysis" observe \
+  --backend live \
+  --session codex-local-audit \
+  --policy policies/local-dev.yaml \
+  --output .apolysis/codex-live/timeline.agent-run.jsonl \
+  --bpf-object "./apolysis-${version}-${target}/ebpf/apolysis_observer.bpf.o" \
+  --workspace-root "$PWD" \
+  --agent-kind codex \
+  --agent-run -- codex resume <codex-session-id>
+```
+
 ## Build
 
 Build the workspace and eBPF object:

@@ -68,6 +68,39 @@ Apolysis 将 intent、isolation 和 evidence 分成三层：
 
 大多数 unit 和 fixture tests 不需要 root。
 
+## Release Artifacts
+
+带 tag 的 release 会附带 Linux artifact bundle，包含 `apolysis` CLI、CO-RE
+`apolysis_observer.bpf.o` object、release manifest 和独立 SHA-256 checksum：
+
+```bash
+version=v0.2.0
+target=x86_64-unknown-linux-gnu
+asset="apolysis-${version}-${target}.tar.gz"
+
+gh release download "$version" \
+  --repo 0xLaiHo/Apolysis \
+  --pattern "$asset*" \
+  --pattern apolysis-release-manifest.json
+
+sha256sum -c "$asset.sha256"
+tar -xzf "$asset"
+```
+
+解包后，在 live observation 中使用 bundle 内的 BPF object：
+
+```bash
+sudo -E "./apolysis-${version}-${target}/bin/apolysis" observe \
+  --backend live \
+  --session codex-local-audit \
+  --policy policies/local-dev.yaml \
+  --output .apolysis/codex-live/timeline.agent-run.jsonl \
+  --bpf-object "./apolysis-${version}-${target}/ebpf/apolysis_observer.bpf.o" \
+  --workspace-root "$PWD" \
+  --agent-kind codex \
+  --agent-run -- codex resume <codex-session-id>
+```
+
 ## 编译
 
 编译整个 workspace 和 eBPF object：

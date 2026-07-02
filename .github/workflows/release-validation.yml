@@ -32,6 +32,9 @@ jobs:
       - name: Run JSONL schema contract gate
         run: make test-jsonl-schema-contract
 
+      - name: Run release artifact packaging contract
+        run: make test-release-artifacts
+
       - name: Run handoff runbook gate
         run: make test-release-validation-handoff
 
