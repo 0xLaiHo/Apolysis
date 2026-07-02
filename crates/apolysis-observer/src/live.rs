@@ -13,6 +13,7 @@ use apolysis_core::{
 };
 use apolysis_feedback::FeedbackWriter;
 use apolysis_policy::PolicyRuntimeCapabilities;
+use apolysis_store::JsonlRotationPolicy;
 use apolysis_store::JsonlStore;
 use aya::maps::{Array, HashMap, MapData, RingBuf};
 use aya::programs::TracePoint;
@@ -228,6 +229,7 @@ pub struct LiveObserveRequest {
     pub agent_discovery: Option<AgentDiscoveryRequest>,
     pub duration: Option<Duration>,
     pub workspace_root: PathBuf,
+    pub output_rotation: Option<JsonlRotationPolicy>,
 }
 
 impl LiveObserveRequest {
@@ -419,14 +421,16 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     let feedback = request.feedback_dir.clone().map(FeedbackWriter::new);
     let runner_plan = ObserverRunnerPlan::host_observer_default();
     let loader_plan = AyaLoaderPlan::audit_observer_default(&request.object_path);
-    let mut store = JsonlStore::create(&request.output_path)
-        .map_err(|error| format!("failed to create live observer timeline: {error}"))?;
+    let mut store =
+        JsonlStore::create_with_rotation_policy(&request.output_path, request.output_rotation)
+            .map_err(|error| format!("failed to create live observer timeline: {error}"))?;
 
     write_observer_metadata(
         &request.session_id,
         &runner_plan,
         ObserverBackend::AyaRingBuffer,
         policy.startup_downgrade(&capabilities),
+        request.output_rotation,
         &mut store,
     )?;
     let registered_agent = match resolve_registered_agent(&request) {
@@ -2161,6 +2165,7 @@ mod tests {
             agent_discovery: None,
             duration: None,
             workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            output_rotation: None,
         };
 
         assert_eq!(

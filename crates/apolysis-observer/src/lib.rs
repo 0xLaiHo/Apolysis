@@ -37,7 +37,7 @@ use apolysis_core::{
 use apolysis_feedback::FeedbackWriter;
 use apolysis_kubernetes::KubernetesMetadata;
 use apolysis_policy::{DecisionDowngrade, Policy, PolicyRuntimeCapabilities};
-use apolysis_store::JsonlStore;
+use apolysis_store::{JsonlRotationPolicy, JsonlStore};
 
 use crate::process_context::ProcessContextTable;
 
@@ -49,6 +49,7 @@ pub struct FixtureObserveRequest {
     pub session_id: String,
     pub feedback_dir: Option<PathBuf>,
     pub kubernetes_metadata_path: Option<PathBuf>,
+    pub output_rotation: Option<JsonlRotationPolicy>,
 }
 
 impl FixtureObserveRequest {
@@ -66,6 +67,7 @@ impl FixtureObserveRequest {
             session_id: session_id.into(),
             feedback_dir: None,
             kubernetes_metadata_path: None,
+            output_rotation: None,
         }
     }
 
@@ -78,6 +80,12 @@ impl FixtureObserveRequest {
     /// Attach optional Kubernetes metadata that should be mirrored into the timeline.
     pub fn with_kubernetes_metadata_path(mut self, path: Option<impl Into<PathBuf>>) -> Self {
         self.kubernetes_metadata_path = path.map(Into::into);
+        self
+    }
+
+    /// Attach an optional output rotation policy for bounded local timelines.
+    pub fn with_output_rotation(mut self, rotation: Option<JsonlRotationPolicy>) -> Self {
+        self.output_rotation = rotation;
         self
     }
 }
@@ -233,8 +241,9 @@ impl EventIdSequence {
 /// Replay a raw observer fixture into raw, canonical, and policy timeline records.
 pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, String> {
     let policy = load_policy(&request.policy_path)?;
-    let mut store = JsonlStore::create(&request.output_path)
-        .map_err(|error| format!("failed to create observer timeline: {error}"))?;
+    let mut store =
+        JsonlStore::create_with_rotation_policy(&request.output_path, request.output_rotation)
+            .map_err(|error| format!("failed to create observer timeline: {error}"))?;
     let runner_plan = ObserverRunnerPlan::host_observer_default();
     let capabilities = PolicyRuntimeCapabilities::detect();
     let feedback = request.feedback_dir.clone().map(FeedbackWriter::new);
@@ -244,6 +253,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
         &runner_plan,
         ObserverBackend::FixtureRingBuffer,
         policy.startup_downgrade(&capabilities),
+        request.output_rotation,
         &mut store,
     )?;
     write_kubernetes_metadata(
@@ -326,16 +336,28 @@ fn write_observer_metadata(
     runner_plan: &ObserverRunnerPlan,
     backend: ObserverBackend,
     startup_downgrade: Option<DecisionDowngrade>,
+    output_rotation: Option<JsonlRotationPolicy>,
     store: &mut JsonlStore,
 ) -> Result<(), String> {
-    for (resource, action) in [
+    let mut metadata = vec![
         (
             resources::OBSERVER_MODE,
             ObserverMode::AuditOnly.as_str().to_string(),
         ),
         (resources::OBSERVER_BACKEND, backend.as_str().to_string()),
         (resources::OBSERVER_RUNNERS, runner_plan.summary()),
-    ] {
+    ];
+    if let Some(rotation) = output_rotation {
+        metadata.push((
+            resources::OBSERVER_OUTPUT_ROTATION,
+            format!(
+                "max_file_bytes:{},max_archived_files:{}",
+                rotation.max_file_bytes, rotation.max_archived_files
+            ),
+        ));
+    }
+
+    for (resource, action) in metadata {
         let event = CanonicalEvent::new(
             session_id,
             EventSource::RuntimeMetadata,

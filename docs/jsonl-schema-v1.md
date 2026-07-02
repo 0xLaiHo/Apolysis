@@ -328,6 +328,20 @@ Persistence-time redaction applies before JSONL output:
   `argv_truncated:true`, `payload_truncated:true`, and
   `resource_truncated:true`.
 
+## Local Output Rotation
+
+Local output rotation is a storage budget, not a schema change. Operators can
+bound local observer files with `--output-max-bytes <bytes>` and
+`--output-max-files <n>` on `apolysis observe`. When the active JSONL file would
+exceed `max_file_bytes`, Apolysis rotates `timeline.jsonl` to
+`timeline.jsonl.1`, shifts older archives, and keeps at most
+`max_archived_files` local archives. A single JSONL record is never split across
+files; an oversized record is written as one line and the next append rotates.
+
+When rotation is enabled, observer metadata includes
+`resource:"observer-output-rotation"` with an action containing
+`max_file_bytes:<bytes>,max_archived_files:<n>`.
+
 ## Minimal Consumer Queries
 
 ```bash

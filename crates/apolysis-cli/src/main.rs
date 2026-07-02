@@ -11,6 +11,7 @@ use apolysis_observer::{
     AgentRunRequest, FixtureObserveRequest, LiveObserveRequest, LiveScope,
 };
 use apolysis_runtime::{run_docker, run_local, DockerRunRequest, LocalRunRequest};
+use apolysis_store::JsonlRotationPolicy;
 use apolysis_visibility::{assess_visibility, RuntimeVisibilityProfile, VisibilityInput};
 use cli::{commands, options, values};
 
@@ -168,7 +169,8 @@ async fn observe_command(args: Vec<String>) -> Result<i32, String> {
                     request.session_id,
                 )
                 .with_feedback_dir(request.feedback_dir)
-                .with_kubernetes_metadata_path(request.kubernetes_metadata_path),
+                .with_kubernetes_metadata_path(request.kubernetes_metadata_path)
+                .with_output_rotation(request.output_rotation),
             )?;
             Ok(0)
         }
@@ -192,6 +194,7 @@ async fn observe_command(args: Vec<String>) -> Result<i32, String> {
                         format!("failed to resolve current workspace root: {error}")
                     })?,
                 ),
+                output_rotation: request.output_rotation,
             })
             .await?;
             Ok(result.agent_exit_code.unwrap_or(0))
@@ -842,6 +845,7 @@ struct ObserveRequest {
     agent_discovery: Option<AgentDiscoveryRequest>,
     duration_seconds: Option<u64>,
     workspace_root: Option<String>,
+    output_rotation: Option<JsonlRotationPolicy>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -881,6 +885,8 @@ impl ObserveRequest {
         let mut agent_discover = false;
         let mut duration_seconds = None;
         let mut workspace_root = None;
+        let mut output_max_bytes = None;
+        let mut output_max_files = None;
         let mut i = 1;
 
         while i < args.len() {
@@ -896,6 +902,14 @@ impl ObserveRequest {
                 options::OUTPUT => {
                     i += 1;
                     output_path = args.get(i).cloned();
+                }
+                options::OUTPUT_MAX_BYTES => {
+                    i += 1;
+                    output_max_bytes = parse_option::<u64>(&args, i, options::OUTPUT_MAX_BYTES)?;
+                }
+                options::OUTPUT_MAX_FILES => {
+                    i += 1;
+                    output_max_files = parse_option::<usize>(&args, i, options::OUTPUT_MAX_FILES)?;
                 }
                 options::POLICY => {
                     i += 1;
@@ -1073,6 +1087,41 @@ impl ObserveRequest {
             }
             (None, None) => None,
         };
+        let output_rotation = match (output_max_bytes, output_max_files) {
+            (Some(max_file_bytes), Some(max_archived_files)) => {
+                if max_file_bytes == 0 {
+                    return Err(format!(
+                        "{} must be greater than zero",
+                        options::OUTPUT_MAX_BYTES
+                    ));
+                }
+                if max_archived_files == 0 {
+                    return Err(format!(
+                        "{} must be greater than zero",
+                        options::OUTPUT_MAX_FILES
+                    ));
+                }
+                Some(JsonlRotationPolicy {
+                    max_file_bytes,
+                    max_archived_files,
+                })
+            }
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(format!(
+                    "{} requires {}",
+                    options::OUTPUT_MAX_BYTES,
+                    options::OUTPUT_MAX_FILES
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(format!(
+                    "{} requires {}",
+                    options::OUTPUT_MAX_FILES,
+                    options::OUTPUT_MAX_BYTES
+                ));
+            }
+        };
 
         match backend {
             ObserverBackendSelection::Fixture => {
@@ -1124,6 +1173,7 @@ impl ObserveRequest {
             agent_discovery,
             duration_seconds,
             workspace_root,
+            output_rotation,
         })
     }
 }
