@@ -73,6 +73,9 @@ The repository is split into small Rust crates:
 - `apolysis-daemon`: node-local Unix socket service.
 - `apolysis-feedback`: agent-facing feedback files.
 
+The versioned JSONL record contract is documented in
+[`docs/jsonl-schema-v1.md`](docs/jsonl-schema-v1.md).
+
 ## Requirements
 
 - Linux development host.

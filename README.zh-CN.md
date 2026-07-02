@@ -56,6 +56,9 @@ Apolysis 将 intent、isolation 和 evidence 分成三层：
 - `apolysis-daemon`：node-local Unix socket service。
 - `apolysis-feedback`：面向 agent 的 feedback files。
 
+版本化 JSONL record contract 见
+[`docs/jsonl-schema-v1.md`](docs/jsonl-schema-v1.md)。
+
 ## 环境要求
 
 - Linux development host。
