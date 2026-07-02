@@ -206,11 +206,20 @@ sudo -E ./target/debug/apolysis observe \
   --session codex-local-audit \
   --policy policies/local-dev.yaml \
   --output .apolysis/codex-live/timeline.agent-run.jsonl \
+  --output-max-bytes 104857600 \
+  --output-max-files 8 \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
   --workspace-root "$PWD" \
   --agent-kind codex \
   --agent-run -- codex resume <codex-session-id>
 ```
+
+`--output-max-bytes` and `--output-max-files` bound local JSONL growth. When
+the active timeline would exceed the byte budget, Apolysis rotates
+`timeline.agent-run.jsonl` to `timeline.agent-run.jsonl.1`, shifts older
+archives, and records `observer-output-rotation` metadata with
+`max_file_bytes` and `max_archived_files`. A single JSONL record is never split
+across files.
 
 If another trusted supervisor has already started the agent, have that
 supervisor write an explicit registration file instead of asking the operator

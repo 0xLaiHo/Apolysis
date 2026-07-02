@@ -49,6 +49,10 @@ pub(crate) mod options {
     pub(crate) const POLICY: &str = "--policy";
     /// JSONL output path.
     pub(crate) const OUTPUT: &str = "--output";
+    /// Maximum bytes for one active JSONL output file before rotation.
+    pub(crate) const OUTPUT_MAX_BYTES: &str = "--output-max-bytes";
+    /// Number of rotated JSONL output files to retain locally.
+    pub(crate) const OUTPUT_MAX_FILES: &str = "--output-max-files";
     /// Command separator before child process arguments.
     pub(crate) const COMMAND_SEPARATOR: &str = "--";
     /// Observer backend selector.
@@ -95,7 +99,7 @@ pub(crate) const DEFAULT_TIMELINE_PATH: &str = ".apolysis/timeline.jsonl";
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
     format!(
-        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path>\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]",
+        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path>\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]",
         run = commands::RUN,
         observe = commands::OBSERVE,
         intent = commands::INTENT,
@@ -109,6 +113,8 @@ pub(crate) fn usage() -> String {
         docker_runtime = options::DOCKER_RUNTIME,
         policy = options::POLICY,
         output = options::OUTPUT,
+        output_max_bytes = options::OUTPUT_MAX_BYTES,
+        output_max_files = options::OUTPUT_MAX_FILES,
         separator = options::COMMAND_SEPARATOR,
         backend = options::BACKEND,
         adapter = options::ADAPTER,

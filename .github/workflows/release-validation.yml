@@ -44,6 +44,9 @@ jobs:
       - name: Run intent correlation contract
         run: make test-intent-correlation
 
+      - name: Run audit write budget contract
+        run: make test-audit-write-budget
+
       - name: Run handoff runbook gate
         run: make test-release-validation-handoff
 
