@@ -71,7 +71,8 @@ Apolysis 将 intent、isolation 和 evidence 分成三层：
 ## Release Artifacts
 
 带 tag 的 release 会附带 Linux artifact bundle，包含 `apolysis` CLI、CO-RE
-`apolysis_observer.bpf.o` object、release manifest 和独立 SHA-256 checksum：
+`apolysis_observer.bpf.o` object、release manifest、独立 SHA-256 checksum，以及
+由 retained F6 signing evidence 生成的 release-signing evidence：
 
 ```bash
 version=v0.2.0
@@ -81,11 +82,20 @@ asset="apolysis-${version}-${target}.tar.gz"
 gh release download "$version" \
   --repo 0xLaiHo/Apolysis \
   --pattern "$asset*" \
-  --pattern apolysis-release-manifest.json
+  --pattern apolysis-release-manifest.json \
+  --pattern apolysis-release-signing-manifest.json \
+  --pattern apolysis-release-signing-evidence.json \
+  --pattern apolysis-regulated-release-signing-evidence-report.json
 
 sha256sum -c "$asset.sha256"
+sha256sum apolysis-release-manifest.json
 tar -xzf "$asset"
 ```
+
+`apolysis-release-signing-manifest.json` 会记录被 retained regulated-release
+signing evidence 覆盖的 `apolysis-release-manifest.json` SHA-256。缺少 signing
+manifest、hash 不匹配，或 `release_signing_ready:false` 都应视为 unsigned
+release。
 
 解包后，在 live observation 中使用 bundle 内的 BPF object：
 

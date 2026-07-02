@@ -7,6 +7,15 @@ on:
         description: Release version, for example v0.2.0
         required: true
         type: string
+      signing_evidence_run_id:
+        description: Optional workflow run ID containing retained F6 signing evidence artifacts
+        required: false
+        type: string
+      require_signing_evidence:
+        description: Fail closed unless retained release signing evidence is attached
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - 'v*'
@@ -49,6 +58,29 @@ jobs:
           [[ -n "$release_version" ]]
           APOLYSIS_RELEASE_VERSION="$release_version" ./scripts/package-release-artifacts.sh
 
+      - name: Download retained signing evidence
+        if: ${{ inputs.signing_evidence_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.signing_evidence_run_id }}
+          path: target/release-signing-input
+
+      - name: Package release signing evidence
+        env:
+          APOLYSIS_RELEASE_ARTIFACT_DIR: target/release-artifacts
+          APOLYSIS_RELEASE_SIGNING_INPUT_DIR: target/release-signing-input
+          APOLYSIS_REQUIRE_RELEASE_SIGNING: ${{ startsWith(github.ref, 'refs/tags/') || inputs.require_signing_evidence }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            release_version="$GITHUB_REF_NAME"
+          else
+            release_version="${{ inputs.version }}"
+          fi
+          [[ -n "$release_version" ]]
+          APOLYSIS_RELEASE_VERSION="$release_version" ./scripts/package-release-signing-evidence.sh
+
       - name: Upload release artifact bundle
         uses: actions/upload-artifact@v4
         with:
@@ -67,9 +99,17 @@ jobs:
           package="target/release-artifacts/apolysis-${release_version}-${APOLYSIS_RELEASE_TARGET}.tar.gz"
           checksum="${package}.sha256"
           manifest="target/release-artifacts/apolysis-release-manifest.json"
+          signing_manifest="target/release-artifacts/apolysis-release-signing-manifest.json"
+          signing_evidence="target/release-artifacts/apolysis-release-signing-evidence.json"
+          signing_report="target/release-artifacts/apolysis-release-signing-report.json"
+          regulated_report="target/release-artifacts/apolysis-regulated-release-signing-evidence-report.json"
           if ! gh release view "$release_version" >/dev/null 2>&1; then
             gh release create "$release_version" \
               --title "$release_version" \
               --notes "Apolysis $release_version"
           fi
-          gh release upload "$release_version" "$package" "$checksum" "$manifest" --clobber
+          assets=("$package" "$checksum" "$manifest" "$signing_manifest")
+          [[ -s "$signing_evidence" ]] && assets+=("$signing_evidence")
+          [[ -s "$signing_report" ]] && assets+=("$signing_report")
+          [[ -s "$regulated_report" ]] && assets+=("$regulated_report")
+          gh release upload "$release_version" "${assets[@]}" --clobber
