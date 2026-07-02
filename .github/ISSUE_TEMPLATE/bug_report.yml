@@ -1,0 +1,44 @@
+name: Bug report
+description: Report incorrect Apolysis behavior with reproducible evidence.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include commands, fixture paths, or minimal logs. Redact private data.
+      placeholder: |
+        make test-community-surface
+        cargo test --workspace
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - CLI
+        - live observer
+        - fixture observer
+        - runtime metadata
+        - policy feedback
+        - release artifacts
+        - documentation
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy check
+      description: Confirm no secrets, kubeconfigs, provider credentials, or private timeline captures are included.
+    validations:
+      required: true

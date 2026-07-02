@@ -565,8 +565,18 @@ Important defaults and constraints:
 - `docs/visibility-validation.md` explains host and guest visibility limits.
 - `docs/release-validation-handoff.md` documents regulated-release validation
   handoff and reproducible evidence-package inputs.
+- `docs/threat-model.md` summarizes the project security boundary.
+- `docs/starter-issues.md` lists small labeled starter issues for first
+  contributors.
 - `deploy/kubernetes/README.md` documents Kubernetes deployment assets.
 - `ebpf/observer/README.md` documents the observer eBPF program.
+
+## Community
+
+- `CONTRIBUTING.md` documents the development workflow, verification gates, and
+  privacy rules for pull requests.
+- `SECURITY.md` documents supported versions, vulnerability reporting, and the
+  security scope.
 
 Detailed roadmap, research notes, validation history, and release-readiness
 records are maintained outside the top-level README so this file can stay

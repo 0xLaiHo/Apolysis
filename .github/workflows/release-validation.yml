@@ -35,6 +35,9 @@ jobs:
       - name: Run release artifact packaging contract
         run: make test-release-artifacts
 
+      - name: Run community surface contract
+        run: make test-community-surface
+
       - name: Run handoff runbook gate
         run: make test-release-validation-handoff
 
