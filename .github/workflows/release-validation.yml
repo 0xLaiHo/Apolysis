@@ -29,6 +29,9 @@ jobs:
       - name: Run release-validation CI contract
         run: make test-release-validation-ci
 
+      - name: Run JSONL schema contract gate
+        run: make test-jsonl-schema-contract
+
       - name: Run handoff runbook gate
         run: make test-release-validation-handoff
 
