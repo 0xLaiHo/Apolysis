@@ -15,6 +15,10 @@ pub(crate) mod commands {
     pub(crate) const OBSERVE: &str = "observe";
     /// Assess host-side visibility for an isolation profile.
     pub(crate) const VISIBILITY: &str = "visibility";
+    /// Ingest external harness intent logs into timeline records.
+    pub(crate) const INTENT: &str = "intent";
+    /// Ingest intent records from a supported harness log.
+    pub(crate) const INGEST: &str = "ingest";
 }
 
 /// Runtime and backend selection values.
@@ -27,6 +31,8 @@ pub(crate) mod values {
     pub(crate) const FIXTURE: &str = "fixture";
     /// Live Aya ring-buffer observer.
     pub(crate) const LIVE: &str = "live";
+    /// Codex JSONL response-item log adapter.
+    pub(crate) const CODEX_JSONL: &str = "codex-jsonl";
 }
 
 /// Shared CLI option names.
@@ -47,6 +53,8 @@ pub(crate) mod options {
     pub(crate) const BACKEND: &str = "--backend";
     /// Input file path.
     pub(crate) const INPUT: &str = "--input";
+    /// Intent harness adapter selector.
+    pub(crate) const ADAPTER: &str = "--adapter";
     /// Session id selector.
     pub(crate) const SESSION: &str = "--session";
     /// Agent feedback directory path.
@@ -81,9 +89,11 @@ pub(crate) const DEFAULT_TIMELINE_PATH: &str = ".apolysis/timeline.jsonl";
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
     format!(
-        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{feedback_dir} <path>]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]",
+        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]",
         run = commands::RUN,
         observe = commands::OBSERVE,
+        intent = commands::INTENT,
+        ingest = commands::INGEST,
         visibility = commands::VISIBILITY,
         runtime = options::RUNTIME,
         local = values::LOCAL,
@@ -94,6 +104,8 @@ pub(crate) fn usage() -> String {
         output = options::OUTPUT,
         separator = options::COMMAND_SEPARATOR,
         backend = options::BACKEND,
+        adapter = options::ADAPTER,
+        codex_jsonl = values::CODEX_JSONL,
         fixture = values::FIXTURE,
         live = values::LIVE,
         input = options::INPUT,

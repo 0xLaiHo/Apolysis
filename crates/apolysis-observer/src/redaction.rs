@@ -112,6 +112,132 @@ pub fn redact_raw_event_for_persistence(
     persisted
 }
 
+pub fn redact_command_text_for_persistence(
+    session_id: &str,
+    workspace_root: &Path,
+    command: &str,
+) -> RedactedValue {
+    let redactor = Redactor::new(session_id, workspace_root);
+    let mut redacted = false;
+    let mut redact_next = false;
+    let mut args = Vec::new();
+    for arg in command.split_whitespace() {
+        if redact_next {
+            args.push("<redacted>".to_string());
+            redacted = true;
+            redact_next = false;
+            continue;
+        }
+
+        if secret_flag(arg) {
+            args.push(arg.to_string());
+            redact_next = true;
+            continue;
+        }
+
+        if authorization_marker(arg) {
+            args.push(arg.to_string());
+            redact_next = true;
+            continue;
+        }
+
+        if let Some((key, value)) = arg.split_once('=') {
+            if secret_word(key) {
+                args.push(format!("{key}=<redacted>"));
+                redacted = true;
+                continue;
+            }
+            let value = redact_command_argument_resource(&redactor, value);
+            if value.redacted {
+                redacted = true;
+                args.push(format!("{key}={}", value.value));
+                continue;
+            }
+        }
+
+        if looks_like_secret_value(arg) {
+            args.push("<redacted>".to_string());
+            redacted = true;
+            continue;
+        }
+
+        let value = redact_command_argument_resource(&redactor, arg);
+        redacted |= value.redacted;
+        args.push(value.value);
+    }
+
+    RedactedValue {
+        value: args.join(" "),
+        redacted,
+    }
+}
+
+fn redact_command_argument_resource(redactor: &Redactor, value: &str) -> RedactedValue {
+    if !looks_like_path_argument(value) {
+        return RedactedValue {
+            value: value.to_string(),
+            redacted: false,
+        };
+    }
+    let event_type = if looks_like_credential_path(value) {
+        EventType::CredentialRead
+    } else {
+        EventType::FileOpen
+    };
+    redactor.redact_resource(event_type, value)
+}
+
+fn secret_flag(value: &str) -> bool {
+    value.starts_with("--") && secret_word(value.trim_start_matches('-'))
+}
+
+fn secret_word(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "api-key",
+        "apikey",
+        "authorization",
+    ]
+    .iter()
+    .any(|word| normalized.contains(word))
+}
+
+fn looks_like_secret_value(value: &str) -> bool {
+    let normalized = value.trim_matches(|ch| matches!(ch, '\'' | '"' | ',' | ';'));
+    normalized.starts_with("sk-")
+        || normalized.starts_with("ghp_")
+        || normalized.starts_with("github_pat_")
+        || normalized.starts_with("Bearer ")
+}
+
+fn authorization_marker(value: &str) -> bool {
+    let normalized = value
+        .trim_matches(|ch| matches!(ch, '\'' | '"' | ',' | ';'))
+        .trim_end_matches(':')
+        .to_ascii_lowercase();
+    normalized == "authorization" || normalized == "bearer"
+}
+
+fn looks_like_path_argument(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~/")
+}
+
+fn looks_like_credential_path(value: &str) -> bool {
+    value.ends_with("/.env")
+        || value.contains("/.env.")
+        || value.contains("/.ssh/")
+        || value.contains("/.aws/")
+        || value.contains("/var/run/secrets/")
+}
+
 fn append_marker(payload: &mut String, marker: &str) {
     if !payload.is_empty() {
         payload.push(',');

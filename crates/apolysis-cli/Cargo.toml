@@ -12,6 +12,7 @@ apolysis-runtime = { path = "../apolysis-runtime" }
 apolysis-kubernetes = { path = "../apolysis-kubernetes" }
 apolysis-store = { path = "../apolysis-store" }
 apolysis-visibility = { path = "../apolysis-visibility" }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }
 
 [[bin]]

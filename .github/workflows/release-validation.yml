@@ -41,6 +41,9 @@ jobs:
       - name: Run community surface contract
         run: make test-community-surface
 
+      - name: Run intent correlation contract
+        run: make test-intent-correlation
+
       - name: Run handoff runbook gate
         run: make test-release-validation-handoff
 

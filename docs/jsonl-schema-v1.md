@@ -118,6 +118,45 @@ Exec payloads may include redacted argv evidence. Truncation is explicit through
 markers such as `argv_truncated:true`, `payload_truncated:true`, and
 `resource_truncated:true`.
 
+### `intent`
+
+Intent records preserve declared harness or tool-call intent as append-only
+timeline records. They are optional: Apolysis can still record host-side
+evidence without harness logs, but consumers need `intent` records when they
+want to compare declared work with observed side effects.
+
+Fields:
+
+- `record_type`: always `intent`
+- `timestamp_unix_ms`: intent ingestion timestamp
+- `session_id`: session identifier
+- `intent_source`: harness or adapter name, for example `codex`
+- `intent_id`: stable intent identifier assigned by the adapter
+- `source_event_id`: source harness event ID or `null`
+- `intent_type`: normalized intent category, for example `tool_call`
+- `tool_name`: source tool/function name
+- `declared_action`: normalized action class such as `shell.command`, or
+  `null`
+- `target`: declared target scope, resource class, or `null`
+- `command`: redacted command or tool payload summary, or `null`
+- `raw_event_id`: observed raw kernel event ID after correlation, or `null`
+
+The first adapter is `codex-jsonl`. It consumes Codex JSONL `response_item`
+function/tool-call records and writes `intent` records with source
+`intent_source:"codex"`. Payload redaction reuses command redaction rules for
+secret-looking argv values and credential-looking paths.
+
+Example ingestion:
+
+```bash
+apolysis intent ingest \
+  --adapter codex-jsonl \
+  --input .apolysis/codex-live/codex-response-items.jsonl \
+  --session codex-local-audit \
+  --output .apolysis/codex-live/intent.codex.jsonl \
+  --workspace-root "$PWD"
+```
+
 ### `policy_violation`
 
 Policy violation records describe policy decisions derived from observed events.
@@ -206,6 +245,9 @@ Use these fields for deterministic joins:
 - `raw_kernel_event.event_id` is the raw event identifier.
 - `event.raw_event_id` links a canonical event to the raw kernel event that
   produced it.
+- `intent.raw_event_id` is `null` at ingestion time and may later link declared
+  intent to an observed raw kernel event when a correlation pass has enough
+  evidence.
 - `policy_violation.observed_event_id` links a policy decision to the observed
   raw event.
 - `enforcement_metadata.observed_event_id` links enforcement metadata to the
@@ -238,6 +280,8 @@ jq -c 'select(.record_type=="raw_kernel_event" and .event_id!=null)' timeline.js
 jq -c 'select(.record_type=="event" and .raw_event_id!=null) | {raw_event_id,event_type,pid,resource}' timeline.jsonl
 
 jq -c 'select(.record_type=="event" and .process_command!=null) | {event_type,pid,process_command,process_executable,process_started_at_unix_ms,raw_event_id}' timeline.jsonl
+
+jq -c 'select(.record_type=="intent") | {intent_source,intent_id,tool_name,declared_action,command,raw_event_id}' timeline.jsonl
 
 jq -c 'select((.record_type=="policy_violation" or .record_type=="enforcement_metadata") and .observed_event_id!=null)' timeline.jsonl
 ```
