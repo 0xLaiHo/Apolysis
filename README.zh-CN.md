@@ -281,9 +281,28 @@ jq -c 'select(.record_type=="intent") | {intent_source,intent_id,tool_name,decla
   .apolysis/codex-live/intent.codex.jsonl
 ```
 
-导入时 `raw_event_id` 为 `null`。后续 correlation pass 可以在 command、process
-context 和 event ID 证据足够时，把 intent record 关联到 raw/canonical event。
-疑似 secret 的 command value 和疑似 credential path 会在持久化前脱敏。
+导入时 `raw_event_id` 通常为 `null`，除非源日志已经带有稳定 event link。观测结束后，
+把导入的 intent records 和 live timeline 做 correlation。使用已安装 binary 时，
+correlation 命令是 `apolysis intent correlate`。
+
+```bash
+cargo run -p apolysis-cli -- intent correlate \
+  --intent-input .apolysis/codex-live/intent.codex.jsonl \
+  --timeline-input .apolysis/codex-live/timeline.agent-run.jsonl \
+  --output .apolysis/codex-live/intent-correlation.jsonl
+
+jq -c 'select(.record_type=="intent_correlation") | {intent_source,intent_id,match_basis,raw_event_id,event_type,pid,resource}' \
+  .apolysis/codex-live/intent-correlation.jsonl
+
+jq -c 'select(.record_type=="accountability_finding") | {kind,decision,evidence_ref,reason}' \
+  .apolysis/codex-live/intent-correlation.jsonl
+```
+
+Correlation 会优先使用 `raw_event_id`，没有稳定 event ID 时再用精确脱敏后的
+process-command context 作为保守 fallback。没有可信 intent 的 side effect 会输出
+`missing_intent`；没有观测到对应 side effect 的声明 intent 会输出
+`unobserved_intent`。疑似 secret 的 command value 和疑似 credential path 会在
+持久化前脱敏。
 
 ### 在 Docker 或 gVisor 中运行 agent
 
