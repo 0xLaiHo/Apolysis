@@ -314,10 +314,29 @@ jq -c 'select(.record_type=="intent") | {intent_source,intent_id,tool_name,decla
   .apolysis/codex-live/intent.codex.jsonl
 ```
 
-`raw_event_id` is `null` at ingestion time. A later correlation pass can link
-intent records to raw/canonical events when the command, process context, and
-event IDs provide enough evidence. Secret-looking command values and
-credential-looking paths are redacted before persistence.
+`raw_event_id` is `null` at ingestion time unless the source log already
+contains a stable event link. Correlate the imported intent records with the
+live timeline after observation has finished. With an installed binary, the
+correlation command is `apolysis intent correlate`.
+
+```bash
+cargo run -p apolysis-cli -- intent correlate \
+  --intent-input .apolysis/codex-live/intent.codex.jsonl \
+  --timeline-input .apolysis/codex-live/timeline.agent-run.jsonl \
+  --output .apolysis/codex-live/intent-correlation.jsonl
+
+jq -c 'select(.record_type=="intent_correlation") | {intent_source,intent_id,match_basis,raw_event_id,event_type,pid,resource}' \
+  .apolysis/codex-live/intent-correlation.jsonl
+
+jq -c 'select(.record_type=="accountability_finding") | {kind,decision,evidence_ref,reason}' \
+  .apolysis/codex-live/intent-correlation.jsonl
+```
+
+Correlation prefers `raw_event_id` matches when present and otherwise uses
+exact redacted process-command context as a conservative fallback. Side effects
+without plausible intent are emitted as `missing_intent`; declared intent with
+no observed side effect is emitted as `unobserved_intent`. Secret-looking
+command values and credential-looking paths are redacted before persistence.
 
 ### Run an agent in Docker or gVisor
 

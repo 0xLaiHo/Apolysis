@@ -20,6 +20,13 @@ for term in \
   'declared_action' \
   'raw_event_id' \
   'apolysis intent ingest' \
+  'apolysis intent correlate' \
+  'record_type`: always `intent_correlation`' \
+  'match_basis' \
+  'process_command_exact' \
+  'record_type`: always `accountability_finding`' \
+  'missing_intent' \
+  'unobserved_intent' \
   'codex-jsonl'; do
   grep -Fq "$term" "$schema_doc" || {
     echo "$schema_doc is missing intent-correlation term: $term" >&2
@@ -32,8 +39,18 @@ grep -Fq 'apolysis intent ingest' README.md || {
   exit 1
 }
 
+grep -Fq 'apolysis intent correlate' README.md || {
+  echo "README.md must document intent correlation" >&2
+  exit 1
+}
+
 grep -Fq 'apolysis intent ingest' README.zh-CN.md || {
   echo "README.zh-CN.md must document intent ingestion" >&2
+  exit 1
+}
+
+grep -Fq 'apolysis intent correlate' README.zh-CN.md || {
+  echo "README.zh-CN.md must document intent correlation" >&2
   exit 1
 }
 
