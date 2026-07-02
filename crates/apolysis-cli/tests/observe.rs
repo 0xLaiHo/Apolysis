@@ -204,6 +204,47 @@ fn observe_fixture_links_raw_canonical_and_policy_records_by_event_id() {
 }
 
 #[test]
+fn observe_fixture_enriches_events_with_process_command_context() {
+    let output = temp_jsonl("apolysis-observe-process-context");
+    let _ = std::fs::remove_file(&output);
+
+    let status = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "fixture",
+            "--input",
+            "tests/fixtures/raw-kernel-events.txt",
+            "--session",
+            "session-process-context",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+        ])
+        .status()
+        .expect("run apolysis observe with process context");
+
+    assert!(status.success());
+    let timeline = std::fs::read_to_string(&output).expect("read observer timeline");
+    let file_event = timeline
+        .lines()
+        .find(|line| {
+            line.contains(r#""record_type":"event""#)
+                && line.contains(r#""event_type":"file_open""#)
+                && line.contains(r#""pid":4100"#)
+                && line.contains(r#""resource":"tests/fixtures/child.py""#)
+        })
+        .expect("file event from exec-derived process context");
+
+    assert!(file_event.contains(r#""process_command":"bash -lc fixture""#));
+    assert!(file_event.contains(r#""process_executable":"/usr/bin/bash""#));
+    assert!(file_event.contains(r#""process_started_at_unix_ms":1780328000001"#));
+
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
 fn observe_fixture_emits_kill_containment_metadata() {
     let output = temp_jsonl("apolysis-observe-kill-metadata");
     let _ = std::fs::remove_file(&output);

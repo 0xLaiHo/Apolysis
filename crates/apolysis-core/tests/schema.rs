@@ -131,6 +131,9 @@ fn canonical_event_json_line_escapes_strings_and_records_actor_resource_action()
     assert!(line.contains(r#""container_id":null"#));
     assert!(line.contains(r#""cgroup_id":null"#));
     assert!(line.contains(r#""raw_event_id":null"#));
+    assert!(line.contains(r#""process_command":null"#));
+    assert!(line.contains(r#""process_executable":null"#));
+    assert!(line.contains(r#""process_started_at_unix_ms":null"#));
 }
 
 #[test]
@@ -171,6 +174,31 @@ fn canonical_event_json_line_records_runtime_identity_when_present() {
 
     assert!(line.contains(r#""container_id":"container-a""#));
     assert!(line.contains(r#""cgroup_id":"42""#));
+}
+
+#[test]
+fn canonical_event_json_line_records_process_context_when_present() {
+    let event = CanonicalEvent::new(
+        "session-1",
+        EventSource::KernelTracepoint,
+        EventType::ProcessExit,
+        42,
+        1,
+        "sed",
+        "",
+        "exit",
+    )
+    .with_process_context(
+        "/usr/bin/sed -n 1,5p README.md",
+        "/usr/bin/sed",
+        1_780_328_000_004,
+    );
+
+    let line = event.to_json_line();
+
+    assert!(line.contains(r#""process_command":"/usr/bin/sed -n 1,5p README.md""#));
+    assert!(line.contains(r#""process_executable":"/usr/bin/sed""#));
+    assert!(line.contains(r#""process_started_at_unix_ms":1780328000004"#));
 }
 
 #[test]

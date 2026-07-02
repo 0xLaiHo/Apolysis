@@ -162,6 +162,9 @@ jq -c 'select(.record_type=="raw_kernel_event" and .event_id!=null) | {event_id,
 jq -c 'select(.record_type=="event" and .raw_event_id!=null) | {raw_event_id,event_type,pid,resource}' \
   .apolysis/codex-live/timeline.agent-run.jsonl | head
 
+jq -c 'select(.record_type=="event" and .process_command!=null) | {event_type,pid,resource,process_command,process_executable,process_started_at_unix_ms,raw_event_id}' \
+  .apolysis/codex-live/timeline.agent-run.jsonl | head
+
 jq -c 'select((.record_type=="policy_violation" or .record_type=="enforcement_metadata") and .observed_event_id!=null) | {record_type,rule_id,observed_event_id,decision,effective_decision}' \
   .apolysis/codex-live/timeline.agent-run.jsonl | head
 ```
@@ -171,7 +174,10 @@ Live exec record 会把 executable path 保留为 canonical `resource`，并把�
 值和疑似 credential path 会在持久化前脱敏；达到限制时会写出
 `argv_truncated:true` 或 `payload_truncated:true` marker。Raw kernel record
 包含 `event_id`；canonical record 包含 `raw_event_id`；由具体 observed event
-生成的 policy 和 enforcement record 会包含 `observed_event_id`。
+生成的 policy 和 enforcement record 会包含 `observed_event_id`。当某个 PID 已经
+观测到成功 exec 后，后续 canonical exec、file、network 和 process-exit record 可以
+包含已脱敏的 `process_command`、`process_executable` 和
+`process_started_at_unix_ms` context。
 
 手动 `--scope-pid` 仍保留为 already-running process 的底层 diagnostic fallback；
 生产示例应优先使用 managed launch 或显式 agent registration file。

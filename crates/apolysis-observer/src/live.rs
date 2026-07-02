@@ -24,6 +24,7 @@ use crate::abi::{
     FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
 };
 use crate::capabilities::validate_live_prerequisites;
+use crate::process_context::ProcessContextTable;
 use crate::{
     append_policy_evaluation, canonicalize, load_policy, write_observer_metadata, AyaLoaderPlan,
     EventIdSequence, ObserveResult, ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor,
@@ -388,6 +389,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     let mut decode_failures = 0_u64;
     let mut truncations = 0_u64;
     let mut event_ids = EventIdSequence::new(&request.session_id);
+    let mut process_context = ProcessContextTable::default();
     let redactor = Redactor::new(&request.session_id, &request.workspace_root);
     let mut agent_exit_status: Option<ExitStatus> = None;
     let mut agent_drain_deadline: Option<tokio::time::Instant> = None;
@@ -459,7 +461,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                     continue;
                 }
             };
-            let canonical = canonicalize(&raw, &policy);
+            let canonical = process_context.observe(&raw, canonicalize(&raw, &policy));
             let (persisted_raw, persisted_canonical) =
                 redact_for_persistence(&raw, &canonical, &redactor);
             store
@@ -984,6 +986,14 @@ fn redact_for_persistence(
             append_marker(&mut persisted_raw.raw_payload, "redacted:payload");
         }
     }
+    if let Some(command) = canonical.process_command.as_deref() {
+        let (command, _) = redact_process_command_for_persistence(
+            command,
+            canonical.process_executable.as_deref(),
+            redactor,
+        );
+        persisted_canonical.process_command = Some(command);
+    }
     (persisted_raw, persisted_canonical)
 }
 
@@ -1048,6 +1058,61 @@ fn redact_exec_payload_for_persistence(payload: &str, redactor: &Redactor) -> (S
         persisted.push_str(markers);
     }
     (persisted, redacted)
+}
+
+fn redact_process_command_for_persistence(
+    command: &str,
+    executable: Option<&str>,
+    redactor: &Redactor,
+) -> (String, bool) {
+    let mut redacted = false;
+    let mut redact_next = false;
+    let mut args = Vec::new();
+    for (index, arg) in command.split_whitespace().enumerate() {
+        if index == 0 && executable == Some(arg) {
+            args.push(arg.to_string());
+            continue;
+        }
+
+        if redact_next {
+            args.push("<redacted>".to_string());
+            redacted = true;
+            redact_next = false;
+            continue;
+        }
+
+        if secret_flag(arg) {
+            args.push(arg.to_string());
+            redact_next = true;
+            continue;
+        }
+
+        if let Some((key, value)) = arg.split_once('=') {
+            if secret_word(key) {
+                args.push(format!("{key}=<redacted>"));
+                redacted = true;
+                continue;
+            }
+            let (value, value_redacted) = redact_argv_resource(value, redactor);
+            if value_redacted {
+                args.push(format!("{key}={value}"));
+                redacted = true;
+                continue;
+            }
+        }
+
+        if looks_like_secret_value(arg) {
+            args.push("<redacted>".to_string());
+            redacted = true;
+            continue;
+        }
+
+        let (arg, arg_redacted) = redact_argv_resource(arg, redactor);
+        args.push(arg);
+        redacted |= arg_redacted;
+    }
+
+    (args.join(" "), redacted)
 }
 
 fn redact_argv_resource(value: &str, redactor: &Redactor) -> (String, bool) {
@@ -1336,6 +1401,150 @@ mod tests {
         assert!(persisted_raw.raw_payload.contains("redacted:payload"));
         assert!(!persisted_raw.raw_payload.contains("sk-test-secret"));
         assert!(!persisted_raw.raw_payload.contains("/workspace/.env"));
+    }
+
+    #[test]
+    fn persisted_process_command_redacts_argv_credentials_and_sensitive_paths() {
+        let raw = RawKernelEvent::new(
+            1,
+            "session-a",
+            EventSource::KernelTracepoint,
+            "sched_process_exec",
+            101,
+            100,
+            1000,
+            1000,
+            "codex",
+            "/usr/bin/codex",
+            "exec",
+            None,
+            Some("42".to_string()),
+            "argv:/usr/bin/codex exec --api-key sk-test-secret /workspace/.env /workspace/src/main.rs",
+        );
+        let canonical = CanonicalEvent::new(
+            "session-a",
+            EventSource::KernelTracepoint,
+            EventType::Exec,
+            101,
+            100,
+            "codex",
+            "/usr/bin/codex",
+            "exec",
+        )
+        .with_process_context(
+            "/usr/bin/codex exec --api-key sk-test-secret /workspace/.env /workspace/src/main.rs",
+            "/usr/bin/codex",
+            1,
+        );
+        let redactor = crate::Redactor::new("session-a", "/workspace");
+
+        let (_persisted_raw, persisted_canonical) =
+            redact_for_persistence(&raw, &canonical, &redactor);
+
+        let process_command = persisted_canonical
+            .process_command
+            .as_deref()
+            .expect("process command");
+        assert!(process_command.starts_with("/usr/bin/codex exec --api-key <redacted>"));
+        assert!(process_command.contains("--api-key <redacted>"));
+        assert!(process_command.contains("path_token:"));
+        assert!(process_command.contains("/workspace/src/main.rs"));
+        assert!(!process_command.contains("sk-test-secret"));
+        assert!(!process_command.contains("/workspace/.env"));
+    }
+
+    #[test]
+    fn process_context_enriches_exec_and_exit_before_cleanup() {
+        let policy = apolysis_policy::Policy::default();
+        let mut contexts = crate::process_context::ProcessContextTable::default();
+        let exec_raw = RawKernelEvent::new(
+            1_780_328_000_004,
+            "session-a",
+            EventSource::KernelTracepoint,
+            "sched_process_exec",
+            44,
+            40,
+            1000,
+            1000,
+            "sed",
+            "/usr/bin/sed",
+            "exec",
+            None,
+            Some("901".to_string()),
+            "argv:/usr/bin/sed -n 1,5p README.md",
+        )
+        .with_event_id("raw-exec");
+
+        let exec_event = contexts.observe(&exec_raw, canonicalize(&exec_raw, &policy));
+
+        assert_eq!(
+            exec_event.process_command.as_deref(),
+            Some("/usr/bin/sed -n 1,5p README.md")
+        );
+        assert_eq!(
+            exec_event.process_executable.as_deref(),
+            Some("/usr/bin/sed")
+        );
+        assert_eq!(
+            exec_event.process_started_at_unix_ms,
+            Some(1_780_328_000_004)
+        );
+
+        let exit_raw = RawKernelEvent::new(
+            1_780_328_000_123,
+            "session-a",
+            EventSource::KernelTracepoint,
+            "sched_process_exit",
+            44,
+            40,
+            1000,
+            1000,
+            "sed",
+            "",
+            "exit",
+            None,
+            Some("901".to_string()),
+            "",
+        )
+        .with_event_id("raw-exit");
+
+        let exit_event = contexts.observe(&exit_raw, canonicalize(&exit_raw, &policy));
+
+        assert_eq!(
+            exit_event.process_command.as_deref(),
+            Some("/usr/bin/sed -n 1,5p README.md")
+        );
+        assert_eq!(
+            exit_event.process_executable.as_deref(),
+            Some("/usr/bin/sed")
+        );
+        assert_eq!(
+            exit_event.process_started_at_unix_ms,
+            Some(1_780_328_000_004)
+        );
+
+        let stale_raw = RawKernelEvent::new(
+            1_780_328_000_124,
+            "session-a",
+            EventSource::KernelTracepoint,
+            "openat",
+            44,
+            40,
+            1000,
+            1000,
+            "sed",
+            "README.md",
+            "read",
+            None,
+            Some("901".to_string()),
+            "",
+        );
+
+        let stale_event = contexts.observe(&stale_raw, canonicalize(&stale_raw, &policy));
+
+        assert_eq!(stale_event.process_command, None);
+        assert_eq!(stale_event.process_executable, None);
+        assert_eq!(stale_event.process_started_at_unix_ms, None);
     }
 
     #[test]

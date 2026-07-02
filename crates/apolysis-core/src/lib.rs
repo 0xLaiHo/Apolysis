@@ -213,6 +213,9 @@ pub struct CanonicalEvent {
     pub action: String,
     pub container_id: Option<String>,
     pub cgroup_id: Option<String>,
+    pub process_command: Option<String>,
+    pub process_executable: Option<String>,
+    pub process_started_at_unix_ms: Option<u128>,
 }
 
 impl CanonicalEvent {
@@ -241,6 +244,9 @@ impl CanonicalEvent {
             action: action.into(),
             container_id: None,
             cgroup_id: None,
+            process_command: None,
+            process_executable: None,
+            process_started_at_unix_ms: None,
         }
     }
 
@@ -267,6 +273,19 @@ impl CanonicalEvent {
         self
     }
 
+    /// Attach userspace command context known for this process at observation time.
+    pub fn with_process_context(
+        mut self,
+        command: impl Into<String>,
+        executable: impl Into<String>,
+        started_at_unix_ms: u128,
+    ) -> Self {
+        self.process_command = Some(command.into());
+        self.process_executable = Some(executable.into());
+        self.process_started_at_unix_ms = Some(started_at_unix_ms);
+        self
+    }
+
     /// Render this event as a JSONL record.
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
@@ -287,7 +306,7 @@ impl JsonLine for CanonicalEvent {
             .unwrap_or_else(|| "null".to_string());
 
         format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"raw_event_id\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"raw_event_id\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{},\"process_command\":{},\"process_executable\":{},\"process_started_at_unix_ms\":{}}}",
             json_string(records::EVENT),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
@@ -300,7 +319,12 @@ impl JsonLine for CanonicalEvent {
             json_string(&self.resource),
             json_string(&self.action),
             container_id,
-            cgroup_id
+            cgroup_id,
+            optional_json_string(self.process_command.as_deref()),
+            optional_json_string(self.process_executable.as_deref()),
+            self.process_started_at_unix_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
         )
     }
 }
