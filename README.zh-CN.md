@@ -503,8 +503,17 @@ Apolysis 记录 evidence。它不会单独把不安全的 runtime 变安全。Ru
 - `docs/visibility-validation.md` 说明 host 和 guest visibility limits。
 - `docs/release-validation-handoff.md` 说明 regulated-release validation
   handoff 和可重复 evidence-package 输入。
+- `docs/threat-model.md` 总结项目 security boundary。
+- `docs/starter-issues.md` 列出适合首次贡献者的小型 labeled starter issues。
 - `deploy/kubernetes/README.md` 说明 Kubernetes deployment assets。
 - `ebpf/observer/README.md` 说明 observer eBPF program。
+
+## 社区
+
+- `CONTRIBUTING.md` 说明 development workflow、verification gates 和 pull
+  request privacy rules。
+- `SECURITY.md` 说明 supported versions、vulnerability reporting 和 security
+  scope。
 
 详细 roadmap、research notes、validation history 和 release-readiness records 不放在顶层 README 中，以便 README 保持面向使用和运维的核心内容。
 

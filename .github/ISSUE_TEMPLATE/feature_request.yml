@@ -1,0 +1,34 @@
+name: Feature request
+description: Propose a focused capability within the runtime-accountability scope.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What operator or user problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the smallest useful change.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This preserves Apolysis as a runtime evidence layer, not a sandbox or approval UI.
+          required: true
+        - label: This does not require committing secrets, kubeconfigs, provider credentials, or private captures.
+          required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Suggested verification
+      description: Which Make target, test, live gate, or documentation gate should prove the change?
