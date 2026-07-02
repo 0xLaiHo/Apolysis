@@ -35,6 +35,9 @@ jobs:
       - name: Run release artifact packaging contract
         run: make test-release-artifacts
 
+      - name: Run release signing contract
+        run: make test-release-signing
+
       - name: Run community surface contract
         run: make test-community-surface
 

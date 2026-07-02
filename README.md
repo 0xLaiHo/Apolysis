@@ -89,8 +89,9 @@ Most unit and fixture tests do not require root.
 ## Release Artifacts
 
 Tagged releases attach a Linux artifact bundle that contains the `apolysis`
-CLI, the CO-RE `apolysis_observer.bpf.o` object, a release manifest, and a
-detached SHA-256 checksum:
+CLI, the CO-RE `apolysis_observer.bpf.o` object, a release manifest, a detached
+SHA-256 checksum, and release-signing evidence produced from retained F6
+signing evidence:
 
 ```bash
 version=v0.2.0
@@ -100,11 +101,20 @@ asset="apolysis-${version}-${target}.tar.gz"
 gh release download "$version" \
   --repo 0xLaiHo/Apolysis \
   --pattern "$asset*" \
-  --pattern apolysis-release-manifest.json
+  --pattern apolysis-release-manifest.json \
+  --pattern apolysis-release-signing-manifest.json \
+  --pattern apolysis-release-signing-evidence.json \
+  --pattern apolysis-regulated-release-signing-evidence-report.json
 
 sha256sum -c "$asset.sha256"
+sha256sum apolysis-release-manifest.json
 tar -xzf "$asset"
 ```
+
+`apolysis-release-signing-manifest.json` records the SHA-256 of
+`apolysis-release-manifest.json` that was covered by retained regulated-release
+signing evidence. Treat a missing signing manifest, a hash mismatch, or
+`release_signing_ready:false` as an unsigned release.
 
 After extraction, use the bundled BPF object with live observation:
 
