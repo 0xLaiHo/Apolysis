@@ -4,7 +4,7 @@ use apolysis_core::{
     actions, actors, env, feedback, records, resources, runtimes, CanonicalEvent,
     EnforcementBackend, EnforcementMetadata, EventSource, EventType, ObserverDiagnostic,
     ObserverDiagnosticKind, PolicyDecision, PolicyViolation, RawKernelEvent, RuntimeKind,
-    SandboxSession,
+    SandboxSession, SessionIntentRecord,
 };
 
 #[test]
@@ -12,6 +12,7 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
     assert_eq!(records::SESSION, "session");
     assert_eq!(records::EVENT, "event");
     assert_eq!(records::RAW_KERNEL_EVENT, "raw_kernel_event");
+    assert_eq!(records::INTENT, "intent");
     assert_eq!(records::POLICY_VIOLATION, "policy_violation");
     assert_eq!(records::ENFORCEMENT_METADATA, "enforcement_metadata");
     assert_eq!(records::OBSERVER_DIAGNOSTIC, "observer_diagnostic");
@@ -28,6 +29,38 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
     assert_eq!(env::SESSION_ID, "APOLYSIS_SESSION_ID");
     assert_eq!(feedback::VIOLATION_TAG, "APOLYSIS_VIOLATION");
     assert_eq!(EnforcementBackend::SeccompBlock.as_str(), "seccomp_block");
+}
+
+#[test]
+fn session_intent_record_json_line_is_append_only_and_joinable() {
+    let intent = SessionIntentRecord::new(
+        "session-intent",
+        "codex",
+        "codex:item:call-1",
+        "tool_call",
+        "exec_command",
+    )
+    .with_timestamp(1_780_328_100_007)
+    .with_source_event_id("call-1")
+    .with_declared_action("shell.command")
+    .with_target("workspace")
+    .with_command("cat Cargo.toml")
+    .with_raw_event_id("session-intent:event:0000000000000004");
+
+    let line = intent.to_json_line();
+
+    assert!(line.contains(r#""record_type":"intent""#));
+    assert!(line.contains(r#""timestamp_unix_ms":1780328100007"#));
+    assert!(line.contains(r#""session_id":"session-intent""#));
+    assert!(line.contains(r#""intent_source":"codex""#));
+    assert!(line.contains(r#""intent_id":"codex:item:call-1""#));
+    assert!(line.contains(r#""source_event_id":"call-1""#));
+    assert!(line.contains(r#""intent_type":"tool_call""#));
+    assert!(line.contains(r#""tool_name":"exec_command""#));
+    assert!(line.contains(r#""declared_action":"shell.command""#));
+    assert!(line.contains(r#""target":"workspace""#));
+    assert!(line.contains(r#""command":"cat Cargo.toml""#));
+    assert!(line.contains(r#""raw_event_id":"session-intent:event:0000000000000004""#));
 }
 
 #[test]

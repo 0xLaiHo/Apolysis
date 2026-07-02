@@ -15,6 +15,8 @@ pub mod records {
     pub const EVENT: &str = "event";
     /// A raw kernel-side event preserved before canonicalization.
     pub const RAW_KERNEL_EVENT: &str = "raw_kernel_event";
+    /// A declared harness or tool-call intent tied to a session.
+    pub const INTENT: &str = "intent";
     /// A policy decision that should be visible to operators or agent hooks.
     pub const POLICY_VIOLATION: &str = "policy_violation";
     /// Capability and timing metadata for a policy enforcement decision.

@@ -27,6 +27,7 @@ dependencies = [
  "apolysis-runtime",
  "apolysis-store",
  "apolysis-visibility",
+ "serde_json",
  "tokio",
 ]
 

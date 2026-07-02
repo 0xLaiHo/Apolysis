@@ -434,6 +434,100 @@ impl JsonLine for RawKernelEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionIntentRecord {
+    pub timestamp_unix_ms: u128,
+    pub session_id: String,
+    pub intent_source: String,
+    pub intent_id: String,
+    pub source_event_id: Option<String>,
+    pub intent_type: String,
+    pub tool_name: String,
+    pub declared_action: Option<String>,
+    pub target: Option<String>,
+    pub command: Option<String>,
+    pub raw_event_id: Option<String>,
+}
+
+impl SessionIntentRecord {
+    /// Create an append-only record for declared harness intent.
+    pub fn new(
+        session_id: impl Into<String>,
+        intent_source: impl Into<String>,
+        intent_id: impl Into<String>,
+        intent_type: impl Into<String>,
+        tool_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            timestamp_unix_ms: now_unix_ms(),
+            session_id: session_id.into(),
+            intent_source: intent_source.into(),
+            intent_id: intent_id.into(),
+            source_event_id: None,
+            intent_type: intent_type.into(),
+            tool_name: tool_name.into(),
+            declared_action: None,
+            target: None,
+            command: None,
+            raw_event_id: None,
+        }
+    }
+
+    pub fn with_timestamp(mut self, timestamp_unix_ms: u128) -> Self {
+        self.timestamp_unix_ms = timestamp_unix_ms;
+        self
+    }
+
+    pub fn with_source_event_id(mut self, source_event_id: impl Into<String>) -> Self {
+        self.source_event_id = Some(source_event_id.into());
+        self
+    }
+
+    pub fn with_declared_action(mut self, declared_action: impl Into<String>) -> Self {
+        self.declared_action = Some(declared_action.into());
+        self
+    }
+
+    pub fn with_target(mut self, target: impl Into<String>) -> Self {
+        self.target = Some(target.into());
+        self
+    }
+
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = Some(command.into());
+        self
+    }
+
+    pub fn with_raw_event_id(mut self, raw_event_id: impl Into<String>) -> Self {
+        self.raw_event_id = Some(raw_event_id.into());
+        self
+    }
+
+    pub fn to_json_line(&self) -> String {
+        <Self as JsonLine>::to_json_line(self)
+    }
+}
+
+impl JsonLine for SessionIntentRecord {
+    fn to_json_line(&self) -> String {
+        format!(
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"intent_source\":{},\"intent_id\":{},\"source_event_id\":{},\"intent_type\":{},\"tool_name\":{},\"declared_action\":{},\"target\":{},\"command\":{},\"raw_event_id\":{}}}",
+            json_string(records::INTENT),
+            self.timestamp_unix_ms,
+            json_string(&self.session_id),
+            json_string(&self.intent_source),
+            json_string(&self.intent_id),
+            optional_json_string(self.source_event_id.as_deref()),
+            json_string(&self.intent_type),
+            json_string(&self.tool_name),
+            optional_json_string(self.declared_action.as_deref()),
+            optional_json_string(self.target.as_deref()),
+            optional_json_string(self.command.as_deref()),
+            optional_json_string(self.raw_event_id.as_deref()),
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ObserverDiagnosticKind {
     RingBufferReserveFailure,
     MapPressure,

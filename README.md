@@ -294,6 +294,31 @@ Manual `--scope-pid` remains available as a low-level diagnostic fallback for
 already-running processes, but production examples should prefer managed launch
 or an explicit agent registration file.
 
+### Import Codex intent records
+
+If you retain a Codex JSONL harness log for the same session, ingest its
+tool-call records into append-only `intent` records. This is the first
+correlation input: it records what the harness declared, while the live
+timeline records what the host observed.
+With an installed binary, the command is `apolysis intent ingest`.
+
+```bash
+cargo run -p apolysis-cli -- intent ingest \
+  --adapter codex-jsonl \
+  --input .apolysis/codex-live/codex-response-items.jsonl \
+  --session codex-local-audit \
+  --output .apolysis/codex-live/intent.codex.jsonl \
+  --workspace-root "$PWD"
+
+jq -c 'select(.record_type=="intent") | {intent_source,intent_id,tool_name,declared_action,command,raw_event_id}' \
+  .apolysis/codex-live/intent.codex.jsonl
+```
+
+`raw_event_id` is `null` at ingestion time. A later correlation pass can link
+intent records to raw/canonical events when the command, process context, and
+event IDs provide enough evidence. Secret-looking command values and
+credential-looking paths are redacted before persistence.
+
 ### Run an agent in Docker or gVisor
 
 Use Docker when you want Apolysis to start the workload with conservative
