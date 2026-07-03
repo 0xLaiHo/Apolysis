@@ -50,6 +50,106 @@ fn observe_fixture_ring_buffer_writes_raw_and_canonical_timeline() {
 }
 
 #[test]
+fn observe_fixture_rotates_timeline_when_output_budget_is_reached() {
+    let output = temp_jsonl("apolysis-observe-rotation");
+    let archives: Vec<_> = (1..=8).map(|index| archive_jsonl(&output, index)).collect();
+    let _ = std::fs::remove_file(&output);
+    for archive in &archives {
+        let _ = std::fs::remove_file(archive);
+    }
+
+    let status = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "fixture",
+            "--input",
+            "tests/fixtures/raw-kernel-events.txt",
+            "--session",
+            "session-host-observer-rotation",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--output-max-bytes",
+            "4096",
+            "--output-max-files",
+            "8",
+        ])
+        .status()
+        .expect("run apolysis observe with output rotation");
+
+    assert!(status.success());
+    assert!(archives[0].is_file(), "rotation should retain archives");
+    let active = std::fs::read_to_string(&output).expect("read active timeline");
+    let retained_archives = archives
+        .iter()
+        .filter(|path| path.is_file())
+        .map(|path| std::fs::read_to_string(path).expect("read archived timeline"))
+        .collect::<Vec<_>>();
+    let combined = format!("{}\n{active}", retained_archives.join("\n"));
+    assert!(active.contains(r#""record_type":"event""#));
+    assert!(retained_archives
+        .iter()
+        .any(|archive| archive.contains(r#""record_type":"event""#)));
+    assert!(combined.contains(r#""resource":"observer-output-rotation""#));
+    assert!(combined.contains("max_file_bytes:4096,max_archived_files:8"));
+    assert!(
+        std::fs::metadata(&output).expect("active metadata").len() <= 4096,
+        "active timeline should respect the configured byte budget"
+    );
+    for archive in archives.iter().filter(|path| path.is_file()) {
+        assert!(
+            std::fs::metadata(archive).expect("archive metadata").len() <= 4096,
+            "archived timeline should respect the configured byte budget"
+        );
+    }
+
+    let _ = std::fs::remove_file(&output);
+    for archive in &archives {
+        let _ = std::fs::remove_file(archive);
+    }
+}
+
+#[test]
+fn observe_output_rotation_requires_complete_positive_budget() {
+    for args in [
+        vec!["--output-max-bytes", "4096"],
+        vec!["--output-max-files", "2"],
+        vec!["--output-max-bytes", "0", "--output-max-files", "2"],
+        vec!["--output-max-bytes", "4096", "--output-max-files", "0"],
+    ] {
+        let output = temp_jsonl("apolysis-observe-invalid-rotation");
+        let mut command_args = vec![
+            "observe",
+            "--backend",
+            "fixture",
+            "--input",
+            "tests/fixtures/raw-kernel-events.txt",
+            "--session",
+            "session-host-observer-invalid-rotation",
+            "--policy",
+            "policies/local-dev.yaml",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+        ];
+        command_args.extend(args);
+
+        let output = apolysis_command()
+            .args(command_args)
+            .output()
+            .expect("run apolysis observe with invalid output rotation");
+
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--output-max-bytes") || stderr.contains("--output-max-files"),
+            "stderr should identify the invalid output rotation option:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn observe_fixture_reports_runner_plan_metadata() {
     let output = temp_jsonl("apolysis-observe-runners");
     let _ = std::fs::remove_file(&output);
@@ -850,6 +950,10 @@ fn workspace_root() -> std::path::PathBuf {
 
 fn temp_jsonl(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}.jsonl", std::process::id()))
+}
+
+fn archive_jsonl(path: &std::path::Path, index: usize) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}.{}", path.display(), index))
 }
 
 fn json_string_field(line: &str, field: &str) -> Option<String> {

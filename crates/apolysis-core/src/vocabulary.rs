@@ -89,6 +89,8 @@ pub mod resources {
     pub const OBSERVER_RUNNERS: &str = "observer-runners";
     /// Live observer session scope metadata.
     pub const OBSERVER_SCOPE: &str = "observer-scope";
+    /// Observer local JSONL output rotation metadata.
+    pub const OBSERVER_OUTPUT_ROTATION: &str = "observer-output-rotation";
     /// Managed agent supervisor mode metadata.
     pub const AGENT_SUPERVISOR_MODE: &str = "agent-supervisor-mode";
     /// Managed agent kind metadata.

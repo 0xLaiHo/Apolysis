@@ -179,11 +179,19 @@ sudo -E ./target/debug/apolysis observe \
   --session codex-local-audit \
   --policy policies/local-dev.yaml \
   --output .apolysis/codex-live/timeline.agent-run.jsonl \
+  --output-max-bytes 104857600 \
+  --output-max-files 8 \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
   --workspace-root "$PWD" \
   --agent-kind codex \
   --agent-run -- codex resume <codex-session-id>
 ```
+
+`--output-max-bytes` 和 `--output-max-files` 用于限制本地 JSONL 增长。当 active
+timeline 即将超过字节预算时，Apolysis 会把 `timeline.agent-run.jsonl` 轮转为
+`timeline.agent-run.jsonl.1`，并顺延更早的归档，同时写入
+`observer-output-rotation` metadata，记录 `max_file_bytes` 和
+`max_archived_files`。单条 JSONL record 不会被拆到多个文件里。
 
 如果 agent 已经由另一个可信 supervisor 启动，不要让 operator 按进程名手动选择
 PID；应由该 supervisor 写出显式 registration file：
