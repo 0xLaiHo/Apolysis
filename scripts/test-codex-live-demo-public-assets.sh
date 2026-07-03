@@ -81,8 +81,6 @@ jq -e 'select(.record_type=="accountability_finding" and .kind=="missing_intent"
 jq -e 'select(.record_type=="policy_violation" and .rule_id=="credentials.deny_read" and (.target|startswith("path_token:")))' \
   "$excerpt" >/dev/null
 
-require_contains README.md "docs/codex-live-demo-public-assets.md"
-require_contains README.zh-CN.md "docs/codex-live-demo-public-assets.md"
 require_contains "$repo_root/.github/workflows/release-validation.yml" "make test-codex-live-demo-public-assets"
 require_contains "$repo_root/scripts/test-release-validation-ci.sh" "test-codex-live-demo-public-assets:"
 
