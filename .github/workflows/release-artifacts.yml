@@ -44,6 +44,7 @@ jobs:
             bpftool_path="$(find /usr/lib/linux-tools* -type f -name bpftool | sort -V | tail -n 1)"
             [[ -n "$bpftool_path" ]]
             sudo ln -sf "$bpftool_path" /usr/local/bin/bpftool
+            hash -r
           fi
           bpftool version
 

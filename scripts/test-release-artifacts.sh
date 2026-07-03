@@ -39,6 +39,7 @@ for needle in \
     "llvm" \
     "linux-tools-common" \
     "linux-tools-generic" \
+    "hash -r" \
     "bpftool version" \
     "cargo build --release -p apolysis-cli --bin apolysis" \
     "make build-ebpf" \
