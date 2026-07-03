@@ -18,8 +18,10 @@ They replay a Codex run where declared intent is compared with host-side
 evidence and an unexpected fake credential read becomes a `missing_intent`
 finding. The live recording procedure is staged in
 [`docs/codex-live-demo-runbook.md`](docs/codex-live-demo-runbook.md). The
-privileged live path has been validated locally; the final public asciinema/GIF
-is still planned after the captured evidence is curated and scrubbed.
+privileged live path has been validated locally, and the scrubbed public
+excerpt is now available in
+[`docs/codex-live-demo-public-assets.md`](docs/codex-live-demo-public-assets.md).
+The final public asciinema/GIF is still planned.
 
 Apolysis is a Linux runtime accountability layer for AI agent workloads. It
 collects environment-owned evidence below the agent harness, correlates that

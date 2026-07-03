@@ -1,0 +1,21 @@
+{
+  "demo_status": "validated_local_live",
+  "source_session": "codex-live-demo",
+  "captured_at": "2026-07-03",
+  "agent": "codex",
+  "observer_backend": "live-ebpf",
+  "timeline_lines": 79949,
+  "intent_records": 3,
+  "intent_correlation_count": 1,
+  "accountability_finding_count": 18748,
+  "declared_workload": "./scripts/run-codex-live-demo-workload.sh",
+  "intent_match_basis": "process_executable",
+  "credential_finding": "missing_intent",
+  "credential_rule": "credentials.deny_read",
+  "credential_target": "path_token:*",
+  "redaction_boundary": "curated_public_excerpt",
+  "public_assets": [
+    "terminal-transcript.txt",
+    "evidence-excerpt.jsonl"
+  ]
+}

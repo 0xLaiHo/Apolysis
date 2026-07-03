@@ -14,8 +14,10 @@ runtime 和声明意图证据关联为可审计 records，供团队独立于 age
 [`docs/codex-intent-mismatch-demo.md`](docs/codex-intent-mismatch-demo.md)。
 它通过 fixture 复现 Codex run 中声明意图与主机侧证据的对比，并把一次意外的假凭证
 读取归结为 `missing_intent` finding。真实录制流程已放在
-[`docs/codex-live-demo-runbook.md`](docs/codex-live-demo-runbook.md)。最终公开首发用的
-asciinema/GIF 仍需等已捕获的 live evidence 完成整理和脱敏后替换。
+[`docs/codex-live-demo-runbook.md`](docs/codex-live-demo-runbook.md)。privileged
+live path 已在本地验证，脱敏后的公开摘录已放在
+[`docs/codex-live-demo-public-assets.md`](docs/codex-live-demo-public-assets.md)。
+最终公开首发用的 asciinema/GIF 仍在计划中。
 
 Apolysis 是一个面向 AI Agent workload 的 Linux 运行时问责层。它在 agent
 harness 之下采集由环境拥有者掌握的证据，将这些证据与声明意图和 runtime metadata
