@@ -37,12 +37,14 @@ for needle in \
     "contents: write" \
     "clang" \
     "llvm" \
+    "libbpf-dev" \
     "linux-tools-common" \
     "linux-tools-generic" \
     "hash -r" \
     "bpftool version" \
     "cargo build --release -p apolysis-cli --bin apolysis" \
-    "make build-ebpf" \
+    "APOLYSIS_REQUIRE_BPF=1 make build-ebpf" \
+    "test -s \"\$APOLYSIS_RELEASE_BPF_OBJECT\"" \
     "./scripts/package-release-artifacts.sh" \
     "actions/upload-artifact@v4" \
     "gh release upload"; do

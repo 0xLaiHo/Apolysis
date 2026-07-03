@@ -39,7 +39,7 @@ jobs:
       - name: Install release build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm linux-tools-common linux-tools-generic
+          sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic
           if ! bpftool version >/dev/null 2>&1; then
             bpftool_path="$(find /usr/lib/linux-tools* -type f -name bpftool | sort -V | tail -n 1)"
             [[ -n "$bpftool_path" ]]
@@ -52,7 +52,9 @@ jobs:
         run: cargo build --release -p apolysis-cli --bin apolysis
 
       - name: Build CO-RE BPF object
-        run: make build-ebpf
+        run: |
+          APOLYSIS_REQUIRE_BPF=1 make build-ebpf
+          test -s "$APOLYSIS_RELEASE_BPF_OBJECT"
 
       - name: Package release artifacts
         run: |
