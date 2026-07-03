@@ -1,6 +1,18 @@
 # Apolysis
 
+[![Release Validation](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml/badge.svg)](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml)
+[![Latest Release](https://img.shields.io/github/v/release/0xLaiHo/Apolysis?sort=semver)](https://github.com/0xLaiHo/Apolysis/releases)
+[![License](https://img.shields.io/github/license/0xLaiHo/Apolysis)](LICENSE)
+
 [English](README.md) | [简体中文](README.zh-CN.md)
+
+**30 秒摘要：**Apolysis 是面向 AI agent workload 的环境侧飞行记录仪。它记录
+一次 agent session 在 Linux 上实际做了什么，并把主机侧进程、文件、网络、凭证、
+runtime 和声明意图证据关联为可审计 records，供团队独立于 agent harness 复查。
+
+**Demo 状态：**第一个公开首发 demo 规划在 P1 阶段产出。届时这里会替换为
+asciinema/GIF，展示 Codex run 中声明意图与主机侧证据的对比。在此之前，可以使用
+下文的本地审计示例复现当前 workflow。
 
 Apolysis 是一个面向 AI Agent workload 的 Linux 运行时问责层。它在 agent
 harness 之下采集由环境拥有者掌握的证据，将这些证据与声明意图和 runtime metadata
