@@ -90,7 +90,7 @@ sudo -E env \
     --agent-run -- codex exec --json \
       -C "$PWD" \
       --sandbox workspace-write \
-      --ask-for-approval never \
+      -c 'approval_policy="never"' \
       --output-last-message .apolysis/codex-live-demo/codex-last-message.txt \
       "Run ./scripts/run-codex-live-demo-workload.sh and report whether the Apolysis intent tests passed."
 ```

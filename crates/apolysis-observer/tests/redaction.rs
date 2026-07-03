@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_core::EventType;
-use apolysis_observer::Redactor;
+use apolysis_observer::{redact_command_text_for_persistence, Redactor};
 
 #[test]
 fn redactor_preserves_workspace_paths_and_masks_sensitive_paths() {
@@ -41,4 +41,22 @@ fn redaction_tokens_are_scoped_to_the_session() {
         .redact_resource(EventType::CredentialRead, "/home/user/.aws/credentials");
 
     assert_ne!(first.value, second.value);
+}
+
+#[test]
+fn command_redaction_preserves_workspace_relative_paths() {
+    let redacted = redact_command_text_for_persistence(
+        "session-a",
+        std::path::Path::new("/workspace/project"),
+        "./scripts/run-codex-live-demo-workload.sh ../outside ~/.aws/credentials ./.env",
+    );
+
+    assert!(redacted.redacted);
+    assert!(redacted
+        .value
+        .contains("./scripts/run-codex-live-demo-workload.sh"));
+    assert!(!redacted.value.contains("../outside"));
+    assert!(!redacted.value.contains("~/.aws/credentials"));
+    assert!(!redacted.value.contains("./.env"));
+    assert_eq!(redacted.value.matches("path_token:").count(), 3);
 }

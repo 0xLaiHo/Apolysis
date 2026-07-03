@@ -210,6 +210,67 @@ fn intent_correlate_prefers_raw_event_id_when_present() {
     let _ = std::fs::remove_file(&output);
 }
 
+#[test]
+fn intent_correlate_links_truncated_live_exec_by_executable_path() {
+    let intent_input = temp_jsonl("apolysis-intent-correlate-executable-intents");
+    let timeline_input = temp_jsonl("apolysis-intent-correlate-executable-timeline");
+    let output = temp_jsonl("apolysis-intent-correlate-executable-output");
+    let _ = std::fs::remove_file(&intent_input);
+    let _ = std::fs::remove_file(&timeline_input);
+    let _ = std::fs::remove_file(&output);
+
+    std::fs::write(
+        &intent_input,
+        r#"{"record_type":"intent","timestamp_unix_ms":1780328400001,"session_id":"session-intent-executable-correlate","intent_source":"codex","intent_id":"codex:call-live-script","source_event_id":"call-live-script","intent_type":"tool_call","tool_name":"exec_command","declared_action":"shell.command","target":"workspace","command":"./scripts/run-codex-live-demo-workload.sh","raw_event_id":null}
+"#,
+    )
+    .expect("write intent records");
+    std::fs::write(
+        &timeline_input,
+        r#"{"record_type":"event","timestamp_unix_ms":1780328401001,"session_id":"session-intent-executable-correlate","event_source":"kernel_tracepoint","event_type":"exec","raw_event_id":"session-intent-executable-correlate:event:0000000000000100","pid":4300,"ppid":1,"actor":"run-codex-live-","resource":"./scripts/run-codex-live-demo-workload.sh","action":"exec","container_id":null,"cgroup_id":null,"process_command":"./scripts/run-codex-live-demo-w","process_executable":"./scripts/run-codex-live-demo-workload.sh","process_started_at_unix_ms":1780328401000}
+{"record_type":"event","timestamp_unix_ms":1780328401002,"session_id":"session-intent-executable-correlate","event_source":"kernel_tracepoint","event_type":"file_open","raw_event_id":"session-intent-executable-correlate:event:0000000000000101","pid":4301,"ppid":4300,"actor":"python3","resource":"path_token:dccfe6616e57989e18638cd0","action":"read","container_id":null,"cgroup_id":null,"process_command":"python3 path_token:f3d72bc9350a77bf367c9645","process_executable":"/usr/bin/python3","process_started_at_unix_ms":1780328401001}
+"#,
+    )
+    .expect("write observed timeline");
+
+    let status = apolysis_command()
+        .args([
+            "intent",
+            "correlate",
+            "--intent-input",
+            intent_input.to_str().expect("utf-8 intent path"),
+            "--timeline-input",
+            timeline_input.to_str().expect("utf-8 timeline path"),
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+        ])
+        .status()
+        .expect("run apolysis intent correlate");
+
+    assert!(status.success());
+    let timeline = std::fs::read_to_string(&output).expect("read correlation output");
+    assert_eq!(
+        timeline
+            .matches(r#""record_type":"intent_correlation""#)
+            .count(),
+        1,
+        "truncated live exec should still be linked to its declared intent:\n{timeline}"
+    );
+    assert!(timeline.contains(r#""intent_id":"codex:call-live-script""#));
+    assert!(timeline.contains(r#""match_basis":"process_executable""#));
+    assert!(timeline.contains(
+        r#""raw_event_id":"session-intent-executable-correlate:event:0000000000000100""#
+    ));
+    assert!(timeline.contains(r#""kind":"missing_intent""#));
+    assert!(timeline.contains(
+        r#""evidence_ref":"session-intent-executable-correlate:event:0000000000000101""#
+    ));
+
+    let _ = std::fs::remove_file(&intent_input);
+    let _ = std::fs::remove_file(&timeline_input);
+    let _ = std::fs::remove_file(&output);
+}
+
 fn apolysis_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_apolysis"));
     command.current_dir(workspace_root());

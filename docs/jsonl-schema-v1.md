@@ -163,7 +163,9 @@ Intent correlation records link declared harness intent to observed host-side
 timeline evidence. Correlation prefers stable `raw_event_id` matches when an
 intent record already carries one. If no event ID is available, the first
 implementation can fall back to exact redacted command-context matching through
-`process_command_exact`.
+`process_command_exact`. For live eBPF traces where argv can be truncated,
+`exec` events may also match a declared command by the observed
+`process_executable` or exec `resource` path.
 
 Fields:
 
@@ -172,12 +174,14 @@ Fields:
 - `session_id`: session identifier
 - `intent_source`: harness or adapter name, for example `codex`
 - `intent_id`: declared intent identifier
-- `match_basis`: `raw_event_id` or `process_command_exact`
+- `match_basis`: `raw_event_id`, `process_command_exact`, or
+  `process_executable`
 - `raw_event_id`: observed raw kernel event ID linked to the canonical event
 - `event_type`: observed canonical event type
 - `pid`: process ID on the observed event, or `0` if unavailable
 - `resource`: observed resource string
 - `process_command`: redacted observed command context, or `null`
+- `process_executable`: observed executable path, or `null`
 - `command`: redacted declared command or tool payload summary, or `null`
 
 Example correlation:
@@ -311,7 +315,11 @@ Use these fields for deterministic joins:
 
 Process context is a separate enrichment model. When available,
 `process_command`, `process_executable`, and `process_started_at_unix_ms` attach
-the latest successful exec context known for the PID at observation time.
+the latest successful exec context known for the PID at observation time. Intent
+correlation treats `exec` records as matchable command evidence, but unmatched
+`exec` records do not by themselves produce `missing_intent` findings; those
+findings are reserved for observed file, network, credential, and similar side
+effects.
 
 ## Redaction And Truncation
 
