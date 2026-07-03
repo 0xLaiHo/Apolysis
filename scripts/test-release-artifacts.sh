@@ -37,7 +37,9 @@ for needle in \
     "contents: write" \
     "clang" \
     "llvm" \
-    "bpftool" \
+    "linux-tools-common" \
+    "linux-tools-generic" \
+    "bpftool version" \
     "cargo build --release -p apolysis-cli --bin apolysis" \
     "make build-ebpf" \
     "./scripts/package-release-artifacts.sh" \
