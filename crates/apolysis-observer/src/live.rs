@@ -288,6 +288,46 @@ struct ManagedAgentChild {
     metadata: AgentScopeMetadata,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedAgentRunAs {
+    uid: u32,
+    gid: u32,
+    home: Option<String>,
+    codex_home: Option<String>,
+}
+
+fn managed_agent_run_as_from_env(
+    current_euid: u32,
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Option<ManagedAgentRunAs> {
+    if current_euid != 0 {
+        return None;
+    }
+
+    let uid = parse_env_u32(get_env("SUDO_UID")?)?;
+    let gid = parse_env_u32(get_env("SUDO_GID")?)?;
+    if uid == 0 {
+        return None;
+    }
+
+    Some(ManagedAgentRunAs {
+        uid,
+        gid,
+        home: get_env("HOME").filter(|value| !value.trim().is_empty()),
+        codex_home: get_env("CODEX_HOME").filter(|value| !value.trim().is_empty()),
+    })
+}
+
+fn parse_env_u32(value: String) -> Option<u32> {
+    value.parse::<u32>().ok()
+}
+
+fn current_managed_agent_run_as() -> Option<ManagedAgentRunAs> {
+    managed_agent_run_as_from_env(unsafe { libc::geteuid() as u32 }, |key| {
+        std::env::var(key).ok()
+    })
+}
+
 #[derive(Debug)]
 struct AgentScopeMetadata {
     supervisor_mode: String,
@@ -809,6 +849,15 @@ fn spawn_managed_agent(
         .args(request.args())
         .current_dir(workspace_root)
         .kill_on_drop(true);
+    if let Some(run_as) = current_managed_agent_run_as() {
+        command.uid(run_as.uid).gid(run_as.gid);
+        if let Some(home) = run_as.home {
+            command.env("HOME", home);
+        }
+        if let Some(codex_home) = run_as.codex_home {
+            command.env("CODEX_HOME", codex_home);
+        }
+    }
     let child = command.spawn().map_err(|error| {
         format!(
             "failed to start managed agent command '{}': {error}",
@@ -1837,6 +1886,56 @@ mod tests {
         assert!(command.contains("TOKEN=<redacted>"));
         assert!(!command.contains("sk-test-secret"));
         assert!(!command.contains("plain-secret"));
+    }
+
+    #[test]
+    fn managed_agent_run_as_uses_sudo_operator_identity_for_root_observer() {
+        let env = BTreeMap::from([
+            ("SUDO_UID", "1000"),
+            ("SUDO_GID", "1001"),
+            ("HOME", "/home/operator"),
+            ("CODEX_HOME", "/home/operator/.codex"),
+        ]);
+
+        let run_as =
+            managed_agent_run_as_from_env(0, |key| env.get(key).map(|value| value.to_string()));
+
+        assert_eq!(
+            run_as,
+            Some(ManagedAgentRunAs {
+                uid: 1000,
+                gid: 1001,
+                home: Some("/home/operator".to_string()),
+                codex_home: Some("/home/operator/.codex".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn managed_agent_run_as_is_disabled_without_non_root_sudo_identity() {
+        let non_root_env = BTreeMap::from([("SUDO_UID", "1000"), ("SUDO_GID", "1001")]);
+        assert_eq!(
+            managed_agent_run_as_from_env(1000, |key| {
+                non_root_env.get(key).map(|value| value.to_string())
+            }),
+            None
+        );
+
+        let root_sudo_env = BTreeMap::from([("SUDO_UID", "0"), ("SUDO_GID", "0")]);
+        assert_eq!(
+            managed_agent_run_as_from_env(0, |key| {
+                root_sudo_env.get(key).map(|value| value.to_string())
+            }),
+            None
+        );
+
+        let incomplete_env = BTreeMap::from([("SUDO_UID", "1000")]);
+        assert_eq!(
+            managed_agent_run_as_from_env(0, |key| {
+                incomplete_env.get(key).map(|value| value.to_string())
+            }),
+            None
+        );
     }
 
     #[test]

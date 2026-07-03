@@ -21,6 +21,14 @@ require_contains() {
     grep -Fq -- "$needle" "$file" || fail "$file missing required text: $needle"
 }
 
+require_not_matches() {
+    local file="$1"
+    local pattern="$2"
+    if grep -Eq -- "$pattern" "$file"; then
+        fail "$file must not match: $pattern"
+    fi
+}
+
 runbook="docs/codex-live-demo-runbook.md"
 workload="scripts/run-codex-live-demo-workload.sh"
 credential_helper="scripts/read-demo-credential.py"
@@ -32,13 +40,18 @@ require_file "$credential_helper"
 for needle in \
     "apolysis observe" \
     "--agent-run -- codex" \
+    "codex exec --json" \
     "APOLYSIS_CODEX_DEMO_HOME" \
+    "CODEX_HOME" \
+    "Do not override HOME" \
+    "SUDO_UID/SUDO_GID" \
     "scripts/run-codex-live-demo-workload.sh" \
     "scripts/read-demo-credential.py" \
     "target/ebpf/apolysis_observer.bpf.o" \
     ".apolysis/codex-live-demo/timeline.agent-run.jsonl" \
     ".apolysis/codex-live-demo/intent.codex.jsonl" \
     ".apolysis/codex-live-demo/intent-correlation.jsonl" \
+    'find "$HOME/.codex/sessions"' \
     "apolysis intent ingest" \
     "apolysis intent correlate" \
     "missing_intent" \
@@ -48,6 +61,8 @@ for needle in \
     "asciinema"; do
     require_contains "$runbook" "$needle"
 done
+
+require_not_matches "$runbook" '(^|[[:space:]])HOME="\$APOLYSIS_CODEX_DEMO_HOME"'
 
 require_contains README.md "docs/codex-live-demo-runbook.md"
 require_contains README.zh-CN.md "docs/codex-live-demo-runbook.md"

@@ -72,9 +72,14 @@ asciinema rec "$APOLYSIS_CODEX_DEMO_ROOT/codex-live-demo.cast"
 Run the observer with Codex as the managed agent command:
 
 ```bash
+export APOLYSIS_CODEX_DEMO_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+export APOLYSIS_CODEX_DEMO_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+
 sudo -E env \
+  PATH="$PATH" \
+  HOME="$HOME" \
+  CODEX_HOME="$APOLYSIS_CODEX_DEMO_CODEX_HOME" \
   APOLYSIS_CODEX_DEMO_HOME="$APOLYSIS_CODEX_DEMO_HOME" \
-  HOME="$APOLYSIS_CODEX_DEMO_HOME" \
   ./target/debug/apolysis observe \
     --backend live \
     --session codex-live-demo \
@@ -82,9 +87,18 @@ sudo -E env \
     --output .apolysis/codex-live-demo/timeline.agent-run.jsonl \
     --bpf-object target/ebpf/apolysis_observer.bpf.o \
     --agent-kind codex \
-    --agent-run -- codex \
+    --agent-run -- codex exec --json \
+      -C "$PWD" \
+      --sandbox workspace-write \
+      --ask-for-approval never \
+      --output-last-message .apolysis/codex-live-demo/codex-last-message.txt \
       "Run ./scripts/run-codex-live-demo-workload.sh and report whether the Apolysis intent tests passed."
 ```
+
+Do not override HOME to the fake demo home. Codex needs the operator's normal
+HOME or CODEX_HOME to find its login state. When the observer itself is started
+through sudo, Apolysis drops the managed agent child back to the operator
+identity from `SUDO_UID/SUDO_GID`; the root process is only the observer.
 
 Expected retained files:
 
@@ -94,10 +108,24 @@ Expected retained files:
 - `.apolysis/codex-live-demo/intent-correlation.jsonl`
 - `.apolysis/codex-live-demo/codex-live-demo.cast` when `asciinema` is used
 
-Retain the Codex response-item JSONL for the same session as
-`.apolysis/codex-live-demo/codex-response-items.jsonl`. Keep only the minimum
-records needed for `apolysis intent ingest`; do not publish private chat text,
-host paths, tokens, or unrelated tool calls.
+Retain the Codex response-item JSONL for the same session. One practical local
+method is to copy the newest Codex session file created after
+`APOLYSIS_CODEX_DEMO_STARTED_AT`:
+
+```bash
+latest_codex_session="$(
+  find "$HOME/.codex/sessions" -type f -name '*.jsonl' \
+    -newermt "$APOLYSIS_CODEX_DEMO_STARTED_AT" |
+  sort |
+  tail -n 1
+)"
+
+test -n "$latest_codex_session"
+cp "$latest_codex_session" .apolysis/codex-live-demo/codex-response-items.jsonl
+```
+
+Keep only the minimum records needed for `apolysis intent ingest`; do not
+publish private chat text, host paths, tokens, or unrelated tool calls.
 
 ## Correlate Intent With Host Evidence
 
