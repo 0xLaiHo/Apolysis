@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1641,6 +1642,11 @@ fn redact_process_command_for_persistence(
 }
 
 fn redact_argv_resource(value: &str, redactor: &Redactor) -> (String, bool) {
+    if let Some(resource) = network_argument_resource(value) {
+        let redacted =
+            redactor.redact_resource(apolysis_core::EventType::NetworkConnect, &resource);
+        return (redacted.value, redacted.redacted);
+    }
     if !looks_like_path_argument(value) {
         return (value.to_string(), false);
     }
@@ -1651,6 +1657,16 @@ fn redact_argv_resource(value: &str, redactor: &Redactor) -> (String, bool) {
     };
     let redacted = redactor.redact_resource(event_type, value);
     (redacted.value, redacted.redacted)
+}
+
+fn network_argument_resource(value: &str) -> Option<String> {
+    let trimmed = value.trim_matches(|ch| matches!(ch, '\'' | '"' | ',' | ';'));
+    if trimmed.parse::<SocketAddr>().is_ok() {
+        return Some(trimmed.to_string());
+    }
+
+    let ip = trimmed.trim_start_matches('[').trim_end_matches(']');
+    ip.parse::<IpAddr>().ok().map(|_| ip.to_string())
 }
 
 fn looks_like_path_argument(value: &str) -> bool {
@@ -1954,7 +1970,7 @@ mod tests {
             "exec",
             None,
             Some("42".to_string()),
-            "argv:/usr/bin/codex exec --api-key sk-test-secret /workspace/.env /workspace/src/main.rs",
+            "argv:/usr/bin/codex exec --api-key sk-test-secret /workspace/.env /workspace/src/main.rs 127.0.0.1",
         );
         let canonical = CanonicalEvent::new(
             "session-a",
@@ -1973,10 +1989,12 @@ mod tests {
 
         assert!(persisted_raw.raw_payload.contains("--api-key <redacted>"));
         assert!(persisted_raw.raw_payload.contains("path_token:"));
+        assert!(persisted_raw.raw_payload.contains("address_token:"));
         assert!(persisted_raw.raw_payload.contains("/workspace/src/main.rs"));
         assert!(persisted_raw.raw_payload.contains("redacted:payload"));
         assert!(!persisted_raw.raw_payload.contains("sk-test-secret"));
         assert!(!persisted_raw.raw_payload.contains("/workspace/.env"));
+        assert!(!persisted_raw.raw_payload.contains("127.0.0.1"));
     }
 
     #[test]
@@ -1995,7 +2013,7 @@ mod tests {
             "exec",
             None,
             Some("42".to_string()),
-            "argv:/usr/bin/codex exec --api-key sk-test-secret /workspace/.env /workspace/src/main.rs",
+            "argv:/usr/bin/codex exec --api-key sk-test-secret /workspace/.env /workspace/src/main.rs 127.0.0.1",
         );
         let canonical = CanonicalEvent::new(
             "session-a",
@@ -2008,7 +2026,7 @@ mod tests {
             "exec",
         )
         .with_process_context(
-            "/usr/bin/codex exec --api-key sk-test-secret /workspace/.env /workspace/src/main.rs",
+            "/usr/bin/codex exec --api-key sk-test-secret /workspace/.env /workspace/src/main.rs 127.0.0.1",
             "/usr/bin/codex",
             1,
         );
@@ -2024,9 +2042,11 @@ mod tests {
         assert!(process_command.starts_with("/usr/bin/codex exec --api-key <redacted>"));
         assert!(process_command.contains("--api-key <redacted>"));
         assert!(process_command.contains("path_token:"));
+        assert!(process_command.contains("address_token:"));
         assert!(process_command.contains("/workspace/src/main.rs"));
         assert!(!process_command.contains("sk-test-secret"));
         assert!(!process_command.contains("/workspace/.env"));
+        assert!(!process_command.contains("127.0.0.1"));
     }
 
     #[test]

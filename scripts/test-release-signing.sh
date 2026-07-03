@@ -33,8 +33,11 @@ require_contains "$makefile" "test-release-signing:"
 
 for needle in \
     "signing_evidence_run_id" \
+    "APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID" \
+    "vars.APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID" \
     "require_signing_evidence" \
     "actions/download-artifact@v4" \
+    "env.APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID" \
     "./scripts/package-release-signing-evidence.sh" \
     "apolysis-release-signing-manifest.json" \
     "apolysis-release-signing-evidence.json" \
