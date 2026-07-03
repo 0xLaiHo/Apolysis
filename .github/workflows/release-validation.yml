@@ -47,6 +47,9 @@ jobs:
       - name: Run audit write budget contract
         run: make test-audit-write-budget
 
+      - name: Run offline hash-chain verification contract
+        run: make test-offline-hash-chain-verify
+
       - name: Run handoff runbook gate
         run: make test-release-validation-handoff
 
