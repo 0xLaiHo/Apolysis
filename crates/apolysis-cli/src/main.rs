@@ -554,6 +554,8 @@ struct ObservedEventForCorrelation {
     pid: u64,
     resource: String,
     process_command: Option<String>,
+    process_executable: Option<String>,
+    report_missing_intent: bool,
     runtime: RuntimeForCorrelation,
 }
 
@@ -613,12 +615,33 @@ fn correlate_intents(
                         })
                         .map(|(index, intent)| (index, intent, "process_command_exact"))
                 })
+            })
+            .or_else(|| {
+                if event.event_type != "exec" {
+                    return None;
+                }
+                intents
+                    .iter()
+                    .enumerate()
+                    .find(|(_, intent)| {
+                        intent.session_id == event.session_id
+                            && intent
+                                .command
+                                .as_deref()
+                                .and_then(command_executable)
+                                .map(|executable| {
+                                    event.process_executable.as_deref() == Some(executable)
+                                        || event.resource == executable
+                                })
+                                .unwrap_or(false)
+                    })
+                    .map(|(index, intent)| (index, intent, "process_executable"))
             });
 
         if let Some((index, intent, match_basis)) = matched {
             matched_intents[index] = true;
             records.push(intent_correlation_record(intent, event, match_basis));
-        } else {
+        } else if event.report_missing_intent {
             records.push(accountability_finding_record(
                 &event.session_id,
                 "missing_intent",
@@ -667,13 +690,15 @@ fn parse_observed_events(input: &str) -> Result<Vec<ObservedEventForCorrelation>
             string_field(value, "record_type") == Some("event")
                 && string_field(value, "raw_event_id").is_some()
                 && string_field(value, "event_type")
-                    .map(side_effect_event_type)
+                    .map(|event_type| side_effect_event_type(event_type) || event_type == "exec")
                     .unwrap_or(false)
         })
         .map(|value| {
+            let event_type = required_string_field(&value, "event_type")?.to_string();
             Ok(ObservedEventForCorrelation {
                 session_id: required_string_field(&value, "session_id")?.to_string(),
-                event_type: required_string_field(&value, "event_type")?.to_string(),
+                report_missing_intent: side_effect_event_type(&event_type),
+                event_type,
                 raw_event_id: required_string_field(&value, "raw_event_id")?.to_string(),
                 pid: value
                     .get("pid")
@@ -681,6 +706,8 @@ fn parse_observed_events(input: &str) -> Result<Vec<ObservedEventForCorrelation>
                     .unwrap_or_default(),
                 resource: required_string_field(&value, "resource")?.to_string(),
                 process_command: string_field(&value, "process_command").map(ToString::to_string),
+                process_executable: string_field(&value, "process_executable")
+                    .map(ToString::to_string),
                 runtime: RuntimeForCorrelation {
                     runtime: string_field(&value, "runtime")
                         .unwrap_or("local")
@@ -713,6 +740,17 @@ fn parse_jsonl(input: &str, label: &str) -> Result<Vec<serde_json::Value>, Strin
         .collect()
 }
 
+fn command_executable(command: &str) -> Option<&str> {
+    command.split_whitespace().next().filter(|value| {
+        value.starts_with('/')
+            || value.starts_with("./")
+            || value.starts_with("../")
+            || value
+                .chars()
+                .all(|ch| !matches!(ch, '\'' | '"' | '{' | '}' | '[' | ']'))
+    })
+}
+
 fn intent_correlation_record(
     intent: &IntentForCorrelation,
     event: &ObservedEventForCorrelation,
@@ -730,6 +768,7 @@ fn intent_correlation_record(
         "pid": event.pid,
         "resource": event.resource,
         "process_command": event.process_command,
+        "process_executable": event.process_executable,
         "command": intent.command,
     })
 }

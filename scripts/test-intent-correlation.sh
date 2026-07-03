@@ -24,6 +24,7 @@ for term in \
   'record_type`: always `intent_correlation`' \
   'match_basis' \
   'process_command_exact' \
+  'process_executable' \
   'record_type`: always `accountability_finding`' \
   'missing_intent' \
   'unobserved_intent' \

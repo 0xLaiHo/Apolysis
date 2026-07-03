@@ -33,7 +33,7 @@ impl Redactor {
             | EventType::FileTruncate
             | EventType::FileUnlink
             | EventType::FileRename => {
-                if Path::new(resource).starts_with(&self.workspace_root) {
+                if self.is_workspace_path(resource) {
                     RedactedValue {
                         value: resource.to_string(),
                         redacted: false,
@@ -79,6 +79,34 @@ impl Redactor {
         }
         token
     }
+
+    fn is_workspace_path(&self, resource: &str) -> bool {
+        let path = Path::new(resource);
+        if path.is_absolute() {
+            return path.starts_with(&self.workspace_root);
+        }
+        relative_path_stays_in_workspace(path)
+    }
+}
+
+fn relative_path_stays_in_workspace(path: &Path) -> bool {
+    let mut depth = 0_u32;
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(_) => {
+                depth = depth.saturating_add(1);
+            }
+            std::path::Component::ParentDir => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => return false,
+        }
+    }
+    true
 }
 
 pub fn redact_raw_event_for_persistence(

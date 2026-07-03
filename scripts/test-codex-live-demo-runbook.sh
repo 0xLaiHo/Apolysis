@@ -41,6 +41,7 @@ for needle in \
     "apolysis observe" \
     "--agent-run -- codex" \
     "codex exec --json" \
+    "approval_policy=\"never\"" \
     "APOLYSIS_CODEX_DEMO_HOME" \
     "CODEX_HOME" \
     "Do not override HOME" \
@@ -63,6 +64,7 @@ for needle in \
 done
 
 require_not_matches "$runbook" '(^|[[:space:]])HOME="\$APOLYSIS_CODEX_DEMO_HOME"'
+require_not_matches "$runbook" '--ask-for-approval'
 
 require_contains README.md "docs/codex-live-demo-runbook.md"
 require_contains README.zh-CN.md "docs/codex-live-demo-runbook.md"
