@@ -47,6 +47,9 @@ jobs:
       - name: Run Codex mismatch demo contract
         run: make test-codex-mismatch-demo
 
+      - name: Run Codex live demo runbook contract
+        run: make test-codex-live-demo-runbook
+
       - name: Run intent correlation contract
         run: make test-intent-correlation
 

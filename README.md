@@ -16,8 +16,9 @@ agent harness.
 [`docs/codex-intent-mismatch-demo.md`](docs/codex-intent-mismatch-demo.md).
 They replay a Codex run where declared intent is compared with host-side
 evidence and an unexpected fake credential read becomes a `missing_intent`
-finding. The final public asciinema/GIF is still planned after a real live run
-and adoptable release artifacts are available.
+finding. The live recording procedure is staged in
+[`docs/codex-live-demo-runbook.md`](docs/codex-live-demo-runbook.md). The
+final public asciinema/GIF is still planned after a real live run is captured.
 
 Apolysis is a Linux runtime accountability layer for AI agent workloads. It
 collects environment-owned evidence below the agent harness, correlates that
