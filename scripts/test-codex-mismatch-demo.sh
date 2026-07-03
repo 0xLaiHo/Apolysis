@@ -40,9 +40,6 @@ for needle in \
     require_contains "$demo_doc" "$needle"
 done
 
-require_contains README.md "docs/codex-intent-mismatch-demo.md"
-require_contains README.zh-CN.md "docs/codex-intent-mismatch-demo.md"
-
 require_contains "$codex_log" '"type":"response_item"'
 require_contains "$codex_log" '"type":"function_call"'
 require_contains "$codex_log" 'cargo test -p apolysis-cli --test intent'

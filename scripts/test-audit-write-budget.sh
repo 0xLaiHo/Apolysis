@@ -16,14 +16,6 @@ for term in \
   'observer-output-rotation' \
   'max_file_bytes' \
   'max_archived_files'; do
-  grep -Fq -- "$term" README.md || {
-    echo "README.md must document audit write budget term: $term" >&2
-    exit 1
-  }
-  grep -Fq -- "$term" README.zh-CN.md || {
-    echo "README.zh-CN.md must document audit write budget term: $term" >&2
-    exit 1
-  }
   grep -Fq -- "$term" docs/jsonl-schema-v1.md || {
     echo "docs/jsonl-schema-v1.md must document audit write budget term: $term" >&2
     exit 1

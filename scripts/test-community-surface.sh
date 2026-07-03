@@ -21,6 +21,14 @@ require_contains() {
     grep -Fq -- "$needle" "$file" || fail "$file missing required text: $needle"
 }
 
+require_not_contains() {
+    local file="$1"
+    local needle="$2"
+    if grep -Fq -- "$needle" "$file"; then
+        fail "$file must not contain: $needle"
+    fi
+}
+
 for file in \
     CONTRIBUTING.md \
     SECURITY.md \
@@ -97,13 +105,32 @@ for readme in README.md README.zh-CN.md; do
     require_contains "$readme" "Codex"
 done
 
-require_contains README.md "30-second summary"
-require_contains README.md "Demo status"
-require_contains README.md "environment-owned flight recorder"
+require_contains README.md "Linux runtime accountability layer"
 require_contains README.md "host-side evidence"
-require_contains README.zh-CN.md "30 秒摘要"
-require_contains README.zh-CN.md "Demo 状态"
-require_contains README.zh-CN.md "环境侧飞行记录仪"
-require_contains README.zh-CN.md "主机侧证据"
+require_contains README.md "append-only audit timeline"
+require_contains README.md "It is not a sandbox"
+require_contains README.md "## Architecture"
+require_contains README.md "Key parameters"
+require_contains README.md "Output:"
+require_contains README.zh-CN.md "Linux 运行时问责层"
+require_contains README.zh-CN.md "主机侧实际产生"
+require_contains README.zh-CN.md "追加式审计时间线"
+require_contains README.zh-CN.md "它不是沙箱"
+require_contains README.zh-CN.md "## 架构设计"
+require_contains README.zh-CN.md "参数说明"
+require_contains README.zh-CN.md "输出示例"
+
+require_not_contains README.md "Demo status"
+require_not_contains README.zh-CN.md "Demo 状态"
+require_not_contains README.md "final public asciinema/GIF"
+require_not_contains README.zh-CN.md "最终公开首发"
+require_not_contains README.zh-CN.md "runtime accountability layer"
+require_not_contains README.zh-CN.md "append-only audit timeline"
+require_not_contains README.zh-CN.md "side effects"
+
+readme_lines="$(wc -l < README.md)"
+readme_zh_lines="$(wc -l < README.zh-CN.md)"
+(( readme_lines <= 240 )) || fail "README.md is too long for the concise project front door"
+(( readme_zh_lines <= 240 )) || fail "README.zh-CN.md is too long for the concise project front door"
 
 printf 'community surface check passed\n'
