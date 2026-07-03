@@ -221,6 +221,22 @@ archives, and records `observer-output-rotation` metadata with
 `max_file_bytes` and `max_archived_files`. A single JSONL record is never split
 across files.
 
+### Verify a Shipped Daemon Timeline
+
+After copying a daemon session timeline out of a node, verify the hash-chain
+without mutating the evidence:
+
+```bash
+./target/debug/apolysis verify hash-chain \
+  --input /var/lib/apolysis/sessions/<session-id>/timeline.jsonl \
+  --output target/hash-chain-verification/<session-id>.report.json
+```
+
+The command exits `0` for a valid timeline, `1` when verification fails and a
+report is written, and `2` when the command cannot run. The report includes
+`record_count`, `last_sequence`, `last_record_hash`, `valid_bytes`,
+`total_bytes`, and `failure`.
+
 If another trusted supervisor has already started the agent, have that
 supervisor write an explicit registration file instead of asking the operator
 to choose a PID by process name:

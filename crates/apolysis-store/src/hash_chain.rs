@@ -28,6 +28,18 @@ pub struct HashChainStore {
     previous_hash: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HashChainVerificationReport {
+    pub path: PathBuf,
+    pub passed: bool,
+    pub record_count: usize,
+    pub last_sequence: u64,
+    pub last_record_hash: String,
+    pub valid_bytes: u64,
+    pub total_bytes: u64,
+    pub failure: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct Recovery {
     pub store: HashChainStore,
@@ -65,6 +77,32 @@ impl std::fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 
 impl HashChainStore {
+    pub fn verify(path: impl AsRef<Path>) -> Result<HashChainVerificationReport, StoreError> {
+        let path = path.as_ref().to_path_buf();
+        let bytes = std::fs::read(&path).map_err(io_error)?;
+        let total_bytes = bytes.len() as u64;
+        let validation = verify_existing(&bytes);
+        let valid_bytes = validation.valid_len as u64;
+        let failure = validation.failure.or_else(|| {
+            (valid_bytes != total_bytes).then(|| {
+                format!(
+                    "invalid or truncated tail after valid prefix at byte {}",
+                    validation.valid_len
+                )
+            })
+        });
+        Ok(HashChainVerificationReport {
+            path,
+            passed: failure.is_none(),
+            record_count: validation.records.len(),
+            last_sequence: validation.sequence,
+            last_record_hash: validation.previous_hash,
+            valid_bytes,
+            total_bytes,
+            failure,
+        })
+    }
+
     pub fn create_or_recover(path: impl AsRef<Path>) -> Result<Recovery, StoreError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -164,6 +202,62 @@ struct Validation {
     previous_hash: String,
     valid_len: usize,
     records: Vec<ChainRecord>,
+}
+
+struct ReadonlyValidation {
+    sequence: u64,
+    previous_hash: String,
+    valid_len: usize,
+    records: Vec<ChainRecord>,
+    failure: Option<String>,
+}
+
+fn verify_existing(bytes: &[u8]) -> ReadonlyValidation {
+    let mut sequence = 0_u64;
+    let mut previous_hash = ZERO_HASH.to_string();
+    let mut valid_len = 0_usize;
+    let mut records = Vec::new();
+    let newline_positions: Vec<usize> = bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, byte)| (*byte == b'\n').then_some(index))
+        .collect();
+    let mut start = 0_usize;
+
+    for newline in newline_positions {
+        let line = &bytes[start..newline];
+        let expected_sequence = sequence.saturating_add(1);
+        match validate_line(line, expected_sequence, &previous_hash) {
+            Ok(record) => {
+                sequence = record.sequence;
+                previous_hash = record.record_hash.clone();
+                records.push(record);
+                valid_len = newline + 1;
+                start = newline + 1;
+            }
+            Err(detail) => {
+                return ReadonlyValidation {
+                    sequence,
+                    previous_hash,
+                    valid_len,
+                    records,
+                    failure: Some(format!(
+                        "hash-chain integrity failure at {:?}: {}",
+                        Some(expected_sequence),
+                        detail
+                    )),
+                };
+            }
+        }
+    }
+
+    ReadonlyValidation {
+        sequence,
+        previous_hash,
+        valid_len,
+        records,
+        failure: None,
+    }
 }
 
 fn validate_existing(bytes: &[u8]) -> Result<Validation, StoreError> {

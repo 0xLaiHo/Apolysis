@@ -11,7 +11,7 @@ use apolysis_observer::{
     AgentRunRequest, FixtureObserveRequest, LiveObserveRequest, LiveScope,
 };
 use apolysis_runtime::{run_docker, run_local, DockerRunRequest, LocalRunRequest};
-use apolysis_store::JsonlRotationPolicy;
+use apolysis_store::{HashChainStore, JsonlRotationPolicy};
 use apolysis_visibility::{assess_visibility, RuntimeVisibilityProfile, VisibilityInput};
 use cli::{commands, options, values};
 
@@ -33,6 +33,7 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
         Some(commands::OBSERVE) => observe_command(args).await,
         Some(commands::INTENT) => intent_command(args).await,
         Some(commands::VISIBILITY) => visibility_command(args).await,
+        Some(commands::VERIFY) => verify_command(args).await,
         _ => Err(usage()),
     }
 }
@@ -155,6 +156,32 @@ async fn visibility_command(args: Vec<String>) -> Result<i32, String> {
     Ok(0)
 }
 
+async fn verify_command(args: Vec<String>) -> Result<i32, String> {
+    match args.get(1).map(String::as_str) {
+        Some(commands::HASH_CHAIN) => verify_hash_chain_command(args).await,
+        _ => Err(usage()),
+    }
+}
+
+async fn verify_hash_chain_command(args: Vec<String>) -> Result<i32, String> {
+    let request = VerifyHashChainRequest::parse(args)?;
+    let report = HashChainStore::verify(&request.input_path)
+        .map_err(|error| format!("failed to verify hash-chain timeline: {error}"))?;
+    if let Some(parent) = request.output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| format!("failed to create verification report parent: {error}"))?;
+        }
+    }
+    let output = serde_json::to_string_pretty(&report)
+        .map_err(|error| format!("failed to serialize verification report: {error}"))?;
+    tokio::fs::write(&request.output_path, format!("{output}\n"))
+        .await
+        .map_err(|error| format!("failed to write verification report: {error}"))?;
+    Ok(if report.passed { 0 } else { 1 })
+}
+
 async fn observe_command(args: Vec<String>) -> Result<i32, String> {
     let request = ObserveRequest::parse(args)?;
     match request.backend {
@@ -216,6 +243,12 @@ struct IntentCorrelateRequest {
     intent_input_path: String,
     timeline_input_path: String,
     output_path: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct VerifyHashChainRequest {
+    input_path: PathBuf,
+    output_path: PathBuf,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -327,6 +360,44 @@ impl IntentCorrelateRequest {
             timeline_input_path: timeline_input_path
                 .ok_or_else(|| format!("missing {}\n{}", options::TIMELINE_INPUT, usage()))?,
             output_path: output_path
+                .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
+        })
+    }
+}
+
+impl VerifyHashChainRequest {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        if args.first().map(String::as_str) != Some(commands::VERIFY)
+            || args.get(1).map(String::as_str) != Some(commands::HASH_CHAIN)
+        {
+            return Err(usage());
+        }
+
+        let mut input_path = None;
+        let mut output_path = None;
+        let mut i = 2;
+
+        while i < args.len() {
+            match args[i].as_str() {
+                options::INPUT => {
+                    i += 1;
+                    input_path = args.get(i).cloned();
+                }
+                options::OUTPUT => {
+                    i += 1;
+                    output_path = args.get(i).cloned();
+                }
+                unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
+            }
+            i += 1;
+        }
+
+        Ok(Self {
+            input_path: input_path
+                .map(PathBuf::from)
+                .ok_or_else(|| format!("missing {}\n{}", options::INPUT, usage()))?,
+            output_path: output_path
+                .map(PathBuf::from)
                 .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
         })
     }

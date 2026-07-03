@@ -130,6 +130,137 @@ fn corruption_before_a_later_record_fails_closed() {
     cleanup(&[path]);
 }
 
+#[test]
+fn offline_verification_reports_valid_hash_chain_without_mutating_file() {
+    let path = temp_path("verify-valid");
+    let original = {
+        let mut store = HashChainStore::create_or_recover(&path)
+            .expect("create")
+            .store;
+        store.append_json(1, r#"{"type":"first"}"#).unwrap();
+        let last = store.append_json(1, r#"{"type":"second"}"#).unwrap();
+        store.flush().unwrap();
+        assert_ne!(last.record_hash, ZERO_HASH);
+        std::fs::read_to_string(&path).expect("read original")
+    };
+
+    let report = HashChainStore::verify(&path).expect("verify valid chain");
+    assert!(report.passed, "{report:?}");
+    assert_eq!(report.record_count, 2);
+    assert_eq!(report.last_sequence, 2);
+    assert_ne!(report.last_record_hash, ZERO_HASH);
+    assert_eq!(report.valid_bytes, report.total_bytes);
+    assert!(report.failure.is_none());
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read after verification"),
+        original
+    );
+
+    cleanup(&[path]);
+}
+
+#[test]
+fn offline_verification_reports_truncated_tail_without_quarantine_mutation() {
+    let path = temp_path("verify-truncated");
+    let original_prefix = {
+        let mut store = HashChainStore::create_or_recover(&path)
+            .expect("create")
+            .store;
+        store.append_json(1, r#"{"type":"first"}"#).unwrap();
+        store.flush().unwrap();
+        std::fs::read_to_string(&path).expect("read original prefix")
+    };
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(br#"{"schema_version":1"#)
+        .unwrap();
+    let with_tail = std::fs::read_to_string(&path).expect("read appended tail");
+
+    let report = HashChainStore::verify(&path).expect("verify truncated chain");
+    assert!(!report.passed, "{report:?}");
+    assert_eq!(report.record_count, 1);
+    assert_eq!(report.last_sequence, 1);
+    assert!(report.valid_bytes < report.total_bytes);
+    assert!(
+        report
+            .failure
+            .as_deref()
+            .unwrap_or_default()
+            .contains("invalid or truncated tail"),
+        "{report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read after verification"),
+        with_tail
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path)
+            .expect("read after verification")
+            .trim_end_matches(r#"{"schema_version":1"#),
+        original_prefix
+    );
+    let quarantine_matches = std::fs::read_dir(path.parent().unwrap())
+        .expect("read temp dir")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("verify-truncated")
+                && entry.file_name().to_string_lossy().contains(".quarantine-")
+        })
+        .count();
+    assert_eq!(quarantine_matches, 0, "verify must be read-only");
+
+    cleanup(&[path]);
+}
+
+#[test]
+fn offline_verification_reports_valid_prefix_before_middle_corruption() {
+    let path = temp_path("verify-middle-corruption");
+    {
+        let mut store = HashChainStore::create_or_recover(&path)
+            .expect("create")
+            .store;
+        store.append_json(1, r#"{"type":"first"}"#).unwrap();
+        store.append_json(1, r#"{"type":"second"}"#).unwrap();
+        store.append_json(1, r#"{"type":"third"}"#).unwrap();
+        store.flush().unwrap();
+    }
+    let first_line_bytes = std::fs::read_to_string(&path)
+        .expect("read original")
+        .lines()
+        .next()
+        .expect("first line")
+        .len()
+        + 1;
+    corrupt_record_hash(&path, 1);
+    let before = std::fs::read_to_string(&path).expect("read before verification");
+
+    let report = HashChainStore::verify(&path).expect("verify corrupted chain");
+    assert!(!report.passed, "{report:?}");
+    assert_eq!(report.record_count, 1);
+    assert_eq!(report.last_sequence, 1);
+    assert_eq!(report.valid_bytes, first_line_bytes as u64);
+    assert!(report.total_bytes > report.valid_bytes);
+    assert!(
+        report
+            .failure
+            .as_deref()
+            .unwrap_or_default()
+            .contains("hash-chain integrity failure"),
+        "{report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read after verification"),
+        before
+    );
+
+    cleanup(&[path]);
+}
+
 fn corrupt_record_hash(path: &std::path::Path, line_index: usize) {
     let input = std::fs::read_to_string(path).unwrap();
     let mut lines: Vec<String> = input.lines().map(ToString::to_string).collect();

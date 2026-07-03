@@ -15,7 +15,9 @@ use tokio::io::{AsyncWriteExt, BufWriter as AsyncBufWriter};
 
 mod hash_chain;
 
-pub use hash_chain::{ChainRecord, HashChainStore, Recovery, StoreError, ZERO_HASH};
+pub use hash_chain::{
+    ChainRecord, HashChainStore, HashChainVerificationReport, Recovery, StoreError, ZERO_HASH,
+};
 
 pub struct JsonlStore {
     writer: BufWriter<File>,

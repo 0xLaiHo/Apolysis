@@ -193,6 +193,22 @@ timeline 即将超过字节预算时，Apolysis 会把 `timeline.agent-run.jsonl
 `observer-output-rotation` metadata，记录 `max_file_bytes` 和
 `max_archived_files`。单条 JSONL record 不会被拆到多个文件里。
 
+### 验证已导出的 daemon timeline
+
+从节点上复制 daemon session timeline 之后，可以用只读 hash-chain verifier
+验证 evidence，不会修改源文件：
+
+```bash
+./target/debug/apolysis verify hash-chain \
+  --input /var/lib/apolysis/sessions/<session-id>/timeline.jsonl \
+  --output target/hash-chain-verification/<session-id>.report.json
+```
+
+timeline 有效时命令退出 `0`；验证失败但 report 已写出时退出 `1`；参数错误、
+输入文件不可读等无法执行的情况退出 `2`。Report 包含 `record_count`、
+`last_sequence`、`last_record_hash`、`valid_bytes`、`total_bytes` 和
+`failure`。
+
 如果 agent 已经由另一个可信 supervisor 启动，不要让 operator 按进程名手动选择
 PID；应由该 supervisor 写出显式 registration file：
 
