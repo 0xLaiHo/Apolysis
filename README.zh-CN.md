@@ -21,6 +21,45 @@ Apolysis 是面向 AI 智能体工作负载的 Linux 运行时问责层。它记
 - 关联本地进程、Docker/containerd 和 Kubernetes 工作负载的运行时元数据。
 - 提供追加式 JSONL 证据、输出轮转、哈希链校验、策略发现和发布验证关卡。
 
+## 架构设计
+
+```text
+智能体 / 工具运行器
+  └─ 声明意图日志
+
+Apolysis 观测器
+  ├─ 实时 eBPF 事件
+  ├─ 进程树归属
+  ├─ 运行时元数据
+  └─ 策略评估
+
+Apolysis 关联层
+  ├─ 意图记录
+  ├─ 主机侧观测事件
+  └─ 问责发现
+
+追加式证据
+  ├─ JSONL 时间线
+  ├─ 本地轮转文件
+  └─ 可选哈希链校验
+```
+
+设计上分开三类边界：
+
+- 意图：智能体框架或工具运行器声明要做什么。
+- 隔离：运行时允许工作负载触及什么。
+- 证据：主机和运行时实际观测到了什么。
+
+核心模块：
+
+- `apolysis-cli`：命令行入口。
+- `apolysis-observer`：离线和实时观测后端。
+- `apolysis-core`：共享 JSONL 记录和模式类型。
+- `apolysis-runtime`：本地、Docker 和运行时元数据适配。
+- `apolysis-policy`：策略解析和决策逻辑。
+- `apolysis-store`：追加式 JSONL 和哈希链存储。
+- `apolysis-daemon`：面向长期运行场景的节点本地服务。
+
 ## 构建与测试
 
 ```bash
@@ -41,9 +80,16 @@ make build-ebpf
 make test-live
 ```
 
-## 最小使用方式
+## 示例：审计本地智能体命令
 
-观测一个由 Apolysis 托管启动的本地智能体命令：
+输入：
+
+- 已构建的二进制：`target/debug/apolysis`
+- 已构建的 BPF 对象：`target/ebpf/apolysis_observer.bpf.o`
+- 策略文件：`policies/local-dev.yaml`
+- 智能体命令：`codex exec --json "run the project tests"`
+
+命令：
 
 ```bash
 sudo -E ./target/debug/apolysis observe \
@@ -57,7 +103,35 @@ sudo -E ./target/debug/apolysis observe \
   --agent-run -- codex exec --json "run the project tests"
 ```
 
-摄入并关联声明意图：
+参数说明：
+
+- `--backend live`：使用实时 eBPF 观测后端。
+- `--session`：写入每条记录的稳定会话标识。
+- `--policy`：用于生成复查和通知发现的策略文件。
+- `--output`：JSONL 时间线输出路径。
+- `--bpf-object`：实时观测后端加载的 CO-RE BPF 对象。
+- `--workspace-root`：用于路径处理的工作区边界。
+- `--agent-kind`：智能体类型提示，例如 `codex`。
+- `--agent-run -- <command>`：由 Apolysis 启动智能体并掌握根进程树，避免让
+  使用者手动查找进程号。
+
+输出示例：
+
+```jsonl
+{"record_type":"event","event_type":"exec","resource":"codex"}
+{"record_type":"event","event_type":"file_open","resource":"path_token:..."}
+{"record_type":"policy_violation","rule_id":"credentials.deny_read","decision":"notify"}
+```
+
+## 示例：关联声明意图
+
+输入：
+
+- Codex 响应日志：`.apolysis/codex-live/codex-response-items.jsonl`
+- 主机观测时间线：`.apolysis/codex-live/timeline.agent-run.jsonl`
+- 会话标识：`codex-local-audit`
+
+命令：
 
 ```bash
 ./target/debug/apolysis intent ingest \
@@ -71,6 +145,14 @@ sudo -E ./target/debug/apolysis observe \
   --intent-input .apolysis/codex-live/intent.codex.jsonl \
   --timeline-input .apolysis/codex-live/timeline.agent-run.jsonl \
   --output .apolysis/codex-live/intent-correlation.jsonl
+```
+
+输出示例：
+
+```jsonl
+{"record_type":"intent","intent_source":"codex","declared_action":"shell.command"}
+{"record_type":"intent_correlation","match_basis":"process_executable"}
+{"record_type":"accountability_finding","kind":"missing_intent","decision":"review"}
 ```
 
 生成的时间线、Codex 日志和报告应放在 `.apolysis/` 或 `target/` 下。不要提交

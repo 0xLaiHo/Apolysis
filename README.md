@@ -28,6 +28,45 @@ agent harness.
 - Append-only JSONL evidence, output rotation, hash-chain verification, policy
   findings, and release-validation gates.
 
+## Architecture
+
+```text
+Agent / tool runner
+  └─ declared intent logs
+
+Apolysis observer
+  ├─ live eBPF events
+  ├─ process tree attribution
+  ├─ runtime metadata
+  └─ policy evaluation
+
+Apolysis correlation
+  ├─ intent records
+  ├─ observed host events
+  └─ accountability findings
+
+Append-only evidence
+  ├─ JSONL timeline
+  ├─ rotated local files
+  └─ optional hash-chain verification
+```
+
+The design keeps three boundaries separate:
+
+- Intent: what the harness or tool runner declared.
+- Isolation: what the runtime allowed the workload to reach.
+- Evidence: what the host and runtime actually observed.
+
+Core crates:
+
+- `apolysis-cli`: command-line entry point.
+- `apolysis-observer`: fixture and live observer backends.
+- `apolysis-core`: shared JSONL records and schema types.
+- `apolysis-runtime`: local, Docker, and runtime metadata adapters.
+- `apolysis-policy`: policy parser and decision logic.
+- `apolysis-store`: append-only JSONL and hash-chain storage.
+- `apolysis-daemon`: node-local service for longer-running deployments.
+
 ## Build And Test
 
 ```bash
@@ -48,9 +87,16 @@ Run the capability-aware live observer smoke test on a prepared Linux host:
 make test-live
 ```
 
-## Minimal Usage
+## Example: Audit A Local Agent Command
 
-Observe a managed local agent command:
+Input:
+
+- Built binary: `target/debug/apolysis`
+- Built BPF object: `target/ebpf/apolysis_observer.bpf.o`
+- Policy file: `policies/local-dev.yaml`
+- Agent command: `codex exec --json "run the project tests"`
+
+Command:
 
 ```bash
 sudo -E ./target/debug/apolysis observe \
@@ -64,7 +110,35 @@ sudo -E ./target/debug/apolysis observe \
   --agent-run -- codex exec --json "run the project tests"
 ```
 
-Ingest and correlate declared intent:
+Key parameters:
+
+- `--backend live`: use the live eBPF observer.
+- `--session`: stable session id written into every record.
+- `--policy`: policy file used for review and notification findings.
+- `--output`: JSONL timeline path.
+- `--bpf-object`: CO-RE observer object loaded by the live backend.
+- `--workspace-root`: workspace boundary used for path handling.
+- `--agent-kind`: agent adapter hint, for example `codex`.
+- `--agent-run -- <command>`: let Apolysis start the agent and own the root
+  process tree instead of asking the operator to find a PID manually.
+
+Output:
+
+```jsonl
+{"record_type":"event","event_type":"exec","resource":"codex"}
+{"record_type":"event","event_type":"file_open","resource":"path_token:..."}
+{"record_type":"policy_violation","rule_id":"credentials.deny_read","decision":"notify"}
+```
+
+## Example: Correlate Declared Intent
+
+Input:
+
+- Codex response-item log: `.apolysis/codex-live/codex-response-items.jsonl`
+- Observed timeline: `.apolysis/codex-live/timeline.agent-run.jsonl`
+- Session id: `codex-local-audit`
+
+Commands:
 
 ```bash
 ./target/debug/apolysis intent ingest \
@@ -78,6 +152,14 @@ Ingest and correlate declared intent:
   --intent-input .apolysis/codex-live/intent.codex.jsonl \
   --timeline-input .apolysis/codex-live/timeline.agent-run.jsonl \
   --output .apolysis/codex-live/intent-correlation.jsonl
+```
+
+Output:
+
+```jsonl
+{"record_type":"intent","intent_source":"codex","declared_action":"shell.command"}
+{"record_type":"intent_correlation","match_basis":"process_executable"}
+{"record_type":"accountability_finding","kind":"missing_intent","decision":"review"}
 ```
 
 Keep generated timelines, Codex logs, and reports under `.apolysis/` or
