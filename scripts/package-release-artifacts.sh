@@ -108,7 +108,7 @@ manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", 
 PY
 
 tar -czf "$package_path" -C "$tmpdir" "$package_base"
-sha256sum "$package_path" >"$checksum_path"
+(cd "$output_dir" && sha256sum "$package_name" >"$package_name.sha256")
 cp "$stage/$manifest_name" "$manifest_path"
 
 printf 'apolysis-release-artifacts: package=%s sha256=%s\n' "$package_path" "$(sha256 "$package_path")"

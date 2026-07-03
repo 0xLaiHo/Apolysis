@@ -94,7 +94,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: apolysis-linux-x86_64-release-artifacts
-          path: target/release-artifacts
+          path: target/release-artifacts/*
           if-no-files-found: error
           retention-days: 30
 
