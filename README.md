@@ -12,10 +12,12 @@ correlates host-side process, file, network, credential, runtime, and declared
 intent evidence into audit records that can be reviewed independently of the
 agent harness.
 
-**Demo status:** the first public launch demo is planned for P1. It will replace
-this placeholder with an asciinema/GIF showing a Codex run where declared intent
-is compared with host-side evidence. Until then, use the local audit examples
-below to reproduce the current workflow.
+**Demo status:** P1 demo starter assets are available in
+[`docs/codex-intent-mismatch-demo.md`](docs/codex-intent-mismatch-demo.md).
+They replay a Codex run where declared intent is compared with host-side
+evidence and an unexpected fake credential read becomes a `missing_intent`
+finding. The final public asciinema/GIF is still planned after a real live run
+and adoptable release artifacts are available.
 
 Apolysis is a Linux runtime accountability layer for AI agent workloads. It
 collects environment-owned evidence below the agent harness, correlates that
