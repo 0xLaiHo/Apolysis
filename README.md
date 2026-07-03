@@ -110,6 +110,11 @@ CLI, the CO-RE `apolysis_observer.bpf.o` object, a release manifest, a detached
 SHA-256 checksum, and release-signing evidence produced from retained F6
 signing evidence:
 
+Before publishing a new demo or release, run the
+[`Release Artifact Dry Run`](docs/release-artifact-dry-run.md) to prove the
+workflow can build and upload the artifact bundle without mutating a public
+GitHub Release.
+
 ```bash
 version=v0.2.0
 target=x86_64-unknown-linux-gnu

@@ -88,6 +88,10 @@ Apolysis 将 intent、isolation 和 evidence 分成三层：
 `apolysis_observer.bpf.o` object、release manifest、独立 SHA-256 checksum，以及
 由 retained F6 signing evidence 生成的 release-signing evidence：
 
+在发布新的 demo 或 release 之前，先运行
+[`Release Artifact Dry Run`](docs/release-artifact-dry-run.md)，验证 workflow
+可以构建并上传 artifact bundle，同时不修改公开 GitHub Release。
+
 ```bash
 version=v0.2.0
 target=x86_64-unknown-linux-gnu

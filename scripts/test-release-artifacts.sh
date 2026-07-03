@@ -37,11 +37,17 @@ for needle in \
     "contents: write" \
     "clang" \
     "llvm" \
-    "bpftool" \
+    "libbpf-dev" \
+    "linux-tools-common" \
+    "linux-tools-generic" \
+    "hash -r" \
+    "bpftool version" \
     "cargo build --release -p apolysis-cli --bin apolysis" \
-    "make build-ebpf" \
+    "APOLYSIS_REQUIRE_BPF=1 make build-ebpf" \
+    "test -s \"\$APOLYSIS_RELEASE_BPF_OBJECT\"" \
     "./scripts/package-release-artifacts.sh" \
     "actions/upload-artifact@v4" \
+    "target/release-artifacts/*" \
     "gh release upload"; do
     require_contains "$workflow" "$needle"
 done
@@ -83,6 +89,8 @@ checksum="$package.sha256"
 [[ -s "$package" ]] || fail "missing release tarball"
 [[ -s "$manifest" ]] || fail "missing release manifest"
 [[ -s "$checksum" ]] || fail "missing release checksum"
+grep -Eq "  $(basename "$package")$" "$checksum" \
+    || fail "checksum file must reference the package basename, not a build-workspace path"
 
 tar -tzf "$package" | grep -Fq -- "apolysis-v0.2.0-test-x86_64-unknown-linux-gnu/bin/apolysis" \
     || fail "tarball missing CLI binary"
@@ -121,6 +129,6 @@ assert artifacts["ebpf/apolysis_observer.bpf.o"]["kind"] == "core_bpf_object"
 assert artifacts["ebpf/apolysis_observer.bpf.o"]["sha256"] == sha256(bpf_path)
 PY
 
-sha256sum -c "$checksum" >/dev/null
+(cd "$output_dir" && sha256sum -c "$(basename "$checksum")" >/dev/null)
 
 printf 'release artifact check passed\n'

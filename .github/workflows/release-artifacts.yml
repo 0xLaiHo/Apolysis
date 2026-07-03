@@ -39,13 +39,22 @@ jobs:
       - name: Install release build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm bpftool
+          sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic
+          if ! bpftool version >/dev/null 2>&1; then
+            bpftool_path="$(find /usr/lib/linux-tools* -type f -name bpftool | sort -V | tail -n 1)"
+            [[ -n "$bpftool_path" ]]
+            sudo ln -sf "$bpftool_path" /usr/local/bin/bpftool
+            hash -r
+          fi
+          bpftool version
 
       - name: Build CLI binary
         run: cargo build --release -p apolysis-cli --bin apolysis
 
       - name: Build CO-RE BPF object
-        run: make build-ebpf
+        run: |
+          APOLYSIS_REQUIRE_BPF=1 make build-ebpf
+          test -s "$APOLYSIS_RELEASE_BPF_OBJECT"
 
       - name: Package release artifacts
         run: |
@@ -85,7 +94,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: apolysis-linux-x86_64-release-artifacts
-          path: target/release-artifacts
+          path: target/release-artifacts/*
           if-no-files-found: error
           retention-days: 30
 
