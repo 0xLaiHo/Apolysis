@@ -50,6 +50,9 @@ jobs:
       - name: Run Codex live demo runbook contract
         run: make test-codex-live-demo-runbook
 
+      - name: Run Codex live demo public assets contract
+        run: make test-codex-live-demo-public-assets
+
       - name: Run intent correlation contract
         run: make test-intent-correlation
 
