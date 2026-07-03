@@ -2,6 +2,7 @@
 .PHONY: test-codex-mismatch-demo
 .PHONY: test-codex-live-demo-runbook
 .PHONY: test-codex-live-demo-public-assets
+.PHONY: test-p1-launch-materials
 .PHONY: test-release-artifact-dry-run
 
 build: build-ebpf
@@ -46,6 +47,9 @@ test-codex-live-demo-runbook:
 
 test-codex-live-demo-public-assets:
 	./scripts/test-codex-live-demo-public-assets.sh
+
+test-p1-launch-materials:
+	./scripts/test-p1-launch-materials.sh
 
 test-local-agent-command-attribution:
 	./scripts/test-local-agent-command-attribution.sh

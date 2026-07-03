@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="620" viewBox="0 0 1120 620" role="img" aria-labelledby="title desc">
+  <title id="title">Apolysis Codex live demo timeline</title>
+  <desc id="desc">A static terminal-style summary showing Codex declaring a workload, Apolysis observing host-side evidence, intent correlation by process_executable, and a missing_intent finding with a redacted path_token target.</desc>
+  <rect width="1120" height="620" rx="16" fill="#0d1117"/>
+  <rect x="28" y="28" width="1064" height="564" rx="12" fill="#111827" stroke="#334155" stroke-width="2"/>
+  <circle cx="58" cy="58" r="7" fill="#ef4444"/>
+  <circle cx="82" cy="58" r="7" fill="#f59e0b"/>
+  <circle cx="106" cy="58" r="7" fill="#22c55e"/>
+  <text x="132" y="64" fill="#cbd5e1" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">codex-live-demo / validated_local_live</text>
+
+  <text x="58" y="122" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">$ apolysis observe --agent-run -- codex exec --json ...</text>
+
+  <rect x="58" y="154" width="1004" height="86" rx="8" fill="#172033" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="82" y="188" fill="#60a5fa" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">1. Codex declares</text>
+  <text x="82" y="220" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">command=./scripts/run-codex-live-demo-workload.sh</text>
+
+  <rect x="58" y="262" width="1004" height="86" rx="8" fill="#13251d" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="82" y="296" fill="#4ade80" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">2. Apolysis observes</text>
+  <text x="82" y="328" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">event_type=exec match_basis=process_executable timeline_lines=79949</text>
+
+  <rect x="58" y="370" width="1004" height="86" rx="8" fill="#2a1f12" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="82" y="404" fill="#fbbf24" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">3. Side effect appears</text>
+  <text x="82" y="436" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">rule_id=credentials.deny_read target=path_token:*</text>
+
+  <rect x="58" y="478" width="1004" height="74" rx="8" fill="#2b1622" stroke="#ec4899" stroke-width="1.5"/>
+  <text x="82" y="512" fill="#f472b6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">4. Accountability finding</text>
+  <text x="82" y="542" fill="#e5e7eb" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">kind=missing_intent decision=review evidence_boundary=host_boundary</text>
+ </svg>

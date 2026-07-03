@@ -17,7 +17,13 @@ runtime 和声明意图证据关联为可审计 records，供团队独立于 age
 [`docs/codex-live-demo-runbook.md`](docs/codex-live-demo-runbook.md)。privileged
 live path 已在本地验证，脱敏后的公开摘录已放在
 [`docs/codex-live-demo-public-assets.md`](docs/codex-live-demo-public-assets.md)。
-最终公开首发用的 asciinema/GIF 仍在计划中。
+第一版静态 launch visual 和英文 write-up 已可用；最终公开首发用的 asciinema/GIF
+仍在计划中。
+
+![Apolysis Codex live demo timeline](docs/assets/codex-live-demo/terminal-demo.svg)
+
+Launch write-up:
+[`Apolysis: A Flight Recorder For AI Coding Agents`](docs/blog/apolysis-flight-recorder-for-ai-coding-agents.md)。
 
 Apolysis 是一个面向 AI Agent workload 的 Linux 运行时问责层。它在 agent
 harness 之下采集由环境拥有者掌握的证据，将这些证据与声明意图和 runtime metadata

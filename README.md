@@ -21,7 +21,13 @@ finding. The live recording procedure is staged in
 privileged live path has been validated locally, and the scrubbed public
 excerpt is now available in
 [`docs/codex-live-demo-public-assets.md`](docs/codex-live-demo-public-assets.md).
-The final public asciinema/GIF is still planned.
+The first static launch visual and write-up are available below; the final
+public asciinema/GIF is still planned.
+
+![Apolysis Codex live demo timeline](docs/assets/codex-live-demo/terminal-demo.svg)
+
+Launch write-up:
+[`Apolysis: A Flight Recorder For AI Coding Agents`](docs/blog/apolysis-flight-recorder-for-ai-coding-agents.md).
 
 Apolysis is a Linux runtime accountability layer for AI agent workloads. It
 collects environment-owned evidence below the agent harness, correlates that

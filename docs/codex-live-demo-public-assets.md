@@ -38,6 +38,10 @@ credential finding target is represented only as a redacted `path_token:*`.
   finding.
 - `docs/assets/codex-live-demo/terminal-transcript.txt`: a scrubbed terminal
   transcript for README screenshot, GIF, or asciinema planning.
+- `docs/assets/codex-live-demo/terminal-demo.svg`: a static README-first visual
+  derived from the scrubbed transcript.
+- `docs/blog/apolysis-flight-recorder-for-ai-coding-agents.md`: the first
+  English launch write-up for the live demo story.
 
 ## Redaction Rules
 
@@ -57,6 +61,7 @@ Run the gate locally:
 
 ```bash
 make test-codex-live-demo-public-assets
+make test-p1-launch-materials
 ```
 
 ## Launch Use
