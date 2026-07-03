@@ -92,11 +92,14 @@ checksum="$package.sha256"
 grep -Eq "  $(basename "$package")$" "$checksum" \
     || fail "checksum file must reference the package basename, not a build-workspace path"
 
-tar -tzf "$package" | grep -Fq -- "apolysis-v0.2.0-test-x86_64-unknown-linux-gnu/bin/apolysis" \
+tar_listing="$tmpdir/package-contents.txt"
+tar -tzf "$package" >"$tar_listing"
+
+grep -Fq -- "apolysis-v0.2.0-test-x86_64-unknown-linux-gnu/bin/apolysis" "$tar_listing" \
     || fail "tarball missing CLI binary"
-tar -tzf "$package" | grep -Fq -- "apolysis-v0.2.0-test-x86_64-unknown-linux-gnu/ebpf/apolysis_observer.bpf.o" \
+grep -Fq -- "apolysis-v0.2.0-test-x86_64-unknown-linux-gnu/ebpf/apolysis_observer.bpf.o" "$tar_listing" \
     || fail "tarball missing observer BPF object"
-tar -tzf "$package" | grep -Fq -- "apolysis-v0.2.0-test-x86_64-unknown-linux-gnu/apolysis-release-manifest.json" \
+grep -Fq -- "apolysis-v0.2.0-test-x86_64-unknown-linux-gnu/apolysis-release-manifest.json" "$tar_listing" \
     || fail "tarball missing embedded manifest"
 
 python3 - "$manifest" "$package" "$fixture_bin" "$fixture_bpf" <<'PY'
