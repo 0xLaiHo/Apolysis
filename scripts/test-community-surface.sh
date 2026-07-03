@@ -91,6 +91,19 @@ for readme in README.md README.zh-CN.md; do
     require_contains "$readme" "SECURITY.md"
     require_contains "$readme" "docs/threat-model.md"
     require_contains "$readme" "docs/starter-issues.md"
+    require_contains "$readme" "actions/workflows/release-validation.yml/badge.svg"
+    require_contains "$readme" "img.shields.io/github/v/release/0xLaiHo/Apolysis"
+    require_contains "$readme" "img.shields.io/github/license/0xLaiHo/Apolysis"
+    require_contains "$readme" "Codex"
 done
+
+require_contains README.md "30-second summary"
+require_contains README.md "Demo status"
+require_contains README.md "environment-owned flight recorder"
+require_contains README.md "host-side evidence"
+require_contains README.zh-CN.md "30 秒摘要"
+require_contains README.zh-CN.md "Demo 状态"
+require_contains README.zh-CN.md "环境侧飞行记录仪"
+require_contains README.zh-CN.md "主机侧证据"
 
 printf 'community surface check passed\n'

@@ -1,6 +1,21 @@
 # Apolysis
 
+[![Release Validation](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml/badge.svg)](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml)
+[![Latest Release](https://img.shields.io/github/v/release/0xLaiHo/Apolysis?sort=semver)](https://github.com/0xLaiHo/Apolysis/releases)
+[![License](https://img.shields.io/github/license/0xLaiHo/Apolysis)](LICENSE)
+
 [English](README.md) | [Simplified Chinese](README.zh-CN.md)
+
+**30-second summary:** Apolysis is an environment-owned flight recorder for AI
+agent workloads. It records what an agent session actually did on Linux, then
+correlates host-side process, file, network, credential, runtime, and declared
+intent evidence into audit records that can be reviewed independently of the
+agent harness.
+
+**Demo status:** the first public launch demo is planned for P1. It will replace
+this placeholder with an asciinema/GIF showing a Codex run where declared intent
+is compared with host-side evidence. Until then, use the local audit examples
+below to reproduce the current workflow.
 
 Apolysis is a Linux runtime accountability layer for AI agent workloads. It
 collects environment-owned evidence below the agent harness, correlates that
