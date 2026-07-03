@@ -1,0 +1,8 @@
+"record_type":"intent_correlation"
+"intent_id":"codex:call-run-tests"
+"match_basis":"process_command_exact"
+"raw_event_id":"codex-mismatch-demo:event:0000000000000001"
+"record_type":"accountability_finding"
+"kind":"missing_intent"
+"evidence_ref":"codex-mismatch-demo:event:0000000000000002"
+"evidence_boundary":"host_boundary"

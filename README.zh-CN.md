@@ -10,9 +10,11 @@
 一次 agent session 在 Linux 上实际做了什么，并把主机侧进程、文件、网络、凭证、
 runtime 和声明意图证据关联为可审计 records，供团队独立于 agent harness 复查。
 
-**Demo 状态：**第一个公开首发 demo 规划在 P1 阶段产出。届时这里会替换为
-asciinema/GIF，展示 Codex run 中声明意图与主机侧证据的对比。在此之前，可以使用
-下文的本地审计示例复现当前 workflow。
+**Demo 状态：**P1 demo starter 资产已放在
+[`docs/codex-intent-mismatch-demo.md`](docs/codex-intent-mismatch-demo.md)。
+它通过 fixture 复现 Codex run 中声明意图与主机侧证据的对比，并把一次意外的假凭证
+读取归结为 `missing_intent` finding。最终公开首发用的 asciinema/GIF 仍需等真实
+live run 和可复现 release artifact 完成后替换。
 
 Apolysis 是一个面向 AI Agent workload 的 Linux 运行时问责层。它在 agent
 harness 之下采集由环境拥有者掌握的证据，将这些证据与声明意图和 runtime metadata

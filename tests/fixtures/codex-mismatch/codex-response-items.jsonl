@@ -1,0 +1,2 @@
+{"type":"response_item","payload":{"type":"function_call","id":"call-run-tests","name":"exec_command","arguments":"{\"cmd\":\"cargo test -p apolysis-cli --test intent\"}"}}
+{"type":"message","role":"assistant","content":"I ran the apolysis intent tests."}

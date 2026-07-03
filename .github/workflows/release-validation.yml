@@ -41,6 +41,9 @@ jobs:
       - name: Run community surface contract
         run: make test-community-surface
 
+      - name: Run Codex mismatch demo contract
+        run: make test-codex-mismatch-demo
+
       - name: Run intent correlation contract
         run: make test-intent-correlation
 
