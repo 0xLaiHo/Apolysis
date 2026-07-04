@@ -60,3 +60,19 @@ fn command_redaction_preserves_workspace_relative_paths() {
     assert!(!redacted.value.contains("./.env"));
     assert_eq!(redacted.value.matches("path_token:").count(), 3);
 }
+
+#[test]
+fn command_redaction_masks_ip_and_socket_arguments() {
+    let redacted = redact_command_text_for_persistence(
+        "session-a",
+        std::path::Path::new("/workspace/project"),
+        "python3 tests/fixtures/connect.py 127.0.0.1 1.1.1.1:443 '[::1]'",
+    );
+
+    assert!(redacted.redacted);
+    assert!(!redacted.value.contains("127.0.0.1"));
+    assert!(!redacted.value.contains("1.1.1.1"));
+    assert!(!redacted.value.contains("::1"));
+    assert_eq!(redacted.value.matches("address_token:").count(), 3);
+    assert!(redacted.value.contains(":port:443"));
+}

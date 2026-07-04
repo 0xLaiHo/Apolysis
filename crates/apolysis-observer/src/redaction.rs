@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use apolysis_core::{EventType, RawKernelEvent};
@@ -201,6 +202,9 @@ pub fn redact_command_text_for_persistence(
 }
 
 fn redact_command_argument_resource(redactor: &Redactor, value: &str) -> RedactedValue {
+    if let Some(resource) = network_argument_resource(value) {
+        return redactor.redact_resource(EventType::NetworkConnect, &resource);
+    }
     if !looks_like_path_argument(value) {
         return RedactedValue {
             value: value.to_string(),
@@ -213,6 +217,16 @@ fn redact_command_argument_resource(redactor: &Redactor, value: &str) -> Redacte
         EventType::FileOpen
     };
     redactor.redact_resource(event_type, value)
+}
+
+fn network_argument_resource(value: &str) -> Option<String> {
+    let trimmed = value.trim_matches(|ch| matches!(ch, '\'' | '"' | ',' | ';'));
+    if trimmed.parse::<SocketAddr>().is_ok() {
+        return Some(trimmed.to_string());
+    }
+
+    let ip = trimmed.trim_start_matches('[').trim_end_matches(']');
+    ip.parse::<IpAddr>().ok().map(|_| ip.to_string())
 }
 
 fn secret_flag(value: &str) -> bool {

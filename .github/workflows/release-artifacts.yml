@@ -32,6 +32,7 @@ jobs:
       APOLYSIS_RELEASE_BINARY: target/release/apolysis
       APOLYSIS_RELEASE_BPF_OBJECT: target/ebpf/apolysis_observer.bpf.o
       APOLYSIS_RELEASE_OUTPUT_DIR: target/release-artifacts
+      APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID: ${{ inputs.signing_evidence_run_id || vars.APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,11 +69,11 @@ jobs:
           APOLYSIS_RELEASE_VERSION="$release_version" ./scripts/package-release-artifacts.sh
 
       - name: Download retained signing evidence
-        if: ${{ inputs.signing_evidence_run_id != '' }}
+        if: ${{ env.APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID != '' }}
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.signing_evidence_run_id }}
+          run-id: ${{ env.APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID }}
           path: target/release-signing-input
 
       - name: Package release signing evidence

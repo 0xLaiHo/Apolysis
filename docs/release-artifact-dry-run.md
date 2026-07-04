@@ -102,6 +102,9 @@ For a real release:
 
 - use a dedicated `release/<version>` branch from `main`;
 - attach retained signing evidence when `require_signing_evidence=true`;
+- before pushing the final tag, set
+  `APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID` to the GitHub Actions run id that
+  contains the retained release-signing evidence artifacts;
 - push the final `v*` tag only after release validation and review;
 - verify the GitHub Release contains the tarball, checksum, release manifest,
   signing manifest, and retained signing evidence artifacts.
