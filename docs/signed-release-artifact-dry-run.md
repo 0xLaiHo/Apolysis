@@ -156,6 +156,9 @@ candidate review. It is not the final `v0.2.0` publication by itself.
 
 For final publication:
 
+- follow the dedicated
+  [v0.2.0 Release Publication](v0.2.0-release-publication.md) checklist;
+  the checked-in path is `docs/v0.2.0-release-publication.md`;
 - create a dedicated `release/<version>` branch from `main`;
 - rerun release validation on the branch;
 - push the final `v*` tag only after review;
