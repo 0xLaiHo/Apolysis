@@ -44,6 +44,9 @@ jobs:
       - name: Run signed release artifact dry-run contract
         run: make test-signed-release-artifact-dry-run
 
+      - name: Run v0.2.0 release publication readiness contract
+        run: make test-release-publication-readiness
+
       - name: Run community surface contract
         run: make test-community-surface
 
