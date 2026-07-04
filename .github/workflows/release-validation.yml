@@ -62,6 +62,9 @@ jobs:
       - name: Run offline hash-chain verification contract
         run: make test-offline-hash-chain-verify
 
+      - name: Run timeline shipping contract
+        run: make test-timeline-shipping
+
       - name: Run handoff runbook gate
         run: make test-release-validation-handoff
 
