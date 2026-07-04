@@ -165,6 +165,7 @@ sudo -E ./target/debug/apolysis observe \
 - [威胁模型](docs/threat-model.md)
 - [发布产物预演](docs/release-artifact-dry-run.md)
 - [哈希链校验](docs/hash-chain-verification.md)
+- [时间线外运](docs/timeline-shipping.md)
 - [Codex 实时演示运行手册](docs/codex-live-demo-runbook.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)
