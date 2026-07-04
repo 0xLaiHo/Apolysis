@@ -3,6 +3,7 @@
 .PHONY: test-codex-live-demo-runbook
 .PHONY: test-codex-live-demo-public-assets
 .PHONY: test-release-artifact-dry-run
+.PHONY: test-signed-release-artifact-dry-run
 
 build: build-ebpf
 	cargo build --workspace
@@ -34,6 +35,9 @@ test-release-signing:
 
 test-release-artifact-dry-run:
 	./scripts/test-release-artifact-dry-run.sh
+
+test-signed-release-artifact-dry-run:
+	./scripts/test-signed-release-artifact-dry-run.sh
 
 test-community-surface:
 	./scripts/test-community-surface.sh
