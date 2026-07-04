@@ -9,6 +9,10 @@ This is a workflow-dispatch dry run. It uploads an Actions artifact bundle only.
 A tag push is the path that creates or updates a GitHub Release and runs
 `gh release upload`.
 
+After repository AWS OIDC and KMS settings are configured, run the signed
+variant in [Signed Release Artifact Dry Run](signed-release-artifact-dry-run.md)
+before treating the artifact path as ready for public release candidates.
+
 ## Run The Dry Run
 
 Choose a non-release version label that cannot be confused with a published tag:
@@ -83,14 +87,14 @@ Inspect package contents:
 tar -tzf "apolysis-${version}-x86_64-unknown-linux-gnu.tar.gz" | sort
 ```
 
-The tarball must contain:
+The tarball must contain these entries under the package root:
 
-- `bin/apolysis`
-- `ebpf/apolysis_observer.bpf.o`
-- `apolysis-release-manifest.json`
-- `README.md`
-- `README.zh-CN.md`
-- `docs/jsonl-schema-v1.md`
+- `apolysis-${version}-x86_64-unknown-linux-gnu/bin/apolysis`
+- `apolysis-${version}-x86_64-unknown-linux-gnu/ebpf/apolysis_observer.bpf.o`
+- `apolysis-${version}-x86_64-unknown-linux-gnu/apolysis-release-manifest.json`
+- `apolysis-${version}-x86_64-unknown-linux-gnu/README.md`
+- `apolysis-${version}-x86_64-unknown-linux-gnu/README.zh-CN.md`
+- `apolysis-${version}-x86_64-unknown-linux-gnu/docs/jsonl-schema-v1.md`
 
 ## Publishing Boundary
 

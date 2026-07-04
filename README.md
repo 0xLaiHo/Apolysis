@@ -170,6 +170,7 @@ Keep generated timelines, Codex logs, and reports under `.apolysis/` or
 - [JSONL schema](docs/jsonl-schema-v1.md)
 - [Threat model](docs/threat-model.md)
 - [Release artifact dry run](docs/release-artifact-dry-run.md)
+- [Signed release artifact dry run](docs/signed-release-artifact-dry-run.md)
 - [Hash-chain verification](docs/hash-chain-verification.md)
 - [Timeline shipping](docs/timeline-shipping.md)
 - [Codex live demo runbook](docs/codex-live-demo-runbook.md)
