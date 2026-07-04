@@ -9,6 +9,7 @@ cd "$repo_root"
 workflow=".github/workflows/release-artifacts.yml"
 packager="scripts/package-release-artifacts.sh"
 signer="scripts/package-release-signing-evidence.sh"
+aws_kms_signer="scripts/test-production-hardening-aws-kms-signing.sh"
 makefile="Makefile"
 
 fail() {
@@ -29,6 +30,7 @@ require_contains() {
 require_file "$workflow"
 require_file "$packager"
 require_file "$signer"
+require_file "$aws_kms_signer"
 require_contains "$makefile" "test-release-signing:"
 
 for needle in \
@@ -36,6 +38,14 @@ for needle in \
     "APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID" \
     "vars.APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID" \
     "require_signing_evidence" \
+    "id-token: write" \
+    "aws-actions/configure-aws-credentials@v4" \
+    "APOLYSIS_PRODUCTION_HARDENING_AWS_ROLE_TO_ASSUME" \
+    "APOLYSIS_PRODUCTION_HARDENING_AWS_KMS_KEY_ID" \
+    "APOLYSIS_PRODUCTION_HARDENING_RELEASE_MANIFEST" \
+    "scripts/test-production-hardening-aws-kms-signing.sh" \
+    "APOLYSIS_RELEASE_SIGNING_EVIDENCE=" \
+    "APOLYSIS_RELEASE_SIGNING_REPORT=" \
     "actions/download-artifact@v4" \
     "env.APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID" \
     "./scripts/package-release-signing-evidence.sh" \
@@ -55,6 +65,13 @@ for needle in \
     "apolysis-release-signing-manifest.json" \
     "release_manifest_sha256"; do
     require_contains "$signer" "$needle"
+done
+
+for needle in \
+    "APOLYSIS_PRODUCTION_HARDENING_RELEASE_MANIFEST" \
+    'cp "$release_manifest_source" "$release_manifest"' \
+    "release_manifest_sha256"; do
+    require_contains "$aws_kms_signer" "$needle"
 done
 
 tmpdir="$(mktemp -d "$repo_root/target/release-signing-test.XXXXXX")"

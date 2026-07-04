@@ -26,7 +26,7 @@ agent harness.
 - Runtime metadata correlation for local processes, Docker/containerd, and
   Kubernetes workloads.
 - Append-only JSONL evidence, output rotation, hash-chain verification, policy
-  findings, and release-validation gates.
+  findings, release-validation gates, and signed release-artifact handoff.
 
 ## Architecture
 

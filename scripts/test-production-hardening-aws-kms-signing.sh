@@ -57,7 +57,17 @@ verify_log="$output_dir/openssl-verify.out"
 evidence="$output_dir/apolysis-production-hardening-aws-kms-signing-evidence.json"
 report="$output_dir/apolysis-production-hardening-aws-kms-signing-report.json"
 
-cat >"$release_manifest" <<'JSON'
+release_manifest_source="${APOLYSIS_PRODUCTION_HARDENING_RELEASE_MANIFEST:-}"
+if [[ -n "$release_manifest_source" ]]; then
+    [[ -f "$release_manifest_source" ]] || {
+        echo "apolysis-production-hardening: APOLYSIS_PRODUCTION_HARDENING_RELEASE_MANIFEST does not exist: $release_manifest_source" >&2
+        exit 2
+    }
+    if [[ "$release_manifest_source" != "$release_manifest" ]]; then
+        cp "$release_manifest_source" "$release_manifest"
+    fi
+else
+    cat >"$release_manifest" <<'JSON'
 {
   "schema": "apolysis.dev/production-hardening-release-manifest/v1",
   "phase": "production-hardening.aws-kms-signing",
@@ -68,6 +78,7 @@ cat >"$release_manifest" <<'JSON'
   }
 }
 JSON
+fi
 
 openssl dgst -sha256 -binary "$release_manifest" >"$release_manifest_digest_bin"
 

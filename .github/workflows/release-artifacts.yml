@@ -27,12 +27,19 @@ jobs:
   linux-x86_64:
     name: linux x86_64 release artifacts
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
     env:
       APOLYSIS_RELEASE_TARGET: x86_64-unknown-linux-gnu
       APOLYSIS_RELEASE_BINARY: target/release/apolysis
       APOLYSIS_RELEASE_BPF_OBJECT: target/ebpf/apolysis_observer.bpf.o
       APOLYSIS_RELEASE_OUTPUT_DIR: target/release-artifacts
       APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID: ${{ inputs.signing_evidence_run_id || vars.APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID }}
+      APOLYSIS_PRODUCTION_HARDENING_AWS_ROLE_TO_ASSUME: ${{ secrets.ProductionHardening_AWS_ROLE_TO_ASSUME }}
+      APOLYSIS_PRODUCTION_HARDENING_AWS_KMS_KEY_ID: ${{ secrets.ProductionHardening_AWS_KMS_KEY_ID }}
+      APOLYSIS_PRODUCTION_HARDENING_AWS_REGION: ${{ vars.ProductionHardening_AWS_REGION }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,6 +74,34 @@ jobs:
           fi
           [[ -n "$release_version" ]]
           APOLYSIS_RELEASE_VERSION="$release_version" ./scripts/package-release-artifacts.sh
+
+      - name: Install AWS CLI for release signing
+        if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.require_signing_evidence) }}
+        run: |
+          python3 -m pip install --user awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure AWS credentials for release signing
+        if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.require_signing_evidence) }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.APOLYSIS_PRODUCTION_HARDENING_AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.APOLYSIS_PRODUCTION_HARDENING_AWS_REGION }}
+
+      - name: Sign release manifest with AWS KMS
+        if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.require_signing_evidence) }}
+        env:
+          APOLYSIS_CONFIRM_PRODUCTION_HARDENING_AWS_KMS_SIGNING: "1"
+          APOLYSIS_PRODUCTION_HARDENING_RELEASE_MANIFEST: target/release-artifacts/apolysis-release-manifest.json
+        run: |
+          set -euo pipefail
+          ./scripts/test-production-hardening-aws-kms-signing.sh
+          evidence="$(find target -path '*/apolysis-production-hardening-aws-kms-signing-evidence.json' -type f | sort | tail -n 1)"
+          report="$(find target -path '*/apolysis-production-hardening-aws-kms-signing-report.json' -type f | sort | tail -n 1)"
+          test -n "$evidence"
+          test -n "$report"
+          echo "APOLYSIS_RELEASE_SIGNING_EVIDENCE=$evidence" >> "$GITHUB_ENV"
+          echo "APOLYSIS_RELEASE_SIGNING_REPORT=$report" >> "$GITHUB_ENV"
 
       - name: Download retained signing evidence
         if: ${{ env.APOLYSIS_RELEASE_SIGNING_EVIDENCE_RUN_ID != '' }}
