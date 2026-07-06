@@ -49,6 +49,9 @@ for needle in \
     "ProductionHardening_AWS_ROLE_TO_ASSUME" \
     "ProductionHardening_AWS_KMS_KEY_ID" \
     "ProductionHardening_AWS_REGION" \
+    "sts:AssumeRoleWithWebIdentity" \
+    "repo:0xLaiHo/Apolysis:ref:refs/tags/v0.2.0" \
+    "repo:0xLaiHo/Apolysis:ref:refs/tags/v*" \
     "gh pr create" \
     "git tag -a v0.2.0" \
     "git push origin v0.2.0" \
@@ -64,6 +67,8 @@ for needle in \
 done
 
 require_contains "$signed_dry_run_doc" "docs/v0.2.0-release-publication.md"
+require_contains "$signed_dry_run_doc" "repo:0xLaiHo/Apolysis:ref:refs/tags/v0.2.0"
+require_contains "$signed_dry_run_doc" "repo:0xLaiHo/Apolysis:ref:refs/tags/v*"
 require_contains "$release_workflow" "push:"
 require_contains "$release_workflow" "tags:"
 require_contains "$release_workflow" "'v*'"
