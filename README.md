@@ -15,6 +15,13 @@ It is not a sandbox, approval UI, MCP gateway, or SIEM. It is the evidence
 layer that helps operators review agent side effects independently of the
 agent harness.
 
+## Current Status
+
+`v0.2.0` is the first signed public release with a prebuilt Linux CLI, bundled
+CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed signing
+evidence. Apolysis remains an audit and accountability layer, not a full
+sandbox provider or compliance-certified platform.
+
 ## Core Capabilities
 
 - Live and fixture observation for process, file, network, bounded exec argv,
