@@ -10,6 +10,13 @@ This is still a workflow-dispatch dry run. It does not create a GitHub Release
 and does not upload release assets through the tag-only `gh release upload`
 step.
 
+The signed dry run is dispatched from `main`, so it proves the branch OIDC
+subject only. The final `v0.2.0` tag publication uses a different GitHub OIDC
+subject. Before pushing the final tag, confirm the AWS IAM role trust policy
+allows `repo:0xLaiHo/Apolysis:ref:refs/tags/v0.2.0` or a bounded
+`repo:0xLaiHo/Apolysis:ref:refs/tags/v*` release-tag pattern for
+`sts:AssumeRoleWithWebIdentity`.
+
 ## Required Repository Settings
 
 The GitHub repository must have these settings before the run:
