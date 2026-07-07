@@ -51,41 +51,9 @@ name = "apolysis-runtime-guardrails-runtime-guardrail-matrix"
 path = "src/bin/apolysis-runtime-guardrails-runtime-guardrail-matrix.rs"
 
 [[bin]]
-name = "apolysis-production-hardening-release-promotion-policy"
-path = "src/bin/apolysis-production-hardening-release-promotion-policy.rs"
-
-[[bin]]
-name = "apolysis-production-hardening-registry-promotion-execution-evidence"
-path = "src/bin/apolysis-production-hardening-registry-promotion-execution-evidence.rs"
-
-[[bin]]
 name = "apolysis-production-hardening-signing-profile"
 path = "src/bin/apolysis-production-hardening-signing-profile.rs"
 
 [[bin]]
 name = "apolysis-production-hardening-signing-execution-evidence"
 path = "src/bin/apolysis-production-hardening-signing-execution-evidence.rs"
-
-[[bin]]
-name = "apolysis-production-hardening-worm-archive-policy"
-path = "src/bin/apolysis-production-hardening-worm-archive-policy.rs"
-
-[[bin]]
-name = "apolysis-production-hardening-worm-archive-execution-evidence"
-path = "src/bin/apolysis-production-hardening-worm-archive-execution-evidence.rs"
-
-[[bin]]
-name = "apolysis-production-hardening-service-mesh-live-evidence"
-path = "src/bin/apolysis-production-hardening-service-mesh-live-evidence.rs"
-
-[[bin]]
-name = "apolysis-production-hardening-operator-controller-evidence"
-path = "src/bin/apolysis-production-hardening-operator-controller-evidence.rs"
-
-[[bin]]
-name = "apolysis-production-hardening-chaos-performance-evidence"
-path = "src/bin/apolysis-production-hardening-chaos-performance-evidence.rs"
-
-[[bin]]
-name = "apolysis-production-hardening-external-provider-qualification"
-path = "src/bin/apolysis-production-hardening-external-provider-qualification.rs"

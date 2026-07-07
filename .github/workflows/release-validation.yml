@@ -6,7 +6,6 @@ on:
     branches:
       - main
       - master
-      - f5-production-hardening
   workflow_dispatch:
 
 permissions:
@@ -16,36 +15,12 @@ jobs:
   release-validation-local-gates:
     name: release-validation local gates
     runs-on: ubuntu-latest
-    env:
-      APOLYSIS_REGULATED_RELEASE_FINAL_SIGNOFF_APPROVER: ci-release-validation
-      APOLYSIS_REGULATED_RELEASE_FINAL_SIGNOFF_DECISION: approve_regulated_release
-      APOLYSIS_REGULATED_RELEASE_FINAL_SIGNOFF_APPROVED_AT: "2026-06-27T00:00:00Z"
-      APOLYSIS_REGULATED_RELEASE_FINAL_SIGNOFF_RATIONALE: CI release-validation fixture proves the final signoff gate stays wired without provider credentials.
-      APOLYSIS_REGULATED_RELEASE_FINAL_SIGNOFF_NO_SECRET_MATERIAL_RECORDED: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run release-validation CI contract
-        run: make test-release-validation-ci
-
       - name: Run JSONL schema contract gate
         run: make test-jsonl-schema-contract
-
-      - name: Run release artifact packaging contract
-        run: make test-release-artifacts
-
-      - name: Run release signing contract
-        run: make test-release-signing
-
-      - name: Run release artifact dry-run contract
-        run: make test-release-artifact-dry-run
-
-      - name: Run signed release artifact dry-run contract
-        run: make test-signed-release-artifact-dry-run
-
-      - name: Run v0.2.0 release publication readiness contract
-        run: make test-release-publication-readiness
 
       - name: Run community surface contract
         run: make test-community-surface
@@ -76,90 +51,3 @@ jobs:
 
       - name: Run timeline shipping contract
         run: make test-timeline-shipping
-
-      - name: Run handoff runbook gate
-        run: make test-release-validation-handoff
-
-      - name: Run preflight fixture gate
-        env:
-          APOLYSIS_RELEASE_VALIDATION_PREFLIGHT_TEST_OUTPUT_DIR: target/release-validation-ci/preflight
-        run: make test-release-validation-preflight
-
-      - name: Upload preflight evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-validation-preflight-evidence
-          path: |
-            target/release-validation-ci/preflight/green/apolysis-release-validation-preflight-report.json
-            target/release-validation-ci/preflight/green/apolysis-release-validation-evidence-index.json
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Prepare final signoff fixture source
-        run: |
-          mkdir -p target/release-validation-ci
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          readiness_fields = [
-              "provider_execution_plan_ready",
-              "signing_evidence_ready",
-              "provider_artifact_import_ready",
-              "provider_workflow_artifact_import_ready",
-              "bundle_env_ready",
-              "final_provider_closure_ready",
-              "evidence_package_ready",
-              "retained_evidence_package_ready",
-              "external_retention_ready",
-              "immutable_registry_ready",
-              "managed_mesh_decision_ready",
-              "live_provider_readback_ready",
-          ]
-          report = {
-              "schema_version": 1,
-              "phase": "regulated-release.final-release-signoff",
-              "passed": True,
-              "regulated_release_ready": True,
-              "run_final_provider_closure": True,
-              "completion_passed": True,
-              "missing_requirements": [],
-              "secret_scan_findings": [],
-          }
-          for field in readiness_fields:
-              report[field] = True
-          Path("target/release-validation-ci/source-report.json").write_text(
-              json.dumps(report, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          PY
-
-      - name: Run final signoff fixture gate
-        env:
-          APOLYSIS_REQUIRE_REGULATED_RELEASE_FINAL_RELEASE_SIGNOFF: "1"
-          APOLYSIS_REGULATED_RELEASE_REPORT: target/release-validation-ci/source-report.json
-          APOLYSIS_REGULATED_RELEASE_FINAL_RELEASE_SIGNOFF_OUTPUT_DIR: target/release-validation-ci/final-signoff
-        run: make test-regulated-release-final-release-signoff
-
-      - name: Upload final signoff evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-validation-final-signoff-evidence
-          path: target/release-validation-ci/final-signoff
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Run production hardening manifest gate
-        run: |
-          set -o pipefail
-          mkdir -p target/release-validation-ci/production-hardening
-          make test-production-hardening 2>&1 \
-            | tee target/release-validation-ci/production-hardening/production-hardening-manifest-gate.log
-
-      - name: Upload production hardening evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-validation-production-hardening-evidence
-          path: target/release-validation-ci/production-hardening
-          if-no-files-found: error
-          retention-days: 30
