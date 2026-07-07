@@ -31,10 +31,10 @@ Fixtures live under `tests/fixtures/codex-mismatch/`:
 
 ## Reproduce Locally
 
-Run the contract gate:
+Run the quickstart:
 
 ```bash
-make test-codex-mismatch-demo
+make quickstart
 ```
 
 Or run the same commands manually:

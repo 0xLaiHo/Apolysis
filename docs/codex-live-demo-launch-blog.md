@@ -140,10 +140,10 @@ paths, oversized excerpts, and unredacted credential markers.
 The safe offline starter requires no privileged eBPF access:
 
 ```bash
-make test-codex-mismatch-demo
+make quickstart
 ```
 
-That gate ingests a minimal Codex fixture and correlates it with a fixture
+That command ingests a minimal Codex fixture and correlates it with a fixture
 timeline containing an unexpected credential read.
 
 The live recording path is documented in:

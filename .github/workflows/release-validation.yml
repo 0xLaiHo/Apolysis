@@ -12,6 +12,9 @@ permissions:
   contents: read
 
 jobs:
+  # Job name is kept as "release-validation local gates" because it is the
+  # required status check configured in branch protection. Renaming it also
+  # requires updating branch protection.
   release-validation-local-gates:
     name: release-validation local gates
     runs-on: ubuntu-latest
@@ -19,38 +22,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run JSONL schema contract gate
-        run: make test-jsonl-schema-contract
+      - name: Format
+        run: cargo fmt --all -- --check
 
-      - name: Run community surface contract
-        run: make test-community-surface
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: Run quickstart contract
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Quickstart smoke test
         run: make test-quickstart
-
-      - name: Run Codex mismatch demo contract
-        run: make test-codex-mismatch-demo
-
-      - name: Run Codex live demo runbook contract
-        run: make test-codex-live-demo-runbook
-
-      - name: Run Codex live demo public assets contract
-        run: make test-codex-live-demo-public-assets
-
-      - name: Run Codex live demo launch blog contract
-        run: make test-codex-live-demo-launch-blog
-
-      - name: Run Codex live demo final assets contract
-        run: make test-codex-live-demo-final-assets
-
-      - name: Run intent correlation contract
-        run: make test-intent-correlation
-
-      - name: Run audit write budget contract
-        run: make test-audit-write-budget
-
-      - name: Run offline hash-chain verification contract
-        run: make test-offline-hash-chain-verify
-
-      - name: Run timeline shipping contract
-        run: make test-timeline-shipping

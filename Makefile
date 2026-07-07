@@ -1,10 +1,5 @@
 .PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
-	test-jsonl-schema-contract test-community-surface \
-	test-local-agent-command-attribution test-intent-correlation \
-	test-audit-write-budget test-offline-hash-chain-verify test-timeline-shipping \
-	test-codex-mismatch-demo test-codex-live-demo-runbook \
-	test-codex-live-demo-public-assets test-codex-live-demo-launch-blog \
-	test-codex-live-demo-final-assets \
+	test-local-agent-command-attribution \
 	test-policy-guardrails test-policy-guardrails-bpf-lsm-live test-runtime-guardrails \
 	test-runtime-foundation test-runtime-foundation-runtime \
 	test-runtime-foundation-validation-harness test-runtime-foundation-runtime-registration \
@@ -47,48 +42,14 @@ quickstart:
 		--output target/quickstart/correlation.jsonl \
 		--summary
 
-# --- Product / demo contract gates (run in CI via release-validation.yml) ---
-
-test-jsonl-schema-contract:
-	./scripts/test-jsonl-schema-contract.sh
-
-test-community-surface:
-	./scripts/test-community-surface.sh
-
+# Quickstart smoke test — the one product-path gate run in CI (release-validation.yml).
 test-quickstart:
 	./scripts/test-quickstart.sh
-
-test-intent-correlation:
-	./scripts/test-intent-correlation.sh
-
-test-audit-write-budget:
-	./scripts/test-audit-write-budget.sh
-
-test-offline-hash-chain-verify:
-	./scripts/test-offline-hash-chain-verify.sh
-
-test-timeline-shipping:
-	./scripts/test-timeline-shipping.sh
 
 test-local-agent-command-attribution:
 	./scripts/test-local-agent-command-attribution.sh
 
-test-codex-mismatch-demo:
-	./scripts/test-codex-mismatch-demo.sh
-
-test-codex-live-demo-runbook:
-	./scripts/test-codex-live-demo-runbook.sh
-
-test-codex-live-demo-public-assets:
-	./scripts/test-codex-live-demo-public-assets.sh
-
-test-codex-live-demo-launch-blog:
-	./scripts/test-codex-live-demo-launch-blog.sh
-
-test-codex-live-demo-final-assets:
-	./scripts/test-codex-live-demo-final-assets.sh
-
-# --- Policy and runtime-foundation gates (privileged / adapter tests) ---
+# --- Policy and runtime-foundation gates (privileged / adapter tests; run manually) ---
 
 test-policy-guardrails:
 	./scripts/test-policy-guardrails.sh

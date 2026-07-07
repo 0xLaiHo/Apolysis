@@ -41,16 +41,6 @@ make lint
 git diff --check
 ```
 
-Documentation and release-surface changes should also run the matching contract
-gate:
-
-```bash
-make test-jsonl-schema-contract
-make test-release-artifacts
-make test-community-surface
-make test-release-validation-ci
-```
-
 Live eBPF, Kubernetes, provider, signing, or release-validation changes must
 state the exact privileged or external gate that was run. If a gate is skipped
 because credentials, kernel features, or cluster access are unavailable, say so

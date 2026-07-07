@@ -31,46 +31,21 @@ Recommended baseline:
 - Label pods with the Agent Sandbox name so Apolysis can correlate timeline
   events to the higher-level sandbox identity.
 
-## ProductionHardening Production-Hardening Baseline
+## Production Deployment Baseline
 
-`apolysisd-production-baseline.yaml` is the first ProductionHardening production-hardening
-deployment baseline for running `apolysisd` as a node-local DaemonSet. It keeps
+`apolysisd-production-baseline.yaml` is the deployment baseline for running
+`apolysisd` as a node-local DaemonSet. It keeps
 production-facing kernel blocking disabled, uses explicit Linux capabilities
 instead of `privileged: true`, mounts runtime sockets read-only, sets bounded
 CPU/memory requests and limits, installs a default-deny `NetworkPolicy`, uses
 semantic health probes for liveness and readiness, and exposes low-cardinality
 Prometheus metrics on the pod-local metrics port.
 
-Validate the manifest before live deployment:
+Validate the manifest before applying it:
 
 ```bash
-make test-production-hardening
 kubectl apply --dry-run=client --validate=false \
   -f deploy/kubernetes/apolysisd-production-baseline.yaml
-```
-
-Run the live k3s deployment gate only on a validation host:
-
-```bash
-APOLYSIS_CONFIRM_PRODUCTION_HARDENING_LIVE_DEPLOYMENT=1 make test-production-hardening-live-deployment
-```
-
-The live gate builds a local image, imports it into k3s containerd, deploys the
-DaemonSet, creates a marked workload for runtime adapter evidence, captures
-health/metrics/log/Kubernetes artifacts, validates DaemonSet pod restart
-recovery, validates k3s CRI socket outage/recovery through a bad socket
-rollout and restore rollout, validates queue pressure and unwritable-store
-failure/recovery evidence, and removes the validation namespace and temporary
-state path before exiting.
-
-The release supply-chain gate builds the release payload and local container
-archive, generates a CycloneDX SBOM and provenance statement, signs the release
-manifest and provenance with `cosign`, runs a `trivy fs` high/critical
-vulnerability scan against the staged payload, and verifies the resulting
-checksums and signatures:
-
-```bash
-make test-production-hardening-supply-chain
 ```
 
 `deploy/helm/apolysis` packages the same node-local daemon shape as a
@@ -80,5 +55,5 @@ runtime metadata RBAC, a default-deny NetworkPolicy, a metrics Service with
 mTLS handoff annotations, and a narrow metrics ingress allowlist.
 
 ```bash
-make test-production-hardening-helm-production
+helm lint deploy/helm/apolysis
 ```
