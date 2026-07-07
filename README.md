@@ -6,14 +6,16 @@
 
 [English](README.md) | [Simplified Chinese](README.zh-CN.md)
 
-Apolysis is a Linux runtime accountability layer for AI agent workloads. It
-records host-side evidence for what an agent session actually did, then
-correlates process, file, network, credential, runtime, policy, and declared
-intent records into an append-only audit timeline.
+**Your AI coding agent says it ran the tests. Did it also read your cloud keys?**
 
-It is not a sandbox, approval UI, MCP gateway, or SIEM. It is the evidence
-layer that helps operators review agent side effects independently of the
-agent harness.
+Apolysis is a Linux runtime accountability layer for AI agents. It records
+host-side evidence of what an agent session actually did — every process, file,
+network connection, and credential path — then flags anything the agent never
+declared, in an append-only audit timeline you can review independently of the
+agent's own logs.
+
+It is not a sandbox, approval UI, MCP gateway, or SIEM. It is the evidence layer
+that helps you review agent side effects independently of the agent harness.
 
 ![Codex live demo: Apolysis matches the declared workload and flags a redacted fake credential side effect as missing intent](docs/assets/codex-live-demo/codex-live-demo.gif)
 
@@ -26,31 +28,53 @@ and [public evidence excerpt](docs/codex-live-demo-public-assets.md).
 make build && make quickstart
 ```
 
-This runs the intent-vs-side-effect accountability flow on a bundled fixture —
-no root, no eBPF — and prints where an agent's declared intent and its real OS
-side effects diverge. See [Quickstart](docs/quickstart.md).
+On a bundled sample — no root, no eBPF, no kernel setup — you see the whole idea:
 
-## Current Status
+```text
+Apolysis accountability summary  (session: codex-mismatch-demo)
+  1 side effect(s) matched declared intent, 1 finding(s) with no declared intent
+  ✓ matched   crates/apolysis-cli/tests/intent.rs
+            declared as: cargo test -p apolysis-cli --test intent  [process_command_exact]
+  ⚠ missing_intent   credential_read /tmp/apolysis-demo-home/.aws/credentials
+            by: python3 scripts/read-demo-credential.py
+            observed side effect has no matching declared intent  [review]
+```
 
-`v0.2.0` is the first signed public release with a prebuilt Linux CLI, bundled
-CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed signing
-evidence. Apolysis remains an audit and accountability layer, not a full
-sandbox provider or compliance-certified platform.
+The agent declared one action — run the tests (`✓ matched`). It also read
+`.aws/credentials` (`⚠ missing_intent`), which nothing declared. That gap is the
+whole point. Full walkthrough: [Quickstart](docs/quickstart.md).
 
-## Core Capabilities
+## Why
 
-- Live and fixture observation for process, file, network, bounded exec argv,
-  and credential-path events.
-- Managed local agent launch with process-tree attribution for Codex and other
-  command-line agents.
-- Intent ingestion and correlation for declared tool calls versus observed
-  host-side side effects.
-- Runtime metadata correlation for local processes, Docker/containerd, and
-  Kubernetes workloads.
-- Append-only JSONL evidence, output rotation, hash-chain verification, policy
-  findings, release-validation gates, and signed release-artifact handoff.
+- **Harness logs show intent, not behavior.** "Ran the tests" in a tool-call log
+  does not capture the `curl`, the `npm postinstall` hook, or the credential read
+  a subprocess actually performed.
+- **Sandboxes bound what an agent can reach, not what it attempted** — and they do
+  not tie a declared tool call to an OS side effect. Apolysis does.
+- **You are accountable for a repo, CI runner, or cluster you may not own the
+  agent for.** Apolysis gives you evidence you do not have to take the harness's
+  word for.
 
-## Architecture
+## What It Does
+
+- **Observe** — capture process, file, network, bounded exec argv, and
+  credential-path events, live via eBPF or from a fixture, scoped to one session.
+- **Correlate** — join the agent's declared intent against the observed timeline
+  and surface `missing_intent` and policy findings.
+- **Record** — a redacted, append-only JSONL timeline with optional hash-chain
+  verification, ready to ship to your existing log stack.
+
+Runtime metadata for local, Docker/containerd, and Kubernetes ties each event to
+its container, pod, service account, and cgroup.
+
+## How It Works
+
+Apolysis keeps three boundaries separate and owns the third:
+
+- **Intent** — what the harness or tool runner declared.
+- **Isolation** — what the runtime allowed the workload to reach (Docker, gVisor,
+  Kata, Kubernetes).
+- **Evidence** — what the host and runtime actually observed. **This is Apolysis.**
 
 ```text
 Agent / tool runner
@@ -73,52 +97,20 @@ Append-only evidence
   └─ optional hash-chain verification
 ```
 
-The design keeps three boundaries separate:
+## Current Status
 
-- Intent: what the harness or tool runner declared.
-- Isolation: what the runtime allowed the workload to reach.
-- Evidence: what the host and runtime actually observed.
+`v0.2.0` is the first signed public release, with a prebuilt Linux CLI and a
+bundled CO-RE eBPF object. Apolysis is an audit-and-accountability layer, not a
+full sandbox provider or a compliance-certified platform. The
+[threat model](docs/threat-model.md) states exactly what it does and does not
+prove, including where host-side observation is blind.
 
-Core crates:
+## Use It Live On Your Own Agent
 
-- `apolysis-cli`: command-line entry point.
-- `apolysis-observer`: fixture and live observer backends.
-- `apolysis-core`: shared JSONL records and schema types.
-- `apolysis-runtime`: local, Docker, and runtime metadata adapters.
-- `apolysis-policy`: policy parser and decision logic.
-- `apolysis-store`: append-only JSONL and hash-chain storage.
-- `apolysis-daemon`: node-local service for longer-running deployments.
+Two steps: record a real timeline with the eBPF observer, then correlate it
+against the agent's declared intent.
 
-## Build And Test
-
-```bash
-make build
-make test
-make lint
-```
-
-Build only the CO-RE eBPF object:
-
-```bash
-make build-ebpf
-```
-
-Run the capability-aware live observer smoke test on a prepared Linux host:
-
-```bash
-make test-live
-```
-
-## Example: Audit A Local Agent Command
-
-Input:
-
-- Built binary: `target/debug/apolysis`
-- Built BPF object: `target/ebpf/apolysis_observer.bpf.o`
-- Policy file: `policies/local-dev.yaml`
-- Agent command: `codex exec --json "run the project tests"`
-
-Command:
+### 1. Record (Linux, root / CAP_BPF)
 
 ```bash
 sudo -E ./target/debug/apolysis observe \
@@ -134,15 +126,12 @@ sudo -E ./target/debug/apolysis observe \
 
 Key parameters:
 
-- `--backend live`: use the live eBPF observer.
-- `--session`: stable session id written into every record.
-- `--policy`: policy file used for review and notification findings.
-- `--output`: JSONL timeline path.
-- `--bpf-object`: CO-RE observer object loaded by the live backend.
-- `--workspace-root`: workspace boundary used for path handling.
-- `--agent-kind`: agent adapter hint, for example `codex`.
-- `--agent-run -- <command>`: let Apolysis start the agent and own the root
-  process tree instead of asking the operator to find a PID manually.
+- `--backend live` — use the live eBPF observer.
+- `--session` — stable session id written into every record.
+- `--policy` — policy file used for review and notification findings.
+- `--bpf-object` — CO-RE observer object loaded by the live backend.
+- `--agent-run -- <command>` — let Apolysis start the agent and own the root
+  process tree instead of asking you to find a PID by hand.
 
 Output:
 
@@ -152,15 +141,7 @@ Output:
 {"record_type":"policy_violation","rule_id":"credentials.deny_read","decision":"notify"}
 ```
 
-## Example: Correlate Declared Intent
-
-Input:
-
-- Codex response-item log: `.apolysis/codex-live/codex-response-items.jsonl`
-- Observed timeline: `.apolysis/codex-live/timeline.agent-run.jsonl`
-- Session id: `codex-local-audit`
-
-Commands:
+### 2. Correlate
 
 ```bash
 ./target/debug/apolysis intent ingest \
@@ -173,7 +154,8 @@ Commands:
 ./target/debug/apolysis intent correlate \
   --intent-input .apolysis/codex-live/intent.codex.jsonl \
   --timeline-input .apolysis/codex-live/timeline.agent-run.jsonl \
-  --output .apolysis/codex-live/intent-correlation.jsonl
+  --output .apolysis/codex-live/intent-correlation.jsonl \
+  --summary
 ```
 
 Output:
@@ -184,8 +166,33 @@ Output:
 {"record_type":"accountability_finding","kind":"missing_intent","decision":"review"}
 ```
 
-Keep generated timelines, Codex logs, and reports under `.apolysis/` or
-`target/`. Do not commit captured workload data or credentials.
+`--summary` prints the human-readable digest shown in the quickstart. Keep
+generated timelines, Codex logs, and reports under `.apolysis/` or `target/`, and
+do not commit captured workload data or credentials.
+
+## Build And Test
+
+```bash
+make build   # build the CLI and the CO-RE eBPF object
+make test
+make lint
+```
+
+- `make build-ebpf` — build only the CO-RE eBPF object.
+- `make test-live` — capability-aware live observer smoke test on a prepared
+  Linux host.
+
+## Architecture
+
+Core crates:
+
+- `apolysis-cli` — command-line entry point.
+- `apolysis-observer` — fixture and live observer backends.
+- `apolysis-core` — shared JSONL records and schema types.
+- `apolysis-runtime` — local, Docker, and runtime metadata adapters.
+- `apolysis-policy` — policy parser and decision logic.
+- `apolysis-store` — append-only JSONL and hash-chain storage.
+- `apolysis-daemon` — node-local service for longer-running deployments.
 
 ## Key Documents
 
