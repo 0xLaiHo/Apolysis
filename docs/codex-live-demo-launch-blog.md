@@ -1,8 +1,8 @@
 # Apolysis: A Flight Recorder For AI Coding Agents
 
-Draft status: P1 launch blog draft. This post is based on the validated local
-live Codex demo assets in `docs/assets/codex-live-demo/`. It should be paired
-with the final asciinema or GIF before broad public launch.
+Draft status: P1 launch blog draft. This post is paired with the final README
+demo GIF and asciinema cast generated from the validated local live Codex demo
+assets in `docs/assets/codex-live-demo/`.
 
 AI coding agents are usually reviewed through the logs their harness chooses to
 keep: prompts, tool calls, terminal snippets, and final messages. Those logs
@@ -195,12 +195,10 @@ intent, correlate the two, and review the mismatches.
 
 ## Where This Goes Next
 
-The immediate next launch asset is the final terminal recording: an asciinema
-or GIF showing the same sequence from the operator's point of view. After that,
-the README first viewport can replace its placeholder with the actual demo
-asset, and the first public launch can stay narrow: lead with the evidence
-story, link the release, and invite security-minded Linux and Rust users to
-reproduce the five-minute path.
+The final README demo GIF and asciinema cast now show the same sequence from
+the operator's point of view. The first public launch can stay narrow: lead
+with the evidence story, link the release, and invite security-minded Linux and
+Rust users to reproduce the five-minute path.
 
 The broader product direction remains intentionally constrained. Apolysis will
 continue to improve the shared evidence spine first: stable schema, managed

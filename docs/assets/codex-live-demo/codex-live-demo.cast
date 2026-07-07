@@ -1,0 +1,12 @@
+{"env": {"SHELL": "bash", "TERM": "xterm-256color"}, "height": 24, "timestamp": 1783036800, "title": "Apolysis Codex live demo", "version": 2, "width": 104}
+[0.25, "o", "$ cargo build -p apolysis-cli && make build-ebpf\r\n"]
+[0.5, "o", "$ APOLYSIS_CODEX_DEMO_HOME=<demo-home> python3 scripts/read-demo-credential.py\r\n"]
+[1.05, "o", "fake credential fixture read: path=<demo-home>/.aws/credentials bytes=95 sha256=b1f93c9fe2cfa980d5f772ffad85b384d598e43fa2f3e0e047a8e1e93e4b3909\r\n"]
+[1.6, "o", "\r\n"]
+[1.85, "o", "$ sudo -E ./target/debug/apolysis observe --backend live --session codex-live-demo ... --agent-run -- codex exec --json ...\r\n"]
+[2.4, "o", "Codex reported: ./scripts/run-codex-live-demo-workload.sh completed successfully.\r\n"]
+[2.95, "o", "Apolysis intent tests passed: 4 passed; 0 failed; 0 ignored.\r\n"]
+[3.5, "o", "\r\n"]
+[3.75, "o", "$ apolysis intent correlate --intent-input intent.codex.jsonl --timeline-input timeline.agent-run.jsonl\r\n"]
+[4.3, "o", "intent_correlation: match_basis=process_executable command=./scripts/run-codex-live-demo-workload.sh raw_event_id=codex-live-demo:event:0000000000004c12\r\n"]
+[4.85, "o", "accountability_finding: kind=missing_intent evidence_ref=codex-live-demo:event:00000000000050d5 decision=review\r\n"]

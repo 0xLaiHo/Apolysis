@@ -60,7 +60,7 @@ for needle in \
     "docs/codex-live-demo-public-assets.md" \
     "v0.2.0" \
     "AWS KMS-backed signing evidence" \
-    "final asciinema or GIF"; do
+    "final README demo GIF and asciinema cast"; do
     require_contains "$blog" "$needle"
 done
 

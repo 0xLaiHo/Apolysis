@@ -16,6 +16,8 @@
   "redaction_boundary": "curated_public_excerpt",
   "public_assets": [
     "terminal-transcript.txt",
-    "evidence-excerpt.jsonl"
+    "evidence-excerpt.jsonl",
+    "codex-live-demo.cast",
+    "codex-live-demo.gif"
   ]
 }

@@ -103,6 +103,8 @@ for readme in README.md README.zh-CN.md; do
     require_contains "$readme" "img.shields.io/github/v/release/0xLaiHo/Apolysis"
     require_contains "$readme" "img.shields.io/github/license/0xLaiHo/Apolysis"
     require_contains "$readme" "Codex"
+    require_contains "$readme" "docs/assets/codex-live-demo/codex-live-demo.gif"
+    require_contains "$readme" "docs/assets/codex-live-demo/codex-live-demo.cast"
 done
 
 require_contains README.md "Linux runtime accountability layer"
@@ -123,6 +125,8 @@ require_contains README.zh-CN.md "输出示例"
 require_not_contains README.md "Demo status"
 require_not_contains README.zh-CN.md "Demo 状态"
 require_not_contains README.md "final public asciinema/GIF"
+require_not_contains README.md "demo placeholder"
+require_not_contains README.zh-CN.md "demo 占位"
 require_not_contains README.zh-CN.md "最终公开首发"
 require_not_contains README.zh-CN.md "runtime accountability layer"
 require_not_contains README.zh-CN.md "append-only audit timeline"
