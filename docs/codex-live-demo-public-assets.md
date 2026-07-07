@@ -38,6 +38,10 @@ credential finding target is represented only as a redacted `path_token:*`.
   finding.
 - `docs/assets/codex-live-demo/terminal-transcript.txt`: a scrubbed terminal
   transcript for README screenshot, GIF, or asciinema planning.
+- `docs/assets/codex-live-demo/codex-live-demo.cast`: final public asciinema
+  v2 cast generated from the scrubbed transcript.
+- `docs/assets/codex-live-demo/codex-live-demo.gif`: final README demo GIF
+  generated from the scrubbed transcript.
 
 ## Redaction Rules
 
@@ -61,9 +65,8 @@ make test-codex-live-demo-public-assets
 
 ## Launch Use
 
-Use these assets as the first public README/demo material while the final GIF
-or asciinema recording is prepared. The public launch asset should show the
-same sequence:
+Use these assets as the first public README/demo material. The final README
+demo GIF and asciinema cast show the same sequence:
 
 1. Codex declares the workload command.
 2. Apolysis records host-side live evidence.
@@ -73,3 +76,17 @@ same sequence:
 
 Do not replace these excerpts with raw live timelines. If a new recording is
 captured, curate a new public excerpt and rerun the same gate.
+
+## Regenerate The Public Demo
+
+The GIF and cast are generated from the scrubbed transcript, not from raw
+`.apolysis/` evidence:
+
+```bash
+python3 scripts/render-codex-live-demo-assets.py
+make test-codex-live-demo-final-assets
+```
+
+The render script requires Python with Pillow available. The validation gate
+uses only shell, JSON parsing, and Python standard library checks so release
+validation does not depend on rendering libraries.

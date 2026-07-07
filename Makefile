@@ -3,6 +3,7 @@
 .PHONY: test-codex-live-demo-runbook
 .PHONY: test-codex-live-demo-public-assets
 .PHONY: test-codex-live-demo-launch-blog
+.PHONY: test-codex-live-demo-final-assets
 .PHONY: test-release-artifact-dry-run
 .PHONY: test-signed-release-artifact-dry-run
 .PHONY: test-release-publication-readiness
@@ -58,6 +59,9 @@ test-codex-live-demo-public-assets:
 
 test-codex-live-demo-launch-blog:
 	./scripts/test-codex-live-demo-launch-blog.sh
+
+test-codex-live-demo-final-assets:
+	./scripts/test-codex-live-demo-final-assets.sh
 
 test-local-agent-command-attribution:
 	./scripts/test-local-agent-command-attribution.sh
