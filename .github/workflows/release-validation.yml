@@ -25,6 +25,9 @@ jobs:
       - name: Run community surface contract
         run: make test-community-surface
 
+      - name: Run quickstart contract
+        run: make test-quickstart
+
       - name: Run Codex mismatch demo contract
         run: make test-codex-mismatch-demo
 

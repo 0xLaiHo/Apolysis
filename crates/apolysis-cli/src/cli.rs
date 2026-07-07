@@ -69,6 +69,8 @@ pub(crate) mod options {
     pub(crate) const INTENT_INPUT: &str = "--intent-input";
     /// Observed timeline JSONL input path.
     pub(crate) const TIMELINE_INPUT: &str = "--timeline-input";
+    /// Print a human-readable accountability summary after correlation.
+    pub(crate) const SUMMARY: &str = "--summary";
     /// Session id selector.
     pub(crate) const SESSION: &str = "--session";
     /// Agent feedback directory path.
@@ -103,7 +105,7 @@ pub(crate) const DEFAULT_TIMELINE_PATH: &str = ".apolysis/timeline.jsonl";
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
     format!(
-        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path>\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
+        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
         run = commands::RUN,
         observe = commands::OBSERVE,
         intent = commands::INTENT,
@@ -126,6 +128,7 @@ pub(crate) fn usage() -> String {
         adapter = options::ADAPTER,
         intent_input = options::INTENT_INPUT,
         timeline_input = options::TIMELINE_INPUT,
+        summary = options::SUMMARY,
         codex_jsonl = values::CODEX_JSONL,
         fixture = values::FIXTURE,
         live = values::LIVE,

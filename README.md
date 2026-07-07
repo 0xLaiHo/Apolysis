@@ -20,6 +20,16 @@ agent harness.
 Demo assets: [asciinema cast](docs/assets/codex-live-demo/codex-live-demo.cast)
 and [public evidence excerpt](docs/codex-live-demo-public-assets.md).
 
+## Try It In Five Minutes (no root)
+
+```bash
+make build && make quickstart
+```
+
+This runs the intent-vs-side-effect accountability flow on a bundled fixture —
+no root, no eBPF — and prints where an agent's declared intent and its real OS
+side effects diverge. See [Quickstart](docs/quickstart.md).
+
 ## Current Status
 
 `v0.2.0` is the first signed public release with a prebuilt Linux CLI, bundled
@@ -179,6 +189,7 @@ Keep generated timelines, Codex logs, and reports under `.apolysis/` or
 
 ## Key Documents
 
+- [Quickstart](docs/quickstart.md)
 - [JSONL schema](docs/jsonl-schema-v1.md)
 - [Threat model](docs/threat-model.md)
 - [Hash-chain verification](docs/hash-chain-verification.md)

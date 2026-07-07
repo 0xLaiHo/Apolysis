@@ -18,6 +18,16 @@ Apolysis 是面向 AI 智能体工作负载的 Linux 运行时问责层。它记
 演示素材：[asciinema cast](docs/assets/codex-live-demo/codex-live-demo.cast)
 和[公开证据摘录](docs/codex-live-demo-public-assets.md)。
 
+## 五分钟试用（无需 root）
+
+```bash
+make build && make quickstart
+```
+
+在一份随包 fixture 上跑完「声明意图 ↔ 真实副作用」问责流程——不需要 root、不需要
+eBPF——并打印出智能体声明的意图和它真实的 OS 副作用在哪里出现分歧。见
+[Quickstart](docs/quickstart.md)。
+
 ## 当前状态
 
 `v0.2.0` 是第一个已签名的公开版本，包含预构建 Linux CLI、随包 CO-RE eBPF
@@ -172,6 +182,7 @@ sudo -E ./target/debug/apolysis observe \
 
 ## 关键文档
 
+- [Quickstart](docs/quickstart.md)
 - [JSONL 模式](docs/jsonl-schema-v1.md)
 - [威胁模型](docs/threat-model.md)
 - [哈希链校验](docs/hash-chain-verification.md)

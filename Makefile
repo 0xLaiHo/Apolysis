@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live \
+.PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
 	test-jsonl-schema-contract test-community-surface \
 	test-local-agent-command-attribution test-intent-correlation \
 	test-audit-write-budget test-offline-hash-chain-verify test-timeline-shipping \
@@ -31,6 +31,22 @@ build-ebpf:
 test-live: build-ebpf
 	./scripts/test-live-observer.sh
 
+# Zero-privilege trial: run the intent/side-effect accountability flow on the
+# bundled Codex mismatch fixture (no root, no eBPF). See docs/quickstart.md.
+quickstart:
+	@mkdir -p target/quickstart
+	@cargo run -q -p apolysis-cli -- intent ingest \
+		--adapter codex-jsonl \
+		--input tests/fixtures/codex-mismatch/codex-response-items.jsonl \
+		--session codex-mismatch-demo \
+		--output target/quickstart/intent.jsonl \
+		--workspace-root "$(CURDIR)"
+	@cargo run -q -p apolysis-cli -- intent correlate \
+		--intent-input target/quickstart/intent.jsonl \
+		--timeline-input tests/fixtures/codex-mismatch/observed-timeline.jsonl \
+		--output target/quickstart/correlation.jsonl \
+		--summary
+
 # --- Product / demo contract gates (run in CI via release-validation.yml) ---
 
 test-jsonl-schema-contract:
@@ -38,6 +54,9 @@ test-jsonl-schema-contract:
 
 test-community-surface:
 	./scripts/test-community-surface.sh
+
+test-quickstart:
+	./scripts/test-quickstart.sh
 
 test-intent-correlation:
 	./scripts/test-intent-correlation.sh

@@ -112,9 +112,9 @@ async fn intent_correlate_command(args: Vec<String>) -> Result<i32, String> {
     let mut store = apolysis_store::AsyncJsonlStore::create(&request.output_path)
         .await
         .map_err(|error| format!("failed to create intent correlation output: {error}"))?;
-    for record in records {
+    for record in &records {
         store
-            .append(&JsonValueLine(record))
+            .append(&JsonValueLine(record.clone()))
             .await
             .map_err(|error| format!("failed to write intent correlation record: {error}"))?;
     }
@@ -122,6 +122,10 @@ async fn intent_correlate_command(args: Vec<String>) -> Result<i32, String> {
         .flush()
         .await
         .map_err(|error| format!("failed to flush intent correlation output: {error}"))?;
+    if request.summary {
+        let events = parse_observed_events(&timeline_input)?;
+        print!("{}", render_correlation_summary(&records, &events));
+    }
     Ok(0)
 }
 
@@ -243,6 +247,7 @@ struct IntentCorrelateRequest {
     intent_input_path: String,
     timeline_input_path: String,
     output_path: String,
+    summary: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -333,6 +338,7 @@ impl IntentCorrelateRequest {
         let mut intent_input_path = None;
         let mut timeline_input_path = None;
         let mut output_path = None;
+        let mut summary = false;
         let mut i = 2;
 
         while i < args.len() {
@@ -349,6 +355,7 @@ impl IntentCorrelateRequest {
                     i += 1;
                     output_path = args.get(i).cloned();
                 }
+                options::SUMMARY => summary = true,
                 unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
             }
             i += 1;
@@ -361,6 +368,7 @@ impl IntentCorrelateRequest {
                 .ok_or_else(|| format!("missing {}\n{}", options::TIMELINE_INPUT, usage()))?,
             output_path: output_path
                 .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
+            summary,
         })
     }
 }
@@ -584,6 +592,87 @@ impl JsonLine for JsonValueLine {
     fn to_json_line(&self) -> String {
         serde_json::to_string(&self.0).expect("serde_json::Value serialization cannot fail")
     }
+}
+
+/// Render a short, human-readable accountability digest from correlation records.
+///
+/// Findings only carry an `evidence_ref` (the raw event id), so this enriches
+/// each one with the actual resource, event type, and process from the observed
+/// timeline to make the "you said X, the kernel shows Y" verdict legible.
+fn render_correlation_summary(
+    records: &[serde_json::Value],
+    events: &[ObservedEventForCorrelation],
+) -> String {
+    use std::fmt::Write as _;
+
+    let event_by_id: std::collections::HashMap<&str, &ObservedEventForCorrelation> = events
+        .iter()
+        .map(|event| (event.raw_event_id.as_str(), event))
+        .collect();
+
+    let mut matched = Vec::new();
+    let mut findings = Vec::new();
+    for record in records {
+        match string_field(record, "record_type") {
+            Some("intent_correlation") => matched.push(record),
+            Some("accountability_finding") => findings.push(record),
+            _ => {}
+        }
+    }
+
+    let session = records
+        .iter()
+        .find_map(|record| string_field(record, "session_id"))
+        .unwrap_or("unknown");
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "\nApolysis accountability summary  (session: {session})"
+    );
+    let _ = writeln!(
+        out,
+        "  {} side effect(s) matched declared intent, {} finding(s) with no declared intent",
+        matched.len(),
+        findings.len()
+    );
+
+    for record in &matched {
+        let resource = string_field(record, "resource").unwrap_or("");
+        let command = string_field(record, "command").unwrap_or("");
+        let basis = string_field(record, "match_basis").unwrap_or("");
+        let _ = writeln!(out, "  \u{2713} matched   {resource}");
+        let _ = writeln!(out, "            declared as: {command}  [{basis}]");
+    }
+
+    for record in &findings {
+        let kind = string_field(record, "kind").unwrap_or("finding");
+        let decision = string_field(record, "decision").unwrap_or("review");
+        let reason = string_field(record, "reason").unwrap_or("");
+        let evidence_ref = string_field(record, "evidence_ref").unwrap_or("");
+        let event = event_by_id.get(evidence_ref).copied();
+        let resource = event
+            .map(|event| event.resource.as_str())
+            .unwrap_or(evidence_ref);
+        let event_type = event.map(|event| event.event_type.as_str()).unwrap_or("");
+        let by = event
+            .and_then(|event| event.process_command.as_deref())
+            .unwrap_or("");
+        let _ = writeln!(out, "  \u{26a0} {kind}   {event_type} {resource}");
+        if !by.is_empty() {
+            let _ = writeln!(out, "            by: {by}");
+        }
+        let _ = writeln!(out, "            {reason}  [{decision}]");
+    }
+
+    if findings.is_empty() {
+        let _ = writeln!(
+            out,
+            "  no findings: every observed side effect matched a declared intent."
+        );
+    }
+
+    out
 }
 
 fn correlate_intents(
