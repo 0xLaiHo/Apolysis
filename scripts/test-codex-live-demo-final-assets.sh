@@ -170,6 +170,5 @@ require_contains "$public_assets_doc" "$cast"
 require_contains "$public_assets_doc" "$gif"
 require_contains "$public_assets_doc" "final README demo"
 require_contains "$repo_root/.github/workflows/release-validation.yml" "make test-codex-live-demo-final-assets"
-require_contains "$repo_root/scripts/test-release-validation-ci.sh" "test-codex-live-demo-final-assets:"
 
 printf 'codex live demo final assets check passed\n'

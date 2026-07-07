@@ -67,7 +67,6 @@ done
 require_contains "$repo_root/Makefile" "test-codex-live-demo-launch-blog:"
 
 require_contains "$repo_root/.github/workflows/release-validation.yml" "make test-codex-live-demo-launch-blog"
-require_contains "$repo_root/scripts/test-release-validation-ci.sh" "test-codex-live-demo-launch-blog:"
 require_contains "$repo_root/README.md" "docs/codex-live-demo-launch-blog.md"
 require_contains "$repo_root/README.zh-CN.md" "docs/codex-live-demo-launch-blog.md"
 

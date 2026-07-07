@@ -9,7 +9,6 @@ cd "$repo_root"
 doc="docs/timeline-shipping.md"
 workflow=".github/workflows/release-validation.yml"
 makefile="Makefile"
-ci_contract="scripts/test-release-validation-ci.sh"
 
 fail() {
     printf 'timeline shipping check failed: %s\n' "$*" >&2
@@ -37,7 +36,6 @@ require_not_contains() {
 require_file "$doc"
 require_file "$workflow"
 require_file "$makefile"
-require_file "$ci_contract"
 
 for term in \
     "JSONL remains the shipping contract" \
@@ -66,7 +64,5 @@ require_contains README.md "docs/timeline-shipping.md"
 require_contains README.zh-CN.md "docs/timeline-shipping.md"
 require_contains "$makefile" "test-timeline-shipping:"
 require_contains "$workflow" "make test-timeline-shipping"
-require_contains "$ci_contract" "test-timeline-shipping:"
-require_contains "$ci_contract" "make test-timeline-shipping"
 
 printf 'timeline shipping check passed\n'

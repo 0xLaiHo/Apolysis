@@ -31,7 +31,6 @@ Keep the docs focused on the attached CLI and CO-RE BPF object.
 Suggested verification:
 
 ```bash
-make test-release-artifacts
 make test-community-surface
 ```
 
@@ -48,5 +47,5 @@ Suggested verification:
 
 ```bash
 make test-community-surface
-make test-release-validation-ci
+make test-timeline-shipping
 ```

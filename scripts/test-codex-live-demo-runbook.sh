@@ -69,7 +69,6 @@ require_not_matches "$runbook" '--ask-for-approval'
 require_contains README.md "docs/codex-live-demo-runbook.md"
 require_contains README.zh-CN.md "docs/codex-live-demo-runbook.md"
 require_contains "$repo_root/.github/workflows/release-validation.yml" "make test-codex-live-demo-runbook"
-require_contains "$repo_root/scripts/test-release-validation-ci.sh" "test-codex-live-demo-runbook"
 
 require_contains "$workload" "cargo test -p apolysis-cli --test intent"
 require_contains "$workload" "scripts/read-demo-credential.py"

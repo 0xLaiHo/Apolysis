@@ -82,6 +82,5 @@ jq -e 'select(.record_type=="policy_violation" and .rule_id=="credentials.deny_r
   "$excerpt" >/dev/null
 
 require_contains "$repo_root/.github/workflows/release-validation.yml" "make test-codex-live-demo-public-assets"
-require_contains "$repo_root/scripts/test-release-validation-ci.sh" "test-codex-live-demo-public-assets:"
 
 printf 'codex live demo public assets check passed\n'
