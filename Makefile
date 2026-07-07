@@ -2,6 +2,7 @@
 .PHONY: test-codex-mismatch-demo
 .PHONY: test-codex-live-demo-runbook
 .PHONY: test-codex-live-demo-public-assets
+.PHONY: test-codex-live-demo-launch-blog
 .PHONY: test-release-artifact-dry-run
 .PHONY: test-signed-release-artifact-dry-run
 .PHONY: test-release-publication-readiness
@@ -54,6 +55,9 @@ test-codex-live-demo-runbook:
 
 test-codex-live-demo-public-assets:
 	./scripts/test-codex-live-demo-public-assets.sh
+
+test-codex-live-demo-launch-blog:
+	./scripts/test-codex-live-demo-launch-blog.sh
 
 test-local-agent-command-attribution:
 	./scripts/test-local-agent-command-attribution.sh

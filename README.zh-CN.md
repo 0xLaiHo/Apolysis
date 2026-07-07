@@ -175,6 +175,7 @@ sudo -E ./target/debug/apolysis observe \
 - [哈希链校验](docs/hash-chain-verification.md)
 - [时间线外运](docs/timeline-shipping.md)
 - [Codex 实时演示运行手册](docs/codex-live-demo-runbook.md)
+- [Codex 实时演示 launch blog 草稿](docs/codex-live-demo-launch-blog.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)
 - [入门任务](docs/starter-issues.md)

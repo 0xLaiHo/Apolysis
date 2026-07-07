@@ -59,6 +59,9 @@ jobs:
       - name: Run Codex live demo public assets contract
         run: make test-codex-live-demo-public-assets
 
+      - name: Run Codex live demo launch blog contract
+        run: make test-codex-live-demo-launch-blog
+
       - name: Run intent correlation contract
         run: make test-intent-correlation
 

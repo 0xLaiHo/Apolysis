@@ -182,6 +182,7 @@ Keep generated timelines, Codex logs, and reports under `.apolysis/` or
 - [Hash-chain verification](docs/hash-chain-verification.md)
 - [Timeline shipping](docs/timeline-shipping.md)
 - [Codex live demo runbook](docs/codex-live-demo-runbook.md)
+- [Codex live demo launch blog draft](docs/codex-live-demo-launch-blog.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 - [Starter issues](docs/starter-issues.md)
