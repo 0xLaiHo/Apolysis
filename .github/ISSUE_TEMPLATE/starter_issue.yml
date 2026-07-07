@@ -32,6 +32,6 @@ body:
     attributes:
       label: Verification
       description: List the exact local command that should pass.
-      placeholder: make test-community-surface
+      placeholder: make test
     validations:
       required: true

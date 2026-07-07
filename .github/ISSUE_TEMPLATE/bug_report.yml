@@ -17,7 +17,7 @@ body:
       label: Reproduction
       description: Include commands, fixture paths, or minimal logs. Redact private data.
       placeholder: |
-        make test-community-surface
+        make quickstart
         cargo test --workspace
     validations:
       required: true

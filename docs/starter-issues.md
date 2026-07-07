@@ -17,7 +17,6 @@ Suggested verification:
 
 ```bash
 cargo test --workspace
-make test-jsonl-schema-contract
 ```
 
 ## Release artifact verification
@@ -31,7 +30,7 @@ Keep the docs focused on the attached CLI and CO-RE BPF object.
 Suggested verification:
 
 ```bash
-make test-community-surface
+make quickstart
 ```
 
 ## Timeline shipping documentation
@@ -46,6 +45,5 @@ deployment asks for it.
 Suggested verification:
 
 ```bash
-make test-community-surface
-make test-timeline-shipping
+make test
 ```

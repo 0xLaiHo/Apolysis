@@ -57,12 +57,6 @@ can pass release validation:
 - `password=` or `password:` fragments;
 - oversized public assets.
 
-Run the gate locally:
-
-```bash
-make test-codex-live-demo-public-assets
-```
-
 ## Launch Use
 
 Use these assets as the first public README/demo material. The final README
@@ -75,7 +69,7 @@ demo GIF and asciinema cast show the same sequence:
    redacted `path_token` target.
 
 Do not replace these excerpts with raw live timelines. If a new recording is
-captured, curate a new public excerpt and rerun the same gate.
+captured, curate a new public excerpt with the same scrubbing.
 
 ## Regenerate The Public Demo
 
@@ -84,9 +78,6 @@ The GIF and cast are generated from the scrubbed transcript, not from raw
 
 ```bash
 python3 scripts/render-codex-live-demo-assets.py
-make test-codex-live-demo-final-assets
 ```
 
-The render script requires Python with Pillow available. The validation gate
-uses only shell, JSON parsing, and Python standard library checks so release
-validation does not depend on rendering libraries.
+The render script requires Python with Pillow available.
