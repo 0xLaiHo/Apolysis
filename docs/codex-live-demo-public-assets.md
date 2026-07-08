@@ -36,11 +36,14 @@ credential finding target is represented only as a redacted `path_token:*`.
   JSONL story showing runtime metadata, the declared workload exec,
   credential policy evidence, intent correlation, and the `missing_intent`
   finding.
-- `docs/assets/codex-live-demo/codex-live-demo.cast`: the README demo asciinema
-  cast, recorded live from `make quickstart` by
-  `scripts/record-quickstart-demo.sh`.
-- `docs/assets/codex-live-demo/codex-live-demo.gif`: the README demo GIF,
-  rendered from that same real recording.
+- `docs/assets/codex-live-demo/live-ebpf-demo.gif` / `.cast`: the README hero — a
+  real `apolysis observe --backend live` run that records a workload, matches its
+  declared intent, and flags an undeclared credential read as `missing_intent`.
+  Recorded on a host with root / `CAP_BPF` (see the runbook); the credential path
+  is redacted to a `path_token` in the evidence.
+- `docs/assets/codex-live-demo/codex-live-demo.gif` / `.cast`: the zero-privilege
+  quickstart recording, reproducible on any host by
+  `scripts/record-quickstart-demo.sh` (no root, bundled fixture).
 
 ## Redaction Rules
 
