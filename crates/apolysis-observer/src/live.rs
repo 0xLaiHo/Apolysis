@@ -771,6 +771,16 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         &mut store,
     )?;
 
+    // Fail loud: silent event loss would let a quiet timeline pass for proof of
+    // absence, which is the one thing an evidence tool must never do.
+    let dropped_events = counters.reserve_failures + counters.map_pressure + decode_failures;
+    if dropped_events > 0 || truncations > 0 {
+        eprintln!(
+            "apolysis: ⚠ evidence may be incomplete — {dropped_events} event(s) dropped, \
+             {truncations} truncated. A quiet timeline is not proof of absence."
+        );
+    }
+
     store
         .flush()
         .map_err(|error| format!("failed to flush live observer timeline: {error}"))?;
