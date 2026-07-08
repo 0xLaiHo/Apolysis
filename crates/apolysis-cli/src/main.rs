@@ -786,7 +786,7 @@ fn parse_observed_events(input: &str) -> Result<Vec<ObservedEventForCorrelation>
             let event_type = required_string_field(&value, "event_type")?.to_string();
             Ok(ObservedEventForCorrelation {
                 session_id: required_string_field(&value, "session_id")?.to_string(),
-                report_missing_intent: side_effect_event_type(&event_type),
+                report_missing_intent: missing_intent_event_type(&event_type),
                 event_type,
                 raw_event_id: required_string_field(&value, "raw_event_id")?.to_string(),
                 pid: value
@@ -901,11 +901,34 @@ fn u64_field(value: &serde_json::Value, field: &str) -> Option<u64> {
         .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
 }
 
+/// Observed event types (besides `exec`) that are correlated against declared
+/// intent. Plain reads are included so a declared file read can still match an
+/// observed one.
 fn side_effect_event_type(event_type: &str) -> bool {
     matches!(
         event_type,
         "file_open"
             | "file_create"
+            | "file_truncate"
+            | "file_unlink"
+            | "file_rename"
+            | "network_connect"
+            | "credential_read"
+    )
+}
+
+/// Of the correlated side effects, the ones worth surfacing as a `missing_intent`
+/// finding when they have no matching declared intent.
+///
+/// Plain reads (`file_open`) are excluded: every process opens hundreds of them
+/// (shared libraries, config, source), so flagging each one buries the real
+/// signal. The accountable undeclared side effects are credential reads, network
+/// egress, and file mutations — a plain read that is not a credential is not, by
+/// itself, a finding.
+fn missing_intent_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "file_create"
             | "file_truncate"
             | "file_unlink"
             | "file_rename"

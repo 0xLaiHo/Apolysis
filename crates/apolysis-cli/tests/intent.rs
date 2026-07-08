@@ -229,6 +229,7 @@ fn intent_correlate_links_truncated_live_exec_by_executable_path() {
         &timeline_input,
         r#"{"record_type":"event","timestamp_unix_ms":1780328401001,"session_id":"session-intent-executable-correlate","event_source":"kernel_tracepoint","event_type":"exec","raw_event_id":"session-intent-executable-correlate:event:0000000000000100","pid":4300,"ppid":1,"actor":"run-codex-live-","resource":"./scripts/run-codex-live-demo-workload.sh","action":"exec","container_id":null,"cgroup_id":null,"process_command":"./scripts/run-codex-live-demo-w","process_executable":"./scripts/run-codex-live-demo-workload.sh","process_started_at_unix_ms":1780328401000}
 {"record_type":"event","timestamp_unix_ms":1780328401002,"session_id":"session-intent-executable-correlate","event_source":"kernel_tracepoint","event_type":"file_open","raw_event_id":"session-intent-executable-correlate:event:0000000000000101","pid":4301,"ppid":4300,"actor":"python3","resource":"path_token:dccfe6616e57989e18638cd0","action":"read","container_id":null,"cgroup_id":null,"process_command":"python3 path_token:f3d72bc9350a77bf367c9645","process_executable":"/usr/bin/python3","process_started_at_unix_ms":1780328401001}
+{"record_type":"event","timestamp_unix_ms":1780328401003,"session_id":"session-intent-executable-correlate","event_source":"kernel_tracepoint","event_type":"credential_read","raw_event_id":"session-intent-executable-correlate:event:0000000000000102","pid":4301,"ppid":4300,"actor":"python3","resource":"path_token:aa11bb22cc33dd44ee55ff66","action":"read","container_id":null,"cgroup_id":null,"process_command":"python3 path_token:f3d72bc9350a77bf367c9645","process_executable":"/usr/bin/python3","process_started_at_unix_ms":1780328401002}
 "#,
     )
     .expect("write observed timeline");
@@ -261,10 +262,20 @@ fn intent_correlate_links_truncated_live_exec_by_executable_path() {
     assert!(timeline.contains(
         r#""raw_event_id":"session-intent-executable-correlate:event:0000000000000100""#
     ));
-    assert!(timeline.contains(r#""kind":"missing_intent""#));
+    assert_eq!(
+        timeline.matches(r#""kind":"missing_intent""#).count(),
+        1,
+        "only the credential read is an accountable missing_intent; the plain file_open read is not:\n{timeline}"
+    );
     assert!(timeline.contains(
-        r#""evidence_ref":"session-intent-executable-correlate:event:0000000000000101""#
+        r#""evidence_ref":"session-intent-executable-correlate:event:0000000000000102""#
     ));
+    assert!(
+        !timeline.contains(
+            r#""evidence_ref":"session-intent-executable-correlate:event:0000000000000101""#
+        ),
+        "a plain file_open read must not become a missing_intent finding:\n{timeline}"
+    );
 
     let _ = std::fs::remove_file(&intent_input);
     let _ = std::fs::remove_file(&timeline_input);
