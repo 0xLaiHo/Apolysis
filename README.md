@@ -15,7 +15,7 @@ It is not a sandbox, approval UI, MCP gateway, or SIEM. It is the evidence
 layer that helps operators review agent side effects independently of the
 agent harness.
 
-![Codex live demo: Apolysis matches the declared workload and flags a redacted fake credential side effect as missing intent](docs/assets/codex-live-demo/codex-live-demo.gif)
+![Apolysis quickstart: an agent's declared test run is matched, and an undeclared credential read is flagged as missing_intent — real output from the zero-privilege make quickstart](docs/assets/codex-live-demo/codex-live-demo.gif)
 
 Demo assets: [asciinema cast](docs/assets/codex-live-demo/codex-live-demo.cast)
 and [public evidence excerpt](docs/codex-live-demo-public-assets.md).

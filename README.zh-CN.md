@@ -13,7 +13,7 @@ Apolysis 是面向 AI 智能体工作负载的 Linux 运行时问责层。它记
 它不是沙箱、审批界面、工具网关或告警平台。它的职责是作为环境侧证据层，帮助
 运维者不依赖智能体框架本身，也能复查智能体到底做了什么。
 
-![Codex 实时演示：Apolysis 匹配声明的 workload，并将脱敏后的假凭证副作用标记为 missing intent](docs/assets/codex-live-demo/codex-live-demo.gif)
+![Apolysis quickstart：智能体声明的测试运行被匹配，而一次未声明的凭证读取被标记为 missing_intent——录自零特权 make quickstart 的真实输出](docs/assets/codex-live-demo/codex-live-demo.gif)
 
 演示素材：[asciinema cast](docs/assets/codex-live-demo/codex-live-demo.cast)
 和[公开证据摘录](docs/codex-live-demo-public-assets.md)。

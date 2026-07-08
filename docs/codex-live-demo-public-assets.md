@@ -36,12 +36,11 @@ credential finding target is represented only as a redacted `path_token:*`.
   JSONL story showing runtime metadata, the declared workload exec,
   credential policy evidence, intent correlation, and the `missing_intent`
   finding.
-- `docs/assets/codex-live-demo/terminal-transcript.txt`: a scrubbed terminal
-  transcript for README screenshot, GIF, or asciinema planning.
-- `docs/assets/codex-live-demo/codex-live-demo.cast`: final public asciinema
-  v2 cast generated from the scrubbed transcript.
-- `docs/assets/codex-live-demo/codex-live-demo.gif`: final README demo GIF
-  generated from the scrubbed transcript.
+- `docs/assets/codex-live-demo/codex-live-demo.cast`: the README demo asciinema
+  cast, recorded live from `make quickstart` by
+  `scripts/record-quickstart-demo.sh`.
+- `docs/assets/codex-live-demo/codex-live-demo.gif`: the README demo GIF,
+  rendered from that same real recording.
 
 ## Redaction Rules
 
@@ -59,25 +58,28 @@ can pass release validation:
 
 ## Launch Use
 
-Use these assets as the first public README/demo material. The final README
-demo GIF and asciinema cast show the same sequence:
+Use these assets as the first public README/demo material. The README demo GIF
+and cast are a real recording of `make quickstart`, which shows the core
+mismatch on the bundled fixture:
 
-1. Codex declares the workload command.
-2. Apolysis records host-side live evidence.
-3. Intent correlation matches the declared workload by `process_executable`.
-4. A fake credential side effect becomes a `missing_intent` finding with a
-   redacted `path_token` target.
+1. The agent's declared action — running the tests — is matched to observed host
+   evidence by `process_command`.
+2. An undeclared credential read becomes a `missing_intent` finding.
 
-Do not replace these excerpts with raw live timelines. If a new recording is
-captured, curate a new public excerpt with the same scrubbing.
+The `evidence-excerpt.jsonl` retains the smaller live-run story: a Codex-declared
+workload correlated by `process_executable`, and a redacted `path_token`
+credential finding from the live eBPF observer. Do not replace these excerpts
+with raw live timelines; if a new one is captured, curate it with the same
+scrubbing.
 
 ## Regenerate The Public Demo
 
-The GIF and cast are generated from the scrubbed transcript, not from raw
-`.apolysis/` evidence:
+The GIF and cast are a real recording of `make quickstart` — every line of
+output comes from the real binary, not a hand-authored transcript:
 
 ```bash
-python3 scripts/render-codex-live-demo-assets.py
+./scripts/record-quickstart-demo.sh
 ```
 
-The render script requires Python with Pillow available.
+The recorder requires `asciinema` and `agg`. It warms the build, records the
+zero-privilege quickstart, and renders the GIF.
