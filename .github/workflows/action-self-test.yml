@@ -1,0 +1,66 @@
+name: Action Self Test
+
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - .github/workflows/action-self-test.yml
+      - crates/**
+      - ebpf/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  action-self-test:
+    name: audit action live self test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install BPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic
+          if ! bpftool version >/dev/null 2>&1; then
+            bpftool_path="$(find /usr/lib/linux-tools* -type f -name bpftool | sort -V | tail -n 1)"
+            [[ -n "$bpftool_path" ]]
+            sudo ln -sf "$bpftool_path" /usr/local/bin/bpftool
+          fi
+
+      - name: Build CLI and CO-RE object from source
+        run: |
+          cargo build -p apolysis-cli
+          APOLYSIS_REQUIRE_BPF=1 make build-ebpf
+
+      - name: Plant a fake credential outside the workspace
+        run: |
+          mkdir -p /tmp/apolysis-selftest-home/.aws
+          echo "fake-selftest-credential" > /tmp/apolysis-selftest-home/.aws/credentials
+
+      - name: Run the action against a workload that reads the credential
+        id: audit
+        uses: ./
+        with:
+          run: 'cat /tmp/apolysis-selftest-home/.aws/credentials && echo selftest-done'
+          session: action-self-test
+          binary: target/debug/apolysis
+          bpf-object: target/ebpf/apolysis_observer.bpf.o
+
+      - name: Assert timeline evidence and redaction
+        run: |
+          timeline='${{ steps.audit.outputs.timeline }}'
+          test -s "$timeline"
+          grep -q '"record_type":"event"' "$timeline"
+          grep -q '"event_type":"exec"' "$timeline"
+          grep -q '"event_type":"credential_read"' "$timeline"
+          # The credential path is outside the workspace and must be persisted
+          # as a redacted token, never as the raw path.
+          if grep -q 'apolysis-selftest-home' "$timeline"; then
+            echo "raw credential path leaked into the persisted timeline" >&2
+            exit 1
+          fi
+          [[ '${{ steps.audit.outputs.exit-code }}' == '0' ]]
+          echo "self test passed: evidence recorded, credential read captured, path redacted"

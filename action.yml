@@ -1,0 +1,222 @@
+name: 'Apolysis Agent Audit'
+description: >-
+  Record kernel-level evidence of what an AI agent (or any command) actually
+  did in your workflow, and surface undeclared side effects.
+branding:
+  icon: 'eye'
+  color: 'green'
+
+inputs:
+  run:
+    description: 'Command to run under observation (executed with bash -c).'
+    required: true
+  session:
+    description: 'Session id written into every record. Defaults to apolysis-<run id>-<attempt>.'
+    required: false
+    default: ''
+  agent-kind:
+    description: 'Agent adapter hint, for example codex. Any non-empty label works.'
+    required: false
+    default: 'ci-agent'
+  policy:
+    description: 'Path to an Apolysis policy file. A minimal audit-only policy is generated when omitted.'
+    required: false
+    default: ''
+  intent-log:
+    description: 'Optional Codex response-items JSONL to correlate declared intent against the observed timeline.'
+    required: false
+    default: ''
+  version:
+    description: 'Apolysis release tag to download when binary/bpf-object are not provided.'
+    required: false
+    default: 'v0.2.0'
+  binary:
+    description: 'Path to a pre-built apolysis binary (skips the release download).'
+    required: false
+    default: ''
+  bpf-object:
+    description: 'Path to a pre-built CO-RE observer object (skips the release download).'
+    required: false
+    default: ''
+  output-dir:
+    description: 'Directory for the timeline and reports, uploaded as a workflow artifact.'
+    required: false
+    default: '.apolysis-action'
+
+outputs:
+  timeline:
+    description: 'Path to the recorded JSONL timeline.'
+    value: ${{ steps.observe.outputs.timeline }}
+  exit-code:
+    description: 'Exit code of the observed command.'
+    value: ${{ steps.observe.outputs.exit-code }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Apolysis
+      id: install
+      shell: bash
+      env:
+        IN_BINARY: ${{ inputs.binary }}
+        IN_BPF: ${{ inputs.bpf-object }}
+        IN_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$IN_BINARY" && -n "$IN_BPF" ]]; then
+          echo "bin=$IN_BINARY" >>"$GITHUB_OUTPUT"
+          echo "bpf=$IN_BPF" >>"$GITHUB_OUTPUT"
+          exit 0
+        fi
+        package="apolysis-${IN_VERSION}-x86_64-unknown-linux-gnu"
+        url="https://github.com/0xLaiHo/Apolysis/releases/download/${IN_VERSION}/${package}.tar.gz"
+        dest="$RUNNER_TEMP/apolysis-install"
+        mkdir -p "$dest"
+        curl -fsSL "$url" -o "$dest/$package.tar.gz"
+        curl -fsSL "$url.sha256" -o "$dest/$package.tar.gz.sha256"
+        (cd "$dest" && sha256sum -c "$package.tar.gz.sha256")
+        tar -xzf "$dest/$package.tar.gz" -C "$dest"
+        echo "bin=$dest/$package/bin/apolysis" >>"$GITHUB_OUTPUT"
+        echo "bpf=$dest/$package/ebpf/apolysis_observer.bpf.o" >>"$GITHUB_OUTPUT"
+
+    - name: Prepare policy
+      id: policy
+      shell: bash
+      env:
+        IN_POLICY: ${{ inputs.policy }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$IN_POLICY" ]]; then
+          echo "path=$IN_POLICY" >>"$GITHUB_OUTPUT"
+          exit 0
+        fi
+        policy="$RUNNER_TEMP/apolysis-default-policy.yaml"
+        cat >"$policy" <<'EOF'
+        version: 1
+
+        workspace:
+          allow_read:
+            - ./
+          allow_write:
+            - ./
+
+        credentials:
+          deny_read:
+            - ~/.ssh
+            - ~/.aws
+            - .env
+            - /var/run/secrets
+
+        network:
+          allow_egress:
+            - 127.0.0.1:0
+
+        commands:
+          deny:
+            - curl http://169.254.169.254
+
+        runtime:
+          max_seconds: 3600
+          max_processes: 4096
+        EOF
+        echo "path=$policy" >>"$GITHUB_OUTPUT"
+
+    - name: Observe
+      id: observe
+      shell: bash
+      env:
+        RUN_CMD: ${{ inputs.run }}
+        IN_SESSION: ${{ inputs.session }}
+        AGENT_KIND: ${{ inputs.agent-kind }}
+        OUT_DIR: ${{ inputs.output-dir }}
+        BIN: ${{ steps.install.outputs.bin }}
+        BPF: ${{ steps.install.outputs.bpf }}
+        POLICY: ${{ steps.policy.outputs.path }}
+      run: |
+        set -uo pipefail
+        session="${IN_SESSION:-apolysis-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
+        mkdir -p "$OUT_DIR"
+        SUDO=""
+        if [[ "$(id -u)" != "0" ]]; then SUDO="sudo"; fi
+        $SUDO "$BIN" observe \
+          --backend live \
+          --session "$session" \
+          --policy "$POLICY" \
+          --output "$OUT_DIR/timeline.jsonl" \
+          --bpf-object "$BPF" \
+          --workspace-root "$GITHUB_WORKSPACE" \
+          --agent-kind "$AGENT_KIND" \
+          --agent-run -- bash -c "$RUN_CMD"
+        code=$?
+        $SUDO chown -R "$(id -u):$(id -g)" "$OUT_DIR" || true
+        echo "exit-code=$code" >>"$GITHUB_OUTPUT"
+        echo "session=$session" >>"$GITHUB_OUTPUT"
+        echo "timeline=$OUT_DIR/timeline.jsonl" >>"$GITHUB_OUTPUT"
+
+    - name: Report
+      shell: bash
+      env:
+        OUT_DIR: ${{ inputs.output-dir }}
+        INTENT_LOG: ${{ inputs.intent-log }}
+        BIN: ${{ steps.install.outputs.bin }}
+        SESSION: ${{ steps.observe.outputs.session }}
+        AGENT_EXIT: ${{ steps.observe.outputs.exit-code }}
+      run: |
+        set -euo pipefail
+        timeline="$OUT_DIR/timeline.jsonl"
+        {
+          echo "## Apolysis agent audit"
+          echo ""
+          echo "Session \`$SESSION\` — observed command exited with code \`$AGENT_EXIT\`."
+          echo ""
+        } >>"$GITHUB_STEP_SUMMARY"
+        if [[ ! -s "$timeline" ]]; then
+          echo "No timeline was recorded; see the Observe step log." >>"$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        events=$(grep -c '"record_type":"event"' "$timeline" || true)
+        violations=$(grep -c '"record_type":"policy_violation"' "$timeline" || true)
+        credentials=$(grep -c '"event_type":"credential_read"' "$timeline" || true)
+        connects=$(grep -c '"event_type":"network_connect"' "$timeline" || true)
+        {
+          echo "| Observed events | Policy findings | Credential reads | Network connects |"
+          echo "| --- | --- | --- | --- |"
+          echo "| $events | $violations | $credentials | $connects |"
+          echo ""
+        } >>"$GITHUB_STEP_SUMMARY"
+        if [[ -n "$INTENT_LOG" && -f "$INTENT_LOG" ]]; then
+          # Plain correlate keeps this compatible with the v0.2.0 release
+          # binary; newer binaries also accept --summary for a richer digest.
+          "$BIN" intent ingest \
+            --adapter codex-jsonl \
+            --input "$INTENT_LOG" \
+            --session "$SESSION" \
+            --output "$OUT_DIR/intent.jsonl" \
+            --workspace-root "$GITHUB_WORKSPACE"
+          "$BIN" intent correlate \
+            --intent-input "$OUT_DIR/intent.jsonl" \
+            --timeline-input "$timeline" \
+            --output "$OUT_DIR/intent-correlation.jsonl"
+          correlation="$OUT_DIR/intent-correlation.jsonl"
+          matched=$(grep -c '"record_type":"intent_correlation"' "$correlation" || true)
+          missing=$(grep -c '"kind":"missing_intent"' "$correlation" || true)
+          {
+            echo "**Intent correlation:** $matched side effect(s) matched declared intent,"
+            echo "$missing finding(s) with no declared intent (\`missing_intent\`)."
+            echo ""
+          } >>"$GITHUB_STEP_SUMMARY"
+        fi
+        echo "The full JSONL evidence is attached as a workflow artifact." >>"$GITHUB_STEP_SUMMARY"
+
+    - name: Upload evidence
+      uses: actions/upload-artifact@v4
+      with:
+        name: apolysis-evidence-${{ steps.observe.outputs.session }}
+        path: ${{ inputs.output-dir }}
+        if-no-files-found: warn
+
+    - name: Propagate observed command exit code
+      shell: bash
+      env:
+        AGENT_EXIT: ${{ steps.observe.outputs.exit-code }}
+      run: exit "$AGENT_EXIT"
