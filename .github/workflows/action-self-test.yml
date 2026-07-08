@@ -51,16 +51,35 @@ jobs:
 
       - name: Assert timeline evidence and redaction
         run: |
+          set +e
           timeline='${{ steps.audit.outputs.timeline }}'
-          test -s "$timeline"
-          grep -q '"record_type":"event"' "$timeline"
-          grep -q '"event_type":"exec"' "$timeline"
-          grep -q '"event_type":"credential_read"' "$timeline"
+          echo "== diagnostics (fixture-grade fake data; safe to print) =="
+          ls -la "$(dirname "$timeline")"
+          wc -l "$timeline"
+          echo "-- record_type histogram --"
+          grep -o '"record_type":"[a-z_]*"' "$timeline" | sort | uniq -c
+          echo "-- event_type histogram --"
+          grep -o '"event_type":"[a-z_]*"' "$timeline" | sort | uniq -c
+          echo "-- observer diagnostics (loss/attach counters) --"
+          grep 'diagnostic' "$timeline" | head -5
+          echo "-- first records --"
+          head -8 "$timeline"
+          echo "== assertions =="
+          fail=0
+          check() {
+            if eval "$2"; then echo "ok:   $1"; else echo "FAIL: $1"; fail=1; fi
+          }
+          check "observed command exited 0" \
+            "[[ '${{ steps.audit.outputs.exit-code }}' == '0' ]]"
+          check "timeline exists and is non-empty" "test -s '$timeline'"
+          check "canonical event records present" \
+            "grep -q '\"record_type\":\"event\"' '$timeline'"
+          check "exec event captured" \
+            "grep -q '\"event_type\":\"exec\"' '$timeline'"
+          check "credential read captured" \
+            "grep -q '\"event_type\":\"credential_read\"' '$timeline'"
           # The credential path is outside the workspace and must be persisted
           # as a redacted token, never as the raw path.
-          if grep -q 'apolysis-selftest-home' "$timeline"; then
-            echo "raw credential path leaked into the persisted timeline" >&2
-            exit 1
-          fi
-          [[ '${{ steps.audit.outputs.exit-code }}' == '0' ]]
-          echo "self test passed: evidence recorded, credential read captured, path redacted"
+          check "raw credential path redacted" \
+            "! grep -q 'apolysis-selftest-home' '$timeline'"
+          exit $fail
