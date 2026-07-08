@@ -213,32 +213,46 @@ static __always_inline void append_exec_argv_arg(struct apolysis_pending_exec *p
                                                  unsigned int *offset,
                                                  const char *arg)
 {
+    unsigned int off = *offset;
     long length;
 
-    if (*offset >= sizeof(pending->payload) - APOLYSIS_EXEC_ARG_LEN) {
+    if (off >= sizeof(pending->payload) - APOLYSIS_EXEC_ARG_LEN) {
         pending->flags |= APOLYSIS_FLAG_ARGV_TRUNCATED | APOLYSIS_FLAG_PAYLOAD_TRUNCATED;
         return;
     }
 
-    if (*offset > 5) {
-        pending->payload[*offset] = ' ';
-        *offset += 1;
+    if (off > 5) {
+        pending->payload[off] = ' ';
+        off += 1;
     }
 
-    length = bpf_probe_read_user_str(pending->payload + *offset, APOLYSIS_EXEC_ARG_LEN, arg);
+    /* Pin the offset in one register and re-bound it right before the read.
+     * Some clang/kernel pairs otherwise clamp a copy of the offset while the
+     * pointer arithmetic uses the unclamped original, and the verifier
+     * rejects payload + off + APOLYSIS_EXEC_ARG_LEN as out of range. */
+    asm volatile("" : "+r"(off));
+    if (off > sizeof(pending->payload) - APOLYSIS_EXEC_ARG_LEN) {
+        pending->flags |= APOLYSIS_FLAG_ARGV_TRUNCATED | APOLYSIS_FLAG_PAYLOAD_TRUNCATED;
+        *offset = off;
+        return;
+    }
+
+    length = bpf_probe_read_user_str(pending->payload + off, APOLYSIS_EXEC_ARG_LEN, arg);
     if (length < 0) {
         pending->flags |= APOLYSIS_FLAG_ARGV_TRUNCATED;
+        *offset = off;
         return;
     }
 
     if (length == APOLYSIS_EXEC_ARG_LEN) {
         pending->flags |= APOLYSIS_FLAG_ARGV_TRUNCATED | APOLYSIS_FLAG_PAYLOAD_TRUNCATED;
-        *offset += APOLYSIS_EXEC_ARG_LEN - 1;
+        *offset = off + APOLYSIS_EXEC_ARG_LEN - 1;
         return;
     }
 
     if (length > 0)
-        *offset += length - 1;
+        off += length - 1;
+    *offset = off;
 }
 
 static __always_inline void read_exec_argv(struct apolysis_pending_exec *pending,

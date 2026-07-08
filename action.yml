@@ -133,11 +133,15 @@ runs:
         BPF: ${{ steps.install.outputs.bpf }}
         POLICY: ${{ steps.policy.outputs.path }}
       run: |
-        set -uo pipefail
+        set -euo pipefail
         session="${IN_SESSION:-apolysis-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
         mkdir -p "$OUT_DIR"
         SUDO=""
         if [[ "$(id -u)" != "0" ]]; then SUDO="sudo"; fi
+        # '|| code=$?' keeps this step alive under the runner's default -e so
+        # the digest, artifact, and exit-code propagation still happen when the
+        # observed command (or the observer itself) fails.
+        code=0
         $SUDO "$BIN" observe \
           --backend live \
           --session "$session" \
@@ -146,8 +150,7 @@ runs:
           --bpf-object "$BPF" \
           --workspace-root "$GITHUB_WORKSPACE" \
           --agent-kind "$AGENT_KIND" \
-          --agent-run -- bash -c "$RUN_CMD"
-        code=$?
+          --agent-run -- bash -c "$RUN_CMD" || code=$?
         $SUDO chown -R "$(id -u):$(id -g)" "$OUT_DIR" || true
         echo "exit-code=$code" >>"$GITHUB_OUTPUT"
         echo "session=$session" >>"$GITHUB_OUTPUT"
