@@ -1,9 +1,5 @@
 # Apolysis: A Flight Recorder For AI Coding Agents
 
-Draft status: P1 launch blog draft. This post is paired with the final README
-demo GIF and asciinema cast generated from the validated local live Codex demo
-assets in `docs/assets/codex-live-demo/`.
-
 AI coding agents are usually reviewed through the logs their harness chooses to
 keep: prompts, tool calls, terminal snippets, and final messages. Those logs
 are useful, but they are not independent evidence. The harness is inside the
@@ -146,6 +142,20 @@ make quickstart
 That command ingests a minimal Codex fixture and correlates it with a fixture
 timeline containing an unexpected credential read.
 
+For continuous integration, one step records the same host-side evidence for
+whatever an agent — or any command — does on the runner, and posts a digest to
+the job summary:
+
+```yaml
+- uses: 0xLaiHo/Apolysis@main
+  with:
+    run: 'codex exec --json "run the project tests"'
+```
+
+The action downloads the signed release, runs the command under the live
+observer, correlates optional declared intent, and uploads the JSONL timeline as
+an artifact. See `docs/github-action.md`.
+
 The live recording path is documented in:
 
 ```text
@@ -180,31 +190,35 @@ declared workload correlation using `process_executable`, and a redacted
 `path_token:*` credential finding. The raw `.apolysis/` evidence stays out of
 git.
 
-## What Shipped In v0.2.0
+## No Build Required
 
-The `v0.2.0` release is the first signed public Apolysis release. It includes a
-prebuilt Linux CLI, bundled CO-RE eBPF object, release manifest, detached
-checksum, and AWS KMS-backed signing evidence. That matters because the demo is
-only useful if someone else can reproduce the path without building every piece
-from scratch.
+The `v0.2.0` release ships a prebuilt Linux CLI and the bundled CO-RE eBPF
+object, so you can wrap a local agent command — or drop the GitHub Action into a
+workflow — without compiling every piece yourself.
 
 This release does not turn Apolysis into a complete sandbox provider or a
-compliance-certified platform. It makes the accountability layer easier to
-try: wrap a local agent command, retain host-side evidence, ingest declared
-intent, correlate the two, and review the mismatches.
+compliance-certified platform. It makes the accountability layer easy to try:
+wrap an agent command, retain host-side evidence, ingest declared intent,
+correlate the two, and review the mismatches.
+
+## Try It
+
+- **Five minutes, no root:** `make quickstart` shows the mismatch on a bundled
+  fixture.
+- **On your own agent:** follow `docs/codex-live-demo-runbook.md` (Linux,
+  root / `CAP_BPF`).
+- **In CI:** add the GitHub Action to a workflow.
+
+If Apolysis surfaces a side effect you did not expect, that is exactly the
+report it is built to produce. Tell us what it found.
 
 ## Where This Goes Next
 
-The final README demo GIF and asciinema cast now show the same sequence from
-the operator's point of view. The first public launch can stay narrow: lead
-with the evidence story, link the release, and invite security-minded Linux and
-Rust users to reproduce the five-minute path.
-
-The broader product direction remains intentionally constrained. Apolysis will
-continue to improve the shared evidence spine first: stable schema, managed
-agent launch, intent correlation, runtime metadata, policy findings, and
-evidence package verification. Stronger isolation and richer deployment
-surfaces can consume that spine later.
+The product direction is intentionally constrained. Apolysis improves the shared
+evidence spine first: stable schema, managed agent launch, intent correlation,
+runtime metadata, policy findings, and evidence verification. Stronger isolation
+and richer deployment surfaces can consume that spine later, when real use asks
+for them.
 
 For now, the core promise is simple: when an AI coding agent says what it did,
 the environment owner should have an independent way to check.
