@@ -719,8 +719,10 @@ fn correlate_intents(
                                 .as_deref()
                                 .and_then(command_executable)
                                 .map(|executable| {
-                                    event.process_executable.as_deref() == Some(executable)
-                                        || event.resource == executable
+                                    executable_matches(
+                                        executable,
+                                        event.process_executable.as_deref(),
+                                    ) || executable_matches(executable, Some(&event.resource))
                                 })
                                 .unwrap_or(false)
                     })
@@ -838,6 +840,23 @@ fn command_executable(command: &str) -> Option<&str> {
                 .chars()
                 .all(|ch| !matches!(ch, '\'' | '"' | '{' | '}' | '[' | ']'))
     })
+}
+
+/// Match a declared executable against an observed one, tolerant of path form.
+/// A declared bare `cargo` matches an observed `/usr/bin/cargo`, and `./run.sh`
+/// matches an absolute `/work/run.sh`, because agents declare a command name
+/// while the kernel records the resolved executable path. Exact equality still
+/// wins first; otherwise the file names must match and be non-empty.
+fn executable_matches(declared: &str, observed: Option<&str>) -> bool {
+    let Some(observed) = observed else {
+        return false;
+    };
+    if declared == observed {
+        return true;
+    }
+    let declared_name = declared.rsplit('/').next().unwrap_or(declared);
+    let observed_name = observed.rsplit('/').next().unwrap_or(observed);
+    !declared_name.is_empty() && declared_name == observed_name
 }
 
 fn intent_correlation_record(
@@ -1483,4 +1502,23 @@ impl VisibilityRequest {
 
 fn usage() -> String {
     cli::usage()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::executable_matches;
+
+    #[test]
+    fn executable_matches_by_name_across_path_forms() {
+        // Agents declare a bare command; the kernel records the resolved path.
+        assert!(executable_matches("cargo", Some("/usr/bin/cargo")));
+        assert!(executable_matches("./run.sh", Some("/work/run.sh")));
+        assert!(executable_matches(
+            "/usr/bin/python3",
+            Some("/usr/bin/python3")
+        ));
+        // Different executables must not match, and a missing path never matches.
+        assert!(!executable_matches("cargo", Some("/usr/bin/rustc")));
+        assert!(!executable_matches("cargo", None));
+    }
 }
