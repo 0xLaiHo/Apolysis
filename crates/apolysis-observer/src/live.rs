@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -287,6 +288,24 @@ impl LiveObserveRequest {
 struct ManagedAgentChild {
     child: Child,
     metadata: AgentScopeMetadata,
+    /// Write end of the pre-exec gate; one byte releases the workload.
+    gate: Option<OwnedFd>,
+}
+
+impl ManagedAgentChild {
+    /// Release the gate so the workload runs now that the observer's tracepoints
+    /// are attached and the pid tree is registered. Writing a newline completes
+    /// the wrapper's `read`, which then `exec`s the real command.
+    fn release_gate(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            let byte = [b'\n'; 1];
+            // SAFETY: gate owns a valid write fd; best-effort single-byte write
+            // to complete the wrapper's gate read. The fd closes on drop.
+            unsafe {
+                libc::write(gate.as_raw_fd(), byte.as_ptr().cast(), 1);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -581,6 +600,12 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         return Err(error);
     }
 
+    // Tracepoints are attached and the pid tree is registered; release the
+    // gated workload so every side effect from here on is captured.
+    if let Some(agent) = managed_agent.as_mut() {
+        agent.release_gate();
+    }
+
     let ring_map = ebpf
         .take_map(&loader_plan.ring_buffer_map)
         .ok_or_else(|| format!("missing BPF map: {}", loader_plan.ring_buffer_map))?;
@@ -845,8 +870,39 @@ fn spawn_managed_agent(
     request: &AgentRunRequest,
     workspace_root: &Path,
 ) -> Result<ManagedAgentChild, String> {
-    let mut command = tokio::process::Command::new(request.executable());
+    // Gate the workload so the observer attaches BEFORE it runs. Without this, a
+    // fast command exec()s and exits during the tens of milliseconds the eBPF
+    // verifier and tracepoint attach take, and no events are captured.
+    //
+    // We cannot simply block in pre_exec: std's spawn() waits for the child to
+    // exec() before returning, so a child that blocks before exec would deadlock
+    // spawn(). Instead we exec a tiny shell wrapper that blocks on a pipe fd
+    // AFTER exec, then exec()s the real command. spawn() returns as soon as the
+    // wrapper execs; the real command's exec — and every side effect after it —
+    // happens only once the observer writes the release byte.
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: fds is a valid two-element array that pipe2 fills.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(format!(
+            "failed to create managed agent gate pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let gate_read = fds[0];
+    let gate_write_raw = fds[1];
+    // SAFETY: pipe2 returned a valid, owned write fd; wrap it for RAII.
+    let gate_write = unsafe { OwnedFd::from_raw_fd(gate_write_raw) };
+
+    // fd inherited by the wrapper (cleared of CLOEXEC via dup2) that its `read`
+    // waits on. `read` fails on EOF, so a dropped gate (observer setup failed)
+    // makes the wrapper exit without running the workload.
+    const GATE_FD: libc::c_int = 3;
+    let mut command = tokio::process::Command::new("/bin/sh");
     command
+        .arg("-c")
+        .arg("IFS= read -r _ <&3 || exit 127; exec \"$@\"")
+        .arg("apolysis-agent-gate")
+        .arg(request.executable())
         .args(request.args())
         .current_dir(workspace_root)
         .kill_on_drop(true);
@@ -859,12 +915,30 @@ fn spawn_managed_agent(
             command.env("CODEX_HOME", codex_home);
         }
     }
+    // SAFETY: runs post-fork/pre-exec, async-signal-safe only. dup2 the gate read
+    // end onto GATE_FD (which clears CLOEXEC), so it survives the wrapper's exec
+    // and the shell can read it; the original CLOEXEC fds close on exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(gate_read, GATE_FD) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
     let child = command.spawn().map_err(|error| {
         format!(
             "failed to start managed agent command '{}': {error}",
             request.redacted_command()
         )
     })?;
+    // Only the wrapper reads the gate; the parent keeps the write end.
+    // SAFETY: gate_read is a valid fd not used again in the parent.
+    unsafe {
+        libc::close(gate_read);
+    }
+
     let root_pid = child
         .id()
         .ok_or_else(|| "managed agent child pid is unavailable".to_string())?;
@@ -878,7 +952,11 @@ fn spawn_managed_agent(
         workspace_root: workspace_root.display().to_string(),
         start_time_ticks: read_process_start_time_ticks(root_pid),
     };
-    Ok(ManagedAgentChild { child, metadata })
+    Ok(ManagedAgentChild {
+        child,
+        metadata,
+        gate: Some(gate_write),
+    })
 }
 
 async fn terminate_managed_agent(agent: Option<&mut ManagedAgentChild>) {
@@ -1226,10 +1304,42 @@ fn redact_command(command: &[String]) -> Vec<String> {
         if looks_like_secret_value(arg) {
             redacted.push("<redacted>".to_string());
         } else {
-            redacted.push(shell_display_arg(arg));
+            redacted.push(shell_display_arg(&redact_command_credential_paths(arg)));
         }
     }
     redacted
+}
+
+/// Replace credential-file tokens (`~/.aws/...`, `.env`, `/var/run/secrets/...`)
+/// inside a launch argv element with a placeholder, so a `bash -c "<script>"`
+/// command cannot leak a credential path into agent-command metadata.
+//
+// ponytail: credential-paths only. The launch command is operator-authored, so
+// non-credential paths stay readable; observed side effects use the stricter
+// session-salted Redactor.
+fn redact_command_credential_paths(arg: &str) -> String {
+    if !arg.contains('/') {
+        return arg.to_string();
+    }
+    let mut redacted = false;
+    let tokens: Vec<String> = arg
+        .split_whitespace()
+        .map(|token| {
+            let core =
+                token.trim_matches(|ch| matches!(ch, '\'' | '"' | '`' | ';' | ',' | '(' | ')'));
+            if looks_like_credential_path(core) {
+                redacted = true;
+                "<credential-path>".to_string()
+            } else {
+                token.to_string()
+            }
+        })
+        .collect();
+    if redacted {
+        tokens.join(" ")
+    } else {
+        arg.to_string()
+    }
 }
 
 fn secret_flag(value: &str) -> bool {
@@ -1840,6 +1950,86 @@ mod tests {
     use super::*;
     use apolysis_core::{CanonicalEvent, EventType};
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn agent_command_metadata_redacts_credential_paths_in_shell_scripts() {
+        let request = AgentRunRequest::new(
+            "bash",
+            vec![
+                "bash".to_string(),
+                "-c".to_string(),
+                "cat /tmp/demo-home/.aws/credentials && echo done".to_string(),
+            ],
+        )
+        .unwrap();
+        let command = request.redacted_command();
+        assert!(
+            !command.contains("/tmp/demo-home/.aws/credentials"),
+            "raw credential path leaked into agent-command metadata: {command}"
+        );
+        assert!(command.contains("<credential-path>"), "got: {command}");
+        // Non-credential structure stays readable.
+        assert!(command.contains("bash -c"), "got: {command}");
+        assert!(command.contains("echo done"), "got: {command}");
+    }
+
+    #[test]
+    fn agent_command_metadata_keeps_ordinary_executable_paths() {
+        let request = AgentRunRequest::new(
+            "codex",
+            vec![
+                "/usr/bin/codex".to_string(),
+                "exec".to_string(),
+                "--json".to_string(),
+            ],
+        )
+        .unwrap();
+        let command = request.redacted_command();
+        assert!(command.contains("/usr/bin/codex"), "got: {command}");
+        assert!(!command.contains("<credential-path>"), "got: {command}");
+    }
+
+    #[tokio::test]
+    async fn managed_agent_waits_for_gate_release_before_running() {
+        let marker = std::env::temp_dir().join(format!(
+            "apolysis-gate-test-{}-{}.marker",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let request = AgentRunRequest::new(
+            "sh",
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("echo ran > {}", marker.display()),
+            ],
+        )
+        .unwrap();
+
+        let mut managed = spawn_managed_agent(&request, Path::new(".")).unwrap();
+        // The child is blocked in pre_exec before running the workload.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            !marker.exists(),
+            "workload ran before the observer released the gate"
+        );
+
+        managed.release_gate();
+        let status = managed.child.wait().await.unwrap();
+        assert!(
+            status.success(),
+            "workload exited unsuccessfully: {status:?}"
+        );
+        assert!(
+            marker.exists(),
+            "workload did not run after the gate was released"
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
 
     #[test]
     fn persisted_live_events_redact_credentials_before_jsonl_output() {

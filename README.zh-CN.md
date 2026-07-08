@@ -28,6 +28,18 @@ make build && make quickstart
 eBPF——并打印出智能体声明的意图和它真实的 OS 副作用在哪里出现分歧。见
 [Quickstart](docs/quickstart.md)。
 
+## 在 CI 里审计智能体（GitHub Action）
+
+```yaml
+- uses: 0xLaiHo/Apolysis@main
+  with:
+    run: 'codex exec --json "run the project tests"'
+```
+
+一个 step 就能在 runner 上以内核级证据记录该命令实际做了什么，把摘要打进 job
+summary，并把 JSONL 时间线作为 artifact 上传。见
+[GitHub Action](docs/github-action.md)。
+
 ## 当前状态
 
 `v0.2.0` 是第一个已签名的公开版本，包含预构建 Linux CLI、随包 CO-RE eBPF
@@ -183,6 +195,7 @@ sudo -E ./target/debug/apolysis observe \
 ## 关键文档
 
 - [Quickstart](docs/quickstart.md)
+- [GitHub Action](docs/github-action.md)
 - [JSONL 模式](docs/jsonl-schema-v1.md)
 - [威胁模型](docs/threat-model.md)
 - [哈希链校验](docs/hash-chain-verification.md)

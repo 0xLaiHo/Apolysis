@@ -30,6 +30,18 @@ This runs the intent-vs-side-effect accountability flow on a bundled fixture —
 no root, no eBPF — and prints where an agent's declared intent and its real OS
 side effects diverge. See [Quickstart](docs/quickstart.md).
 
+## Audit An Agent In CI (GitHub Action)
+
+```yaml
+- uses: 0xLaiHo/Apolysis@main
+  with:
+    run: 'codex exec --json "run the project tests"'
+```
+
+One step records kernel-level evidence of what the command actually did on the
+runner, prints a digest into the job summary, and uploads the JSONL timeline as
+an artifact. See [GitHub Action](docs/github-action.md).
+
 ## Current Status
 
 `v0.2.0` is the first signed public release with a prebuilt Linux CLI, bundled
@@ -190,6 +202,7 @@ Keep generated timelines, Codex logs, and reports under `.apolysis/` or
 ## Key Documents
 
 - [Quickstart](docs/quickstart.md)
+- [GitHub Action](docs/github-action.md)
 - [JSONL schema](docs/jsonl-schema-v1.md)
 - [Threat model](docs/threat-model.md)
 - [Hash-chain verification](docs/hash-chain-verification.md)
