@@ -43,9 +43,11 @@ summary，并把 JSONL 时间线作为 artifact 上传。见
 
 ## 当前状态
 
-`v0.2.0` 是第一个已签名的公开版本，包含预构建 Linux CLI、随包 CO-RE eBPF
-对象、release manifest、checksum 和 AWS KMS 签名证据。Apolysis 仍然是审计与
-问责层，不是完整沙箱提供方，也不是合规认证平台。
+`v0.3.0` 是最新的已签名公开版本，包含预构建 Linux CLI、随包 CO-RE eBPF
+对象、release manifest、checksum 和 AWS KMS 签名证据。该版本修复了快命令
+可能丢失全部事件的观测器竞态，新增关联摘要，并在证据被丢弃或截断时
+大声告警。Apolysis 仍然是审计与问责层，不是完整沙箱提供方，也不是合规
+认证平台。
 
 ## 核心能力
 
