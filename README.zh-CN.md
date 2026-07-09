@@ -6,14 +6,14 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Apolysis 是面向 AI 智能体工作负载的 Linux 运行时问责层。它记录一次智能体会话在
-主机侧实际产生的进程、文件、网络、凭证、运行时、策略和声明意图证据，并将这些证据
-关联成追加式审计时间线。
+Apolysis 是面向 AI 智能体工作负载的实验性 Linux 运行时审计遥测与问责层。它记录
+有 scope 的主机观测和 syscall 尝试子集，并把进程、文件、网络、凭证、运行时、策略和
+声明意图记录做启发式关联，形成有序审计时间线。
 
-它不是沙箱、审批界面、工具网关或告警平台。它的职责是作为环境侧证据层，帮助
-运维者不依赖智能体框架本身，也能复查智能体到底做了什么。
+它不是沙箱、审批界面、工具网关或告警平台。它是一个以证据为目标的环境侧层，帮助
+运维者不依赖智能体框架本身，带着显式不确定性复查环境观测到了什么。
 
-![Apolysis 实时 eBPF 审计：智能体声明的 workload 被匹配，一次未声明的凭证读取被标记为 missing_intent——录自真实 observe 运行；凭证路径在证据中已脱敏](docs/assets/codex-live-demo/live-ebpf-demo.gif)
+![Apolysis 实时 eBPF 审计：智能体声明的 workload 被匹配，一次未声明的凭证路径访问尝试被标记为 missing_intent——录自真实 observe 运行；凭证路径在 timeline 中已脱敏](docs/assets/codex-live-demo/live-ebpf-demo.gif)
 
 演示素材：[实时 asciinema cast](docs/assets/codex-live-demo/live-ebpf-demo.cast)、
 [零特权 quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast)
@@ -25,38 +25,42 @@ Apolysis 是面向 AI 智能体工作负载的 Linux 运行时问责层。它记
 make build && make quickstart
 ```
 
-在一份随包 fixture 上跑完「声明意图 ↔ 真实副作用」问责流程——不需要 root、不需要
-eBPF——并打印出智能体声明的意图和它真实的 OS 副作用在哪里出现分歧。见
+在一份随包 fixture 上跑完「声明意图 ↔ 观测事件」问责流程——不需要 root、不需要
+eBPF——并打印出声明意图和 fixture 中的 OS 观测事件在哪里出现分歧。见
 [Quickstart](docs/quickstart.md)。
 
 ## 在 CI 里审计智能体（GitHub Action）
 
 ```yaml
-- uses: 0xLaiHo/Apolysis@main
+- uses: 0xLaiHo/Apolysis@c00a84650e306d01b44e2fbd6b80f1395c852f74 # v0.3.0
   with:
     run: 'codex exec --json "run the project tests"'
 ```
 
-一个 step 就能在 runner 上以内核级证据记录该命令实际做了什么，把摘要打进 job
-summary，并把 JSONL 时间线作为 artifact 上传。见
+一个 step 就能在 runner 上记录该命令在 session scope 内的内核观测和 syscall 尝试，
+把摘要打进 job summary，并把 JSONL 时间线作为 artifact 上传。见
 [GitHub Action](docs/github-action.md)。
 
 ## 当前状态
 
-`v0.3.0` 是最新的已签名公开版本，包含预构建 Linux CLI、随包 CO-RE eBPF
+`v0.3.0` 是最新的公开研究版本，包含预构建 Linux CLI、随包 CO-RE eBPF
 对象、release manifest、checksum 和 AWS KMS 签名证据。该版本修复了快命令
-可能丢失全部事件的观测器竞态，新增关联摘要，并在证据被丢弃或截断时
-大声告警。Apolysis 仍然是审计与问责层，不是完整沙箱提供方，也不是合规
-认证平台。
+可能丢失全部事件的观测器竞态，新增关联摘要，并在事件被丢弃或截断时告警。
+
+Apolysis 仍是实验性审计遥测：当前文件与网络 tracepoint 在没有结果信息时只描述
+syscall 尝试；CLI timeline 是普通 JSONL，daemon 模式可以使用本地 hash-chain
+envelope。两者都不是已被独立锚定的取证记录。下一步 roadmap Gate 依次是公开路径
+加固、精确的证据契约、关联质量和 CI-first 设计伙伴验证。在加固版本发布前，不要
+把当前 Action 用于不可信仓库或 pull request。
 
 ## 核心能力
 
-- 通过离线数据和实时 eBPF 观测采集进程、文件、网络、受限命令参数和凭证路径事件。
+- 通过离线数据和实时 eBPF 观测采集进程、文件、网络、受限命令参数和凭证路径事件，
+  并显式说明 attempt/outcome 局限。
 - 由 Apolysis 托管启动本地智能体命令，并为 Codex 等命令行智能体追踪进程树。
-- 摄入并关联智能体声明的工具调用意图与主机侧实际副作用。
+- 摄入智能体声明的工具调用意图，并与主机侧观测事件做启发式关联。
 - 关联本地进程、Docker/containerd 和 Kubernetes 工作负载的运行时元数据。
-- 提供追加式 JSONL 证据、输出轮转、哈希链校验、策略发现、发布验证关卡，以及
-  带签名证据的 release 产物交接。
+- 提供有序 JSONL timeline、输出轮转、daemon 本地哈希链校验、策略发现和发布验证关卡。
 
 ## 架构设计
 
@@ -75,7 +79,7 @@ Apolysis 关联层
   ├─ 主机侧观测事件
   └─ 问责发现
 
-追加式证据
+记录的时间线
   ├─ JSONL 时间线
   ├─ 本地轮转文件
   └─ 可选哈希链校验
