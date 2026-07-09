@@ -29,7 +29,7 @@ inputs:
   version:
     description: 'Apolysis release tag to download when binary/bpf-object are not provided.'
     required: false
-    default: 'v0.2.0'
+    default: 'v0.3.0'
   binary:
     description: 'Path to a pre-built apolysis binary (skips the release download).'
     required: false
@@ -197,8 +197,8 @@ runs:
           } >>"$GITHUB_STEP_SUMMARY"
         fi
         if [[ -n "$INTENT_LOG" && -f "$INTENT_LOG" ]]; then
-          # Plain correlate keeps this compatible with the v0.2.0 release
-          # binary; newer binaries also accept --summary for a richer digest.
+          # Plain correlate keeps this compatible with every release binary
+          # (v0.2.0 lacks --summary); v0.3.0+ also accept --summary locally.
           "$BIN" intent ingest \
             --adapter codex-jsonl \
             --input "$INTENT_LOG" \

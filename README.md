@@ -45,10 +45,12 @@ an artifact. See [GitHub Action](docs/github-action.md).
 
 ## Current Status
 
-`v0.2.0` is the first signed public release with a prebuilt Linux CLI, bundled
+`v0.3.0` is the latest signed public release with a prebuilt Linux CLI, bundled
 CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed signing
-evidence. Apolysis remains an audit and accountability layer, not a full
-sandbox provider or compliance-certified platform.
+evidence. It fixes an observer race that could drop all events for fast
+commands, adds a correlation summary, and warns loudly when evidence is
+dropped or truncated. Apolysis remains an audit and accountability layer, not
+a full sandbox provider or compliance-certified platform.
 
 ## Core Capabilities
 
