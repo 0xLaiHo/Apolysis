@@ -6,16 +6,17 @@
 
 [English](README.md) | [Simplified Chinese](README.zh-CN.md)
 
-Apolysis is a Linux runtime accountability layer for AI agent workloads. It
-records host-side evidence for what an agent session actually did, then
-correlates process, file, network, credential, runtime, policy, and declared
-intent records into an append-only audit timeline.
+Apolysis is an experimental Linux runtime audit-telemetry and accountability
+layer for AI agent workloads. It records a scoped subset of host observations
+and syscall attempts, then heuristically correlates process, file, network,
+credential, runtime, policy, and declared-intent records into an ordered audit
+timeline.
 
-It is not a sandbox, approval UI, MCP gateway, or SIEM. It is the evidence
-layer that helps operators review agent side effects independently of the
-agent harness.
+It is not a sandbox, approval UI, MCP gateway, or SIEM. It is an
+evidence-focused layer that helps operators review what the environment
+observed, independently of the agent harness and with explicit uncertainty.
 
-![Apolysis live eBPF audit: the agent's declared workload is matched and an undeclared credential read is flagged as missing_intent — recorded from a real observe run; the credential path is redacted in the evidence](docs/assets/codex-live-demo/live-ebpf-demo.gif)
+![Apolysis live eBPF audit: the agent's declared workload is matched and an undeclared credential-path access attempt is flagged as missing_intent — recorded from a real observe run; the credential path is redacted in the timeline](docs/assets/codex-live-demo/live-ebpf-demo.gif)
 
 Demo assets: [live asciinema cast](docs/assets/codex-live-demo/live-ebpf-demo.cast),
 [zero-privilege quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast),
@@ -27,43 +28,51 @@ and [public evidence excerpt](docs/codex-live-demo-public-assets.md).
 make build && make quickstart
 ```
 
-This runs the intent-vs-side-effect accountability flow on a bundled fixture —
-no root, no eBPF — and prints where an agent's declared intent and its real OS
-side effects diverge. See [Quickstart](docs/quickstart.md).
+This runs the intent-vs-observation accountability flow on a bundled fixture —
+no root, no eBPF — and prints where declared intent and the fixture's observed
+OS events diverge. See [Quickstart](docs/quickstart.md).
 
 ## Audit An Agent In CI (GitHub Action)
 
 ```yaml
-- uses: 0xLaiHo/Apolysis@main
+- uses: 0xLaiHo/Apolysis@c00a84650e306d01b44e2fbd6b80f1395c852f74 # v0.3.0
   with:
     run: 'codex exec --json "run the project tests"'
 ```
 
-One step records kernel-level evidence of what the command actually did on the
-runner, prints a digest into the job summary, and uploads the JSONL timeline as
+One step records session-scoped kernel observations and syscall attempts for the
+command, prints a digest into the job summary, and uploads the JSONL timeline as
 an artifact. See [GitHub Action](docs/github-action.md).
 
 ## Current Status
 
-`v0.3.0` is the latest signed public release with a prebuilt Linux CLI, bundled
-CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed signing
+`v0.3.0` is the latest public research release with a prebuilt Linux CLI,
+bundled CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed signing
 evidence. It fixes an observer race that could drop all events for fast
-commands, adds a correlation summary, and warns loudly when evidence is
-dropped or truncated. Apolysis remains an audit and accountability layer, not
-a full sandbox provider or compliance-certified platform.
+commands, adds a correlation summary, and warns when events are dropped or
+truncated.
+
+Apolysis is still experimental audit telemetry: current file and network
+tracepoints describe syscall attempts unless an outcome is available; CLI
+timelines are ordinary JSONL, while daemon mode can use a local hash-chain
+envelope. Neither is an independently anchored forensic record. The next
+roadmap gates are public-path hardening, a precise evidence contract,
+correlation quality, and CI-first design-partner validation. Do not treat the
+current Action as safe for untrusted repositories or pull requests until that
+hardening ships.
 
 ## Core Capabilities
 
 - Live and fixture observation for process, file, network, bounded exec argv,
-  and credential-path events.
+  and credential-path events, with explicit attempt/outcome limitations.
 - Managed local agent launch with process-tree attribution for Codex and other
   command-line agents.
-- Intent ingestion and correlation for declared tool calls versus observed
-  host-side side effects.
+- Intent ingestion and heuristic correlation for declared tool calls versus
+  observed host-side events.
 - Runtime metadata correlation for local processes, Docker/containerd, and
   Kubernetes workloads.
-- Append-only JSONL evidence, output rotation, hash-chain verification, policy
-  findings, release-validation gates, and signed release-artifact handoff.
+- Ordered JSONL timelines, output rotation, daemon-local hash-chain
+  verification, policy findings, and release-validation gates.
 
 ## Architecture
 
@@ -82,7 +91,7 @@ Apolysis correlation
   ├─ observed host events
   └─ accountability findings
 
-Append-only evidence
+Recorded timeline
   ├─ JSONL timeline
   ├─ rotated local files
   └─ optional hash-chain verification
