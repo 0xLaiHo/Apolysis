@@ -13,9 +13,10 @@ Apolysis 是面向 AI 智能体工作负载的 Linux 运行时问责层。它记
 它不是沙箱、审批界面、工具网关或告警平台。它的职责是作为环境侧证据层，帮助
 运维者不依赖智能体框架本身，也能复查智能体到底做了什么。
 
-![Codex 实时演示：Apolysis 匹配声明的 workload，并将脱敏后的假凭证副作用标记为 missing intent](docs/assets/codex-live-demo/codex-live-demo.gif)
+![Apolysis 实时 eBPF 审计：智能体声明的 workload 被匹配，一次未声明的凭证读取被标记为 missing_intent——录自真实 observe 运行；凭证路径在证据中已脱敏](docs/assets/codex-live-demo/live-ebpf-demo.gif)
 
-演示素材：[asciinema cast](docs/assets/codex-live-demo/codex-live-demo.cast)
+演示素材：[实时 asciinema cast](docs/assets/codex-live-demo/live-ebpf-demo.cast)、
+[零特权 quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast)
 和[公开证据摘录](docs/codex-live-demo-public-assets.md)。
 
 ## 五分钟试用（无需 root）
@@ -42,9 +43,11 @@ summary，并把 JSONL 时间线作为 artifact 上传。见
 
 ## 当前状态
 
-`v0.2.0` 是第一个已签名的公开版本，包含预构建 Linux CLI、随包 CO-RE eBPF
-对象、release manifest、checksum 和 AWS KMS 签名证据。Apolysis 仍然是审计与
-问责层，不是完整沙箱提供方，也不是合规认证平台。
+`v0.3.0` 是最新的已签名公开版本，包含预构建 Linux CLI、随包 CO-RE eBPF
+对象、release manifest、checksum 和 AWS KMS 签名证据。该版本修复了快命令
+可能丢失全部事件的观测器竞态，新增关联摘要，并在证据被丢弃或截断时
+大声告警。Apolysis 仍然是审计与问责层，不是完整沙箱提供方，也不是合规
+认证平台。
 
 ## 核心能力
 

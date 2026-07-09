@@ -29,7 +29,7 @@ inputs:
   version:
     description: 'Apolysis release tag to download when binary/bpf-object are not provided.'
     required: false
-    default: 'v0.2.0'
+    default: 'v0.3.0'
   binary:
     description: 'Path to a pre-built apolysis binary (skips the release download).'
     required: false
@@ -187,9 +187,18 @@ runs:
           echo "| $events | $violations | $credentials | $connects |"
           echo ""
         } >>"$GITHUB_STEP_SUMMARY"
+        # Fail loud on event loss: a quiet timeline is not proof of absence.
+        dropped=$(grep -oE '"kind":"(ring_buffer_reserve_failure|map_pressure|decode_failure)","count":[0-9]+' "$timeline" | grep -oE '[0-9]+$' | awk '{s+=$1} END{print s+0}' || true)
+        truncated=$(grep -oE '"kind":"truncation","count":[0-9]+' "$timeline" | grep -oE '[0-9]+$' | awk '{s+=$1} END{print s+0}' || true)
+        if [[ "$dropped" -gt 0 || "$truncated" -gt 0 ]]; then
+          {
+            echo "> ⚠️ **Evidence may be incomplete:** $dropped event(s) dropped, $truncated truncated. A quiet timeline is not proof of absence."
+            echo ""
+          } >>"$GITHUB_STEP_SUMMARY"
+        fi
         if [[ -n "$INTENT_LOG" && -f "$INTENT_LOG" ]]; then
-          # Plain correlate keeps this compatible with the v0.2.0 release
-          # binary; newer binaries also accept --summary for a richer digest.
+          # Plain correlate keeps this compatible with every release binary
+          # (v0.2.0 lacks --summary); v0.3.0+ also accept --summary locally.
           "$BIN" intent ingest \
             --adapter codex-jsonl \
             --input "$INTENT_LOG" \

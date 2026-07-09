@@ -15,9 +15,10 @@ It is not a sandbox, approval UI, MCP gateway, or SIEM. It is the evidence
 layer that helps operators review agent side effects independently of the
 agent harness.
 
-![Codex live demo: Apolysis matches the declared workload and flags a redacted fake credential side effect as missing intent](docs/assets/codex-live-demo/codex-live-demo.gif)
+![Apolysis live eBPF audit: the agent's declared workload is matched and an undeclared credential read is flagged as missing_intent — recorded from a real observe run; the credential path is redacted in the evidence](docs/assets/codex-live-demo/live-ebpf-demo.gif)
 
-Demo assets: [asciinema cast](docs/assets/codex-live-demo/codex-live-demo.cast)
+Demo assets: [live asciinema cast](docs/assets/codex-live-demo/live-ebpf-demo.cast),
+[zero-privilege quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast),
 and [public evidence excerpt](docs/codex-live-demo-public-assets.md).
 
 ## Try It In Five Minutes (no root)
@@ -44,10 +45,12 @@ an artifact. See [GitHub Action](docs/github-action.md).
 
 ## Current Status
 
-`v0.2.0` is the first signed public release with a prebuilt Linux CLI, bundled
+`v0.3.0` is the latest signed public release with a prebuilt Linux CLI, bundled
 CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed signing
-evidence. Apolysis remains an audit and accountability layer, not a full
-sandbox provider or compliance-certified platform.
+evidence. It fixes an observer race that could drop all events for fast
+commands, adds a correlation summary, and warns loudly when evidence is
+dropped or truncated. Apolysis remains an audit and accountability layer, not
+a full sandbox provider or compliance-certified platform.
 
 ## Core Capabilities
 

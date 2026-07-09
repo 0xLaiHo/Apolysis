@@ -57,7 +57,7 @@ many `missing_intent` findings had no declared cover. The full
 | `policy` | generated | Your policy file; a minimal audit-only policy (credential deny-list, workspace `./`) is generated when omitted. |
 | `session` | `apolysis-<run id>-<attempt>` | Session id written into every record. |
 | `agent-kind` | `ci-agent` | Agent adapter hint label. |
-| `version` | `v0.2.0` | Release to download (binary + CO-RE object, checksum-verified). |
+| `version` | `v0.3.0` | Release to download (binary + CO-RE object, checksum-verified). |
 | `binary` / `bpf-object` | — | Use pre-built artifacts instead of downloading. |
 | `output-dir` | `.apolysis-action` | Where the timeline and reports are written. |
 

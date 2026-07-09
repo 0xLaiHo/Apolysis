@@ -109,6 +109,10 @@ async fn intent_correlate_command(args: Vec<String>) -> Result<i32, String> {
         .await
         .map_err(|error| format!("failed to read timeline input: {error}"))?;
     let records = correlate_intents(&intent_input, &timeline_input)?;
+    let (dropped, truncated) = observer_evidence_loss(&timeline_input);
+    if let Some(warning) = evidence_loss_warning(dropped, truncated) {
+        eprintln!("{warning}");
+    }
     let mut store = apolysis_store::AsyncJsonlStore::create(&request.output_path)
         .await
         .map_err(|error| format!("failed to create intent correlation output: {error}"))?;
@@ -719,8 +723,10 @@ fn correlate_intents(
                                 .as_deref()
                                 .and_then(command_executable)
                                 .map(|executable| {
-                                    event.process_executable.as_deref() == Some(executable)
-                                        || event.resource == executable
+                                    executable_matches(
+                                        executable,
+                                        event.process_executable.as_deref(),
+                                    ) || executable_matches(executable, Some(&event.resource))
                                 })
                                 .unwrap_or(false)
                     })
@@ -786,7 +792,7 @@ fn parse_observed_events(input: &str) -> Result<Vec<ObservedEventForCorrelation>
             let event_type = required_string_field(&value, "event_type")?.to_string();
             Ok(ObservedEventForCorrelation {
                 session_id: required_string_field(&value, "session_id")?.to_string(),
-                report_missing_intent: side_effect_event_type(&event_type),
+                report_missing_intent: missing_intent_event_type(&event_type),
                 event_type,
                 raw_event_id: required_string_field(&value, "raw_event_id")?.to_string(),
                 pid: value
@@ -838,6 +844,59 @@ fn command_executable(command: &str) -> Option<&str> {
                 .chars()
                 .all(|ch| !matches!(ch, '\'' | '"' | '{' | '}' | '[' | ']'))
     })
+}
+
+/// Match a declared executable against an observed one, tolerant of path form.
+/// A declared bare `cargo` matches an observed `/usr/bin/cargo`, and `./run.sh`
+/// matches an absolute `/work/run.sh`, because agents declare a command name
+/// while the kernel records the resolved executable path. Exact equality still
+/// wins first; otherwise the file names must match and be non-empty.
+fn executable_matches(declared: &str, observed: Option<&str>) -> bool {
+    let Some(observed) = observed else {
+        return false;
+    };
+    if declared == observed {
+        return true;
+    }
+    let declared_name = declared.rsplit('/').next().unwrap_or(declared);
+    let observed_name = observed.rsplit('/').next().unwrap_or(observed);
+    !declared_name.is_empty() && declared_name == observed_name
+}
+
+/// Sum the observer's event-loss diagnostics in a timeline into
+/// (dropped, truncated). Best-effort: a malformed timeline yields (0, 0).
+fn observer_evidence_loss(timeline_input: &str) -> (u64, u64) {
+    let records = parse_jsonl(timeline_input, "timeline input").unwrap_or_default();
+    let mut dropped = 0;
+    let mut truncated = 0;
+    for value in &records {
+        if string_field(value, "record_type") != Some("observer_diagnostic") {
+            continue;
+        }
+        let count = value
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        match string_field(value, "kind") {
+            Some("ring_buffer_reserve_failure" | "map_pressure" | "decode_failure") => {
+                dropped += count;
+            }
+            Some("truncation") => truncated += count,
+            _ => {}
+        }
+    }
+    (dropped, truncated)
+}
+
+/// The fail-loud incompleteness warning, or None when the evidence is whole.
+fn evidence_loss_warning(dropped: u64, truncated: u64) -> Option<String> {
+    if dropped == 0 && truncated == 0 {
+        return None;
+    }
+    Some(format!(
+        "apolysis: ⚠ evidence may be incomplete — {dropped} event(s) dropped, \
+         {truncated} truncated. A quiet timeline is not proof of absence."
+    ))
 }
 
 fn intent_correlation_record(
@@ -901,11 +960,34 @@ fn u64_field(value: &serde_json::Value, field: &str) -> Option<u64> {
         .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
 }
 
+/// Observed event types (besides `exec`) that are correlated against declared
+/// intent. Plain reads are included so a declared file read can still match an
+/// observed one.
 fn side_effect_event_type(event_type: &str) -> bool {
     matches!(
         event_type,
         "file_open"
             | "file_create"
+            | "file_truncate"
+            | "file_unlink"
+            | "file_rename"
+            | "network_connect"
+            | "credential_read"
+    )
+}
+
+/// Of the correlated side effects, the ones worth surfacing as a `missing_intent`
+/// finding when they have no matching declared intent.
+///
+/// Plain reads (`file_open`) are excluded: every process opens hundreds of them
+/// (shared libraries, config, source), so flagging each one buries the real
+/// signal. The accountable undeclared side effects are credential reads, network
+/// egress, and file mutations — a plain read that is not a credential is not, by
+/// itself, a finding.
+fn missing_intent_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "file_create"
             | "file_truncate"
             | "file_unlink"
             | "file_rename"
@@ -1460,4 +1542,42 @@ impl VisibilityRequest {
 
 fn usage() -> String {
     cli::usage()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{evidence_loss_warning, executable_matches, observer_evidence_loss};
+
+    #[test]
+    fn evidence_loss_is_summed_and_warned() {
+        let timeline = concat!(
+            r#"{"record_type":"observer_diagnostic","session_id":"s","kind":"truncation","count":2,"detail":"x"}"#,
+            "\n",
+            r#"{"record_type":"observer_diagnostic","session_id":"s","kind":"ring_buffer_reserve_failure","count":3,"detail":"x"}"#,
+            "\n",
+            r#"{"record_type":"observer_diagnostic","session_id":"s","kind":"decode_failure","count":1,"detail":"x"}"#,
+            "\n",
+            r#"{"record_type":"event","event_type":"exec","raw_event_id":"s:e:1"}"#,
+            "\n",
+        );
+        assert_eq!(observer_evidence_loss(timeline), (4, 2));
+        assert!(evidence_loss_warning(4, 2).is_some());
+        // A whole timeline (no diagnostics) must not warn.
+        assert_eq!(observer_evidence_loss(r#"{"record_type":"event"}"#), (0, 0));
+        assert!(evidence_loss_warning(0, 0).is_none());
+    }
+
+    #[test]
+    fn executable_matches_by_name_across_path_forms() {
+        // Agents declare a bare command; the kernel records the resolved path.
+        assert!(executable_matches("cargo", Some("/usr/bin/cargo")));
+        assert!(executable_matches("./run.sh", Some("/work/run.sh")));
+        assert!(executable_matches(
+            "/usr/bin/python3",
+            Some("/usr/bin/python3")
+        ));
+        // Different executables must not match, and a missing path never matches.
+        assert!(!executable_matches("cargo", Some("/usr/bin/rustc")));
+        assert!(!executable_matches("cargo", None));
+    }
 }

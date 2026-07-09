@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version, for example v0.2.0
+        description: Release version, for example v0.3.0
         required: true
         type: string
       signing_evidence_run_id:

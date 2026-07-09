@@ -1,0 +1,57 @@
+name: Release Smoke
+
+# Verify a published release end to end through the real user path: the action
+# downloads the tagged tarball (no binary/bpf-object overrides, unlike the PR
+# self-test, which builds from source). Run this after publishing a release.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published release tag to smoke-test, for example v0.3.0
+        required: true
+        type: string
+
+jobs:
+  smoke:
+    name: smoke released artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Plant fake credential fixture
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/apolysis-smoke-home/.aws
+          printf 'aws_secret_access_key=APOLYSIS_FAKE_smoke\n' \
+            > /tmp/apolysis-smoke-home/.aws/credentials
+
+      - name: Audit a fast command with the released binary
+        id: audit
+        uses: ./
+        with:
+          version: ${{ inputs.version }}
+          session: release-smoke
+          run: 'cat /tmp/apolysis-smoke-home/.aws/credentials > /dev/null && echo smoke-done'
+
+      - name: Assert the released artifact captured the evidence
+        run: |
+          set -uo pipefail
+          timeline='${{ steps.audit.outputs.timeline }}'
+          echo "== timeline: $timeline =="
+          wc -l "$timeline"
+          echo "== event_type histogram =="
+          grep -o '"event_type":"[a-z_]*"' "$timeline" | sort | uniq -c || true
+
+          fail=0
+          check() {
+            local name="$1"; shift
+            if "$@"; then echo "PASS: $name"; else echo "FAIL: $name"; fail=1; fi
+          }
+          events=$(grep -c '"record_type":"event"' "$timeline" || true)
+          # A fast command must still produce events: this is the direct
+          # regression check for the spawn-before-attach race (v0.2.0).
+          check "events captured (got $events)" [ "$events" -gt 0 ]
+          check "exec observed" grep -q '"event_type":"exec"' "$timeline"
+          check "credential read observed" grep -q '"event_type":"credential_read"' "$timeline"
+          check "raw credential path redacted" bash -c "! grep -q 'apolysis-smoke-home' '$timeline'"
+          exit "$fail"
