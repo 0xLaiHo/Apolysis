@@ -192,7 +192,7 @@ git.
 
 ## No Build Required
 
-The `v0.2.0` release ships a prebuilt Linux CLI and the bundled CO-RE eBPF
+The `v0.3.0` release ships a prebuilt Linux CLI and the bundled CO-RE eBPF
 object, so you can wrap a local agent command — or drop the GitHub Action into a
 workflow — without compiling every piece yourself.
 
