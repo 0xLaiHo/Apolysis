@@ -1,9 +1,10 @@
 # Contributing To Apolysis
 
 Thanks for helping improve Apolysis. Keep contributions focused on the project
-scope: an operator-owned Linux runtime accountability layer for AI agent
-workloads. Apolysis records evidence; it is not a sandbox provider, approval UI,
-or central security platform.
+scope: an Agent Runtime Evidence & Policy Plane that correlates agent lifecycle
+and protocol claims, customer-controlled runtime evidence, and external
+outcomes. Native Linux eBPF is an optional high-trust source. Apolysis is not an
+orchestrator, sandbox, general MCP or LLM gateway, or SIEM.
 
 ## Development Workflow
 
