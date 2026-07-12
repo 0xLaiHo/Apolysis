@@ -6,15 +6,17 @@
 
 [English](README.md) | [Simplified Chinese](README.zh-CN.md)
 
-Apolysis is an experimental Linux runtime audit-telemetry and accountability
-layer for AI agent workloads. It records a scoped subset of host observations
-and syscall attempts, then heuristically correlates process, file, network,
-credential, runtime, policy, and declared-intent records into an ordered audit
-timeline.
+Apolysis is currently an experimental Linux runtime audit-telemetry and
+accountability layer for AI agent workloads. It records a scoped subset of host
+observations and syscall attempts, then heuristically correlates process, file,
+network, credential, runtime, policy, and declared-intent records into an
+ordered audit timeline.
 
-It is not a sandbox, approval UI, MCP gateway, or SIEM. It is an
-evidence-focused layer that helps operators review what the environment
-observed, independently of the agent harness and with explicit uncertainty.
+The project is evolving toward an Agent Runtime Evidence & Policy Plane that
+joins hook, SDK, OTLP, MCP, A2A, provider-outcome, and optional eBPF runtime
+evidence across local, CI, vendor-hosted, container, and Kubernetes agent
+environments. It is not a general agent orchestrator, sandbox, MCP gateway, or
+SIEM.
 
 ![Apolysis live eBPF audit: the agent's declared workload is matched and an undeclared credential-path access attempt is flagged as missing_intent — recorded from a real observe run; the credential path is redacted in the timeline](docs/assets/codex-live-demo/live-ebpf-demo.gif)
 
@@ -47,19 +49,26 @@ an artifact. See [GitHub Action](docs/github-action.md).
 ## Current Status
 
 `v0.3.0` is the latest public research release with a prebuilt Linux CLI,
-bundled CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed signing
-evidence. It fixes an observer race that could drop all events for fast
-commands, adds a correlation summary, and warns when events are dropped or
-truncated.
+bundled CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed
+release-artifact signing evidence. It fixes an observer race that could drop
+all events for fast commands, adds a correlation summary, and warns when events
+are dropped or truncated.
 
 Apolysis is still experimental audit telemetry: current file and network
 tracepoints describe syscall attempts unless an outcome is available; CLI
 timelines are ordinary JSONL, while daemon mode can use a local hash-chain
-envelope. Neither is an independently anchored forensic record. The next
-roadmap gates are public-path hardening, a precise evidence contract,
-correlation quality, and CI-first design-partner validation. Do not treat the
-current Action as safe for untrusted repositories or pull requests until that
-hardening ships.
+envelope. Neither is an independently anchored forensic record.
+
+The 26-week production-MVP direction starts with a versioned Agent Execution
+Record, an authenticated Execution Evidence Gateway, durable storage, and
+Minimum Console v0 for run inventory, separate coverage, timeline, source
+health and findings. Later source integrations culminate in Investigation
+Console v1 with Agent Run Graph, cross-run search, and bounded workflow action
+before a controlled partner pilot. Every run will expose semantic, execution,
+and outcome coverage separately.
+These are roadmap targets, not current capabilities. Do not treat the current
+Action as safe for untrusted repositories or Pull Requests until the public
+path is hardened.
 
 ## Core Capabilities
 
@@ -74,7 +83,7 @@ hardening ships.
 - Ordered JSONL timelines, output rotation, daemon-local hash-chain
   verification, policy findings, and release-validation gates.
 
-## Architecture
+## Current Architecture
 
 ```text
 Agent / tool runner
@@ -223,4 +232,3 @@ Keep generated timelines, Codex logs, and reports under `.apolysis/` or
 - [Codex live demo launch blog draft](docs/codex-live-demo-launch-blog.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
-- [Starter issues](docs/starter-issues.md)
