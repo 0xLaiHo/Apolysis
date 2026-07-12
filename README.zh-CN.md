@@ -6,12 +6,13 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Apolysis 是面向 AI 智能体工作负载的实验性 Linux 运行时审计遥测与问责层。它记录
+Apolysis 当前是面向 AI 智能体工作负载的实验性 Linux 运行时审计遥测与问责层。它记录
 有 scope 的主机观测和 syscall 尝试子集，并把进程、文件、网络、凭证、运行时、策略和
 声明意图记录做启发式关联，形成有序审计时间线。
 
-它不是沙箱、审批界面、工具网关或告警平台。它是一个以证据为目标的环境侧层，帮助
-运维者不依赖智能体框架本身，带着显式不确定性复查环境观测到了什么。
+项目正在演进为 Agent 运行时证据与策略平面，把本地、CI、厂商托管、container 和
+Kubernetes Agent 环境中的 hook、SDK、OTLP、MCP、A2A、provider outcome 与可选 eBPF
+runtime evidence 关联起来。它不是通用 Agent orchestrator、sandbox、MCP gateway 或 SIEM。
 
 ![Apolysis 实时 eBPF 审计：智能体声明的 workload 被匹配，一次未声明的凭证路径访问尝试被标记为 missing_intent——录自真实 observe 运行；凭证路径在 timeline 中已脱敏](docs/assets/codex-live-demo/live-ebpf-demo.gif)
 
@@ -49,9 +50,14 @@ eBPF——并打印出声明意图和 fixture 中的 OS 观测事件在哪里出
 
 Apolysis 仍是实验性审计遥测：当前文件与网络 tracepoint 在没有结果信息时只描述
 syscall 尝试；CLI timeline 是普通 JSONL，daemon 模式可以使用本地 hash-chain
-envelope。两者都不是已被独立锚定的取证记录。下一步 roadmap Gate 依次是公开路径
-加固、精确的证据契约、关联质量和 CI-first 设计伙伴验证。在加固版本发布前，不要
-把当前 Action 用于不可信仓库或 pull request。
+envelope。两者都不是已被独立锚定的取证记录。
+
+26 周 production MVP 方向先交付版本化 Agent Execution Record、带认证的 Execution
+Evidence Gateway、耐久存储和最小 run Console；随后增加 coding-agent hook 与 GitHub
+outcome、SDK/OTLP 与 MCP/A2A identity、Kubernetes binding 和生产级 eBPF Runtime Witness，
+最后交付有限 hook/MCP policy 与受控伙伴 pilot。每次 run 将分别显示 semantic、execution
+与 outcome coverage。这些都是 roadmap 目标，不是当前能力。在公开路径完成加固前，不要把
+当前 Action 用于不可信仓库或 GitHub 拉取请求（PR）。
 
 ## 核心能力
 
@@ -62,7 +68,7 @@ envelope。两者都不是已被独立锚定的取证记录。下一步 roadmap 
 - 关联本地进程、Docker/containerd 和 Kubernetes 工作负载的运行时元数据。
 - 提供有序 JSONL timeline、输出轮转、daemon 本地哈希链校验、策略发现和发布验证关卡。
 
-## 架构设计
+## 当前架构
 
 ```text
 智能体 / 工具运行器
