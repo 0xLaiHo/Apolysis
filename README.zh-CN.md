@@ -45,7 +45,7 @@ eBPF——并打印出声明意图和 fixture 中的 OS 观测事件在哪里出
 ## 当前状态
 
 `v0.3.0` 是最新的公开研究版本，包含预构建 Linux CLI、随包 CO-RE eBPF
-对象、release manifest、checksum 和 AWS KMS 签名证据。该版本修复了快命令
+对象、release manifest、checksum 和 AWS KMS 发布制品签名证据。该版本修复了快命令
 可能丢失全部事件的观测器竞态，新增关联摘要，并在事件被丢弃或截断时告警。
 
 Apolysis 仍是实验性审计遥测：当前文件与网络 tracepoint 在没有结果信息时只描述
@@ -53,10 +53,11 @@ syscall 尝试；CLI timeline 是普通 JSONL，daemon 模式可以使用本地 
 envelope。两者都不是已被独立锚定的取证记录。
 
 26 周 production MVP 方向先交付版本化 Agent Execution Record、带认证的 Execution
-Evidence Gateway、耐久存储和最小 run Console；随后增加 coding-agent hook 与 GitHub
-outcome、SDK/OTLP 与 MCP/A2A identity、Kubernetes binding 和生产级 eBPF Runtime Witness，
-最后交付有限 hook/MCP policy 与受控伙伴 pilot。每次 run 将分别显示 semantic、execution
-与 outcome coverage。这些都是 roadmap 目标，不是当前能力。在公开路径完成加固前，不要把
+Evidence Gateway、耐久存储，以及展示 run inventory、独立 coverage、timeline、source
+health 和 finding 的 Minimum Console v0；后续 source integration 最终形成带 Agent Run
+Graph、跨 run search 与有限 workflow action 的 Investigation Console v1，再进入受控伙伴
+pilot。每次 run 将分别显示 semantic、execution 与 outcome coverage。这些都是 roadmap
+目标，不是当前能力。在公开路径完成加固前，不要把
 当前 Action 用于不可信仓库或 GitHub 拉取请求（PR）。
 
 ## 核心能力
@@ -217,4 +218,3 @@ sudo -E ./target/debug/apolysis observe \
 - [Codex 实时演示 launch blog 草稿](docs/codex-live-demo-launch-blog.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)
-- [入门任务](docs/starter-issues.md)

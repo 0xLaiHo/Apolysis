@@ -49,10 +49,10 @@ an artifact. See [GitHub Action](docs/github-action.md).
 ## Current Status
 
 `v0.3.0` is the latest public research release with a prebuilt Linux CLI,
-bundled CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed signing
-evidence. It fixes an observer race that could drop all events for fast
-commands, adds a correlation summary, and warns when events are dropped or
-truncated.
+bundled CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed
+release-artifact signing evidence. It fixes an observer race that could drop
+all events for fast commands, adds a correlation summary, and warns when events
+are dropped or truncated.
 
 Apolysis is still experimental audit telemetry: current file and network
 tracepoints describe syscall attempts unless an outcome is available; CLI
@@ -60,11 +60,12 @@ timelines are ordinary JSONL, while daemon mode can use a local hash-chain
 envelope. Neither is an independently anchored forensic record.
 
 The 26-week production-MVP direction starts with a versioned Agent Execution
-Record, an authenticated Execution Evidence Gateway, durable storage, and a
-minimal run Console. It then adds coding-agent hooks and GitHub outcomes,
-SDK/OTLP and MCP/A2A identity, Kubernetes binding, and the production eBPF
-Runtime Witness before bounded hook/MCP policy and a controlled partner pilot.
-Every run will expose semantic, execution, and outcome coverage separately.
+Record, an authenticated Execution Evidence Gateway, durable storage, and
+Minimum Console v0 for run inventory, separate coverage, timeline, source
+health and findings. Later source integrations culminate in Investigation
+Console v1 with Agent Run Graph, cross-run search, and bounded workflow action
+before a controlled partner pilot. Every run will expose semantic, execution,
+and outcome coverage separately.
 These are roadmap targets, not current capabilities. Do not treat the current
 Action as safe for untrusted repositories or Pull Requests until the public
 path is hardened.
@@ -231,4 +232,3 @@ Keep generated timelines, Codex logs, and reports under `.apolysis/` or
 - [Codex live demo launch blog draft](docs/codex-live-demo-launch-blog.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
-- [Starter issues](docs/starter-issues.md)
