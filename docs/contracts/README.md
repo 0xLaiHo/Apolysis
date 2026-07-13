@@ -1,11 +1,16 @@
 # W1–W2 Contract Set
 
-Status: normative W1–W2 contract and machine-contract implementation input.
+Status: normative W1–W2 contract. The active Gateway foundation slice includes
+an application core and a non-durable reference adapter, not a production
+Gateway service.
 
 These documents freeze the W1–W2 product and evidence contract. The independent
-machine types, schemas, and fixtures live in `apolysis-contracts`; they describe
-what later Gateway, projection, Query API, and Console implementations must do
-without claiming those runtime components exist in the current release.
+machine types, schemas, and fixtures live in `apolysis-contracts`. The
+current `pre-release` implementation now applies the Gateway types in an
+authenticated application core and an in-memory conformance adapter. The
+remaining contracts describe what durable Gateway storage, projection, Query
+API, and Console implementations must do without claiming those production
+runtime components exist.
 
 Read the contracts in this order:
 
@@ -29,6 +34,10 @@ permission to make the broader claim.
 ## Machine artifacts
 
 - Rust wire types: `crates/apolysis-contracts/src/`
+- Gateway application core and non-durable reference adapter:
+  `crates/apolysis-gateway/src/`
+- Gateway conformance and RFC 8785 golden-vector tests:
+  `crates/apolysis-gateway/tests/`
 - Generated JSON Schema: `schemas/contracts/v0.1/`
 - Positive and negative compatibility fixtures:
   `crates/apolysis-contracts/tests/fixtures/`
@@ -53,7 +62,18 @@ incompatible wire change requires a new version.
 
 ## Current implementation boundary
 
-The current code provides local CLI, daemon, JSONL, Codex intent, accountability,
-runtime metadata, and Linux observation paths. It does not implement the remote
-Gateway, organization-scoped Query API, versioned projectors, or Web Console
-specified here.
+The current code provides local CLI, daemon, JSONL, Codex intent,
+accountability, runtime metadata, and Linux observation paths. The
+`pre-release` implementation line also provides the four-operation Gateway
+application core, server-side join grant/policy checks, RFC 8785 request and
+inline-payload golden vectors, bounded lifecycle reconciliation, and a
+non-durable memory adapter. The adapter models atomic record append,
+deduplication, ingest sequencing, and projection-outbox mutation for conformance
+testing.
+
+This is not a production Gateway and does not complete W3–W6. There is no
+PostgreSQL durability, restart recovery, or concurrency validation; network
+transport or live credential revocation; object-store resolver; background
+deadline reaper; or production rate and request-size enforcement. The
+organization-scoped Query API, versioned projectors, and Web Console specified
+here are also not implemented.

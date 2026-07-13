@@ -1,7 +1,8 @@
 # Execution Evidence Gateway Lifecycle v0.1
 
-Status: normative W1–W2 target contract. The Execution Evidence Gateway is not
-implemented in the current release.
+Status: normative W1–W2 target contract. An application core and non-durable
+reference adapter are implemented on the `pre-release` development line; the
+production Execution Evidence Gateway is not.
 
 ## Boundary
 
@@ -13,6 +14,45 @@ browser endpoint.
 The canonical operations are `open_run`, `bind_runtime`, `ingest`, and
 `finish_run`. Their machine types belong to the independent contracts boundary;
 legacy JSONL v1 is an edge adapter input, not a Gateway schema.
+
+## Current implementation status
+
+The Gateway foundation slice currently implements:
+
+- an application service for all four canonical operations, with an
+  authenticated context injected by its caller;
+- organization, source-registration, source-policy, and scoped hashed-lease
+  authorization checks;
+- server-side join grants and registration policies rather than trusting a
+  client-supplied join assertion;
+- immutable run-policy and source-registration facts, with trust and policy
+  revision frozen for each server-assigned stream;
+- RFC 8785 canonical request, inline-payload, and source-manifest digests, with
+  committed golden vectors for requests and inline payloads;
+- an in-memory reference adapter that commits record append, deduplication,
+  ingest sequence, and projection-outbox intent atomically, including batches
+  containing exact duplicates and novel envelopes; and
+- bounded finishing declarations and deadlines, sealing a reconciled run as
+  `finished`, and lazy command-boundary reconciliation that seals an active or
+  finishing run after its last lease or finalization deadline expires.
+
+The slice is a conformance foundation, not a production service, and does not
+complete W3–W6. In particular, it has:
+
+- no PostgreSQL adapter or durability, restart-recovery, crash, and concurrent
+  writer validation;
+- no HTTP or gRPC transport, transport-level mTLS/JWT verification, or live
+  credential-revocation integration;
+- no object-store resolver for referenced payloads;
+- no background deadline reaper—expiration is reconciled only when a later
+  novel lifecycle command reaches the application core;
+- no production rate, batch-byte, request-byte, source, or organization limit
+  enforcement; and
+- no durable projectors, Query service, or Web Console.
+
+The following sections remain the normative production behavior even where the
+reference adapter cannot yet demonstrate the associated durability or
+availability claim.
 
 ## Authentication and authority
 
@@ -67,6 +107,10 @@ The Gateway checks both the transport principal and join authorization. It
 creates a distinct source stream and lease; it does not share the initiating
 source's credentials, sequence space, or trust profile. Join mode cannot change
 the run's authority, organization, privacy ceiling, or retention ceiling.
+When a required source joins a run that is already `finishing`, its lease is
+bounded by the run's immutable finalization deadline. At or after that deadline
+the Gateway rejects novel joins while preserving an already committed exact
+operation replay.
 
 The response to either mode identifies whether the run was `created`, `joined`,
 or returned from an idempotent retry. It never reveals a cross-organization run.
@@ -121,21 +165,40 @@ organization policy; request content cannot extend it beyond that ceiling.
 The first valid call moves an active run to `finishing`. During that bounded
 state, registered sources may fill declared sequence gaps or send required
 terminal envelopes under their existing leases. Projection can revise coverage
-as those inputs commit.
+as those inputs commit. A requested deadline at or before acceptance time is
+invalid rather than silently replaced with a later policy deadline. At or after
+the accepted deadline, novel join and ingest are rejected; an exact operation
+retry may still return its previously committed result. A duplicate envelope
+under a new operation requires a lease that is still valid.
+
+When the first declaration is already reconciled, one atomic command records
+the accepted cumulative finalization declaration, both `active -> finishing`
+and `finishing -> finished`, and returns `finished`;
+the client does not need a second operation identifier for the normal complete
+path. An unresolved declaration remains in bounded `finishing`.
 
 The Gateway seals the run as:
 
 - `finished` when all required terminal declarations and sequence positions are
   reconciled without an unresolved required-source gap; or
-- `incomplete` when a lease expires, a required source or terminal declaration
-  is missing, a required gap remains, or the finalization deadline passes.
+- `incomplete` when the run has no unexpired lease, a required source or
+  terminal declaration is missing, a required gap remains, or the finalization
+  deadline passes.
 
 The same operation identifier and digest returns the same result. A conflicting
-retry is rejected. After sealing, exact duplicate envelopes and finish retries
-may receive their original acknowledgement while novel envelopes are rejected
-with `invalid_lifecycle_transition`. A future correction mechanism must create
-an audited revision; it cannot reopen the run through these lifecycle
-operations.
+retry is rejected. After sealing, exact stored operation retries may receive
+their original result; exact duplicate envelopes under a still-valid lease may
+receive their prior acknowledgement while novel envelopes are rejected with
+`invalid_lifecycle_transition`. A future correction mechanism must create an
+audited revision; it cannot reopen the run through these lifecycle operations.
+
+Before admitting a novel lifecycle mutation, the Gateway reconciles run-level
+expiry. An `active` or `finishing` run with no unexpired lease is atomically
+sealed `incomplete`; an elapsed finishing deadline has the same result. A
+reusable join policy cannot revive that run. Exact stored operation replay is
+resolved before this dynamic reconciliation so lost-response recovery remains
+stable. A rejected ingest still commits no envelope, although the same command
+may commit the independent lifecycle transition that the expiry check made due.
 
 `finished` is not a success verdict and `incomplete` is not a failed execution
 verdict.
@@ -175,6 +238,38 @@ verdict.
   dedupe proof has expired, a replay is rejected rather than accepted as novel.
 - Repeated binding and lifecycle operations follow the same
   identifier-plus-digest rule.
+
+### Canonical digest profile
+
+Gateway protocol digests use RFC 8785 JSON Canonicalization Scheme (JCS) and
+SHA-256 with explicit domain separation. Conceptually, the byte input is:
+
+```text
+SHA-256(UTF8(domain) || 0x00 || UTF8(discriminator) || 0x00 || JCS(value))
+```
+
+The request domain is `apolysis.gateway.request/v1`; its discriminator is the
+canonical operation name, and the root `request_digest` member is removed from
+the value before canonicalization. The inline-payload domain is
+`apolysis.evidence.inline-payload/v1` and uses `evidence_type` as its
+discriminator. The source-manifest domain is
+`apolysis.evidence.source-manifest/v1` and uses `source_id` as its
+discriminator. Server-side source-envelope deduplication uses
+`apolysis.evidence.source-envelope/v1` with `payload_type`; runtime-binding
+conflict detection uses `apolysis.gateway.runtime-binding/v1` with
+`runtime_binding`. The primary lease lookup key is SHA-256 of
+`apolysis.gateway.lease-id/v1 || 0x00 || UTF8(lease_id)`. Because an exact
+`open_run` retry must reproduce its original lease, a durable adapter may also
+retain the response's bearer material only in a separately KMS or
+envelope-encrypted replay record with strict TTL, access control, and audit;
+the bearer value is never plaintext in database indexes or logs. Integers
+outside the exact interoperable range `[-(2^53-1), 2^53-1]` are rejected before
+JCS.
+
+The committed Gateway fixtures and `crates/apolysis-gateway/tests/digest_vectors.rs`
+lock request and inline-payload digest outputs as interoperability inputs. Any
+change to field omission, domain separation, canonicalization, or expected
+digest values is a protocol change that requires fixture and contract review.
 
 ## Backpressure and availability
 

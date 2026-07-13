@@ -2,7 +2,7 @@
 
 use apolysis_contracts::{
     AuthorityKind, AuthorityRef, ContractError, EnvironmentKind, PrincipalKind, PrincipalRef,
-    RunDescriptor, RunState, SchemaVersion,
+    RunDescriptor, RunPolicySelection, RunState, SchemaVersion, SourceKind,
 };
 
 #[test]
@@ -18,11 +18,23 @@ fn run_lifecycle_accepts_only_forward_contract_transitions() {
         principal,
         "objective_sha256_012345",
         EnvironmentKind::CiRunnerOrRemoteWorkspace,
+        RunPolicySelection::new(
+            "privacy_content_off_v1",
+            "retention_30d_v1",
+            vec![SourceKind::SemanticHook],
+        )
+        .expect("valid run policy selection"),
     )
     .expect("valid run descriptor");
 
     assert_eq!(run.schema_version(), SchemaVersion::V0_1);
     assert_eq!(run.state(), RunState::Opening);
+    assert_eq!(run.policy().privacy_profile_ref(), "privacy_content_off_v1");
+    assert_eq!(run.policy().retention_profile_ref(), "retention_30d_v1");
+    assert_eq!(
+        run.policy().expected_source_kinds(),
+        &[SourceKind::SemanticHook]
+    );
     run.transition_to(RunState::Active)
         .expect("opening to active");
     run.transition_to(RunState::Finishing)

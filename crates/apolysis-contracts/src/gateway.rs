@@ -6,14 +6,15 @@
 //! A server must inject the authenticated organization and source principal
 //! before validating a request; no request field is an authority decision.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt};
 
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::{
     id::{validate_contract_identifier, validate_reference},
-    AuthorityRef, ContractError, EnvironmentKind, OrganizationId, PrincipalRef, RunId, RunState,
-    SchemaVersion, SourceEnvelope, SourceId, SourceKind, SourceManifest,
+    AuthorityRef, ContractError, EnvironmentKind, OrganizationId, PrincipalRef, PrivacyCapability,
+    RunId, RunState, SchemaVersion, SourceCapability, SourceEnvelope, SourceId, SourceKind,
+    SourceManifest, TrustProfile,
 };
 
 /// Maximum number of envelopes in one atomic v0.1 ingest request.
@@ -31,8 +32,17 @@ pub struct SourceRegistrationPolicy {
     allowed_source_kinds: Vec<SourceKind>,
     allowed_environments: Vec<EnvironmentKind>,
     allowed_operations: Vec<GatewayOperation>,
+    effective_trust_profile: TrustProfile,
+    allowed_capabilities: Vec<SourceCapability>,
+    allowed_privacy_capabilities: Vec<PrivacyCapability>,
+    allowed_redaction_profile_refs: Vec<String>,
+    allowed_run_authorities: Vec<AuthorityRef>,
+    allowed_run_privacy_profile_refs: Vec<String>,
+    allowed_run_retention_profile_refs: Vec<String>,
+    required_run_source_kinds: Vec<SourceKind>,
     may_create_runs: bool,
     may_join_runs: bool,
+    may_finalize_runs: bool,
 }
 
 impl SourceRegistrationPolicy {
@@ -84,9 +94,139 @@ impl SourceRegistrationPolicy {
             allowed_source_kinds,
             allowed_environments,
             allowed_operations,
+            effective_trust_profile: TrustProfile::Declared,
+            allowed_capabilities: Vec::new(),
+            allowed_privacy_capabilities: vec![PrivacyCapability::StructureOnly],
+            allowed_redaction_profile_refs: Vec::new(),
+            allowed_run_authorities: Vec::new(),
+            allowed_run_privacy_profile_refs: Vec::new(),
+            allowed_run_retention_profile_refs: Vec::new(),
+            required_run_source_kinds: Vec::new(),
             may_create_runs,
             may_join_runs,
+            may_finalize_runs: false,
         })
+    }
+
+    /// Attach the server-assigned trust and evidence ceilings for this source.
+    pub fn with_evidence_policy(
+        mut self,
+        effective_trust_profile: TrustProfile,
+        allowed_capabilities: Vec<SourceCapability>,
+        allowed_privacy_capabilities: Vec<PrivacyCapability>,
+        allowed_redaction_profile_refs: Vec<String>,
+    ) -> Result<Self, ContractError> {
+        if allowed_capabilities.is_empty()
+            || allowed_privacy_capabilities.is_empty()
+            || !allowed_privacy_capabilities.contains(&PrivacyCapability::StructureOnly)
+            || allowed_redaction_profile_refs.is_empty()
+        {
+            return Err(ContractError::InvalidField {
+                field: "source_registration_policy.evidence_policy",
+                reason: "capabilities, structure-only privacy, and redaction profiles are required",
+            });
+        }
+        let mut capabilities = BTreeSet::new();
+        if allowed_capabilities
+            .iter()
+            .any(|value| !capabilities.insert(value))
+        {
+            return Err(ContractError::DuplicateValue {
+                field: "allowed_capabilities",
+            });
+        }
+        let mut privacy_capabilities = BTreeSet::new();
+        if allowed_privacy_capabilities
+            .iter()
+            .any(|value| !privacy_capabilities.insert(value))
+        {
+            return Err(ContractError::DuplicateValue {
+                field: "allowed_privacy_capabilities",
+            });
+        }
+        let mut redaction_profiles = BTreeSet::new();
+        for profile in &allowed_redaction_profile_refs {
+            validate_contract_identifier(profile, "allowed_redaction_profile_refs")?;
+            if !redaction_profiles.insert(profile.as_str()) {
+                return Err(ContractError::DuplicateValue {
+                    field: "allowed_redaction_profile_refs",
+                });
+            }
+        }
+        self.effective_trust_profile = effective_trust_profile;
+        self.allowed_capabilities = allowed_capabilities;
+        self.allowed_privacy_capabilities = allowed_privacy_capabilities;
+        self.allowed_redaction_profile_refs = allowed_redaction_profile_refs;
+        Ok(self)
+    }
+
+    /// Allow a joined source registration to finalize runs when its lease also
+    /// grants `finish_run`.
+    pub fn with_finalization_permission(mut self, may_finalize_runs: bool) -> Self {
+        self.may_finalize_runs = may_finalize_runs;
+        self
+    }
+
+    /// Bind create authorization to server-resolved run authorities.
+    pub fn with_run_authorities(
+        mut self,
+        allowed_run_authorities: Vec<AuthorityRef>,
+    ) -> Result<Self, ContractError> {
+        if allowed_run_authorities.is_empty() {
+            return Err(ContractError::InvalidField {
+                field: "source_registration_policy.allowed_run_authorities",
+                reason: "must not be empty",
+            });
+        }
+        for (index, authority) in allowed_run_authorities.iter().enumerate() {
+            if allowed_run_authorities[..index].contains(authority) {
+                return Err(ContractError::DuplicateValue {
+                    field: "allowed_run_authorities",
+                });
+            }
+        }
+        self.allowed_run_authorities = allowed_run_authorities;
+        Ok(self)
+    }
+
+    /// Bind create requests to organization-approved privacy, retention, and
+    /// required-source profiles selected by trusted policy lookup.
+    pub fn with_run_profiles(
+        mut self,
+        allowed_run_privacy_profile_refs: Vec<String>,
+        allowed_run_retention_profile_refs: Vec<String>,
+        required_run_source_kinds: Vec<SourceKind>,
+    ) -> Result<Self, ContractError> {
+        if allowed_run_privacy_profile_refs.is_empty()
+            || allowed_run_retention_profile_refs.is_empty()
+            || required_run_source_kinds.is_empty()
+        {
+            return Err(ContractError::InvalidField {
+                field: "source_registration_policy.run_profiles",
+                reason: "privacy, retention, and required source profiles must not be empty",
+            });
+        }
+        validate_unique_profile_refs(
+            &allowed_run_privacy_profile_refs,
+            "allowed_run_privacy_profile_refs",
+        )?;
+        validate_unique_profile_refs(
+            &allowed_run_retention_profile_refs,
+            "allowed_run_retention_profile_refs",
+        )?;
+        let mut source_kinds = BTreeSet::new();
+        if required_run_source_kinds
+            .iter()
+            .any(|kind| !source_kinds.insert(kind))
+        {
+            return Err(ContractError::DuplicateValue {
+                field: "required_run_source_kinds",
+            });
+        }
+        self.allowed_run_privacy_profile_refs = allowed_run_privacy_profile_refs;
+        self.allowed_run_retention_profile_refs = allowed_run_retention_profile_refs;
+        self.required_run_source_kinds = required_run_source_kinds;
+        Ok(self)
     }
 
     /// Return the registered source identity.
@@ -109,6 +249,46 @@ impl SourceRegistrationPolicy {
         &self.allowed_operations
     }
 
+    /// Return the trust profile assigned by the accepting control plane.
+    pub fn effective_trust_profile(&self) -> TrustProfile {
+        self.effective_trust_profile
+    }
+
+    /// Return the source capabilities authorized by registration policy.
+    pub fn allowed_capabilities(&self) -> &[SourceCapability] {
+        &self.allowed_capabilities
+    }
+
+    /// Return privacy representations authorized for this source.
+    pub fn allowed_privacy_capabilities(&self) -> &[PrivacyCapability] {
+        &self.allowed_privacy_capabilities
+    }
+
+    /// Return registered redaction profiles accepted for this source.
+    pub fn allowed_redaction_profile_refs(&self) -> &[String] {
+        &self.allowed_redaction_profile_refs
+    }
+
+    /// Return run authorities admitted by this server-loaded registration.
+    pub fn allowed_run_authorities(&self) -> &[AuthorityRef] {
+        &self.allowed_run_authorities
+    }
+
+    /// Return organization-approved run privacy profiles.
+    pub fn allowed_run_privacy_profile_refs(&self) -> &[String] {
+        &self.allowed_run_privacy_profile_refs
+    }
+
+    /// Return organization-approved run retention profiles.
+    pub fn allowed_run_retention_profile_refs(&self) -> &[String] {
+        &self.allowed_run_retention_profile_refs
+    }
+
+    /// Return source kinds required by the selected server-side run policy.
+    pub fn required_run_source_kinds(&self) -> &[SourceKind] {
+        &self.required_run_source_kinds
+    }
+
     /// Return whether this registration may initiate a run.
     pub fn may_create_runs(&self) -> bool {
         self.may_create_runs
@@ -118,6 +298,25 @@ impl SourceRegistrationPolicy {
     pub fn may_join_runs(&self) -> bool {
         self.may_join_runs
     }
+
+    /// Return whether this source may finalize a run it did not initiate.
+    pub fn may_finalize_runs(&self) -> bool {
+        self.may_finalize_runs
+    }
+}
+
+fn validate_unique_profile_refs(
+    values: &[String],
+    field: &'static str,
+) -> Result<(), ContractError> {
+    let mut profiles = BTreeSet::new();
+    for value in values {
+        validate_contract_identifier(value, field)?;
+        if !profiles.insert(value.as_str()) {
+            return Err(ContractError::DuplicateValue { field });
+        }
+    }
+    Ok(())
 }
 
 /// Authenticated source facts injected by the transport adapter.
@@ -126,10 +325,78 @@ impl SourceRegistrationPolicy {
 /// wire request. Deliberately omitting serde implementations makes that
 /// boundary mechanically visible.
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticationSnapshot {
+    credential_id: String,
+    policy_revision: u64,
+    authenticated_at_unix_ms: u64,
+    expires_at_unix_ms: u64,
+}
+
+impl AuthenticationSnapshot {
+    /// Record the bounded authentication and authorization snapshot resolved by
+    /// trusted transport middleware.
+    pub fn new(
+        credential_id: impl Into<String>,
+        policy_revision: u64,
+        authenticated_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            credential_id: credential_id.into(),
+            policy_revision,
+            authenticated_at_unix_ms,
+            expires_at_unix_ms,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the opaque credential identity for protected audit records.
+    pub fn credential_id(&self) -> &str {
+        &self.credential_id
+    }
+
+    /// Return the server-loaded policy revision used for this decision.
+    pub fn policy_revision(&self) -> u64 {
+        self.policy_revision
+    }
+
+    /// Return when transport authentication completed.
+    pub fn authenticated_at_unix_ms(&self) -> u64 {
+        self.authenticated_at_unix_ms
+    }
+
+    /// Return the hard expiry of this authentication snapshot.
+    pub fn expires_at_unix_ms(&self) -> u64 {
+        self.expires_at_unix_ms
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        validate_contract_identifier(&self.credential_id, "credential_id")?;
+        if self.policy_revision == 0 {
+            return Err(ContractError::InvalidField {
+                field: "policy_revision",
+                reason: "must be greater than zero",
+            });
+        }
+        if self.authenticated_at_unix_ms == 0
+            || self.expires_at_unix_ms <= self.authenticated_at_unix_ms
+        {
+            return Err(ContractError::InvalidField {
+                field: "authenticated_at_unix_ms/expires_at_unix_ms",
+                reason: "authentication must have a positive bounded validity window",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedSourceContext {
     organization_id: OrganizationId,
     principal: PrincipalRef,
     source_registration_id: String,
+    authentication: AuthenticationSnapshot,
     registration_policy: SourceRegistrationPolicy,
 }
 
@@ -139,6 +406,7 @@ impl AuthenticatedSourceContext {
         organization_id: OrganizationId,
         principal: PrincipalRef,
         source_registration_id: impl Into<String>,
+        authentication: AuthenticationSnapshot,
         registration_policy: SourceRegistrationPolicy,
     ) -> Result<Self, ContractError> {
         let source_registration_id = source_registration_id.into();
@@ -147,6 +415,7 @@ impl AuthenticatedSourceContext {
             organization_id,
             principal,
             source_registration_id,
+            authentication,
             registration_policy,
         })
     }
@@ -166,24 +435,33 @@ impl AuthenticatedSourceContext {
         &self.source_registration_id
     }
 
+    /// Return the bounded transport authentication snapshot.
+    pub fn authentication(&self) -> &AuthenticationSnapshot {
+        &self.authentication
+    }
+
     /// Return the server-loaded source registration policy.
     pub fn registration_policy(&self) -> &SourceRegistrationPolicy {
         &self.registration_policy
     }
 }
 
-fn validate_digest(value: &str) -> Result<(), ContractError> {
+fn validate_sha256_digest(value: &str, field: &'static str) -> Result<(), ContractError> {
     if value.len() != 64
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(ContractError::InvalidField {
-            field: "request_digest",
+            field,
             reason: "must be a lowercase 64-character SHA-256 digest",
         });
     }
     Ok(())
+}
+
+fn validate_digest(value: &str) -> Result<(), ContractError> {
+    validate_sha256_digest(value, "request_digest")
 }
 
 fn validate_idempotency(
@@ -265,7 +543,157 @@ pub enum OpenRunRequest {
     },
 }
 
+/// Explicit branch selected by an [`OpenRunRequest`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenRunMode {
+    /// Establish a new canonical run.
+    Create,
+    /// Join an existing canonical run.
+    Join,
+}
+
 impl OpenRunRequest {
+    /// Return the selected create-or-join operation mode.
+    pub fn mode(&self) -> OpenRunMode {
+        match self {
+            Self::Create { .. } => OpenRunMode::Create,
+            Self::Join { .. } => OpenRunMode::Join,
+        }
+    }
+
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        match self {
+            Self::Create { schema_version, .. } | Self::Join { schema_version, .. } => {
+                *schema_version
+            }
+        }
+    }
+
+    /// Return the client-scoped idempotency identity.
+    pub fn client_operation_id(&self) -> &str {
+        match self {
+            Self::Create {
+                client_operation_id,
+                ..
+            }
+            | Self::Join {
+                client_operation_id,
+                ..
+            } => client_operation_id,
+        }
+    }
+
+    /// Return the client-supplied canonical request digest.
+    pub fn request_digest(&self) -> &str {
+        match self {
+            Self::Create { request_digest, .. } | Self::Join { request_digest, .. } => {
+                request_digest
+            }
+        }
+    }
+
+    /// Return the source declaration supplied by either open mode.
+    pub fn source_manifest(&self) -> &SourceManifest {
+        match self {
+            Self::Create {
+                source_manifest, ..
+            }
+            | Self::Join {
+                source_manifest, ..
+            } => source_manifest,
+        }
+    }
+
+    /// Return the collision-detection key supplied by create mode.
+    pub fn client_run_key(&self) -> Option<&str> {
+        match self {
+            Self::Create { client_run_key, .. } => Some(client_run_key),
+            Self::Join { .. } => None,
+        }
+    }
+
+    /// Return the environment selected by create mode.
+    pub fn environment(&self) -> Option<EnvironmentKind> {
+        match self {
+            Self::Create { environment, .. } => Some(*environment),
+            Self::Join { .. } => None,
+        }
+    }
+
+    /// Return the authority assertion supplied by create mode.
+    pub fn authority(&self) -> Option<&AuthorityRef> {
+        match self {
+            Self::Create { authority, .. } => Some(authority),
+            Self::Join { .. } => None,
+        }
+    }
+
+    /// Return the principal assertion supplied by create mode.
+    pub fn principal(&self) -> Option<&PrincipalRef> {
+        match self {
+            Self::Create { principal, .. } => Some(principal),
+            Self::Join { .. } => None,
+        }
+    }
+
+    /// Return the content-free objective reference supplied by create mode.
+    pub fn objective_ref(&self) -> Option<&str> {
+        match self {
+            Self::Create { objective_ref, .. } => Some(objective_ref),
+            Self::Join { .. } => None,
+        }
+    }
+
+    /// Return the privacy profile selected by create mode.
+    pub fn privacy_profile_ref(&self) -> Option<&str> {
+        match self {
+            Self::Create {
+                privacy_profile_ref,
+                ..
+            } => Some(privacy_profile_ref),
+            Self::Join { .. } => None,
+        }
+    }
+
+    /// Return the retention profile selected by create mode.
+    pub fn retention_profile_ref(&self) -> Option<&str> {
+        match self {
+            Self::Create {
+                retention_profile_ref,
+                ..
+            } => Some(retention_profile_ref),
+            Self::Join { .. } => None,
+        }
+    }
+
+    /// Return expected source kinds declared by create mode.
+    pub fn expected_source_kinds(&self) -> Option<&[SourceKind]> {
+        match self {
+            Self::Create {
+                expected_source_kinds,
+                ..
+            } => Some(expected_source_kinds),
+            Self::Join { .. } => None,
+        }
+    }
+
+    /// Return the existing run assertion supplied by join mode.
+    pub fn run_id(&self) -> Option<&RunId> {
+        match self {
+            Self::Create { .. } => None,
+            Self::Join { run_id, .. } => Some(run_id),
+        }
+    }
+
+    /// Return the authorization proof supplied by join mode.
+    pub fn join_proof(&self) -> Option<&JoinProof> {
+        match self {
+            Self::Create { .. } => None,
+            Self::Join { join_proof, .. } => Some(join_proof),
+        }
+    }
+
     /// Return whether this request explicitly creates a new run.
     pub fn is_create(&self) -> bool {
         matches!(self, Self::Create { .. })
@@ -427,7 +855,7 @@ pub enum JoinProofKind {
 }
 
 /// Join proof whose wire-visible scope cannot silently target another source.
-#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Eq, PartialEq, Serialize)]
 #[schemars(deny_unknown_fields)]
 pub struct JoinProof {
     kind: JoinProofKind,
@@ -439,7 +867,30 @@ pub struct JoinProof {
     expires_at_unix_ms: u64,
 }
 
+impl fmt::Debug for JoinProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JoinProof")
+            .field("kind", &self.kind)
+            .field("proof_ref", &"[REDACTED]")
+            .field("run_id", &self.run_id)
+            .field("source_id", &self.source_id)
+            .field("expires_at_unix_ms", &self.expires_at_unix_ms)
+            .finish()
+    }
+}
+
 impl JoinProof {
+    /// Return the proof representation selected by the source.
+    pub fn kind(&self) -> JoinProofKind {
+        self.kind
+    }
+
+    /// Return the opaque server-verifiable proof reference.
+    pub fn proof_ref(&self) -> &str {
+        &self.proof_ref
+    }
+
     /// Return the run scope asserted by the proof.
     pub fn run_id(&self) -> &RunId {
         &self.run_id
@@ -448,6 +899,11 @@ impl JoinProof {
     /// Return the joining source scope asserted by the proof.
     pub fn source_id(&self) -> &SourceId {
         &self.source_id
+    }
+
+    /// Return the asserted proof expiry.
+    pub fn expires_at_unix_ms(&self) -> u64 {
+        self.expires_at_unix_ms
     }
 
     fn validate(&self) -> Result<(), ContractError> {
@@ -503,6 +959,40 @@ pub enum GatewayOperation {
     FinishRun,
 }
 
+/// Bearer lease identity with a redacted `Debug` representation.
+#[derive(schemars::JsonSchema, Clone, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+#[schemars(transparent)]
+pub struct RunLeaseId(String);
+
+impl RunLeaseId {
+    fn new(value: impl Into<String>) -> Result<Self, ContractError> {
+        let value = value.into();
+        validate_contract_identifier(&value, "lease_id")?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RunLeaseId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RunLeaseId([REDACTED])")
+    }
+}
+
+impl<'de> Deserialize<'de> for RunLeaseId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
+    }
+}
+
 /// A time-bounded, source-stream-scoped capability returned by `open_run`.
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[schemars(deny_unknown_fields)]
@@ -511,7 +1001,7 @@ pub struct RunLease {
         length(min = 1, max = 128),
         regex(pattern = r"^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$")
     )]
-    lease_id: String,
+    lease_id: RunLeaseId,
     #[schemars(range(min = 1))]
     expires_at_unix_ms: u64,
     #[schemars(length(min = 1))]
@@ -519,9 +1009,29 @@ pub struct RunLease {
 }
 
 impl RunLease {
+    /// Issue a validated source-stream-scoped run lease.
+    pub fn new(
+        lease_id: impl Into<String>,
+        expires_at_unix_ms: u64,
+        allowed_operations: Vec<GatewayOperation>,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            lease_id: RunLeaseId::new(lease_id)?,
+            expires_at_unix_ms,
+            allowed_operations,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
     /// Return the opaque lease identity.
     pub fn lease_id(&self) -> &str {
-        &self.lease_id
+        self.lease_id.as_str()
+    }
+
+    /// Return the server-controlled lease expiry.
+    pub fn expires_at_unix_ms(&self) -> u64 {
+        self.expires_at_unix_ms
     }
 
     /// Return the granted Gateway operations.
@@ -530,7 +1040,6 @@ impl RunLease {
     }
 
     fn validate(&self) -> Result<(), ContractError> {
-        validate_contract_identifier(&self.lease_id, "lease_id")?;
         if self.expires_at_unix_ms == 0 {
             return Err(ContractError::InvalidField {
                 field: "expires_at_unix_ms",
@@ -569,7 +1078,7 @@ impl<'de> Deserialize<'de> for RunLease {
         }
         let wire = Wire::deserialize(deserializer)?;
         let value = Self {
-            lease_id: wire.lease_id,
+            lease_id: RunLeaseId::new(wire.lease_id).map_err(de::Error::custom)?,
             expires_at_unix_ms: wire.expires_at_unix_ms,
             allowed_operations: wire.allowed_operations,
         };
@@ -607,9 +1116,49 @@ pub struct OpenRunResponse {
 }
 
 impl OpenRunResponse {
+    /// Construct a validated response after a run source stream is committed.
+    pub fn new(
+        run_id: RunId,
+        source_id: SourceId,
+        source_stream_id: impl Into<String>,
+        outcome: OpenRunOutcome,
+        lease: RunLease,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            schema_version: SchemaVersion::V0_1,
+            run_id,
+            source_id,
+            source_stream_id: source_stream_id.into(),
+            outcome,
+            lease,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
     /// Return the canonical run identity.
     pub fn run_id(&self) -> &RunId {
         &self.run_id
+    }
+
+    /// Return the registered source identity.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Return the distinct source stream created by this operation.
+    pub fn source_stream_id(&self) -> &str {
+        &self.source_stream_id
+    }
+
+    /// Return whether the stream was created, joined, or replayed.
+    pub fn outcome(&self) -> OpenRunOutcome {
+        self.outcome
     }
 
     /// Return the source-stream-scoped lease.
@@ -715,9 +1264,24 @@ pub struct RuntimeBindingCandidate {
 }
 
 impl RuntimeBindingCandidate {
+    /// Return the candidate runtime identity reference.
+    pub fn identity_ref(&self) -> &str {
+        &self.identity_ref
+    }
+
+    /// Return the evidence-backed reasons supporting this candidate.
+    pub fn reason_codes(&self) -> &[String] {
+        &self.reason_codes
+    }
+
     /// Return the candidate's bounded projector score in basis points.
     pub fn confidence_bps(&self) -> u16 {
         self.confidence_bps
+    }
+
+    /// Return the evidence references supporting this candidate.
+    pub fn evidence_basis_refs(&self) -> &[String] {
+        &self.evidence_basis_refs
     }
 
     fn validate(&self) -> Result<(), ContractError> {
@@ -807,6 +1371,36 @@ impl RuntimeBinding {
         &self.asserting_source_id
     }
 
+    /// Return the runtime identity category.
+    pub fn identity_kind(&self) -> RuntimeIdentityKind {
+        self.identity_kind
+    }
+
+    /// Return the runtime identity reference asserted by this binding.
+    pub fn identity_ref(&self) -> &str {
+        &self.identity_ref
+    }
+
+    /// Return the beginning of the asserted validity window.
+    pub fn valid_from_unix_ms(&self) -> u64 {
+        self.valid_from_unix_ms
+    }
+
+    /// Return the end of the asserted validity window, when bounded.
+    pub fn valid_until_unix_ms(&self) -> Option<u64> {
+        self.valid_until_unix_ms
+    }
+
+    /// Return the method used to establish this binding.
+    pub fn evidence_basis(&self) -> RuntimeBindingBasis {
+        self.evidence_basis
+    }
+
+    /// Return the evidence reference establishing this binding.
+    pub fn evidence_basis_ref(&self) -> &str {
+        &self.evidence_basis_ref
+    }
+
     /// Return the selected or first retained candidate score, when non-exact.
     pub fn confidence_bps(&self) -> Option<u16> {
         self.confidence_bps
@@ -815,6 +1409,11 @@ impl RuntimeBinding {
     /// Return the explicit correlation quality.
     pub fn attribution(&self) -> RuntimeAttribution {
         self.attribution
+    }
+
+    /// Return the reasons supporting a non-exact attribution.
+    pub fn reason_codes(&self) -> &[String] {
+        &self.reason_codes
     }
 
     /// Return every scored alternative retained for an ambiguous binding.
@@ -960,6 +1559,118 @@ impl<'de> Deserialize<'de> for RuntimeBinding {
     }
 }
 
+/// Runtime binding after server-side source and policy acceptance.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct AcceptedRuntimeBinding {
+    source_registration_id: String,
+    source_stream_id: String,
+    #[schemars(range(min = 1))]
+    registration_policy_revision: u64,
+    effective_trust_profile: TrustProfile,
+    manifest_version: SchemaVersion,
+    #[schemars(length(equal = 64), regex(pattern = r"^[0-9a-f]{64}$"))]
+    manifest_digest: String,
+    binding: RuntimeBinding,
+}
+
+impl AcceptedRuntimeBinding {
+    /// Construct a runtime binding with immutable server acceptance facts.
+    pub fn new(
+        source_registration_id: impl Into<String>,
+        source_stream_id: impl Into<String>,
+        registration_policy_revision: u64,
+        effective_trust_profile: TrustProfile,
+        manifest_version: SchemaVersion,
+        manifest_digest: impl Into<String>,
+        binding: RuntimeBinding,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            source_registration_id: source_registration_id.into(),
+            source_stream_id: source_stream_id.into(),
+            registration_policy_revision,
+            effective_trust_profile,
+            manifest_version,
+            manifest_digest: manifest_digest.into(),
+            binding,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn source_registration_id(&self) -> &str {
+        &self.source_registration_id
+    }
+
+    pub fn source_stream_id(&self) -> &str {
+        &self.source_stream_id
+    }
+
+    pub fn registration_policy_revision(&self) -> u64 {
+        self.registration_policy_revision
+    }
+
+    pub fn effective_trust_profile(&self) -> TrustProfile {
+        self.effective_trust_profile
+    }
+
+    pub fn manifest_version(&self) -> SchemaVersion {
+        self.manifest_version
+    }
+
+    pub fn manifest_digest(&self) -> &str {
+        &self.manifest_digest
+    }
+
+    pub fn binding(&self) -> &RuntimeBinding {
+        &self.binding
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ContractError> {
+        validate_contract_identifier(&self.source_registration_id, "source_registration_id")?;
+        validate_contract_identifier(&self.source_stream_id, "source_stream_id")?;
+        if self.registration_policy_revision == 0 {
+            return Err(ContractError::InvalidField {
+                field: "registration_policy_revision",
+                reason: "must be greater than zero",
+            });
+        }
+        validate_sha256_digest(&self.manifest_digest, "manifest_digest")?;
+        self.binding.validate()
+    }
+}
+
+impl<'de> Deserialize<'de> for AcceptedRuntimeBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(schemars::JsonSchema, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            source_registration_id: String,
+            source_stream_id: String,
+            registration_policy_revision: u64,
+            effective_trust_profile: TrustProfile,
+            manifest_version: SchemaVersion,
+            manifest_digest: String,
+            binding: RuntimeBinding,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.source_registration_id,
+            wire.source_stream_id,
+            wire.registration_policy_revision,
+            wire.effective_trust_profile,
+            wire.manifest_version,
+            wire.manifest_digest,
+            wire.binding,
+        )
+        .map_err(de::Error::custom)
+    }
+}
+
 /// Idempotent request to bind a runtime identity under a run lease.
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[schemars(deny_unknown_fields)]
@@ -977,14 +1688,34 @@ pub struct BindRuntimeRequest {
         length(min = 1, max = 128),
         regex(pattern = r"^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$")
     )]
-    lease_id: String,
+    lease_id: RunLeaseId,
     binding: RuntimeBinding,
 }
 
 impl BindRuntimeRequest {
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
+    /// Return the client-scoped idempotency identity.
+    pub fn client_operation_id(&self) -> &str {
+        &self.client_operation_id
+    }
+
+    /// Return the client-supplied canonical request digest.
+    pub fn request_digest(&self) -> &str {
+        &self.request_digest
+    }
+
+    /// Return the asserted run scope.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
     /// Return the required lease assertion.
     pub fn lease_id(&self) -> &str {
-        &self.lease_id
+        self.lease_id.as_str()
     }
 
     /// Return the versioned runtime relation asserted by this request.
@@ -992,9 +1723,10 @@ impl BindRuntimeRequest {
         &self.binding
     }
 
-    fn validate(&self) -> Result<(), ContractError> {
+    /// Revalidate invariants at a trusted service boundary.
+    pub fn validate(&self) -> Result<(), ContractError> {
         validate_idempotency(&self.client_operation_id, &self.request_digest)?;
-        validate_contract_identifier(&self.lease_id, "lease_id")?;
+        validate_contract_identifier(self.lease_id.as_str(), "lease_id")?;
         self.binding.validate()
     }
 }
@@ -1020,7 +1752,7 @@ impl<'de> Deserialize<'de> for BindRuntimeRequest {
             client_operation_id: wire.client_operation_id,
             request_digest: wire.request_digest,
             run_id: wire.run_id,
-            lease_id: wire.lease_id,
+            lease_id: RunLeaseId::new(wire.lease_id).map_err(de::Error::custom)?,
             binding: wire.binding,
         };
         value.validate().map_err(de::Error::custom)?;
@@ -1029,14 +1761,90 @@ impl<'de> Deserialize<'de> for BindRuntimeRequest {
 }
 
 /// Acknowledgement of a runtime binding operation.
-#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
+#[schemars(deny_unknown_fields)]
 pub struct BindRuntimeResponse {
     schema_version: SchemaVersion,
     run_id: RunId,
     binding_id: String,
     accepted: bool,
     idempotent_replay: bool,
+}
+
+impl BindRuntimeResponse {
+    /// Construct a validated runtime-binding acknowledgement.
+    pub fn new(
+        run_id: RunId,
+        binding_id: impl Into<String>,
+        accepted: bool,
+        idempotent_replay: bool,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            schema_version: SchemaVersion::V0_1,
+            run_id,
+            binding_id: binding_id.into(),
+            accepted,
+            idempotent_replay,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
+    /// Return the acknowledged run identity.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Return the idempotent binding identity.
+    pub fn binding_id(&self) -> &str {
+        &self.binding_id
+    }
+
+    /// Return whether the binding was accepted.
+    pub fn accepted(&self) -> bool {
+        self.accepted
+    }
+
+    /// Return whether this is the original response to an exact retry.
+    pub fn idempotent_replay(&self) -> bool {
+        self.idempotent_replay
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        validate_contract_identifier(&self.binding_id, "binding_id")
+    }
+}
+
+impl<'de> Deserialize<'de> for BindRuntimeResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(schemars::JsonSchema, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema_version: SchemaVersion,
+            run_id: RunId,
+            binding_id: String,
+            accepted: bool,
+            idempotent_replay: bool,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let value = Self {
+            schema_version: wire.schema_version,
+            run_id: wire.run_id,
+            binding_id: wire.binding_id,
+            accepted: wire.accepted,
+            idempotent_replay: wire.idempotent_replay,
+        };
+        value.validate().map_err(de::Error::custom)?;
+        Ok(value)
+    }
 }
 
 /// Bounded, atomic evidence-ingest request under a source-stream lease.
@@ -1056,20 +1864,46 @@ pub struct IngestRequest {
         length(min = 1, max = 128),
         regex(pattern = r"^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$")
     )]
-    lease_id: String,
+    lease_id: RunLeaseId,
     #[schemars(length(min = 1, max = 256))]
     envelopes: Vec<SourceEnvelope>,
 }
 
 impl IngestRequest {
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
+    /// Return the client-scoped idempotency identity.
+    pub fn client_operation_id(&self) -> &str {
+        &self.client_operation_id
+    }
+
+    /// Return the client-supplied canonical request digest.
+    pub fn request_digest(&self) -> &str {
+        &self.request_digest
+    }
+
+    /// Return the asserted run scope.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Return the required lease assertion.
+    pub fn lease_id(&self) -> &str {
+        self.lease_id.as_str()
+    }
+
     /// Return the bounded evidence batch.
     pub fn envelopes(&self) -> &[SourceEnvelope] {
         &self.envelopes
     }
 
-    fn validate(&self) -> Result<(), ContractError> {
+    /// Revalidate invariants at a trusted service boundary.
+    pub fn validate(&self) -> Result<(), ContractError> {
         validate_idempotency(&self.client_operation_id, &self.request_digest)?;
-        validate_contract_identifier(&self.lease_id, "lease_id")?;
+        validate_contract_identifier(self.lease_id.as_str(), "lease_id")?;
         if self.envelopes.is_empty() {
             return Err(ContractError::InvalidField {
                 field: "envelopes",
@@ -1116,7 +1950,7 @@ impl<'de> Deserialize<'de> for IngestRequest {
             client_operation_id: wire.client_operation_id,
             request_digest: wire.request_digest,
             run_id: wire.run_id,
-            lease_id: wire.lease_id,
+            lease_id: RunLeaseId::new(wire.lease_id).map_err(de::Error::custom)?,
             envelopes: wire.envelopes,
         };
         value.validate().map_err(de::Error::custom)?;
@@ -1144,6 +1978,36 @@ pub struct EnvelopeAck {
 }
 
 impl EnvelopeAck {
+    /// Construct a validated durable per-envelope acknowledgement.
+    pub fn new(
+        source_event_id: impl Into<String>,
+        disposition: IngestDisposition,
+        ingest_sequence: u64,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            source_event_id: source_event_id.into(),
+            disposition,
+            ingest_sequence: Some(ingest_sequence),
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the acknowledged source event identity.
+    pub fn source_event_id(&self) -> &str {
+        &self.source_event_id
+    }
+
+    /// Return whether this event was newly committed or an exact duplicate.
+    pub fn disposition(&self) -> IngestDisposition {
+        self.disposition
+    }
+
+    /// Return the immutable durable ingest position.
+    pub fn ingest_sequence(&self) -> Option<u64> {
+        self.ingest_sequence
+    }
+
     fn validate(&self) -> Result<(), ContractError> {
         validate_contract_identifier(&self.source_event_id, "source_event_id")?;
         match (self.disposition, self.ingest_sequence) {
@@ -1194,6 +2058,19 @@ pub struct SequenceGap {
 }
 
 impl SequenceGap {
+    /// Construct a validated inclusive source-sequence gap.
+    pub fn new(
+        first_missing_sequence: u64,
+        last_missing_sequence: u64,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            first_missing_sequence,
+            last_missing_sequence,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
     /// Return the first missing source-local sequence.
     pub fn first_missing_sequence(&self) -> u64 {
         self.first_missing_sequence
@@ -1253,6 +2130,51 @@ pub struct IngestAck {
 }
 
 impl IngestAck {
+    /// Construct a validated durable ingest acknowledgement.
+    pub fn new(
+        run_id: RunId,
+        acknowledgements: Vec<EnvelopeAck>,
+        durable_ingest_watermark: u64,
+        source_watermark: u64,
+        known_gaps: Vec<SequenceGap>,
+    ) -> Result<Self, ContractError> {
+        let committed_count = acknowledgements
+            .iter()
+            .filter(|ack| ack.disposition == IngestDisposition::Committed)
+            .count() as u32;
+        let duplicate_count = acknowledgements
+            .iter()
+            .filter(|ack| ack.disposition == IngestDisposition::Duplicate)
+            .count() as u32;
+        let value = Self {
+            schema_version: SchemaVersion::V0_1,
+            run_id,
+            acknowledgements,
+            committed_count,
+            duplicate_count,
+            durable_ingest_watermark,
+            source_watermark,
+            known_gaps,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
+    /// Return the acknowledged run identity.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Return the input-ordered per-envelope acknowledgements.
+    pub fn acknowledgements(&self) -> &[EnvelopeAck] {
+        &self.acknowledgements
+    }
+
     /// Return the number of newly committed envelopes.
     pub fn committed_count(&self) -> u32 {
         self.committed_count
@@ -1266,6 +2188,11 @@ impl IngestAck {
     /// Return the highest durable server ingest sequence reflected here.
     pub fn durable_ingest_watermark(&self) -> u64 {
         self.durable_ingest_watermark
+    }
+
+    /// Return the highest durable source-local sequence observed by the stream.
+    pub fn source_watermark(&self) -> u64 {
+        self.source_watermark
     }
 
     /// Return currently known source-local gaps without fabricating events.
@@ -1373,6 +2300,26 @@ pub struct TerminalSourcePosition {
 }
 
 impl TerminalSourcePosition {
+    /// Construct a validated terminal position for one source stream.
+    pub fn new(
+        source_id: SourceId,
+        source_stream_id: impl Into<String>,
+        final_source_sequence: u64,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            source_id,
+            source_stream_id: source_stream_id.into(),
+            final_source_sequence,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the source identity owning this terminal stream.
+    pub fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
     /// Return the terminal source stream.
     pub fn source_stream_id(&self) -> &str {
         &self.source_stream_id
@@ -1435,7 +2382,7 @@ pub struct FinishRunRequest {
         length(min = 1, max = 128),
         regex(pattern = r"^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$")
     )]
-    lease_id: String,
+    lease_id: RunLeaseId,
     #[schemars(length(min = 1, max = 256))]
     terminal_positions: Vec<TerminalSourcePosition>,
     #[schemars(length(max = 64))]
@@ -1444,6 +2391,31 @@ pub struct FinishRunRequest {
 }
 
 impl FinishRunRequest {
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
+    /// Return the client-scoped idempotency identity.
+    pub fn client_operation_id(&self) -> &str {
+        &self.client_operation_id
+    }
+
+    /// Return the client-supplied canonical request digest.
+    pub fn request_digest(&self) -> &str {
+        &self.request_digest
+    }
+
+    /// Return the asserted run scope.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Return the required lease assertion.
+    pub fn lease_id(&self) -> &str {
+        self.lease_id.as_str()
+    }
+
     /// Return expected terminal source positions.
     pub fn terminal_positions(&self) -> &[TerminalSourcePosition] {
         &self.terminal_positions
@@ -1454,39 +2426,16 @@ impl FinishRunRequest {
         &self.outcome_claim_refs
     }
 
-    fn validate(&self) -> Result<(), ContractError> {
+    /// Return the client-requested finalization deadline, when supplied.
+    pub fn requested_finalization_deadline_unix_ms(&self) -> Option<u64> {
+        self.requested_finalization_deadline_unix_ms
+    }
+
+    /// Revalidate invariants at a trusted service boundary.
+    pub fn validate(&self) -> Result<(), ContractError> {
         validate_idempotency(&self.client_operation_id, &self.request_digest)?;
-        validate_contract_identifier(&self.lease_id, "lease_id")?;
-        if self.terminal_positions.is_empty()
-            || self.terminal_positions.len() > MAX_TERMINAL_POSITIONS
-        {
-            return Err(ContractError::InvalidField {
-                field: "terminal_positions",
-                reason: "must contain between 1 and 256 source positions",
-            });
-        }
-        let mut streams = BTreeSet::new();
-        for position in &self.terminal_positions {
-            position.validate()?;
-            if !streams.insert(position.source_stream_id.as_str()) {
-                return Err(ContractError::DuplicateValue {
-                    field: "terminal_positions.source_stream_id",
-                });
-            }
-        }
-        if self.outcome_claim_refs.len() > MAX_OUTCOME_CLAIMS {
-            return Err(ContractError::InvalidField {
-                field: "outcome_claim_refs",
-                reason: "must contain at most 64 references",
-            });
-        }
-        for reference in &self.outcome_claim_refs {
-            validate_reference(reference, "outcome_claim_refs")?;
-        }
-        reject_duplicate_refs(
-            self.outcome_claim_refs.iter().map(String::as_str),
-            "outcome_claim_refs",
-        )?;
+        validate_contract_identifier(self.lease_id.as_str(), "lease_id")?;
+        validate_finalization_inputs(&self.terminal_positions, &self.outcome_claim_refs)?;
         if self
             .requested_finalization_deadline_unix_ms
             .is_some_and(|deadline| deadline == 0)
@@ -1498,6 +2447,40 @@ impl FinishRunRequest {
         }
         Ok(())
     }
+}
+
+fn validate_finalization_inputs(
+    terminal_positions: &[TerminalSourcePosition],
+    outcome_claim_refs: &[String],
+) -> Result<(), ContractError> {
+    if terminal_positions.is_empty() || terminal_positions.len() > MAX_TERMINAL_POSITIONS {
+        return Err(ContractError::InvalidField {
+            field: "terminal_positions",
+            reason: "must contain between 1 and 256 source positions",
+        });
+    }
+    let mut streams = BTreeSet::new();
+    for position in terminal_positions {
+        position.validate()?;
+        if !streams.insert(position.source_stream_id.as_str()) {
+            return Err(ContractError::DuplicateValue {
+                field: "terminal_positions.source_stream_id",
+            });
+        }
+    }
+    if outcome_claim_refs.len() > MAX_OUTCOME_CLAIMS {
+        return Err(ContractError::InvalidField {
+            field: "outcome_claim_refs",
+            reason: "must contain at most 64 references",
+        });
+    }
+    for reference in outcome_claim_refs {
+        validate_reference(reference, "outcome_claim_refs")?;
+    }
+    reject_duplicate_refs(
+        outcome_claim_refs.iter().map(String::as_str),
+        "outcome_claim_refs",
+    )
 }
 
 impl<'de> Deserialize<'de> for FinishRunRequest {
@@ -1523,13 +2506,140 @@ impl<'de> Deserialize<'de> for FinishRunRequest {
             client_operation_id: wire.client_operation_id,
             request_digest: wire.request_digest,
             run_id: wire.run_id,
-            lease_id: wire.lease_id,
+            lease_id: RunLeaseId::new(wire.lease_id).map_err(de::Error::custom)?,
             terminal_positions: wire.terminal_positions,
             outcome_claim_refs: wire.outcome_claim_refs,
             requested_finalization_deadline_unix_ms: wire.requested_finalization_deadline_unix_ms,
         };
         value.validate().map_err(de::Error::custom)?;
         Ok(value)
+    }
+}
+
+/// Server-accepted cumulative declaration used to rebuild finalization.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct AcceptedRunFinalization {
+    declared_by_source_registration_id: String,
+    declared_by_source_stream_id: String,
+    declared_by_principal: PrincipalRef,
+    #[schemars(range(min = 1))]
+    registration_policy_revision: u64,
+    #[schemars(length(min = 1, max = 256))]
+    terminal_positions: Vec<TerminalSourcePosition>,
+    #[schemars(length(max = 64))]
+    outcome_claim_refs: Vec<String>,
+    #[schemars(range(min = 1))]
+    accepted_deadline_unix_ms: u64,
+}
+
+impl AcceptedRunFinalization {
+    /// Construct a server-owned cumulative finalization declaration.
+    pub fn new(
+        declared_by_source_registration_id: impl Into<String>,
+        declared_by_source_stream_id: impl Into<String>,
+        declared_by_principal: PrincipalRef,
+        registration_policy_revision: u64,
+        terminal_positions: Vec<TerminalSourcePosition>,
+        outcome_claim_refs: Vec<String>,
+        accepted_deadline_unix_ms: u64,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            declared_by_source_registration_id: declared_by_source_registration_id.into(),
+            declared_by_source_stream_id: declared_by_source_stream_id.into(),
+            declared_by_principal,
+            registration_policy_revision,
+            terminal_positions,
+            outcome_claim_refs,
+            accepted_deadline_unix_ms,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the authenticated source registration that declared finalization.
+    pub fn declared_by_source_registration_id(&self) -> &str {
+        &self.declared_by_source_registration_id
+    }
+
+    /// Return the lease-bound source stream that declared finalization.
+    pub fn declared_by_source_stream_id(&self) -> &str {
+        &self.declared_by_source_stream_id
+    }
+
+    /// Return the authenticated principal that declared finalization.
+    pub fn declared_by_principal(&self) -> &PrincipalRef {
+        &self.declared_by_principal
+    }
+
+    /// Return the control-plane policy revision used for the declaration.
+    pub fn registration_policy_revision(&self) -> u64 {
+        self.registration_policy_revision
+    }
+
+    /// Return the complete cumulative terminal stream declaration.
+    pub fn terminal_positions(&self) -> &[TerminalSourcePosition] {
+        &self.terminal_positions
+    }
+
+    /// Return the complete cumulative set of claimed outcome references.
+    pub fn outcome_claim_refs(&self) -> &[String] {
+        &self.outcome_claim_refs
+    }
+
+    /// Return the immutable server-bounded deadline accepted for this run.
+    pub fn accepted_deadline_unix_ms(&self) -> u64 {
+        self.accepted_deadline_unix_ms
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ContractError> {
+        validate_contract_identifier(
+            &self.declared_by_source_registration_id,
+            "declared_by_source_registration_id",
+        )?;
+        validate_contract_identifier(
+            &self.declared_by_source_stream_id,
+            "declared_by_source_stream_id",
+        )?;
+        self.declared_by_principal.validate()?;
+        if self.registration_policy_revision == 0 || self.accepted_deadline_unix_ms == 0 {
+            return Err(ContractError::InvalidField {
+                field: "registration_policy_revision/accepted_deadline_unix_ms",
+                reason: "must be greater than zero",
+            });
+        }
+        validate_finalization_inputs(&self.terminal_positions, &self.outcome_claim_refs)
+    }
+}
+
+impl<'de> Deserialize<'de> for AcceptedRunFinalization {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(schemars::JsonSchema, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            declared_by_source_registration_id: String,
+            declared_by_source_stream_id: String,
+            declared_by_principal: PrincipalRef,
+            registration_policy_revision: u64,
+            terminal_positions: Vec<TerminalSourcePosition>,
+            outcome_claim_refs: Vec<String>,
+            accepted_deadline_unix_ms: u64,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.declared_by_source_registration_id,
+            wire.declared_by_source_stream_id,
+            wire.declared_by_principal,
+            wire.registration_policy_revision,
+            wire.terminal_positions,
+            wire.outcome_claim_refs,
+            wire.accepted_deadline_unix_ms,
+        )
+        .map_err(de::Error::custom)
     }
 }
 
@@ -1545,9 +2655,47 @@ pub struct FinishRunResponse {
 }
 
 impl FinishRunResponse {
+    /// Construct a validated finalization response.
+    pub fn new(
+        run_id: RunId,
+        state: RunState,
+        finalization_deadline_unix_ms: Option<u64>,
+        idempotent_replay: bool,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            schema_version: SchemaVersion::V0_1,
+            run_id,
+            state,
+            finalization_deadline_unix_ms,
+            idempotent_replay,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
+    /// Return the finalized run identity.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
     /// Return the accepted finalization lifecycle state.
     pub fn state(&self) -> RunState {
         self.state
+    }
+
+    /// Return the server-assigned finalization deadline while finishing.
+    pub fn finalization_deadline_unix_ms(&self) -> Option<u64> {
+        self.finalization_deadline_unix_ms
+    }
+
+    /// Return whether this is the original response to an exact retry.
+    pub fn idempotent_replay(&self) -> bool {
+        self.idempotent_replay
     }
 
     fn validate(&self) -> Result<(), ContractError> {
@@ -1653,9 +2801,37 @@ pub struct GatewayErrorResponse {
 }
 
 impl GatewayErrorResponse {
+    /// Construct a validated, enumeration-safe Gateway error body.
+    pub fn new(
+        code: ContractErrorCode,
+        message: impl Into<String>,
+        retryable: bool,
+        retry_after_ms: Option<u64>,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            schema_version: SchemaVersion::V0_1,
+            code,
+            message: message.into(),
+            retryable,
+            retry_after_ms,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
     /// Return the stable machine error code.
     pub fn code(&self) -> ContractErrorCode {
         self.code
+    }
+
+    /// Return safe text suitable for the authenticated caller.
+    pub fn message(&self) -> &str {
+        &self.message
     }
 
     /// Return whether an exact request may be retried.

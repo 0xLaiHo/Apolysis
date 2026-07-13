@@ -7,6 +7,9 @@
   "fact": {
     "fact_type": "evidence_accepted",
     "fact": {
+      "source_registration_id": "registration_codex",
+      "source_stream_id": "stream_codex_01",
+      "registration_policy_revision": 7,
       "effective_trust_profile": "harness_observed",
       "manifest_version": "0.1",
       "manifest_digest": "7123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",

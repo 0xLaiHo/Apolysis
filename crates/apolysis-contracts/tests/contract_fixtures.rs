@@ -113,7 +113,9 @@ fn runtime_binding_is_a_first_class_append_fact() {
     assert!(matches!(
         item.fact(),
         AgentExecutionRecordFact::RuntimeBound(binding)
-            if binding.attribution() == apolysis_contracts::RuntimeAttribution::Exact
+            if binding.binding().attribution() == apolysis_contracts::RuntimeAttribution::Exact
+                && binding.source_registration_id() == "registration_runtime"
+                && binding.source_stream_id() == "stream_runtime_01"
     ));
 }
 

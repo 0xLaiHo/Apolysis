@@ -6,7 +6,7 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::{
     id::{validate_contract_identifier, validate_reference},
-    ContractError, EnvironmentKind, SchemaVersion, SourceId,
+    ContractError, EnvironmentKind, PrincipalRef, SchemaVersion, SourceId,
 };
 
 /// Evidence Source integration categories.
@@ -109,12 +109,18 @@ pub enum SourceCapability {
     Mcp,
     /// A2A task lifecycle and identifiers.
     A2a,
+    /// Policy decisions produced at a supported decision seam.
+    PolicyDecisions,
+    /// Confirmed policy actuation reports from a registered actuator.
+    PolicyActuation,
     /// Process execution observations.
     Process,
     /// File operation observations.
     File,
     /// Network operation observations.
     Network,
+    /// Identity or credential-boundary observations.
+    Identity,
     /// Workload/runtime binding observations.
     Workload,
     /// Agent, tool, or provider outcome claims.
@@ -162,9 +168,19 @@ pub struct SourceManifest {
 }
 
 impl SourceManifest {
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
     /// Return the registered source identifier.
     pub fn source_id(&self) -> &SourceId {
         &self.source_id
+    }
+
+    /// Return the integration category declared by the source.
+    pub fn source_kind(&self) -> SourceKind {
+        self.source_kind
     }
 
     /// Return the declared source capabilities.
@@ -175,6 +191,46 @@ impl SourceManifest {
     /// Return the source-declared observation boundary.
     pub fn declared_boundary(&self) -> EvidenceBoundary {
         self.declared_boundary
+    }
+
+    /// Return the registered adapter name.
+    pub fn adapter_name(&self) -> &str {
+        &self.adapter_name
+    }
+
+    /// Return the source adapter version.
+    pub fn adapter_version(&self) -> &str {
+        &self.adapter_version
+    }
+
+    /// Return the declared deployment environment.
+    pub fn environment(&self) -> EnvironmentKind {
+        self.environment
+    }
+
+    /// Return lifecycle markers expected from each source stream.
+    pub fn expected_lifecycle(&self) -> &[SourceLifecycleEvent] {
+        &self.expected_lifecycle
+    }
+
+    /// Return the ordering guarantee declared by the source.
+    pub fn ordering(&self) -> OrderingCapability {
+        self.ordering
+    }
+
+    /// Return whether this source intentionally samples evidence.
+    pub fn samples(&self) -> bool {
+        self.samples
+    }
+
+    /// Return the source-side redaction policy reference.
+    pub fn redaction_profile_ref(&self) -> &str {
+        &self.redaction_profile_ref
+    }
+
+    /// Return source fields declared redacted before transmission.
+    pub fn redacted_fields(&self) -> &[String] {
+        &self.redacted_fields
     }
 
     /// Return payload representations the source is permitted to produce.
@@ -332,11 +388,57 @@ impl<'de> Deserialize<'de> for SourceManifest {
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[schemars(deny_unknown_fields)]
 pub struct RegisteredSource {
+    source_registration_id: String,
+    source_stream_id: String,
+    #[schemars(range(min = 1))]
+    registration_policy_revision: u64,
+    principal: PrincipalRef,
     manifest: SourceManifest,
     effective_trust_profile: TrustProfile,
 }
 
 impl RegisteredSource {
+    /// Construct validated server-assigned source registration facts.
+    pub fn new(
+        source_registration_id: impl Into<String>,
+        source_stream_id: impl Into<String>,
+        registration_policy_revision: u64,
+        principal: PrincipalRef,
+        manifest: SourceManifest,
+        effective_trust_profile: TrustProfile,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            source_registration_id: source_registration_id.into(),
+            source_stream_id: source_stream_id.into(),
+            registration_policy_revision,
+            principal,
+            manifest,
+            effective_trust_profile,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the server-resolved source registration identity.
+    pub fn source_registration_id(&self) -> &str {
+        &self.source_registration_id
+    }
+
+    /// Return the server-assigned stream identity for this registration event.
+    pub fn source_stream_id(&self) -> &str {
+        &self.source_stream_id
+    }
+
+    /// Return the control-plane policy revision frozen for this stream.
+    pub fn registration_policy_revision(&self) -> u64 {
+        self.registration_policy_revision
+    }
+
+    /// Return the authenticated principal that established this stream.
+    pub fn principal(&self) -> &PrincipalRef {
+        &self.principal
+    }
+
     /// Return the source-supplied, validated manifest.
     pub fn manifest(&self) -> &SourceManifest {
         &self.manifest
@@ -348,6 +450,15 @@ impl RegisteredSource {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ContractError> {
+        validate_contract_identifier(&self.source_registration_id, "source_registration_id")?;
+        validate_contract_identifier(&self.source_stream_id, "source_stream_id")?;
+        if self.registration_policy_revision == 0 {
+            return Err(ContractError::InvalidField {
+                field: "registration_policy_revision",
+                reason: "must be greater than zero",
+            });
+        }
+        self.principal.validate()?;
         self.manifest.validate()
     }
 }
@@ -360,12 +471,20 @@ impl<'de> Deserialize<'de> for RegisteredSource {
         #[derive(schemars::JsonSchema, Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
+            source_registration_id: String,
+            source_stream_id: String,
+            registration_policy_revision: u64,
+            principal: PrincipalRef,
             manifest: SourceManifest,
             effective_trust_profile: TrustProfile,
         }
 
         let wire = Wire::deserialize(deserializer)?;
         let value = Self {
+            source_registration_id: wire.source_registration_id,
+            source_stream_id: wire.source_stream_id,
+            registration_policy_revision: wire.registration_policy_revision,
+            principal: wire.principal,
             manifest: wire.manifest,
             effective_trust_profile: wire.effective_trust_profile,
         };

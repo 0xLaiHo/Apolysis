@@ -100,10 +100,7 @@
           "minimum": 1
         },
         "lease_id": {
-          "type": "string",
-          "maxLength": 128,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+          "$ref": "#/$defs/RunLeaseId"
         }
       },
       "additionalProperties": false,
@@ -112,6 +109,10 @@
         "expires_at_unix_ms",
         "allowed_operations"
       ]
+    },
+    "RunLeaseId": {
+      "description": "Bearer lease identity with a redacted `Debug` representation.",
+      "type": "string"
     },
     "SchemaVersion": {
       "description": "Wire schema versions understood by this crate.",

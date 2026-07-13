@@ -12,5 +12,10 @@
   },
   "objective_ref": "objective_sha256_012345",
   "environment": "ci_runner_or_remote_workspace",
+  "policy": {
+    "privacy_profile_ref": "privacy_structure_only_v1",
+    "retention_profile_ref": "retention_30d_v1",
+    "expected_source_kinds": ["semantic_hook"]
+  },
   "state": "opening"
 }

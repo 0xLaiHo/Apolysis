@@ -85,6 +85,24 @@ acceptance, the Gateway adds those server facts, including the effective trust
 profile, to the append-oriented `AgentExecutionRecord` item and binds it to the
 accepted `SourceEnvelope` and `SourceManifest` digest.
 
+The `RunOpened` fact retains the server-approved privacy profile, retention
+profile, and expected source kinds so a projector does not depend on a mutable
+policy table to rebuild the run. Each `SourceRegistered` fact retains the
+server-resolved source registration, assigned stream, frozen policy revision,
+authenticated principal, manifest, and effective trust. Each accepted envelope
+repeats the authoritative registration, stream, and frozen policy revision and
+validates that its stream matches the unchanged source envelope. A
+`RuntimeBound` fact similarly wraps the source binding with its authoritative
+registration, stream, manifest digest, effective trust, and policy revision. A
+policy revision change revokes the old stream lease; it cannot silently raise
+the trust assigned to later evidence.
+Each accepted `finish_run` also appends the complete cumulative terminal
+positions and outcome references, authenticated declarer registration,
+lease-bound source stream and principal, frozen policy revision, and
+server-bounded deadline before any resulting state transition.
+The terminal lifecycle can therefore be replayed without consulting mutable
+run side tables.
+
 A `SourceManifest` declares what a source can emit, its evidence boundary,
 stream-ordering guarantee, expected lifecycle, sampling behavior, redaction
 profile, and structure-only or separately authorized object-reference privacy
