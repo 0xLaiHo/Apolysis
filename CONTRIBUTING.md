@@ -8,12 +8,13 @@ orchestrator, sandbox, general MCP or LLM gateway, or SIEM.
 
 ## Development Workflow
 
-Do not develop directly on main. Start each change from the latest `main` and
-use a focused branch:
+Do not develop directly on `main` or `pre-release`. Keep `main` release-ready
+and use `pre-release` as the integration branch for the active roadmap. Start
+each change from the latest `pre-release` and use a focused branch:
 
 ```bash
-git switch main
-git pull --ff-only origin main
+git switch pre-release
+git pull --ff-only origin pre-release
 git switch -c feat/<short-name>
 ```
 
@@ -27,6 +28,17 @@ Use these branch prefixes:
 
 Keep each branch narrow. Do not mix unrelated feature work, release work,
 roadmap edits, and cleanup refactors in one pull request.
+
+Open working pull requests against `pre-release`:
+
+```bash
+gh pr create --base pre-release
+```
+
+Never target `main` directly from a feature, fix, documentation, test, or
+release-preparation branch. Promote `pre-release` to `main` through a dedicated
+pull request only after the complete planned milestone and its release gates
+pass.
 
 ## Verification
 
@@ -69,4 +81,6 @@ Pull requests should include:
 - Rollback or cleanup notes when host, runtime, provider, or release state may
   be affected.
 
-All pull requests must pass required CI and review before merging to `main`.
+All working pull requests must pass required CI and review before merging to
+`pre-release`. The final `pre-release` to `main` promotion pull request must
+also pass the protected `main` gates before release.
