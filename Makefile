@@ -1,4 +1,5 @@
 .PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
+	test-gateway-postgres \
 	test-local-agent-command-attribution \
 	test-policy-guardrails test-policy-guardrails-bpf-lsm-live test-runtime-guardrails \
 	test-runtime-foundation test-runtime-foundation-runtime \
@@ -45,6 +46,11 @@ quickstart:
 # Quickstart smoke test — the one product-path gate run in CI (release-validation.yml).
 test-quickstart:
 	./scripts/test-quickstart.sh
+
+# Opt-in integration gate. This is intentionally separate from `make test` so
+# the default workspace suite never requires Docker or a database.
+test-gateway-postgres:
+	./scripts/test-gateway-postgres.sh
 
 test-local-agent-command-attribution:
 	./scripts/test-local-agent-command-attribution.sh
