@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+apolysis-accountability = { path = "../apolysis-accountability" }
 apolysis-core = { path = "../apolysis-core" }
 apolysis-observer = { path = "../apolysis-observer" }
 apolysis-runtime = { path = "../apolysis-runtime" }

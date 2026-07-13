@@ -1,0 +1,613 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunExplorerPage",
+  "description": "Bounded Run Explorer response.",
+  "type": "object",
+  "properties": {
+    "items": {
+      "description": "Authorized run summaries in stable server order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RunListItem"
+      },
+      "maxItems": 200
+    },
+    "limit": {
+      "description": "Requested and enforced page limit.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 200,
+      "minimum": 1
+    },
+    "next_cursor": {
+      "description": "Opaque continuation token; its contents have no client semantics.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "items",
+    "limit"
+  ],
+  "$defs": {
+    "ComputedCoverage": {
+      "description": "One versioned, server-derived coverage dimension.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_watermark": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projection_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageReasonCode"
+          },
+          "minItems": 1
+        },
+        "state": {
+          "$ref": "#/$defs/SemanticCoverageState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "reason_codes",
+        "evidence_refs"
+      ]
+    },
+    "ComputedCoverage2": {
+      "description": "One versioned, server-derived coverage dimension.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_watermark": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projection_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageReasonCode"
+          },
+          "minItems": 1
+        },
+        "state": {
+          "$ref": "#/$defs/ExecutionCoverageState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "reason_codes",
+        "evidence_refs"
+      ]
+    },
+    "ComputedCoverage3": {
+      "description": "One versioned, server-derived coverage dimension.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "type": "string"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_watermark": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projection_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageReasonCode"
+          },
+          "minItems": 1
+        },
+        "state": {
+          "$ref": "#/$defs/OutcomeCoverageState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "reason_codes",
+        "evidence_refs"
+      ]
+    },
+    "CoverageReasonCode": {
+      "description": "Stable reasons attached to a coverage computation.",
+      "oneOf": [
+        {
+          "description": "All requirements for the dimension were met.",
+          "type": "string",
+          "const": "requirements_satisfied"
+        },
+        {
+          "description": "A required source or lifecycle item is absent.",
+          "type": "string",
+          "const": "required_evidence_missing"
+        },
+        {
+          "description": "A source reported dropped evidence.",
+          "type": "string",
+          "const": "source_loss"
+        },
+        {
+          "description": "The source samples rather than observing every qualifying item.",
+          "type": "string",
+          "const": "sampling_enabled"
+        },
+        {
+          "description": "The source truncated evidence.",
+          "type": "string",
+          "const": "evidence_truncated"
+        },
+        {
+          "description": "A required source failed.",
+          "type": "string",
+          "const": "source_failed"
+        },
+        {
+          "description": "The environment does not expose the required capability.",
+          "type": "string",
+          "const": "unsupported_capability"
+        },
+        {
+          "description": "The relevant environment boundary is opaque.",
+          "type": "string",
+          "const": "opaque_boundary"
+        },
+        {
+          "description": "No independent outcome verifier contributed.",
+          "type": "string",
+          "const": "verifier_missing"
+        },
+        {
+          "description": "An independent check disagrees with a claim.",
+          "type": "string",
+          "const": "outcome_mismatch"
+        },
+        {
+          "description": "This dimension has no requirement for the run profile.",
+          "type": "string",
+          "const": "no_applicable_requirement"
+        },
+        {
+          "description": "Available evidence does not support a stronger state.",
+          "type": "string",
+          "const": "insufficient_evidence"
+        }
+      ]
+    },
+    "CoverageSummary": {
+      "description": "The three independent coverage dimensions and outcome comparison.",
+      "type": "object",
+      "properties": {
+        "execution": {
+          "$ref": "#/$defs/ComputedCoverage2"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ComputedCoverage3"
+        },
+        "outcome_comparison": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutcomeComparisonState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "semantic": {
+          "$ref": "#/$defs/ComputedCoverage"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "semantic",
+        "execution",
+        "outcome"
+      ]
+    },
+    "EnvironmentKind": {
+      "description": "The supported environment profiles for an Agent Run.",
+      "oneOf": [
+        {
+          "description": "Local CLI or IDE integration.",
+          "type": "string",
+          "const": "local_cli_or_ide"
+        },
+        {
+          "description": "CI runner or remote development workspace.",
+          "type": "string",
+          "const": "ci_runner_or_remote_workspace"
+        },
+        {
+          "description": "Vendor-hosted coding-agent sandbox.",
+          "type": "string",
+          "const": "vendor_hosted_coding_sandbox"
+        },
+        {
+          "description": "Customer-built agent service.",
+          "type": "string",
+          "const": "customer_built_agent_service"
+        },
+        {
+          "description": "Fully managed agent runtime.",
+          "type": "string",
+          "const": "fully_managed_agent_runtime"
+        }
+      ]
+    },
+    "ExecutionCoverageState": {
+      "description": "Server-derived Execution Coverage states.",
+      "oneOf": [
+        {
+          "description": "The controlled host boundary met its declared capability without a gap.",
+          "type": "string",
+          "const": "host_verified"
+        },
+        {
+          "description": "Execution evidence exists with a known capability or loss gap.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "No qualifying source can observe the execution boundary.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "The run profile requires no execution assertion.",
+          "type": "string",
+          "const": "not_applicable"
+        },
+        {
+          "description": "A required execution source did not produce usable complete evidence.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    },
+    "OrganizationId": {
+      "description": "An organization-scoped opaque identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "OutcomeComparisonState": {
+      "description": "Comparison between a claim and an independent outcome check.",
+      "oneOf": [
+        {
+          "description": "The independent check matches the claimed outcome.",
+          "type": "string",
+          "const": "match"
+        },
+        {
+          "description": "The independent check disagrees with the claimed outcome.",
+          "type": "string",
+          "const": "mismatch"
+        },
+        {
+          "description": "A definitive comparison is not currently available.",
+          "type": "string",
+          "const": "unresolved"
+        }
+      ]
+    },
+    "OutcomeCoverageState": {
+      "description": "Server-derived Outcome Coverage states.",
+      "oneOf": [
+        {
+          "description": "A required outcome was independently checked, whether matching or not.",
+          "type": "string",
+          "const": "verified"
+        },
+        {
+          "description": "An outcome was claimed but not independently checked.",
+          "type": "string",
+          "const": "unconfirmed"
+        },
+        {
+          "description": "A reliable claim/check relationship cannot be established.",
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "description": "The run profile requires no external outcome.",
+          "type": "string",
+          "const": "not_applicable"
+        }
+      ]
+    },
+    "ProjectionFreshness": {
+      "description": "Projection freshness rendered by a Query API client without recomputation.",
+      "oneOf": [
+        {
+          "description": "The projection is current at the declared input watermark.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Projection lag exceeds the configured freshness objective.",
+          "type": "string",
+          "const": "stale"
+        },
+        {
+          "description": "The view is being rebuilt and can change at the next revision.",
+          "type": "string",
+          "const": "rebuilding"
+        }
+      ]
+    },
+    "ProjectionMetadata": {
+      "description": "Version and freshness facts attached to every bounded read projection.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "description": "Stable projector implementation version.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "freshness": {
+          "description": "Server-computed freshness state.",
+          "$ref": "#/$defs/ProjectionFreshness"
+        },
+        "input_watermark": {
+          "description": "Highest durable ingest sequence included in the view.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lag_ms": {
+          "description": "Measured projection lag; zero is a measured value, not an unknown value.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projected_at_unix_ms": {
+          "description": "Server-recorded completion time for this revision.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "projection_revision": {
+          "description": "Monotonic revision of this projected view.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "view_version": {
+          "description": "Read-model wire version.",
+          "$ref": "#/$defs/QueryViewVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "view_version",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "projected_at_unix_ms",
+        "freshness",
+        "lag_ms"
+      ]
+    },
+    "QueryViewVersion": {
+      "description": "Console read-model version.",
+      "oneOf": [
+        {
+          "description": "Minimum Console read model.",
+          "type": "string",
+          "const": "0"
+        }
+      ]
+    },
+    "RunId": {
+      "description": "An organization-scoped Agent Run identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "RunListItem": {
+      "description": "One row in the Run Explorer.",
+      "type": "object",
+      "properties": {
+        "active_finding_count": {
+          "description": "Number of Findings still in a non-resolved state.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "coverage": {
+          "description": "Independent coverage dimensions.",
+          "$ref": "#/$defs/CoverageSummary"
+        },
+        "degraded_source_count": {
+          "description": "Number of sources currently degraded, gapped, stalled, or failed.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "environment": {
+          "description": "Environment profile used to interpret source capabilities.",
+          "$ref": "#/$defs/EnvironmentKind"
+        },
+        "finished_at_unix_ms": {
+          "description": "Terminal server-visible time, when sealed.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "organization_id": {
+          "description": "Organization scope already authorized by the Query API.",
+          "$ref": "#/$defs/OrganizationId"
+        },
+        "primary_agent_ref": {
+          "description": "Content-free primary Agent reference, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projection": {
+          "description": "Projection revision and freshness for this run row.",
+          "$ref": "#/$defs/ProjectionMetadata"
+        },
+        "run_id": {
+          "description": "Canonical run identity.",
+          "$ref": "#/$defs/RunId"
+        },
+        "started_at_unix_ms": {
+          "description": "Earliest server-visible run time.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "state": {
+          "description": "Current terminal or non-terminal lifecycle state.",
+          "$ref": "#/$defs/RunState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "organization_id",
+        "run_id",
+        "environment",
+        "state",
+        "started_at_unix_ms",
+        "coverage",
+        "active_finding_count",
+        "degraded_source_count",
+        "projection"
+      ]
+    },
+    "RunState": {
+      "description": "Lifecycle states for an Agent Run.",
+      "oneOf": [
+        {
+          "description": "Identity and source policy are being validated.",
+          "type": "string",
+          "const": "opening"
+        },
+        {
+          "description": "Registered sources may contribute evidence.",
+          "type": "string",
+          "const": "active"
+        },
+        {
+          "description": "Terminal declarations and gaps are being reconciled.",
+          "type": "string",
+          "const": "finishing"
+        },
+        {
+          "description": "The run is sealed without an unresolved required-source gap.",
+          "type": "string",
+          "const": "finished"
+        },
+        {
+          "description": "The run is sealed with at least one terminal or evidence gap.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Wire schema versions understood by this crate.",
+      "oneOf": [
+        {
+          "description": "Agent Execution Record schema v0.1.",
+          "type": "string",
+          "const": "0.1"
+        }
+      ]
+    },
+    "SemanticCoverageState": {
+      "description": "Server-derived Semantic Coverage states.",
+      "oneOf": [
+        {
+          "description": "All required semantic lifecycle evidence was observed.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "Useful semantic evidence exists with a known required gap.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "The semantic boundary is intentionally opaque.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "Expected semantic evidence is not usable or available.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    }
+  }
+}

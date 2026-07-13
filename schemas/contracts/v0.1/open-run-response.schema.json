@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenRunResponse",
+  "description": "Lease and canonical identities returned after opening a source stream.",
+  "type": "object",
+  "properties": {
+    "lease": {
+      "$ref": "#/$defs/RunLease"
+    },
+    "outcome": {
+      "$ref": "#/$defs/OpenRunOutcome"
+    },
+    "run_id": {
+      "$ref": "#/$defs/RunId"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "source_id": {
+      "$ref": "#/$defs/SourceId"
+    },
+    "source_stream_id": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "source_id",
+    "source_stream_id",
+    "outcome",
+    "lease"
+  ],
+  "$defs": {
+    "GatewayOperation": {
+      "description": "Operations granted by a source-scoped run lease.",
+      "oneOf": [
+        {
+          "description": "Attach an execution identity.",
+          "type": "string",
+          "const": "bind_runtime"
+        },
+        {
+          "description": "Submit evidence envelopes.",
+          "type": "string",
+          "const": "ingest"
+        },
+        {
+          "description": "Request bounded run finalization.",
+          "type": "string",
+          "const": "finish_run"
+        }
+      ]
+    },
+    "OpenRunOutcome": {
+      "description": "Result classification for an `open_run` request.",
+      "oneOf": [
+        {
+          "description": "A new run was created.",
+          "type": "string",
+          "const": "created"
+        },
+        {
+          "description": "A new source joined an existing run.",
+          "type": "string",
+          "const": "joined"
+        },
+        {
+          "description": "The original result was returned for an exact retry.",
+          "type": "string",
+          "const": "idempotent_retry"
+        }
+      ]
+    },
+    "RunId": {
+      "description": "An organization-scoped Agent Run identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "RunLease": {
+      "description": "A time-bounded, source-stream-scoped capability returned by `open_run`.",
+      "type": "object",
+      "properties": {
+        "allowed_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GatewayOperation"
+          },
+          "minItems": 1
+        },
+        "expires_at_unix_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "lease_id",
+        "expires_at_unix_ms",
+        "allowed_operations"
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Wire schema versions understood by this crate.",
+      "oneOf": [
+        {
+          "description": "Agent Execution Record schema v0.1.",
+          "type": "string",
+          "const": "0.1"
+        }
+      ]
+    },
+    "SourceId": {
+      "description": "A registered Evidence Source identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    }
+  }
+}

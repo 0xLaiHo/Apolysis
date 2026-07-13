@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SourceManifest",
+  "description": "Versioned declaration of an Evidence Source's identity and limits.",
+  "type": "object",
+  "properties": {
+    "adapter_name": {
+      "type": "string"
+    },
+    "adapter_version": {
+      "type": "string"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SourceCapability"
+      },
+      "minItems": 1
+    },
+    "declared_boundary": {
+      "$ref": "#/$defs/EvidenceBoundary"
+    },
+    "environment": {
+      "$ref": "#/$defs/EnvironmentKind"
+    },
+    "expected_lifecycle": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SourceLifecycleEvent"
+      }
+    },
+    "ordering": {
+      "$ref": "#/$defs/OrderingCapability"
+    },
+    "privacy_capabilities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PrivacyCapability"
+      },
+      "minItems": 1
+    },
+    "redacted_fields": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "redaction_profile_ref": {
+      "type": "string"
+    },
+    "samples": {
+      "type": "boolean"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "source_id": {
+      "$ref": "#/$defs/SourceId"
+    },
+    "source_kind": {
+      "$ref": "#/$defs/SourceKind"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_id",
+    "source_kind",
+    "declared_boundary",
+    "adapter_name",
+    "adapter_version",
+    "environment",
+    "capabilities",
+    "expected_lifecycle",
+    "ordering",
+    "samples",
+    "redaction_profile_ref",
+    "redacted_fields",
+    "privacy_capabilities"
+  ],
+  "$defs": {
+    "EnvironmentKind": {
+      "description": "The supported environment profiles for an Agent Run.",
+      "oneOf": [
+        {
+          "description": "Local CLI or IDE integration.",
+          "type": "string",
+          "const": "local_cli_or_ide"
+        },
+        {
+          "description": "CI runner or remote development workspace.",
+          "type": "string",
+          "const": "ci_runner_or_remote_workspace"
+        },
+        {
+          "description": "Vendor-hosted coding-agent sandbox.",
+          "type": "string",
+          "const": "vendor_hosted_coding_sandbox"
+        },
+        {
+          "description": "Customer-built agent service.",
+          "type": "string",
+          "const": "customer_built_agent_service"
+        },
+        {
+          "description": "Fully managed agent runtime.",
+          "type": "string",
+          "const": "fully_managed_agent_runtime"
+        }
+      ]
+    },
+    "EvidenceBoundary": {
+      "description": "Boundary a source can directly observe, independent from effective trust.",
+      "oneOf": [
+        {
+          "description": "Agent hook, wrapper, or IDE harness boundary.",
+          "type": "string",
+          "const": "agent_harness"
+        },
+        {
+          "description": "In-process SDK or telemetry processor boundary.",
+          "type": "string",
+          "const": "in_process_sdk"
+        },
+        {
+          "description": "MCP, A2A, or comparable protocol boundary.",
+          "type": "string",
+          "const": "protocol_boundary"
+        },
+        {
+          "description": "Vendor or managed-provider control-plane boundary.",
+          "type": "string",
+          "const": "provider_control_plane"
+        },
+        {
+          "description": "Customer-controlled host, VM, container, or node boundary.",
+          "type": "string",
+          "const": "customer_controlled_host"
+        },
+        {
+          "description": "Independent read-back boundary for an external outcome.",
+          "type": "string",
+          "const": "independent_outcome_readback"
+        }
+      ]
+    },
+    "OrderingCapability": {
+      "description": "Ordering guarantee declared by one source stream.",
+      "oneOf": [
+        {
+          "description": "Sequence is strictly increasing within a source stream.",
+          "type": "string",
+          "const": "strict_per_stream"
+        },
+        {
+          "description": "The source may deliver reordered items and reports observed gaps.",
+          "type": "string",
+          "const": "best_effort"
+        }
+      ]
+    },
+    "PrivacyCapability": {
+      "description": "Privacy-preserving payload representations a source can produce.",
+      "oneOf": [
+        {
+          "description": "Typed allowlisted metadata with no raw prompt, result, body, or argv.",
+          "type": "string",
+          "const": "structure_only"
+        },
+        {
+          "description": "Immutable object reference subject to separate capture and read policy.",
+          "type": "string",
+          "const": "authorized_content_reference"
+        }
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Wire schema versions understood by this crate.",
+      "oneOf": [
+        {
+          "description": "Agent Execution Record schema v0.1.",
+          "type": "string",
+          "const": "0.1"
+        }
+      ]
+    },
+    "SourceCapability": {
+      "description": "A source capability declaration, not a per-run completeness claim.",
+      "oneOf": [
+        {
+          "description": "Agent/run lifecycle semantics.",
+          "type": "string",
+          "const": "semantic_lifecycle"
+        },
+        {
+          "description": "Agent delegation lifecycle.",
+          "type": "string",
+          "const": "delegation"
+        },
+        {
+          "description": "Declared tool-call lifecycle.",
+          "type": "string",
+          "const": "tool_calls"
+        },
+        {
+          "description": "MCP lifecycle and correlation identifiers.",
+          "type": "string",
+          "const": "mcp"
+        },
+        {
+          "description": "A2A task lifecycle and identifiers.",
+          "type": "string",
+          "const": "a2a"
+        },
+        {
+          "description": "Process execution observations.",
+          "type": "string",
+          "const": "process"
+        },
+        {
+          "description": "File operation observations.",
+          "type": "string",
+          "const": "file"
+        },
+        {
+          "description": "Network operation observations.",
+          "type": "string",
+          "const": "network"
+        },
+        {
+          "description": "Workload/runtime binding observations.",
+          "type": "string",
+          "const": "workload"
+        },
+        {
+          "description": "Agent, tool, or provider outcome claims.",
+          "type": "string",
+          "const": "claimed_outcome"
+        },
+        {
+          "description": "Independently checked outcome evidence.",
+          "type": "string",
+          "const": "verified_outcome"
+        },
+        {
+          "description": "Source health, loss, or terminal-position evidence.",
+          "type": "string",
+          "const": "source_health"
+        }
+      ]
+    },
+    "SourceId": {
+      "description": "A registered Evidence Source identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "SourceKind": {
+      "description": "Evidence Source integration categories.",
+      "oneOf": [
+        {
+          "description": "Agent or IDE lifecycle hook.",
+          "type": "string",
+          "const": "semantic_hook"
+        },
+        {
+          "description": "In-process SDK processor.",
+          "type": "string",
+          "const": "sdk_processor"
+        },
+        {
+          "description": "MCP, A2A, or other protocol evidence tap.",
+          "type": "string",
+          "const": "protocol_tap"
+        },
+        {
+          "description": "Provider API or audit adapter.",
+          "type": "string",
+          "const": "provider_adapter"
+        },
+        {
+          "description": "Customer-controlled execution boundary witness.",
+          "type": "string",
+          "const": "runtime_witness"
+        },
+        {
+          "description": "Independent outcome read-back integration.",
+          "type": "string",
+          "const": "outcome_verifier"
+        }
+      ]
+    },
+    "SourceLifecycleEvent": {
+      "description": "Expected source lifecycle markers.",
+      "oneOf": [
+        {
+          "description": "Source stream start declaration.",
+          "type": "string",
+          "const": "started"
+        },
+        {
+          "description": "Optional source liveness declaration.",
+          "type": "string",
+          "const": "heartbeat"
+        },
+        {
+          "description": "Source stream terminal declaration.",
+          "type": "string",
+          "const": "finished"
+        }
+      ]
+    }
+  }
+}

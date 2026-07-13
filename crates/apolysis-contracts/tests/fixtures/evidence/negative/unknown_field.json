@@ -1,0 +1,10 @@
+{
+  "evidence_type": "agent_lifecycle",
+  "body": {
+    "agent_ref": "agent_primary",
+    "supervisor_agent_ref": null,
+    "event": "started",
+    "outcome": "succeeded",
+    "raw_prompt": "must never enter the structure-only contract"
+  }
+}

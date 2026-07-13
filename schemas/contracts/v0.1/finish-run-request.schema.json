@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FinishRunRequest",
+  "description": "Idempotent declaration that a run should enter bounded finalization.",
+  "type": "object",
+  "properties": {
+    "client_operation_id": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "lease_id": {
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "outcome_claim_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 64
+    },
+    "request_digest": {
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "requested_finalization_deadline_unix_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "run_id": {
+      "$ref": "#/$defs/RunId"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "terminal_positions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TerminalSourcePosition"
+      },
+      "maxItems": 256,
+      "minItems": 1
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "client_operation_id",
+    "request_digest",
+    "run_id",
+    "lease_id",
+    "terminal_positions",
+    "outcome_claim_refs"
+  ],
+  "$defs": {
+    "RunId": {
+      "description": "An organization-scoped Agent Run identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "SchemaVersion": {
+      "description": "Wire schema versions understood by this crate.",
+      "oneOf": [
+        {
+          "description": "Agent Execution Record schema v0.1.",
+          "type": "string",
+          "const": "0.1"
+        }
+      ]
+    },
+    "SourceId": {
+      "description": "A registered Evidence Source identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "TerminalSourcePosition": {
+      "description": "Final declared position for one expected source stream.",
+      "type": "object",
+      "properties": {
+        "final_source_sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "source_id": {
+          "$ref": "#/$defs/SourceId"
+        },
+        "source_stream_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "source_stream_id",
+        "final_source_sequence"
+      ]
+    }
+  }
+}

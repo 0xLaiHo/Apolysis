@@ -1,0 +1,11 @@
+{
+  "schema_version": "0.1",
+  "organization_id": "org_acme",
+  "run_id": "run_01",
+  "ingest_sequence": 0,
+  "ingested_at_unix_ms": 1783891200300,
+  "fact": {
+    "fact_type": "run_state_changed",
+    "fact": {"from": "opening", "to": "active", "recorded_at_unix_ms": 1783891200200}
+  }
+}

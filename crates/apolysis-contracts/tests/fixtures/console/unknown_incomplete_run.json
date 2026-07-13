@@ -1,0 +1,44 @@
+{
+  "view_version": "0",
+  "organization_id": "org-synthetic",
+  "run_id": "run-incomplete-001",
+  "authority": {"kind": "service", "id": "authority-agent-service"},
+  "principal": {"kind": "workload", "id": "principal-agent-service"},
+  "objective_ref": "objective-sha256-incomplete",
+  "primary_agent_ref": "agent-service-001",
+  "environment": "customer_built_agent_service",
+  "state": "incomplete",
+  "started_at_unix_ms": 1783901300000,
+  "finished_at_unix_ms": 1783901360000,
+  "coverage": {
+    "schema_version": "0.1",
+    "semantic": {"state": "unavailable", "computation_version": "coverage_v1", "projection_revision": 4, "input_watermark": 9, "reason_codes": ["source_failed"], "evidence_refs": []},
+    "execution": {"state": "incomplete", "computation_version": "coverage_v1", "projection_revision": 4, "input_watermark": 9, "reason_codes": ["required_evidence_missing"], "evidence_refs": []},
+    "outcome": {"state": "unknown", "computation_version": "coverage_v1", "projection_revision": 4, "input_watermark": 9, "reason_codes": ["insufficient_evidence"], "evidence_refs": []},
+    "outcome_comparison": "unresolved"
+  },
+  "outcome": {"coverage": "unknown", "comparison": "unresolved", "claimed": null, "verified": null},
+  "source_health": [
+    {
+      "source_id": "source-sdk-failed",
+      "source_kind": "sdk_processor",
+      "trust_profile": "incomplete",
+      "expected": true,
+      "joined": false,
+      "expected_capabilities": ["semantic_lifecycle", "tool_calls", "source_health"],
+      "state": "failed",
+      "reason_codes": ["expected_source_missing", "failed"],
+      "source_stream_ref": null,
+      "last_durable_sequence": null,
+      "terminal_sequence": null,
+      "last_ingested_at_unix_ms": null,
+      "sampling": false,
+      "redacted": false,
+      "gaps": [{"gap_ref": "gap-sdk-missing", "reason_code": "required_evidence_missing", "required": true, "source_id": "source-sdk-failed", "source_stream_ref": null, "missing_from_sequence": null, "missing_to_sequence": null, "detected_at_unix_ms": 1783901360000, "resolved_at_unix_ms": null}]
+    }
+  ],
+  "coverage_gaps": [{"gap_ref": "gap-sdk-missing", "reason_code": "required_evidence_missing", "required": true, "source_id": "source-sdk-failed", "source_stream_ref": null, "missing_from_sequence": null, "missing_to_sequence": null, "detected_at_unix_ms": 1783901360000, "resolved_at_unix_ms": null}],
+  "findings": [{"finding_ref": "finding-incomplete-001", "kind": "source_gap", "severity": "high", "state": "open", "rule_ref": "rule-incomplete-finalization", "rule_version": "1.0.0", "affected_entity_refs": ["run-incomplete-001"], "coverage_reason_codes": ["required_evidence_missing"], "evidence_refs": [], "first_seen_at_unix_ms": 1783901360000, "last_seen_at_unix_ms": 1783901360000}],
+  "evidence_refs": [],
+  "projection": {"view_version": "0", "computation_version": "console_v0", "projection_revision": 4, "input_watermark": 9, "projected_at_unix_ms": 1783901365000, "freshness": "stale", "lag_ms": 5000}
+}

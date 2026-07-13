@@ -1,0 +1,5 @@
+{
+  "schema_version": "0.1", "run_id": "run_01", "acknowledgements": [],
+  "committed_count": 0, "duplicate_count": 0, "durable_ingest_watermark": 42,
+  "source_watermark": 3, "known_gaps": [{"first_missing_sequence": 4, "last_missing_sequence": 2}]
+}

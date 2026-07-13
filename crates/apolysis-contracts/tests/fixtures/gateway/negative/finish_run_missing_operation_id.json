@@ -1,0 +1,6 @@
+{
+  "schema_version": "0.1",
+  "request_digest": "4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "run_id": "run_01", "lease_id": "lease_01", "terminal_positions": [],
+  "outcome_claim_refs": [], "requested_finalization_deadline_unix_ms": null
+}

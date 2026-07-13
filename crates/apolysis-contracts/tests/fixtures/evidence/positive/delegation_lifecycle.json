@@ -1,0 +1,11 @@
+{
+  "evidence_type": "delegation_lifecycle",
+  "body": {
+    "delegation_ref": "delegation_review_01",
+    "delegator_agent_ref": "agent_primary",
+    "delegate_agent_ref": "agent_reviewer",
+    "task_ref": "task_review_01",
+    "event": "requested",
+    "outcome": "pending"
+  }
+}
