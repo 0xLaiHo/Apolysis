@@ -35,7 +35,7 @@ pub use query::*;
 pub use record::{AgentExecutionRecordFact, AgentExecutionRecordItem};
 pub use run::{
     AuthorityKind, AuthorityRef, EnvironmentKind, PrincipalKind, PrincipalRef, RunDescriptor,
-    RunState, RunStateTransition,
+    RunPolicySelection, RunState, RunStateTransition,
 };
 pub use schema::contract_schemas;
 pub use source::{

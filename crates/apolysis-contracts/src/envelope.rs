@@ -30,9 +30,19 @@ pub struct ObservedTime {
 }
 
 impl ObservedTime {
+    /// Return the source-declared clock basis.
+    pub fn clock_basis(&self) -> ClockBasis {
+        self.clock_basis
+    }
+
     /// Return the reported Unix timestamp in milliseconds.
     pub fn unix_ms(&self) -> u64 {
         self.unix_ms
+    }
+
+    /// Return the known clock uncertainty; absence means unknown, not zero.
+    pub fn uncertainty_ms(&self) -> Option<u64> {
+        self.uncertainty_ms
     }
 
     fn validate(&self) -> Result<(), ContractError> {
@@ -160,6 +170,16 @@ impl EvidenceObjectRef {
         &self.object_id
     }
 
+    /// Borrow the immutable object digest.
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    /// Return the declared object size.
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
     fn validate(&self) -> Result<(), ContractError> {
         validate_contract_identifier(&self.object_id, "object_ref.object_id")?;
         validate_sha256(&self.sha256, "object_ref.sha256")
@@ -229,6 +249,11 @@ pub struct SourceEnvelope {
 }
 
 impl SourceEnvelope {
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
     /// Return the source-local sequence, which begins at one per stream.
     pub fn source_sequence(&self) -> u64 {
         self.source_sequence
@@ -244,6 +269,41 @@ impl SourceEnvelope {
         &self.run_id
     }
 
+    /// Return the source-local stream identity.
+    pub fn source_stream_id(&self) -> &str {
+        &self.source_stream_id
+    }
+
+    /// Return the idempotent source event identity.
+    pub fn source_event_id(&self) -> &str {
+        &self.source_event_id
+    }
+
+    /// Return source-observed time and uncertainty.
+    pub fn observed_at(&self) -> &ObservedTime {
+        &self.observed_at
+    }
+
+    /// Return explicitly supplied correlation identifiers.
+    pub fn correlation(&self) -> &CorrelationRefs {
+        &self.correlation
+    }
+
+    /// Return source-declared loss, redaction, and content flags.
+    pub fn flags(&self) -> EvidenceFlags {
+        self.flags
+    }
+
+    /// Return the typed payload discriminator.
+    pub fn payload_type(&self) -> &str {
+        &self.payload_type
+    }
+
+    /// Return the source payload contract version.
+    pub fn payload_version(&self) -> &str {
+        &self.payload_version
+    }
+
     /// Return a structure-only inline payload when one was accepted.
     pub fn inline_payload(&self) -> Option<&TypedEvidencePayload> {
         self.inline_payload.as_ref()
@@ -252,6 +312,11 @@ impl SourceEnvelope {
     /// Borrow the source-supplied integrity digest for the selected payload.
     pub fn payload_digest(&self) -> &str {
         &self.payload_digest
+    }
+
+    /// Return an immutable authorized object reference when selected.
+    pub fn object_ref(&self) -> Option<&EvidenceObjectRef> {
+        self.object_ref.as_ref()
     }
 
     /// Validate source-controlled fields without assigning server facts.
@@ -358,6 +423,10 @@ impl<'de> Deserialize<'de> for SourceEnvelope {
 #[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Serialize)]
 #[schemars(deny_unknown_fields)]
 pub struct AcceptedSourceEnvelope {
+    source_registration_id: String,
+    source_stream_id: String,
+    #[schemars(range(min = 1))]
+    registration_policy_revision: u64,
     effective_trust_profile: TrustProfile,
     manifest_version: SchemaVersion,
     #[schemars(length(equal = 64), regex(pattern = r"^[0-9a-f]{64}$"))]
@@ -380,6 +449,44 @@ fn validate_sha256(value: &str, field: &'static str) -> Result<(), ContractError
 }
 
 impl AcceptedSourceEnvelope {
+    /// Construct validated server acceptance facts around an unchanged envelope.
+    pub fn new(
+        source_registration_id: impl Into<String>,
+        source_stream_id: impl Into<String>,
+        registration_policy_revision: u64,
+        effective_trust_profile: TrustProfile,
+        manifest_version: SchemaVersion,
+        manifest_digest: impl Into<String>,
+        envelope: SourceEnvelope,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            source_registration_id: source_registration_id.into(),
+            source_stream_id: source_stream_id.into(),
+            registration_policy_revision,
+            effective_trust_profile,
+            manifest_version,
+            manifest_digest: manifest_digest.into(),
+            envelope,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the server-resolved registration that submitted this envelope.
+    pub fn source_registration_id(&self) -> &str {
+        &self.source_registration_id
+    }
+
+    /// Return the server-accepted stream scope for this envelope.
+    pub fn source_stream_id(&self) -> &str {
+        &self.source_stream_id
+    }
+
+    /// Return the control-plane policy revision frozen for this stream.
+    pub fn registration_policy_revision(&self) -> u64 {
+        self.registration_policy_revision
+    }
+
     /// Return the original validated source contribution.
     pub fn envelope(&self) -> &SourceEnvelope {
         &self.envelope
@@ -390,14 +497,34 @@ impl AcceptedSourceEnvelope {
         self.effective_trust_profile
     }
 
+    /// Return the manifest wire version used during acceptance.
+    pub fn manifest_version(&self) -> SchemaVersion {
+        self.manifest_version
+    }
+
     /// Return the immutable manifest digest used during acceptance.
     pub fn manifest_digest(&self) -> &str {
         &self.manifest_digest
     }
 
     fn validate(&self) -> Result<(), ContractError> {
+        validate_contract_identifier(&self.source_registration_id, "source_registration_id")?;
+        validate_contract_identifier(&self.source_stream_id, "source_stream_id")?;
+        if self.registration_policy_revision == 0 {
+            return Err(ContractError::InvalidField {
+                field: "registration_policy_revision",
+                reason: "must be greater than zero",
+            });
+        }
         validate_sha256(&self.manifest_digest, "manifest_digest")?;
-        self.envelope.validate()
+        self.envelope.validate()?;
+        if self.source_stream_id != self.envelope.source_stream_id() {
+            return Err(ContractError::InvalidField {
+                field: "source_stream_id",
+                reason: "server stream scope must match the accepted envelope",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -409,6 +536,9 @@ impl<'de> Deserialize<'de> for AcceptedSourceEnvelope {
         #[derive(schemars::JsonSchema, Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
+            source_registration_id: String,
+            source_stream_id: String,
+            registration_policy_revision: u64,
             effective_trust_profile: TrustProfile,
             manifest_version: SchemaVersion,
             manifest_digest: String,
@@ -417,6 +547,9 @@ impl<'de> Deserialize<'de> for AcceptedSourceEnvelope {
 
         let wire = Wire::deserialize(deserializer)?;
         let value = Self {
+            source_registration_id: wire.source_registration_id,
+            source_stream_id: wire.source_stream_id,
+            registration_policy_revision: wire.registration_policy_revision,
             effective_trust_profile: wire.effective_trust_profile,
             manifest_version: wire.manifest_version,
             manifest_digest: wire.manifest_digest,

@@ -7,18 +7,26 @@
   "fact": {
     "fact_type": "runtime_bound",
     "fact": {
-      "binding_id": "binding_pod_01",
-      "asserting_source_id": "source_runtime",
-      "identity_kind": "pod",
-      "identity_ref": "cluster_a:namespace_default:pod_agent_01",
-      "valid_from_unix_ms": 1783891200000,
-      "valid_until_unix_ms": 1783894800000,
-      "evidence_basis": "propagated_and_validated",
-      "evidence_basis_ref": "kubernetes_uid_readback_01",
-      "attribution": "exact",
-      "reason_codes": [],
-      "confidence_bps": null,
-      "alternative_runtime_candidates": []
+      "source_registration_id": "registration_runtime",
+      "source_stream_id": "stream_runtime_01",
+      "registration_policy_revision": 3,
+      "effective_trust_profile": "host_verified",
+      "manifest_version": "0.1",
+      "manifest_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "binding": {
+        "binding_id": "binding_pod_01",
+        "asserting_source_id": "source_runtime",
+        "identity_kind": "pod",
+        "identity_ref": "cluster_a:namespace_default:pod_agent_01",
+        "valid_from_unix_ms": 1783891200000,
+        "valid_until_unix_ms": 1783894800000,
+        "evidence_basis": "propagated_and_validated",
+        "evidence_basis_ref": "kubernetes_uid_readback_01",
+        "attribution": "exact",
+        "reason_codes": [],
+        "confidence_bps": null,
+        "alternative_runtime_candidates": []
+      }
     }
   }
 }
