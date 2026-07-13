@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QueryError",
+  "description": "Content-free Query API failure response.",
+  "type": "object",
+  "properties": {
+    "code": {
+      "description": "Stable machine error class.",
+      "$ref": "#/$defs/ContractErrorCode"
+    },
+    "request_ref": {
+      "description": "Opaque support correlation reference.",
+      "type": "string"
+    },
+    "retry_after_ms": {
+      "description": "Server-supplied minimum retry delay, when retryable.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "retryable": {
+      "description": "Whether retry can succeed without changing the request.",
+      "type": "boolean"
+    },
+    "view_version": {
+      "description": "Read-model wire version.",
+      "$ref": "#/$defs/QueryViewVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "view_version",
+    "code",
+    "retryable",
+    "request_ref"
+  ],
+  "$defs": {
+    "ContractErrorCode": {
+      "description": "Closed v0.1 wire error vocabulary for all Gateway operations.",
+      "oneOf": [
+        {
+          "description": "No acceptable transport identity was supplied.",
+          "type": "string",
+          "const": "unauthenticated"
+        },
+        {
+          "description": "The authenticated principal lacks this operation.",
+          "type": "string",
+          "const": "forbidden"
+        },
+        {
+          "description": "Enumeration-safe missing or cross-organization resource result.",
+          "type": "string",
+          "const": "not_found"
+        },
+        {
+          "description": "Request schema version is not supported.",
+          "type": "string",
+          "const": "unsupported_contract_version"
+        },
+        {
+          "description": "Source payload version is not supported.",
+          "type": "string",
+          "const": "unsupported_source_version"
+        },
+        {
+          "description": "Request violates the selected wire contract.",
+          "type": "string",
+          "const": "invalid_contract"
+        },
+        {
+          "description": "Operation is not legal in the current run state.",
+          "type": "string",
+          "const": "invalid_lifecycle_transition"
+        },
+        {
+          "description": "Lease passed its server-controlled expiry.",
+          "type": "string",
+          "const": "lease_expired"
+        },
+        {
+          "description": "Lease was explicitly revoked.",
+          "type": "string",
+          "const": "lease_revoked"
+        },
+        {
+          "description": "Lease is not scoped to this run, source, stream, or operation.",
+          "type": "string",
+          "const": "lease_scope_mismatch"
+        },
+        {
+          "description": "Operation identity was reused with different content.",
+          "type": "string",
+          "const": "idempotency_conflict"
+        },
+        {
+          "description": "Source event identity was reused with different content.",
+          "type": "string",
+          "const": "source_event_conflict"
+        },
+        {
+          "description": "A source sequence contradicts durable stream state.",
+          "type": "string",
+          "const": "sequence_conflict"
+        },
+        {
+          "description": "Source registration does not permit this evidence capability.",
+          "type": "string",
+          "const": "capability_mismatch"
+        },
+        {
+          "description": "Required edge or Gateway redaction was not applied.",
+          "type": "string",
+          "const": "redaction_required"
+        },
+        {
+          "description": "Content capture exceeds the authorized privacy ceiling.",
+          "type": "string",
+          "const": "content_not_authorized"
+        },
+        {
+          "description": "Requested retention exceeds the organization ceiling.",
+          "type": "string",
+          "const": "retention_not_authorized"
+        },
+        {
+          "description": "Request exceeds the bounded batch limit.",
+          "type": "string",
+          "const": "batch_too_large"
+        },
+        {
+          "description": "Capacity is temporarily unavailable and nothing novel committed.",
+          "type": "string",
+          "const": "backpressure"
+        },
+        {
+          "description": "Principal or organization rate limit was reached.",
+          "type": "string",
+          "const": "rate_limited"
+        },
+        {
+          "description": "Query cursor signature, shape, or scope is invalid.",
+          "type": "string",
+          "const": "cursor_invalid"
+        },
+        {
+          "description": "Query cursor is valid but no longer retained.",
+          "type": "string",
+          "const": "cursor_expired"
+        },
+        {
+          "description": "Required projection is unavailable; durable ingest may still exist.",
+          "type": "string",
+          "const": "projection_unavailable"
+        }
+      ]
+    },
+    "QueryViewVersion": {
+      "description": "Console read-model version.",
+      "oneOf": [
+        {
+          "description": "Minimum Console read model.",
+          "type": "string",
+          "const": "0"
+        }
+      ]
+    }
+  }
+}

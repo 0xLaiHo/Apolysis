@@ -1,0 +1,1563 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunOverview",
+  "description": "Complete bounded overview for one authorized Agent Run.",
+  "type": "object",
+  "properties": {
+    "authority": {
+      "description": "Authority boundary that permitted the run.",
+      "$ref": "#/$defs/AuthorityRef"
+    },
+    "coverage": {
+      "description": "Three independent server-computed coverage dimensions.",
+      "$ref": "#/$defs/CoverageSummary"
+    },
+    "coverage_gaps": {
+      "description": "Unresolved and historical coverage limitations.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoverageGap"
+      }
+    },
+    "environment": {
+      "description": "Environment profile used for coverage computation.",
+      "$ref": "#/$defs/EnvironmentKind"
+    },
+    "evidence_refs": {
+      "description": "Authorized metadata-only evidence references associated with the run.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EvidenceReference"
+      }
+    },
+    "findings": {
+      "description": "Current read-only Findings.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Finding"
+      }
+    },
+    "finished_at_unix_ms": {
+      "description": "Terminal server-visible time, when sealed.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "objective_ref": {
+      "description": "Content-free objective reference.",
+      "type": "string"
+    },
+    "organization_id": {
+      "description": "Organization scope already authorized by the Query API.",
+      "$ref": "#/$defs/OrganizationId"
+    },
+    "outcome": {
+      "description": "Claimed and verified outcome statements and their separate comparison.",
+      "$ref": "#/$defs/OutcomeComparison"
+    },
+    "primary_agent_ref": {
+      "description": "Content-free primary Agent reference, when known.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "principal": {
+      "description": "Authenticated principal acting inside the Authority.",
+      "$ref": "#/$defs/PrincipalRef"
+    },
+    "projection": {
+      "description": "Projection version, watermark, and freshness.",
+      "$ref": "#/$defs/ProjectionMetadata"
+    },
+    "run_id": {
+      "description": "Canonical run identity.",
+      "$ref": "#/$defs/RunId"
+    },
+    "source_health": {
+      "description": "Expected and joined source health, including source loss.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SourceHealth"
+      }
+    },
+    "started_at_unix_ms": {
+      "description": "Server-visible start time.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "state": {
+      "description": "Current lifecycle state.",
+      "$ref": "#/$defs/RunState"
+    },
+    "view_version": {
+      "description": "Read-model wire version.",
+      "$ref": "#/$defs/QueryViewVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "view_version",
+    "organization_id",
+    "run_id",
+    "authority",
+    "principal",
+    "objective_ref",
+    "environment",
+    "state",
+    "started_at_unix_ms",
+    "coverage",
+    "outcome",
+    "source_health",
+    "coverage_gaps",
+    "findings",
+    "evidence_refs",
+    "projection"
+  ],
+  "$defs": {
+    "AuthorityKind": {
+      "description": "The kind of boundary that authorized a run.",
+      "oneOf": [
+        {
+          "description": "A human-controlled authorization boundary.",
+          "type": "string",
+          "const": "human"
+        },
+        {
+          "description": "A service-controlled authorization boundary.",
+          "type": "string",
+          "const": "service"
+        },
+        {
+          "description": "A policy-controlled authorization boundary.",
+          "type": "string",
+          "const": "policy"
+        }
+      ]
+    },
+    "AuthorityRef": {
+      "description": "A content-free reference to the Authority that permits a run.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/AuthorityKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ]
+    },
+    "ComputedCoverage": {
+      "description": "One versioned, server-derived coverage dimension.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_watermark": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projection_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageReasonCode"
+          },
+          "minItems": 1
+        },
+        "state": {
+          "$ref": "#/$defs/SemanticCoverageState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "reason_codes",
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
+      ]
+    },
+    "ComputedCoverage2": {
+      "description": "One versioned, server-derived coverage dimension.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_watermark": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projection_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageReasonCode"
+          },
+          "minItems": 1
+        },
+        "state": {
+          "$ref": "#/$defs/ExecutionCoverageState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "reason_codes",
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
+      ]
+    },
+    "ComputedCoverage3": {
+      "description": "One versioned, server-derived coverage dimension.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_watermark": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projection_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageReasonCode"
+          },
+          "minItems": 1
+        },
+        "state": {
+          "$ref": "#/$defs/OutcomeCoverageState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "reason_codes",
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
+      ]
+    },
+    "CoverageGap": {
+      "description": "Stable coverage-gap identity and its bounded sequence/time extent.",
+      "type": "object",
+      "properties": {
+        "detected_at_unix_ms": {
+          "description": "First time the gap became visible to the projector.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "gap_ref": {
+          "description": "Opaque gap identity.",
+          "type": "string"
+        },
+        "missing_from_sequence": {
+          "description": "First missing source sequence, if the gap is sequence-based.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "missing_to_sequence": {
+          "description": "Last currently missing source sequence, inclusive.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reason_code": {
+          "description": "Coverage reason represented by this gap.",
+          "$ref": "#/$defs/CoverageReasonCode"
+        },
+        "required": {
+          "description": "Whether this gap blocks the applicable complete state.",
+          "type": "boolean"
+        },
+        "resolved_at_unix_ms": {
+          "description": "Time the gap closed, if later evidence reconciled it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source_id": {
+          "description": "Source associated with the gap, if known.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_stream_ref": {
+          "description": "Stream associated with the gap, if known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "gap_ref",
+        "reason_code",
+        "required",
+        "detected_at_unix_ms"
+      ]
+    },
+    "CoverageReasonCode": {
+      "description": "Stable reasons attached to a coverage computation.",
+      "oneOf": [
+        {
+          "description": "All requirements for the dimension were met.",
+          "type": "string",
+          "const": "requirements_satisfied"
+        },
+        {
+          "description": "A required source or lifecycle item is absent.",
+          "type": "string",
+          "const": "required_evidence_missing"
+        },
+        {
+          "description": "A source reported dropped evidence.",
+          "type": "string",
+          "const": "source_loss"
+        },
+        {
+          "description": "The source samples rather than observing every qualifying item.",
+          "type": "string",
+          "const": "sampling_enabled"
+        },
+        {
+          "description": "The source truncated evidence.",
+          "type": "string",
+          "const": "evidence_truncated"
+        },
+        {
+          "description": "A required source failed.",
+          "type": "string",
+          "const": "source_failed"
+        },
+        {
+          "description": "The environment does not expose the required capability.",
+          "type": "string",
+          "const": "unsupported_capability"
+        },
+        {
+          "description": "The relevant environment boundary is opaque.",
+          "type": "string",
+          "const": "opaque_boundary"
+        },
+        {
+          "description": "No independent outcome verifier contributed.",
+          "type": "string",
+          "const": "verifier_missing"
+        },
+        {
+          "description": "An independent check disagrees with a claim.",
+          "type": "string",
+          "const": "outcome_mismatch"
+        },
+        {
+          "description": "This dimension has no requirement for the run profile.",
+          "type": "string",
+          "const": "no_applicable_requirement"
+        },
+        {
+          "description": "Available evidence does not support a stronger state.",
+          "type": "string",
+          "const": "insufficient_evidence"
+        }
+      ]
+    },
+    "CoverageSummary": {
+      "description": "The three independent coverage dimensions and outcome comparison.",
+      "type": "object",
+      "properties": {
+        "execution": {
+          "$ref": "#/$defs/ComputedCoverage2"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ComputedCoverage3"
+        },
+        "outcome_comparison": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutcomeComparisonState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "semantic": {
+          "$ref": "#/$defs/ComputedCoverage"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "semantic",
+        "execution",
+        "outcome"
+      ]
+    },
+    "EnvironmentKind": {
+      "description": "The supported environment profiles for an Agent Run.",
+      "oneOf": [
+        {
+          "description": "Local CLI or IDE integration.",
+          "type": "string",
+          "const": "local_cli_or_ide"
+        },
+        {
+          "description": "CI runner or remote development workspace.",
+          "type": "string",
+          "const": "ci_runner_or_remote_workspace"
+        },
+        {
+          "description": "Vendor-hosted coding-agent sandbox.",
+          "type": "string",
+          "const": "vendor_hosted_coding_sandbox"
+        },
+        {
+          "description": "Customer-built agent service.",
+          "type": "string",
+          "const": "customer_built_agent_service"
+        },
+        {
+          "description": "Fully managed agent runtime.",
+          "type": "string",
+          "const": "fully_managed_agent_runtime"
+        }
+      ]
+    },
+    "EvidenceAccessState": {
+      "description": "Object access state computed independently from possession of a reference.",
+      "oneOf": [
+        {
+          "description": "Metadata is visible but no raw object was captured.",
+          "type": "string",
+          "const": "metadata_only"
+        },
+        {
+          "description": "The caller may request a fresh, separately authorized dereference.",
+          "type": "string",
+          "const": "dereference_authorized"
+        },
+        {
+          "description": "The caller is not authorized to read the object.",
+          "type": "string",
+          "const": "not_authorized"
+        },
+        {
+          "description": "The object was deleted and cannot be read.",
+          "type": "string",
+          "const": "deleted"
+        },
+        {
+          "description": "Authorization or storage state is unavailable and reads fail closed.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    },
+    "EvidenceCategory": {
+      "description": "Stable content-free evidence categories.",
+      "oneOf": [
+        {
+          "description": "Agent or tool semantic lifecycle evidence.",
+          "type": "string",
+          "const": "semantic"
+        },
+        {
+          "description": "Host or runtime operation evidence.",
+          "type": "string",
+          "const": "execution"
+        },
+        {
+          "description": "Agent/provider claimed outcome.",
+          "type": "string",
+          "const": "claimed_outcome"
+        },
+        {
+          "description": "Independent outcome read-back.",
+          "type": "string",
+          "const": "verified_outcome"
+        },
+        {
+          "description": "Source health or Coverage Gap evidence.",
+          "type": "string",
+          "const": "coverage_gap"
+        },
+        {
+          "description": "Finding-specific supporting evidence.",
+          "type": "string",
+          "const": "finding"
+        }
+      ]
+    },
+    "EvidenceReference": {
+      "description": "Opaque evidence metadata. It deliberately has no URL, path, bucket, or credential field.",
+      "type": "object",
+      "properties": {
+        "access": {
+          "description": "Current separately authorized dereference state.",
+          "$ref": "#/$defs/EvidenceAccessState"
+        },
+        "category": {
+          "description": "Stable content-free evidence category.",
+          "$ref": "#/$defs/EvidenceCategory"
+        },
+        "evidence_ref": {
+          "description": "Organization-scoped opaque reference.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        },
+        "redacted": {
+          "description": "Whether metadata or content was redacted.",
+          "type": "boolean"
+        },
+        "size_bytes": {
+          "description": "Captured object size when disclosing it is authorized.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source_id": {
+          "description": "Source that contributed the referenced evidence.",
+          "$ref": "#/$defs/SourceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "evidence_ref",
+        "category",
+        "source_id",
+        "access",
+        "redacted"
+      ]
+    },
+    "ExecutionCoverageState": {
+      "description": "Server-derived Execution Coverage states.",
+      "oneOf": [
+        {
+          "description": "The controlled host boundary met its declared capability without a gap.",
+          "type": "string",
+          "const": "host_verified"
+        },
+        {
+          "description": "Execution evidence exists with a known capability or loss gap.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "No qualifying source can observe the execution boundary.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "The run profile requires no execution assertion.",
+          "type": "string",
+          "const": "not_applicable"
+        },
+        {
+          "description": "A required execution source did not produce usable complete evidence.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    },
+    "Finding": {
+      "description": "Current Finding projection. Console v0 exposes no mutation actions.",
+      "type": "object",
+      "properties": {
+        "affected_entity_refs": {
+          "description": "Content-free affected entity references.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "coverage_reason_codes": {
+          "description": "Coverage limitations relevant to interpretation.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageReasonCode"
+          }
+        },
+        "evidence_refs": {
+          "description": "Opaque supporting evidence metadata.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceReference"
+          }
+        },
+        "finding_ref": {
+          "description": "Stable Finding identity.",
+          "type": "string"
+        },
+        "first_seen_at_unix_ms": {
+          "description": "First projected observation time.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "kind": {
+          "description": "Stable Finding category.",
+          "$ref": "#/$defs/FindingKind"
+        },
+        "last_seen_at_unix_ms": {
+          "description": "Last projected observation time.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rule_ref": {
+          "description": "Stable rule identity.",
+          "type": "string"
+        },
+        "rule_version": {
+          "description": "Rule implementation version.",
+          "type": "string"
+        },
+        "severity": {
+          "description": "Server-computed severity.",
+          "$ref": "#/$defs/FindingSeverity"
+        },
+        "state": {
+          "description": "Current server-owned state.",
+          "$ref": "#/$defs/FindingState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "finding_ref",
+        "kind",
+        "severity",
+        "state",
+        "rule_ref",
+        "rule_version",
+        "affected_entity_refs",
+        "coverage_reason_codes",
+        "evidence_refs",
+        "first_seen_at_unix_ms",
+        "last_seen_at_unix_ms"
+      ]
+    },
+    "FindingKind": {
+      "description": "Stable Finding categories rendered by Console v0.",
+      "oneOf": [
+        {
+          "description": "No intent was supplied for an observed action.",
+          "type": "string",
+          "const": "missing_intent"
+        },
+        {
+          "description": "Declared intent was not matched to observed execution.",
+          "type": "string",
+          "const": "unobserved_intent"
+        },
+        {
+          "description": "Observed action was not declared.",
+          "type": "string",
+          "const": "undeclared_action"
+        },
+        {
+          "description": "Credential-like resource access.",
+          "type": "string",
+          "const": "credential_read"
+        },
+        {
+          "description": "Workspace or managed-boundary escape.",
+          "type": "string",
+          "const": "workspace_boundary"
+        },
+        {
+          "description": "Network destination outside declared egress.",
+          "type": "string",
+          "const": "unknown_egress"
+        },
+        {
+          "description": "Command classified as dangerous by a versioned rule.",
+          "type": "string",
+          "const": "dangerous_command"
+        },
+        {
+          "description": "Kubernetes service-account token access.",
+          "type": "string",
+          "const": "service_account_token_read"
+        }
+      ]
+    },
+    "FindingSeverity": {
+      "description": "Finding severity supplied by the versioned finding projector.",
+      "oneOf": [
+        {
+          "description": "Informational evidence context.",
+          "type": "string",
+          "const": "informational"
+        },
+        {
+          "description": "Low-severity concern.",
+          "type": "string",
+          "const": "low"
+        },
+        {
+          "description": "Medium-severity concern.",
+          "type": "string",
+          "const": "medium"
+        },
+        {
+          "description": "High-severity concern.",
+          "type": "string",
+          "const": "high"
+        },
+        {
+          "description": "Critical concern.",
+          "type": "string",
+          "const": "critical"
+        }
+      ]
+    },
+    "FindingState": {
+      "description": "Current server-owned Finding workflow state, rendered read-only in v0.",
+      "oneOf": [
+        {
+          "description": "Finding has no later workflow disposition.",
+          "type": "string",
+          "const": "open"
+        },
+        {
+          "description": "A later workflow acknowledged it.",
+          "type": "string",
+          "const": "acknowledged"
+        },
+        {
+          "description": "A later workflow suppressed it under policy.",
+          "type": "string",
+          "const": "suppressed"
+        },
+        {
+          "description": "A later workflow resolved it.",
+          "type": "string",
+          "const": "resolved"
+        }
+      ]
+    },
+    "OrganizationId": {
+      "description": "An organization-scoped opaque identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "OutcomeComparison": {
+      "description": "Claimed outcome, independent verification, coverage, and comparison.",
+      "type": "object",
+      "properties": {
+        "claimed": {
+          "description": "Source claim, when one was received.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutcomeStatement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "comparison": {
+          "description": "Comparison is separate from coverage and may be a mismatch when verified.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutcomeComparisonState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coverage": {
+          "description": "Server-derived Outcome Coverage.",
+          "$ref": "#/$defs/OutcomeCoverageState"
+        },
+        "verified": {
+          "description": "Independent read-back, when one was received.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutcomeStatement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "coverage"
+      ]
+    },
+    "OutcomeComparisonState": {
+      "description": "Comparison between a claim and an independent outcome check.",
+      "oneOf": [
+        {
+          "description": "The independent check matches the claimed outcome.",
+          "type": "string",
+          "const": "match"
+        },
+        {
+          "description": "The independent check disagrees with the claimed outcome.",
+          "type": "string",
+          "const": "mismatch"
+        },
+        {
+          "description": "A definitive comparison is not currently available.",
+          "type": "string",
+          "const": "unresolved"
+        }
+      ]
+    },
+    "OutcomeCoverageState": {
+      "description": "Server-derived Outcome Coverage states.",
+      "oneOf": [
+        {
+          "description": "A required outcome was independently checked, whether matching or not.",
+          "type": "string",
+          "const": "verified"
+        },
+        {
+          "description": "An outcome was claimed but not independently checked.",
+          "type": "string",
+          "const": "unconfirmed"
+        },
+        {
+          "description": "A reliable claim/check relationship cannot be established.",
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "description": "The run profile requires no external outcome.",
+          "type": "string",
+          "const": "not_applicable"
+        }
+      ]
+    },
+    "OutcomeState": {
+      "description": "One outcome value retained without treating a claim as verification.",
+      "oneOf": [
+        {
+          "description": "The source reports a successful operation or check.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "The source reports a failed operation or check.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "The operation was denied.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "The outcome has not reached a terminal state.",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "Available evidence cannot establish an outcome.",
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "description": "No outcome applies to the represented item.",
+          "type": "string",
+          "const": "not_applicable"
+        }
+      ]
+    },
+    "OutcomeStatement": {
+      "description": "A source-bound claimed or verified outcome statement.",
+      "type": "object",
+      "properties": {
+        "evidence_refs": {
+          "description": "Opaque evidence references supporting the statement.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceReference"
+          }
+        },
+        "observed_at_unix_ms": {
+          "description": "Source-observed time for the statement.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source_id": {
+          "description": "Source that supplied the claim or independent check.",
+          "$ref": "#/$defs/SourceId"
+        },
+        "state": {
+          "description": "Outcome asserted by this source.",
+          "$ref": "#/$defs/OutcomeState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "source_id",
+        "observed_at_unix_ms",
+        "evidence_refs"
+      ]
+    },
+    "PrincipalKind": {
+      "description": "The kind of authenticated identity acting within an Authority.",
+      "oneOf": [
+        {
+          "description": "An authenticated human identity.",
+          "type": "string",
+          "const": "human"
+        },
+        {
+          "description": "An authenticated workload identity.",
+          "type": "string",
+          "const": "workload"
+        }
+      ]
+    },
+    "PrincipalRef": {
+      "description": "A content-free reference to the Principal acting in a run.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PrincipalKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ]
+    },
+    "ProjectionFreshness": {
+      "description": "Projection freshness rendered by a Query API client without recomputation.",
+      "oneOf": [
+        {
+          "description": "The projection is current at the declared input watermark.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Projection lag exceeds the configured freshness objective.",
+          "type": "string",
+          "const": "stale"
+        },
+        {
+          "description": "The view is being rebuilt and can change at the next revision.",
+          "type": "string",
+          "const": "rebuilding"
+        }
+      ]
+    },
+    "ProjectionMetadata": {
+      "description": "Version and freshness facts attached to every bounded read projection.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "description": "Stable projector implementation version.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "freshness": {
+          "description": "Server-computed freshness state.",
+          "$ref": "#/$defs/ProjectionFreshness"
+        },
+        "input_watermark": {
+          "description": "Highest durable ingest sequence included in the view.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lag_ms": {
+          "description": "Measured projection lag; zero is a measured value, not an unknown value.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projected_at_unix_ms": {
+          "description": "Server-recorded completion time for this revision.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "projection_revision": {
+          "description": "Monotonic revision of this projected view.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "view_version": {
+          "description": "Read-model wire version.",
+          "$ref": "#/$defs/QueryViewVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "view_version",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "projected_at_unix_ms",
+        "freshness",
+        "lag_ms"
+      ]
+    },
+    "QueryViewVersion": {
+      "description": "Console read-model version.",
+      "oneOf": [
+        {
+          "description": "Minimum Console read model.",
+          "type": "string",
+          "const": "0"
+        }
+      ]
+    },
+    "RunId": {
+      "description": "An organization-scoped Agent Run identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "RunState": {
+      "description": "Lifecycle states for an Agent Run.",
+      "oneOf": [
+        {
+          "description": "Identity and source policy are being validated.",
+          "type": "string",
+          "const": "opening"
+        },
+        {
+          "description": "Registered sources may contribute evidence.",
+          "type": "string",
+          "const": "active"
+        },
+        {
+          "description": "Terminal declarations and gaps are being reconciled.",
+          "type": "string",
+          "const": "finishing"
+        },
+        {
+          "description": "The run is sealed without an unresolved required-source gap.",
+          "type": "string",
+          "const": "finished"
+        },
+        {
+          "description": "The run is sealed with at least one terminal or evidence gap.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Wire schema versions understood by this crate.",
+      "oneOf": [
+        {
+          "description": "Agent Execution Record schema v0.1.",
+          "type": "string",
+          "const": "0.1"
+        }
+      ]
+    },
+    "SemanticCoverageState": {
+      "description": "Server-derived Semantic Coverage states.",
+      "oneOf": [
+        {
+          "description": "All required semantic lifecycle evidence was observed.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "Useful semantic evidence exists with a known required gap.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "The semantic boundary is intentionally opaque.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "Expected semantic evidence is not usable or available.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    },
+    "SourceCapability": {
+      "description": "A source capability declaration, not a per-run completeness claim.",
+      "oneOf": [
+        {
+          "description": "Agent/run lifecycle semantics.",
+          "type": "string",
+          "const": "semantic_lifecycle"
+        },
+        {
+          "description": "Agent delegation lifecycle.",
+          "type": "string",
+          "const": "delegation"
+        },
+        {
+          "description": "Declared tool-call lifecycle.",
+          "type": "string",
+          "const": "tool_calls"
+        },
+        {
+          "description": "MCP lifecycle and correlation identifiers.",
+          "type": "string",
+          "const": "mcp"
+        },
+        {
+          "description": "A2A task lifecycle and identifiers.",
+          "type": "string",
+          "const": "a2a"
+        },
+        {
+          "description": "Process execution observations.",
+          "type": "string",
+          "const": "process"
+        },
+        {
+          "description": "File operation observations.",
+          "type": "string",
+          "const": "file"
+        },
+        {
+          "description": "Network operation observations.",
+          "type": "string",
+          "const": "network"
+        },
+        {
+          "description": "Workload/runtime binding observations.",
+          "type": "string",
+          "const": "workload"
+        },
+        {
+          "description": "Agent, tool, or provider outcome claims.",
+          "type": "string",
+          "const": "claimed_outcome"
+        },
+        {
+          "description": "Independently checked outcome evidence.",
+          "type": "string",
+          "const": "verified_outcome"
+        },
+        {
+          "description": "Source health, loss, or terminal-position evidence.",
+          "type": "string",
+          "const": "source_health"
+        }
+      ]
+    },
+    "SourceHealth": {
+      "description": "Query projection for one expected or joined Evidence Source.",
+      "type": "object",
+      "properties": {
+        "expected": {
+          "description": "Whether the run profile expected this source.",
+          "type": "boolean"
+        },
+        "expected_capabilities": {
+          "description": "Declared expected capabilities relevant to this run.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceCapability"
+          }
+        },
+        "gaps": {
+          "description": "Typed gaps associated with the source.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageGap"
+          }
+        },
+        "joined": {
+          "description": "Whether a source stream joined the run.",
+          "type": "boolean"
+        },
+        "last_durable_sequence": {
+          "description": "Last durable source sequence, when any item was accepted.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "last_ingested_at_unix_ms": {
+          "description": "Last durable ingest time, when any item was accepted.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reason_codes": {
+          "description": "Stable reasons for the current state.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceHealthReasonCode"
+          }
+        },
+        "redacted": {
+          "description": "Whether source-side or Gateway redaction affected the stream.",
+          "type": "boolean"
+        },
+        "sampling": {
+          "description": "Whether the source declares sampling.",
+          "type": "boolean"
+        },
+        "source_id": {
+          "description": "Registered source identity.",
+          "$ref": "#/$defs/SourceId"
+        },
+        "source_kind": {
+          "description": "Source integration category.",
+          "$ref": "#/$defs/SourceKind"
+        },
+        "source_stream_ref": {
+          "description": "Current stream identity, when joined.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "Server-computed source health state.",
+          "$ref": "#/$defs/SourceHealthState"
+        },
+        "terminal_sequence": {
+          "description": "Declared terminal source sequence, when received.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "trust_profile": {
+          "description": "Effective server-assigned trust profile.",
+          "$ref": "#/$defs/TrustProfile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "source_kind",
+        "trust_profile",
+        "expected",
+        "joined",
+        "expected_capabilities",
+        "state",
+        "reason_codes",
+        "sampling",
+        "redacted",
+        "gaps"
+      ]
+    },
+    "SourceHealthReasonCode": {
+      "description": "Stable source-health reasons suitable for filters and accessible labels.",
+      "oneOf": [
+        {
+          "description": "Source is operating at the declared capability.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Expected source did not join the run.",
+          "type": "string",
+          "const": "expected_source_missing"
+        },
+        {
+          "description": "A required lifecycle declaration is missing.",
+          "type": "string",
+          "const": "lifecycle_missing"
+        },
+        {
+          "description": "One or more source sequence positions are missing.",
+          "type": "string",
+          "const": "sequence_gap"
+        },
+        {
+          "description": "Source explicitly reported loss.",
+          "type": "string",
+          "const": "loss_reported"
+        },
+        {
+          "description": "Source samples qualifying evidence.",
+          "type": "string",
+          "const": "sampling_enabled"
+        },
+        {
+          "description": "Source applies required redaction.",
+          "type": "string",
+          "const": "redaction_applied"
+        },
+        {
+          "description": "Source has not advanced within the liveness objective.",
+          "type": "string",
+          "const": "stale"
+        },
+        {
+          "description": "Source failed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Environment boundary is opaque.",
+          "type": "string",
+          "const": "opaque_boundary"
+        },
+        {
+          "description": "No applicable requirement exists.",
+          "type": "string",
+          "const": "no_applicable_requirement"
+        }
+      ]
+    },
+    "SourceHealthState": {
+      "description": "Health state computed for an expected or joined Evidence Source.",
+      "oneOf": [
+        {
+          "description": "Expected lifecycle and sequence observations are current.",
+          "type": "string",
+          "const": "healthy"
+        },
+        {
+          "description": "The source is useful but operating below its declared capability.",
+          "type": "string",
+          "const": "degraded"
+        },
+        {
+          "description": "At least one source-sequence gap is open.",
+          "type": "string",
+          "const": "gapped"
+        },
+        {
+          "description": "The source has not advanced within its liveness objective.",
+          "type": "string",
+          "const": "stalled"
+        },
+        {
+          "description": "The source declared or was diagnosed as failed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "The relevant source boundary cannot be observed.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "This source capability is not required by the environment profile.",
+          "type": "string",
+          "const": "not_applicable"
+        }
+      ]
+    },
+    "SourceId": {
+      "description": "A registered Evidence Source identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "SourceKind": {
+      "description": "Evidence Source integration categories.",
+      "oneOf": [
+        {
+          "description": "Agent or IDE lifecycle hook.",
+          "type": "string",
+          "const": "semantic_hook"
+        },
+        {
+          "description": "In-process SDK processor.",
+          "type": "string",
+          "const": "sdk_processor"
+        },
+        {
+          "description": "MCP, A2A, or other protocol evidence tap.",
+          "type": "string",
+          "const": "protocol_tap"
+        },
+        {
+          "description": "Provider API or audit adapter.",
+          "type": "string",
+          "const": "provider_adapter"
+        },
+        {
+          "description": "Customer-controlled execution boundary witness.",
+          "type": "string",
+          "const": "runtime_witness"
+        },
+        {
+          "description": "Independent outcome read-back integration.",
+          "type": "string",
+          "const": "outcome_verifier"
+        }
+      ]
+    },
+    "TrustProfile": {
+      "description": "The trust boundary under which source statements are interpreted.",
+      "oneOf": [
+        {
+          "description": "A source declared a fact without an independent observer.",
+          "type": "string",
+          "const": "declared"
+        },
+        {
+          "description": "A harness observed lifecycle or tool semantics.",
+          "type": "string",
+          "const": "harness_observed"
+        },
+        {
+          "description": "A customer-controlled host boundary observed execution.",
+          "type": "string",
+          "const": "host_verified"
+        },
+        {
+          "description": "A vendor attests activity inside its own boundary.",
+          "type": "string",
+          "const": "provider_attested"
+        },
+        {
+          "description": "The execution boundary is not observable by a qualifying source.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "Expected trust evidence is missing, lost, or otherwise incomplete.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    }
+  }
+}

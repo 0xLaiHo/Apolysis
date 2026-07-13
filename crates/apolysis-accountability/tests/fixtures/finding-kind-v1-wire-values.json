@@ -1,0 +1,10 @@
+[
+  "missing_intent",
+  "unobserved_intent",
+  "undeclared_action",
+  "credential_read",
+  "workspace_boundary",
+  "unknown_egress",
+  "dangerous_command",
+  "service_account_token_read"
+]

@@ -1,0 +1,11 @@
+{
+  "evidence_type": "actuation_report",
+  "body": {
+    "actuation_ref": "actuation_01",
+    "decision_ref": "decision_01",
+    "actuator_ref": "mcp_policy_adapter_01",
+    "subject_ref": "tool_interaction_01",
+    "action": "block",
+    "outcome": "denied"
+  }
+}
