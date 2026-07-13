@@ -1,0 +1,10 @@
+{
+  "evidence_type": "runtime_effect",
+  "body": {
+    "effect_ref": "runtime_effect_01",
+    "runtime_ref": "container_agent_01",
+    "effect_kind": "network",
+    "target_ref": "endpoint_digest_01",
+    "outcome": "unknown"
+  }
+}

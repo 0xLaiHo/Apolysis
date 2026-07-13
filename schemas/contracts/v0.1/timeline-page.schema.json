@@ -1,0 +1,712 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TimelinePage",
+  "description": "Bounded timeline response in stable projection order.",
+  "type": "object",
+  "properties": {
+    "items": {
+      "description": "Items in projection order, which is not a causal order claim.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TimelineItem"
+      },
+      "maxItems": 200
+    },
+    "limit": {
+      "description": "Requested and enforced page limit.",
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 200,
+      "minimum": 1
+    },
+    "next_cursor": {
+      "description": "Opaque continuation token.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "projection": {
+      "description": "Projection version, watermark, and freshness.",
+      "$ref": "#/$defs/ProjectionMetadata"
+    },
+    "run_id": {
+      "description": "Run that scopes every item in the page.",
+      "$ref": "#/$defs/RunId"
+    },
+    "view_version": {
+      "description": "Read-model wire version.",
+      "$ref": "#/$defs/QueryViewVersion"
+    },
+    "window": {
+      "description": "Explicit bounded query window.",
+      "$ref": "#/$defs/TimelineWindow"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "view_version",
+    "run_id",
+    "window",
+    "items",
+    "limit",
+    "projection"
+  ],
+  "$defs": {
+    "AttributionCandidate": {
+      "description": "One retained candidate for an ambiguous relation.",
+      "type": "object",
+      "properties": {
+        "confidence_bps": {
+          "description": "Projector score in basis points, from 0 through 10,000.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 10000,
+          "minimum": 0
+        },
+        "entity_ref": {
+          "description": "Candidate entity identity.",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "description": "Evidence supporting this candidate without upgrading it to exact.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceReference"
+          },
+          "minItems": 1
+        },
+        "reason_codes": {
+          "description": "Non-empty stable reasons for retaining this candidate.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "entity_ref",
+        "reason_codes",
+        "confidence_bps",
+        "evidence_refs"
+      ]
+    },
+    "ClockBasis": {
+      "description": "Time basis supplied by an Evidence Source.",
+      "oneOf": [
+        {
+          "description": "Source wall clock.",
+          "type": "string",
+          "const": "wall_clock"
+        },
+        {
+          "description": "A monotonic clock converted to wall time by the source.",
+          "type": "string",
+          "const": "monotonic_converted"
+        },
+        {
+          "description": "A vendor or external provider clock.",
+          "type": "string",
+          "const": "provider_clock"
+        }
+      ]
+    },
+    "EvidenceAccessState": {
+      "description": "Object access state computed independently from possession of a reference.",
+      "oneOf": [
+        {
+          "description": "Metadata is visible but no raw object was captured.",
+          "type": "string",
+          "const": "metadata_only"
+        },
+        {
+          "description": "The caller may request a fresh, separately authorized dereference.",
+          "type": "string",
+          "const": "dereference_authorized"
+        },
+        {
+          "description": "The caller is not authorized to read the object.",
+          "type": "string",
+          "const": "not_authorized"
+        },
+        {
+          "description": "The object was deleted and cannot be read.",
+          "type": "string",
+          "const": "deleted"
+        },
+        {
+          "description": "Authorization or storage state is unavailable and reads fail closed.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    },
+    "EvidenceCategory": {
+      "description": "Stable content-free evidence categories.",
+      "oneOf": [
+        {
+          "description": "Agent or tool semantic lifecycle evidence.",
+          "type": "string",
+          "const": "semantic"
+        },
+        {
+          "description": "Host or runtime operation evidence.",
+          "type": "string",
+          "const": "execution"
+        },
+        {
+          "description": "Agent/provider claimed outcome.",
+          "type": "string",
+          "const": "claimed_outcome"
+        },
+        {
+          "description": "Independent outcome read-back.",
+          "type": "string",
+          "const": "verified_outcome"
+        },
+        {
+          "description": "Source health or Coverage Gap evidence.",
+          "type": "string",
+          "const": "coverage_gap"
+        },
+        {
+          "description": "Finding-specific supporting evidence.",
+          "type": "string",
+          "const": "finding"
+        }
+      ]
+    },
+    "EvidenceReference": {
+      "description": "Opaque evidence metadata. It deliberately has no URL, path, bucket, or credential field.",
+      "type": "object",
+      "properties": {
+        "access": {
+          "description": "Current separately authorized dereference state.",
+          "$ref": "#/$defs/EvidenceAccessState"
+        },
+        "category": {
+          "description": "Stable content-free evidence category.",
+          "$ref": "#/$defs/EvidenceCategory"
+        },
+        "evidence_ref": {
+          "description": "Organization-scoped opaque reference.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        },
+        "redacted": {
+          "description": "Whether metadata or content was redacted.",
+          "type": "boolean"
+        },
+        "size_bytes": {
+          "description": "Captured object size when disclosing it is authorized.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source_id": {
+          "description": "Source that contributed the referenced evidence.",
+          "$ref": "#/$defs/SourceId"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "evidence_ref",
+        "category",
+        "source_id",
+        "access",
+        "redacted"
+      ]
+    },
+    "ExactAttributionBasis": {
+      "description": "Qualifying basis for an exact identity relation.",
+      "oneOf": [
+        {
+          "description": "The same identity was explicitly propagated across both records.",
+          "type": "string",
+          "const": "propagated_identity"
+        },
+        {
+          "description": "A provider supplied a native stable relationship identity.",
+          "type": "string",
+          "const": "provider_native_identity"
+        }
+      ]
+    },
+    "OutcomeState": {
+      "description": "One outcome value retained without treating a claim as verification.",
+      "oneOf": [
+        {
+          "description": "The source reports a successful operation or check.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "The source reports a failed operation or check.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "The operation was denied.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "The outcome has not reached a terminal state.",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "Available evidence cannot establish an outcome.",
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "description": "No outcome applies to the represented item.",
+          "type": "string",
+          "const": "not_applicable"
+        }
+      ]
+    },
+    "ProjectionFreshness": {
+      "description": "Projection freshness rendered by a Query API client without recomputation.",
+      "oneOf": [
+        {
+          "description": "The projection is current at the declared input watermark.",
+          "type": "string",
+          "const": "current"
+        },
+        {
+          "description": "Projection lag exceeds the configured freshness objective.",
+          "type": "string",
+          "const": "stale"
+        },
+        {
+          "description": "The view is being rebuilt and can change at the next revision.",
+          "type": "string",
+          "const": "rebuilding"
+        }
+      ]
+    },
+    "ProjectionMetadata": {
+      "description": "Version and freshness facts attached to every bounded read projection.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "description": "Stable projector implementation version.",
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "freshness": {
+          "description": "Server-computed freshness state.",
+          "$ref": "#/$defs/ProjectionFreshness"
+        },
+        "input_watermark": {
+          "description": "Highest durable ingest sequence included in the view.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lag_ms": {
+          "description": "Measured projection lag; zero is a measured value, not an unknown value.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projected_at_unix_ms": {
+          "description": "Server-recorded completion time for this revision.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "projection_revision": {
+          "description": "Monotonic revision of this projected view.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "view_version": {
+          "description": "Read-model wire version.",
+          "$ref": "#/$defs/QueryViewVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "view_version",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "projected_at_unix_ms",
+        "freshness",
+        "lag_ms"
+      ]
+    },
+    "QueryViewVersion": {
+      "description": "Console read-model version.",
+      "oneOf": [
+        {
+          "description": "Minimum Console read model.",
+          "type": "string",
+          "const": "0"
+        }
+      ]
+    },
+    "RelationAttribution": {
+      "description": "Attribution retained exactly as computed; no variant asserts causality.",
+      "oneOf": [
+        {
+          "description": "An explicit identity relation from a qualifying source.",
+          "type": "object",
+          "properties": {
+            "basis": {
+              "description": "Typed non-heuristic identity basis.",
+              "$ref": "#/$defs/ExactAttributionBasis"
+            },
+            "entity_ref": {
+              "description": "Related entity identity.",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "description": "Evidence carrying the propagated or provider-native identity.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EvidenceReference"
+              },
+              "minItems": 1
+            },
+            "state": {
+              "type": "string",
+              "const": "exact"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "entity_ref",
+            "basis",
+            "evidence_refs"
+          ]
+        },
+        {
+          "description": "A non-exact relation inferred by a versioned projector.",
+          "type": "object",
+          "properties": {
+            "confidence_bps": {
+              "description": "Projector score in basis points, from 0 through 10,000.",
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 10000,
+              "minimum": 0
+            },
+            "entity_ref": {
+              "description": "Best candidate identity.",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "description": "Evidence supporting the inference without upgrading it to exact.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EvidenceReference"
+              },
+              "minItems": 1
+            },
+            "reason_codes": {
+              "description": "Non-empty stable inference reasons.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "state": {
+              "type": "string",
+              "const": "inferred"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "entity_ref",
+            "reason_codes",
+            "confidence_bps",
+            "evidence_refs"
+          ]
+        },
+        {
+          "description": "Multiple candidates remain and are all retained.",
+          "type": "object",
+          "properties": {
+            "candidates": {
+              "description": "Candidate identities; at least two are required.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AttributionCandidate"
+              },
+              "minItems": 2
+            },
+            "reason_codes": {
+              "description": "Non-empty stable reasons why no candidate is exact.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "state": {
+              "type": "string",
+              "const": "ambiguous"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "candidates",
+            "reason_codes"
+          ]
+        },
+        {
+          "description": "No qualifying relation was established.",
+          "type": "object",
+          "properties": {
+            "reason_codes": {
+              "description": "Stable explanation for the missing relation.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "state": {
+              "type": "string",
+              "const": "unattributed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "reason_codes"
+          ]
+        }
+      ]
+    },
+    "RunId": {
+      "description": "An organization-scoped Agent Run identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "SourceId": {
+      "description": "A registered Evidence Source identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "TimelineItem": {
+      "description": "One bounded timeline item.",
+      "type": "object",
+      "properties": {
+        "attribution": {
+          "description": "Exact, inferred, ambiguous, or unattributed relation.",
+          "$ref": "#/$defs/RelationAttribution"
+        },
+        "event_ref": {
+          "description": "Stable projected event identity.",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "description": "Opaque evidence metadata supporting this item.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceReference"
+          }
+        },
+        "ingest_sequence": {
+          "description": "Server-assigned durable ingest order.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "ingested_at_unix_ms": {
+          "description": "Server-assigned durable ingest time.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "item_type": {
+          "description": "Stable content-free event type.",
+          "type": "string"
+        },
+        "lane": {
+          "description": "Timeline layer.",
+          "$ref": "#/$defs/TimelineLane"
+        },
+        "observed_at": {
+          "description": "Source timestamp and uncertainty.",
+          "$ref": "#/$defs/TimelineObservedTime"
+        },
+        "outcome": {
+          "description": "Item-level operation/outcome state.",
+          "$ref": "#/$defs/OutcomeState"
+        },
+        "source": {
+          "description": "Source identity and effective trust.",
+          "$ref": "#/$defs/TimelineSource"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "event_ref",
+        "lane",
+        "item_type",
+        "observed_at",
+        "ingested_at_unix_ms",
+        "ingest_sequence",
+        "source",
+        "outcome",
+        "attribution",
+        "evidence_refs"
+      ]
+    },
+    "TimelineLane": {
+      "description": "Timeline layer. Display order is projection order, not causal order.",
+      "oneOf": [
+        {
+          "description": "Agent, delegation, tool, MCP, or A2A semantics.",
+          "type": "string",
+          "const": "semantic"
+        },
+        {
+          "description": "Host, process, file, network, or workload observations.",
+          "type": "string",
+          "const": "execution"
+        },
+        {
+          "description": "Claimed or independently verified outcomes.",
+          "type": "string",
+          "const": "outcome"
+        },
+        {
+          "description": "Loss, redaction, source failure, or other coverage limitation.",
+          "type": "string",
+          "const": "coverage_gap"
+        }
+      ]
+    },
+    "TimelineObservedTime": {
+      "description": "Source-observed time with an explicit clock basis and uncertainty.",
+      "type": "object",
+      "properties": {
+        "clock_basis": {
+          "description": "Basis of the source timestamp.",
+          "$ref": "#/$defs/ClockBasis"
+        },
+        "uncertainty_ms": {
+          "description": "Known uncertainty; `None` means unknown, never zero.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "unix_ms": {
+          "description": "Source-reported Unix timestamp.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "unix_ms",
+        "clock_basis"
+      ]
+    },
+    "TimelineSource": {
+      "description": "Source and effective trust retained on every timeline item.",
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "description": "Registered source identity.",
+          "$ref": "#/$defs/SourceId"
+        },
+        "trust_profile": {
+          "description": "Server-assigned effective trust profile.",
+          "$ref": "#/$defs/TrustProfile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "trust_profile"
+      ]
+    },
+    "TimelineWindow": {
+      "description": "Explicit bounded time window for one timeline page.",
+      "type": "object",
+      "properties": {
+        "end_unix_ms": {
+          "description": "Exclusive upper time bound.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "start_unix_ms": {
+          "description": "Inclusive lower time bound.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "start_unix_ms",
+        "end_unix_ms"
+      ]
+    },
+    "TrustProfile": {
+      "description": "The trust boundary under which source statements are interpreted.",
+      "oneOf": [
+        {
+          "description": "A source declared a fact without an independent observer.",
+          "type": "string",
+          "const": "declared"
+        },
+        {
+          "description": "A harness observed lifecycle or tool semantics.",
+          "type": "string",
+          "const": "harness_observed"
+        },
+        {
+          "description": "A customer-controlled host boundary observed execution.",
+          "type": "string",
+          "const": "host_verified"
+        },
+        {
+          "description": "A vendor attests activity inside its own boundary.",
+          "type": "string",
+          "const": "provider_attested"
+        },
+        {
+          "description": "The execution boundary is not observable by a qualifying source.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "Expected trust evidence is missing, lost, or otherwise incomplete.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    }
+  }
+}

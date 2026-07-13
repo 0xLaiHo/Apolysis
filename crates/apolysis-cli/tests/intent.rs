@@ -152,6 +152,20 @@ fn intent_correlate_links_commands_and_reports_mismatches() {
     assert!(timeline.contains(r#""kind":"unobserved_intent""#));
     assert!(timeline.contains(r#""evidence_ref":"codex:call-2""#));
 
+    let typed_findings: Vec<apolysis_accountability::AccountabilityFinding> = timeline
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid output JSONL"))
+        .filter(|record| record["record_type"] == "accountability_finding")
+        .map(|record| serde_json::from_value(record).expect("finding matches shared v1 contract"))
+        .collect();
+    assert_eq!(typed_findings.len(), 2);
+    assert!(typed_findings
+        .iter()
+        .any(|finding| { finding.kind == apolysis_accountability::FindingKind::MissingIntent }));
+    assert!(typed_findings
+        .iter()
+        .any(|finding| { finding.kind == apolysis_accountability::FindingKind::UnobservedIntent }));
+
     let _ = std::fs::remove_file(&intent_input);
     let _ = std::fs::remove_file(&timeline_input);
     let _ = std::fs::remove_file(&output);

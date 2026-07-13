@@ -1,0 +1,28 @@
+{
+  "schema_version": "0.1",
+  "run_id": "run_01",
+  "source_id": "source_codex",
+  "source_stream_id": "stream_codex_01",
+  "source_event_id": "event_tool_01",
+  "source_sequence": 1,
+  "observed_at": {"unix_ms": 1783891200000, "clock_basis": "wall_clock", "uncertainty_ms": 25},
+  "correlation": {"trace_ref": "trace_01", "agent_ref": "agent_primary", "tool_ref": "tool_call_01", "runtime_ref": null},
+  "flags": {"loss_detected": false, "redacted": false, "contains_content": true},
+  "payload_type": "tool_interaction",
+  "payload_version": "0.1",
+  "payload_digest": "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "inline_payload": {
+    "evidence_type": "tool_interaction",
+    "body": {
+      "interaction_ref": "tool_call_01",
+      "agent_ref": "agent_primary",
+      "tool_ref": "exec_command",
+      "capability": "process",
+      "event": "completed",
+      "request_ref": "request_digest_01",
+      "response_ref": null,
+      "outcome": "succeeded"
+    }
+  },
+  "object_ref": null
+}

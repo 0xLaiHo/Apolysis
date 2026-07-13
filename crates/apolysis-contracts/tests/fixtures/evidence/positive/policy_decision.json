@@ -1,0 +1,11 @@
+{
+  "evidence_type": "policy_decision",
+  "body": {
+    "decision_ref": "decision_01",
+    "policy_ref": "policy_workspace_boundary_v1",
+    "subject_ref": "tool_interaction_01",
+    "decision": "require_approval",
+    "reason_code": "matched_rule",
+    "basis_ref": "policy_evaluation_digest_01"
+  }
+}

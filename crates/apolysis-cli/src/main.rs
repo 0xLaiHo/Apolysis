@@ -5,6 +5,10 @@ mod cli;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use apolysis_accountability::{
+    AccountabilityFinding, EvidenceBoundary, FindingDecision, FindingKind, RuntimeIdentity,
+    FINDING_SCHEMA_V1,
+};
 use apolysis_core::{now_unix_ms, JsonLine, SessionIntentRecord};
 use apolysis_observer::{
     observe_fixture, observe_live, redact_command_text_for_persistence, AgentDiscoveryRequest,
@@ -739,11 +743,11 @@ fn correlate_intents(
         } else if event.report_missing_intent {
             records.push(accountability_finding_record(
                 &event.session_id,
-                "missing_intent",
+                FindingKind::MissingIntent,
                 "observed side effect has no matching declared intent",
                 &event.raw_event_id,
                 &event.runtime,
-            ));
+            )?);
         }
     }
 
@@ -751,11 +755,11 @@ fn correlate_intents(
         if !matched {
             records.push(accountability_finding_record(
                 &intent.session_id,
-                "unobserved_intent",
+                FindingKind::UnobservedIntent,
                 "declared intent has no matching observed side effect",
                 &intent.intent_id,
                 &RuntimeForCorrelation::default(),
-            ));
+            )?);
         }
     }
 
@@ -923,27 +927,29 @@ fn intent_correlation_record(
 
 fn accountability_finding_record(
     session_id: &str,
-    kind: &str,
+    kind: FindingKind,
     reason: &str,
     evidence_ref: &str,
     runtime: &RuntimeForCorrelation,
-) -> serde_json::Value {
-    serde_json::json!({
-        "record_type": "accountability_finding",
-        "schema_version": 1,
-        "session_id": session_id,
-        "kind": kind,
-        "decision": "review",
-        "reason": reason,
-        "evidence_ref": evidence_ref,
-        "runtime": {
-            "runtime": runtime.runtime,
-            "container_id": runtime.container_id,
-            "pod_uid": runtime.pod_uid,
-            "cgroup_id": runtime.cgroup_id,
+) -> Result<serde_json::Value, String> {
+    let finding = AccountabilityFinding {
+        schema_version: FINDING_SCHEMA_V1,
+        session_id: session_id.to_string(),
+        kind,
+        decision: FindingDecision::Review,
+        reason: reason.to_string(),
+        evidence_ref: evidence_ref.to_string(),
+        runtime: RuntimeIdentity {
+            runtime: runtime.runtime.clone(),
+            container_id: runtime.container_id.clone(),
+            pod_uid: runtime.pod_uid.clone(),
+            cgroup_id: runtime.cgroup_id,
         },
-        "evidence_boundary": "host_boundary",
-    })
+        evidence_boundary: EvidenceBoundary::HostBoundary,
+    };
+    finding
+        .to_record_value()
+        .map_err(|error| format!("failed to serialize accountability finding: {error}"))
 }
 
 fn string_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a str> {

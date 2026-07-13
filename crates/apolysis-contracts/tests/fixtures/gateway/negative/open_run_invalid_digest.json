@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "mode": "join",
+  "client_operation_id": "operation_join_01",
+  "request_digest": "not-a-sha256",
+  "run_id": "run_01",
+  "join_proof": {"kind": "grant", "proof_ref": "join_grant_01", "run_id": "run_01", "source_id": "source_runtime", "expires_at_unix_ms": 1783894800000},
+  "source_manifest": {
+    "schema_version": "0.1", "source_id": "source_runtime", "source_kind": "runtime_witness", "declared_boundary": "customer_controlled_host",
+    "adapter_name": "apolysis_ebpf", "adapter_version": "0.3.0", "environment": "ci_runner_or_remote_workspace",
+    "capabilities": ["process"], "expected_lifecycle": ["started", "finished"], "ordering": "strict_per_stream", "samples": false,
+    "redaction_profile_ref": "redaction_runtime_metadata_v1", "redacted_fields": [], "privacy_capabilities": ["structure_only"]
+  }
+}

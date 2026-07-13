@@ -1,0 +1,16 @@
+{
+  "coverage": "verified",
+  "comparison": "mismatch",
+  "claimed": {
+    "state": "succeeded",
+    "source_id": "source-agent-claim",
+    "observed_at_unix_ms": 1783901200000,
+    "evidence_refs": [{"evidence_ref": "evidence-claim-mismatch", "category": "claimed_outcome", "source_id": "source-agent-claim", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+  },
+  "verified": {
+    "state": "failed",
+    "source_id": "source-git-readback",
+    "observed_at_unix_ms": 1783901205000,
+    "evidence_refs": [{"evidence_ref": "evidence-readback-mismatch", "category": "verified_outcome", "source_id": "source-git-readback", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+  }
+}

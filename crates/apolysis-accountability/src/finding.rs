@@ -59,6 +59,7 @@ pub struct ObservedEffect {
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     MissingIntent,
+    UnobservedIntent,
     UndeclaredAction,
     CredentialRead,
     WorkspaceBoundary,
@@ -84,6 +85,23 @@ pub struct AccountabilityFinding {
     pub evidence_ref: String,
     pub runtime: RuntimeIdentity,
     pub evidence_boundary: EvidenceBoundary,
+}
+
+#[derive(Serialize)]
+struct AccountabilityFindingRecord<'a> {
+    record_type: &'static str,
+    #[serde(flatten)]
+    finding: &'a AccountabilityFinding,
+}
+
+impl AccountabilityFinding {
+    /// Serialize the complete JSONL record shared by CLI and daemon emitters.
+    pub fn to_record_value(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(AccountabilityFindingRecord {
+            record_type: "accountability_finding",
+            finding: self,
+        })
+    }
 }
 
 pub struct AccountabilityAnalyzer;

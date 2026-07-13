@@ -1,0 +1,12 @@
+{
+  "schema_version": "0.1",
+  "run_id": "run_01",
+  "source_id": "source_codex",
+  "source_stream_id": "stream_codex_01",
+  "outcome": "created",
+  "lease": {
+    "lease_id": "lease_01",
+    "expires_at_unix_ms": 1783894800000,
+    "allowed_operations": ["bind_runtime", "ingest", "finish_run"]
+  }
+}

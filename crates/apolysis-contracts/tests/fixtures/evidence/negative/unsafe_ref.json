@@ -1,0 +1,10 @@
+{
+  "evidence_type": "runtime_effect",
+  "body": {
+    "effect_ref": "runtime_effect_01",
+    "runtime_ref": "container_agent_01\nforged",
+    "effect_kind": "process",
+    "target_ref": null,
+    "outcome": "unknown"
+  }
+}

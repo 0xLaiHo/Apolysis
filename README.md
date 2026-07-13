@@ -66,9 +66,15 @@ health and findings. Later source integrations culminate in Investigation
 Console v1 with Agent Run Graph, cross-run search, and bounded workflow action
 before a controlled partner pilot. Every run will expose semantic, execution,
 and outcome coverage separately.
-These are roadmap targets, not current capabilities. Do not treat the current
-Action as safe for untrusted repositories or Pull Requests until the public
-path is hardened.
+
+W1–W2 now has an independent `apolysis-contracts` boundary, versioned record,
+Gateway, coverage, and Query/Console wire types, compatibility fixtures, and
+normative contract documents. This freezes an implementation input; the remote
+Gateway, durable projectors, Query service, and Web Console remain roadmap
+targets. The external exit gate also remains open until three qualified design
+partners approve their deployment and data boundaries. Do not treat the
+current Action as safe for untrusted repositories or Pull Requests until the
+public path is hardened.
 
 ## Core Capabilities
 
@@ -117,6 +123,7 @@ Core crates:
 - `apolysis-cli`: command-line entry point.
 - `apolysis-observer`: fixture and live observer backends.
 - `apolysis-core`: shared JSONL records and schema types.
+- `apolysis-contracts`: versioned production record, Gateway, and Query wire contracts.
 - `apolysis-runtime`: local, Docker, and runtime metadata adapters.
 - `apolysis-policy`: policy parser and decision logic.
 - `apolysis-store`: append-only JSONL and hash-chain storage.

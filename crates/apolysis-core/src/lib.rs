@@ -2,10 +2,11 @@
 
 //! Core domain types for Apolysis.
 //!
-//! This crate intentionally has no third-party dependencies.  The event
-//! schema is the contract shared by the CLI, policy engine, store, and future
-//! eBPF observer.  Keeping it small makes early JSONL fixtures stable and easy
-//! to inspect during kernel/runtime experiments.
+//! This crate intentionally has no third-party dependencies. Its explicit
+//! records remain the legacy local JSONL v1 contract shared by the CLI, policy
+//! engine, store, and eBPF observer. Production Agent Execution Record and
+//! Gateway/Query wire types live in `apolysis-contracts`; keeping this crate
+//! small preserves compatibility for kernel/runtime experiments.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

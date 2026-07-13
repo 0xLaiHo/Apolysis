@@ -1,0 +1,33 @@
+{
+  "schema_version": "0.1",
+  "run_id": "run_01",
+  "source_id": "source_outcome",
+  "source_stream_id": "stream_outcome_01",
+  "source_event_id": "event_outcome_01",
+  "source_sequence": 1,
+  "observed_at": {
+    "unix_ms": 1783891200200,
+    "clock_basis": "provider_clock",
+    "uncertainty_ms": null
+  },
+  "correlation": {
+    "trace_ref": null,
+    "agent_ref": null,
+    "tool_ref": "tool_call_01",
+    "runtime_ref": null
+  },
+  "flags": {
+    "loss_detected": false,
+    "redacted": true,
+    "contains_content": true
+  },
+  "payload_type": "outcome_verification",
+  "payload_version": "0.1",
+  "payload_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "inline_payload": null,
+  "object_ref": {
+    "object_id": "object_01",
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "size_bytes": 4096
+  }
+}

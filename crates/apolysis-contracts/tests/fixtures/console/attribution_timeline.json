@@ -1,0 +1,86 @@
+{
+  "view_version": "0",
+  "run_id": "run-attribution-001",
+  "window": {"start_unix_ms": 1783901100000, "end_unix_ms": 1783901160000},
+  "items": [
+    {
+      "event_ref": "event-exact-001",
+      "lane": "semantic",
+      "item_type": "tool_call_started",
+      "observed_at": {"unix_ms": 1783901110000, "clock_basis": "wall_clock", "uncertainty_ms": 10},
+      "ingested_at_unix_ms": 1783901110100,
+      "ingest_sequence": 101,
+      "source": {"source_id": "source-agent-hook", "trust_profile": "harness_observed"},
+      "outcome": "pending",
+      "attribution": {
+        "state": "exact",
+        "entity_ref": "tool-call-001",
+        "basis": "propagated_identity",
+        "evidence_refs": [{"evidence_ref": "evidence-exact-identity", "category": "semantic", "source_id": "source-agent-hook", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+      },
+      "evidence_refs": [{"evidence_ref": "evidence-exact-identity", "category": "semantic", "source_id": "source-agent-hook", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+    },
+    {
+      "event_ref": "event-inferred-001",
+      "lane": "execution",
+      "item_type": "process_started",
+      "observed_at": {"unix_ms": 1783901111000, "clock_basis": "monotonic_converted", "uncertainty_ms": 25},
+      "ingested_at_unix_ms": 1783901111100,
+      "ingest_sequence": 102,
+      "source": {"source_id": "source-runtime-witness", "trust_profile": "host_verified"},
+      "outcome": "succeeded",
+      "attribution": {
+        "state": "inferred",
+        "entity_ref": "tool-call-001",
+        "reason_codes": ["runtime_binding_and_parentage_match"],
+        "confidence_bps": 7200,
+        "evidence_refs": [{"evidence_ref": "evidence-inference-001", "category": "execution", "source_id": "source-runtime-witness", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+      },
+      "evidence_refs": [{"evidence_ref": "evidence-inference-001", "category": "execution", "source_id": "source-runtime-witness", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+    },
+    {
+      "event_ref": "event-ambiguous-001",
+      "lane": "execution",
+      "item_type": "network_connect",
+      "observed_at": {"unix_ms": 1783901112000, "clock_basis": "monotonic_converted", "uncertainty_ms": 25},
+      "ingested_at_unix_ms": 1783901112100,
+      "ingest_sequence": 103,
+      "source": {"source_id": "source-runtime-witness", "trust_profile": "host_verified"},
+      "outcome": "succeeded",
+      "attribution": {
+        "state": "ambiguous",
+        "candidates": [
+          {
+            "entity_ref": "tool-call-002",
+            "reason_codes": ["shared_runtime_binding"],
+            "confidence_bps": 6200,
+            "evidence_refs": [{"evidence_ref": "evidence-candidate-002", "category": "execution", "source_id": "source-runtime-witness", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+          },
+          {
+            "entity_ref": "tool-call-003",
+            "reason_codes": ["shared_runtime_binding"],
+            "confidence_bps": 6100,
+            "evidence_refs": [{"evidence_ref": "evidence-candidate-003", "category": "execution", "source_id": "source-runtime-witness", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+          }
+        ],
+        "reason_codes": ["multiple_active_tools_share_runtime"]
+      },
+      "evidence_refs": [{"evidence_ref": "evidence-ambiguous-001", "category": "execution", "source_id": "source-runtime-witness", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+    },
+    {
+      "event_ref": "event-unattributed-001",
+      "lane": "execution",
+      "item_type": "file_write",
+      "observed_at": {"unix_ms": 1783901113000, "clock_basis": "monotonic_converted", "uncertainty_ms": null},
+      "ingested_at_unix_ms": 1783901113100,
+      "ingest_sequence": 104,
+      "source": {"source_id": "source-runtime-witness", "trust_profile": "host_verified"},
+      "outcome": "succeeded",
+      "attribution": {"state": "unattributed", "reason_codes": ["runtime_binding_absent"]},
+      "evidence_refs": [{"evidence_ref": "evidence-unattributed-001", "category": "execution", "source_id": "source-runtime-witness", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+    }
+  ],
+  "limit": 50,
+  "next_cursor": null,
+  "projection": {"view_version": "0", "computation_version": "console_v0", "projection_revision": 9, "input_watermark": 104, "projected_at_unix_ms": 1783901114000, "freshness": "current", "lag_ms": 100}
+}

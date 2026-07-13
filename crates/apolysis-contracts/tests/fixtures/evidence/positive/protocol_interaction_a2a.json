@@ -1,0 +1,13 @@
+{
+  "evidence_type": "protocol_interaction",
+  "body": {
+    "interaction_ref": "a2a_interaction_01",
+    "agent_ref": "agent_primary",
+    "protocol": "a2a",
+    "peer_ref": "agent_remote_reviewer",
+    "operation": "task_submit",
+    "request_ref": "a2a_task_ref_01",
+    "response_ref": "a2a_status_ref_01",
+    "outcome": "denied"
+  }
+}

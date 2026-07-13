@@ -1,0 +1,30 @@
+{
+  "schema_version": "0.1",
+  "mode": "create",
+  "client_operation_id": "operation_open_01",
+  "request_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "client_run_key": "github_pr_42_attempt_1",
+  "environment": "ci_runner_or_remote_workspace",
+  "authority": {"kind": "service", "id": "authority_ci"},
+  "principal": {"kind": "workload", "id": "principal_runner"},
+  "objective_ref": "objective_sha256_012345",
+  "privacy_profile_ref": "privacy_structure_only_v1",
+  "retention_profile_ref": "retention_30d_v1",
+  "expected_source_kinds": ["semantic_hook", "runtime_witness", "outcome_verifier"],
+  "source_manifest": {
+    "schema_version": "0.1",
+    "source_id": "source_codex",
+    "source_kind": "semantic_hook",
+    "declared_boundary": "agent_harness",
+    "adapter_name": "codex_hook",
+    "adapter_version": "1.0.0",
+    "environment": "ci_runner_or_remote_workspace",
+    "capabilities": ["semantic_lifecycle", "tool_calls", "claimed_outcome"],
+    "expected_lifecycle": ["started", "finished"],
+    "ordering": "strict_per_stream",
+    "samples": false,
+    "redaction_profile_ref": "redaction_structure_only_v1",
+    "redacted_fields": ["payload.command"],
+    "privacy_capabilities": ["structure_only"]
+  }
+}

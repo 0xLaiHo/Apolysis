@@ -1,0 +1,13 @@
+{
+  "evidence_type": "protocol_interaction",
+  "body": {
+    "interaction_ref": "mcp_interaction_01",
+    "agent_ref": "agent_primary",
+    "protocol": "mcp",
+    "peer_ref": "mcp_server_filesystem",
+    "operation": "tool_call",
+    "request_ref": "mcp_request_digest_01",
+    "response_ref": null,
+    "outcome": "failed"
+  }
+}

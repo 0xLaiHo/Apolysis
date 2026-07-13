@@ -1,0 +1,2598 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentExecutionRecordItem",
+  "description": "One bounded, independently consumable append item for an Agent Run.\n\nThis is the public storage/stream seam. It intentionally does not expose an\nunbounded whole-run snapshot.",
+  "type": "object",
+  "properties": {
+    "fact": {
+      "$ref": "#/$defs/AgentExecutionRecordFact"
+    },
+    "ingest_sequence": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1
+    },
+    "ingested_at_unix_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1
+    },
+    "organization_id": {
+      "$ref": "#/$defs/OrganizationId"
+    },
+    "run_id": {
+      "$ref": "#/$defs/RunId"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/SchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "organization_id",
+    "run_id",
+    "ingest_sequence",
+    "ingested_at_unix_ms",
+    "fact"
+  ],
+  "$defs": {
+    "AcceptedSourceEnvelope": {
+      "description": "Effective trust assigned to an unchanged source item after acceptance.\n\nOrganization, run, ingest position, and ingest time remain exclusively on\nthe enclosing `AgentExecutionRecordItem`.",
+      "type": "object",
+      "properties": {
+        "effective_trust_profile": {
+          "$ref": "#/$defs/TrustProfile"
+        },
+        "envelope": {
+          "$ref": "#/$defs/SourceEnvelope"
+        },
+        "manifest_digest": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "effective_trust_profile",
+        "manifest_version",
+        "manifest_digest",
+        "envelope"
+      ]
+    },
+    "ActuationAction": {
+      "description": "Allowlisted actions an enforcement point can report.",
+      "oneOf": [
+        {
+          "description": "Permit the subject operation to continue.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Prevent the subject operation.",
+          "type": "string",
+          "const": "block"
+        },
+        {
+          "description": "Terminate an already-running subject.",
+          "type": "string",
+          "const": "terminate"
+        },
+        {
+          "description": "Isolate the subject from a boundary.",
+          "type": "string",
+          "const": "isolate"
+        },
+        {
+          "description": "Apply a narrower capability or resource limit.",
+          "type": "string",
+          "const": "restrict"
+        },
+        {
+          "description": "Emit a notification without changing execution.",
+          "type": "string",
+          "const": "notify"
+        }
+      ]
+    },
+    "ActuationReportBody": {
+      "description": "A report of actuation tied to the policy decision that requested it.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ActuationAction"
+        },
+        "actuation_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "actuator_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "decision_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "outcome": {
+          "$ref": "#/$defs/OperationOutcome"
+        },
+        "subject_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "actuation_ref",
+        "decision_ref",
+        "actuator_ref",
+        "subject_ref",
+        "action",
+        "outcome"
+      ]
+    },
+    "AgentExecutionRecordFact": {
+      "description": "The typed fact retained in one append-oriented record item.",
+      "oneOf": [
+        {
+          "description": "Immutable run opening identity and boundary.",
+          "type": "object",
+          "properties": {
+            "fact": {
+              "$ref": "#/$defs/RunDescriptor"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "run_opened"
+            }
+          },
+          "required": [
+            "fact_type",
+            "fact"
+          ]
+        },
+        {
+          "description": "One legal lifecycle transition.",
+          "type": "object",
+          "properties": {
+            "fact": {
+              "$ref": "#/$defs/RunStateTransition"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "run_state_changed"
+            }
+          },
+          "required": [
+            "fact_type",
+            "fact"
+          ]
+        },
+        {
+          "description": "Server-accepted source registration and effective trust.",
+          "type": "object",
+          "properties": {
+            "fact": {
+              "$ref": "#/$defs/RegisteredSource"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "source_registered"
+            }
+          },
+          "required": [
+            "fact_type",
+            "fact"
+          ]
+        },
+        {
+          "description": "Evidence-backed relation between the run and an execution identity.",
+          "type": "object",
+          "properties": {
+            "fact": {
+              "$ref": "#/$defs/RuntimeBinding"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "runtime_bound"
+            }
+          },
+          "required": [
+            "fact_type",
+            "fact"
+          ]
+        },
+        {
+          "description": "Source evidence after acceptance and effective-trust assignment.",
+          "type": "object",
+          "properties": {
+            "fact": {
+              "$ref": "#/$defs/AcceptedSourceEnvelope"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "evidence_accepted"
+            }
+          },
+          "required": [
+            "fact_type",
+            "fact"
+          ]
+        },
+        {
+          "description": "A rebuildable server-side coverage computation.",
+          "type": "object",
+          "properties": {
+            "fact": {
+              "$ref": "#/$defs/CoverageSummary"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "coverage_computed"
+            }
+          },
+          "required": [
+            "fact_type",
+            "fact"
+          ]
+        }
+      ]
+    },
+    "AgentLifecycleBody": {
+      "description": "A content-off agent lifecycle observation.",
+      "type": "object",
+      "properties": {
+        "agent_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "event": {
+          "$ref": "#/$defs/AgentLifecycleEvent"
+        },
+        "outcome": {
+          "$ref": "#/$defs/OperationOutcome"
+        },
+        "supervisor_agent_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "agent_ref",
+        "event",
+        "outcome"
+      ]
+    },
+    "AgentLifecycleEvent": {
+      "description": "Agent lifecycle event names exposed by the structure-only contract.",
+      "oneOf": [
+        {
+          "description": "An agent identity was allocated.",
+          "type": "string",
+          "const": "spawned"
+        },
+        {
+          "description": "The agent began work.",
+          "type": "string",
+          "const": "started"
+        },
+        {
+          "description": "The agent was suspended.",
+          "type": "string",
+          "const": "suspended"
+        },
+        {
+          "description": "A suspended agent resumed.",
+          "type": "string",
+          "const": "resumed"
+        },
+        {
+          "description": "The agent reported completion.",
+          "type": "string",
+          "const": "completed"
+        },
+        {
+          "description": "The agent reported a failure.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "The agent was cancelled.",
+          "type": "string",
+          "const": "cancelled"
+        }
+      ]
+    },
+    "AgentProtocol": {
+      "description": "Agent protocol families supported in v0.1.",
+      "oneOf": [
+        {
+          "description": "Model Context Protocol.",
+          "type": "string",
+          "const": "mcp"
+        },
+        {
+          "description": "Agent-to-Agent protocol.",
+          "type": "string",
+          "const": "a2a"
+        }
+      ]
+    },
+    "AuthorityKind": {
+      "description": "The kind of boundary that authorized a run.",
+      "oneOf": [
+        {
+          "description": "A human-controlled authorization boundary.",
+          "type": "string",
+          "const": "human"
+        },
+        {
+          "description": "A service-controlled authorization boundary.",
+          "type": "string",
+          "const": "service"
+        },
+        {
+          "description": "A policy-controlled authorization boundary.",
+          "type": "string",
+          "const": "policy"
+        }
+      ]
+    },
+    "AuthorityRef": {
+      "description": "A content-free reference to the Authority that permits a run.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/AuthorityKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ]
+    },
+    "ClockBasis": {
+      "description": "Time basis supplied by an Evidence Source.",
+      "oneOf": [
+        {
+          "description": "Source wall clock.",
+          "type": "string",
+          "const": "wall_clock"
+        },
+        {
+          "description": "A monotonic clock converted to wall time by the source.",
+          "type": "string",
+          "const": "monotonic_converted"
+        },
+        {
+          "description": "A vendor or external provider clock.",
+          "type": "string",
+          "const": "provider_clock"
+        }
+      ]
+    },
+    "ComputedCoverage": {
+      "description": "One versioned, server-derived coverage dimension.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_watermark": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projection_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageReasonCode"
+          },
+          "minItems": 1
+        },
+        "state": {
+          "$ref": "#/$defs/SemanticCoverageState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "reason_codes",
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
+      ]
+    },
+    "ComputedCoverage2": {
+      "description": "One versioned, server-derived coverage dimension.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_watermark": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projection_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageReasonCode"
+          },
+          "minItems": 1
+        },
+        "state": {
+          "$ref": "#/$defs/ExecutionCoverageState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "reason_codes",
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
+      ]
+    },
+    "ComputedCoverage3": {
+      "description": "One versioned, server-derived coverage dimension.",
+      "type": "object",
+      "properties": {
+        "computation_version": {
+          "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "input_watermark": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "projection_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageReasonCode"
+          },
+          "minItems": 1
+        },
+        "state": {
+          "$ref": "#/$defs/OutcomeCoverageState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "computation_version",
+        "projection_revision",
+        "input_watermark",
+        "reason_codes",
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
+      ]
+    },
+    "CorrelationRefs": {
+      "description": "Explicit identifiers supplied for correlation; absence is never invented.",
+      "type": "object",
+      "properties": {
+        "agent_ref": {
+          "description": "Agent or delegate identity, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_ref": {
+          "description": "Outcome artifact identity, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delegation_ref": {
+          "description": "Delegation identity, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_ref": {
+          "description": "Provider-native session, job, or audit identity, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository_ref": {
+          "description": "Repository identity, when supplied by a hook, CI, or provider source.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime_ref": {
+          "description": "Process, container, Pod, VM, runner, or provider workload identity.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "span_ref": {
+          "description": "Distributed trace span identity, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_ref": {
+          "description": "MCP or A2A task identity, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_ref": {
+          "description": "Tool-call, MCP call, or A2A task identity, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trace_ref": {
+          "description": "Distributed trace identity, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn_ref": {
+          "description": "Agent turn identity, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CoverageReasonCode": {
+      "description": "Stable reasons attached to a coverage computation.",
+      "oneOf": [
+        {
+          "description": "All requirements for the dimension were met.",
+          "type": "string",
+          "const": "requirements_satisfied"
+        },
+        {
+          "description": "A required source or lifecycle item is absent.",
+          "type": "string",
+          "const": "required_evidence_missing"
+        },
+        {
+          "description": "A source reported dropped evidence.",
+          "type": "string",
+          "const": "source_loss"
+        },
+        {
+          "description": "The source samples rather than observing every qualifying item.",
+          "type": "string",
+          "const": "sampling_enabled"
+        },
+        {
+          "description": "The source truncated evidence.",
+          "type": "string",
+          "const": "evidence_truncated"
+        },
+        {
+          "description": "A required source failed.",
+          "type": "string",
+          "const": "source_failed"
+        },
+        {
+          "description": "The environment does not expose the required capability.",
+          "type": "string",
+          "const": "unsupported_capability"
+        },
+        {
+          "description": "The relevant environment boundary is opaque.",
+          "type": "string",
+          "const": "opaque_boundary"
+        },
+        {
+          "description": "No independent outcome verifier contributed.",
+          "type": "string",
+          "const": "verifier_missing"
+        },
+        {
+          "description": "An independent check disagrees with a claim.",
+          "type": "string",
+          "const": "outcome_mismatch"
+        },
+        {
+          "description": "This dimension has no requirement for the run profile.",
+          "type": "string",
+          "const": "no_applicable_requirement"
+        },
+        {
+          "description": "Available evidence does not support a stronger state.",
+          "type": "string",
+          "const": "insufficient_evidence"
+        }
+      ]
+    },
+    "CoverageSummary": {
+      "description": "The three independent coverage dimensions and outcome comparison.",
+      "type": "object",
+      "properties": {
+        "execution": {
+          "$ref": "#/$defs/ComputedCoverage2"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ComputedCoverage3"
+        },
+        "outcome_comparison": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutcomeComparisonState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "semantic": {
+          "$ref": "#/$defs/ComputedCoverage"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "semantic",
+        "execution",
+        "outcome"
+      ]
+    },
+    "DelegationLifecycleBody": {
+      "description": "A content-off delegation relationship and lifecycle observation.",
+      "type": "object",
+      "properties": {
+        "delegate_agent_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "delegation_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "delegator_agent_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "event": {
+          "$ref": "#/$defs/DelegationLifecycleEvent"
+        },
+        "outcome": {
+          "$ref": "#/$defs/OperationOutcome"
+        },
+        "task_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "delegation_ref",
+        "delegator_agent_ref",
+        "delegate_agent_ref",
+        "task_ref",
+        "event",
+        "outcome"
+      ]
+    },
+    "DelegationLifecycleEvent": {
+      "description": "Delegation lifecycle event names.",
+      "oneOf": [
+        {
+          "description": "Delegation was requested.",
+          "type": "string",
+          "const": "requested"
+        },
+        {
+          "description": "The delegate accepted the work.",
+          "type": "string",
+          "const": "accepted"
+        },
+        {
+          "description": "The delegate reported completion.",
+          "type": "string",
+          "const": "completed"
+        },
+        {
+          "description": "The delegate reported failure.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Delegated work was cancelled.",
+          "type": "string",
+          "const": "cancelled"
+        }
+      ]
+    },
+    "DiagnosticSeverity": {
+      "description": "Source diagnostic severity.",
+      "oneOf": [
+        {
+          "description": "Informational source state.",
+          "type": "string",
+          "const": "info"
+        },
+        {
+          "description": "A gap or degraded source state.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "A source failure that prevents expected evidence.",
+          "type": "string",
+          "const": "error"
+        }
+      ]
+    },
+    "EnvironmentKind": {
+      "description": "The supported environment profiles for an Agent Run.",
+      "oneOf": [
+        {
+          "description": "Local CLI or IDE integration.",
+          "type": "string",
+          "const": "local_cli_or_ide"
+        },
+        {
+          "description": "CI runner or remote development workspace.",
+          "type": "string",
+          "const": "ci_runner_or_remote_workspace"
+        },
+        {
+          "description": "Vendor-hosted coding-agent sandbox.",
+          "type": "string",
+          "const": "vendor_hosted_coding_sandbox"
+        },
+        {
+          "description": "Customer-built agent service.",
+          "type": "string",
+          "const": "customer_built_agent_service"
+        },
+        {
+          "description": "Fully managed agent runtime.",
+          "type": "string",
+          "const": "fully_managed_agent_runtime"
+        }
+      ]
+    },
+    "EvidenceBoundary": {
+      "description": "Boundary a source can directly observe, independent from effective trust.",
+      "oneOf": [
+        {
+          "description": "Agent hook, wrapper, or IDE harness boundary.",
+          "type": "string",
+          "const": "agent_harness"
+        },
+        {
+          "description": "In-process SDK or telemetry processor boundary.",
+          "type": "string",
+          "const": "in_process_sdk"
+        },
+        {
+          "description": "MCP, A2A, or comparable protocol boundary.",
+          "type": "string",
+          "const": "protocol_boundary"
+        },
+        {
+          "description": "Vendor or managed-provider control-plane boundary.",
+          "type": "string",
+          "const": "provider_control_plane"
+        },
+        {
+          "description": "Customer-controlled host, VM, container, or node boundary.",
+          "type": "string",
+          "const": "customer_controlled_host"
+        },
+        {
+          "description": "Independent read-back boundary for an external outcome.",
+          "type": "string",
+          "const": "independent_outcome_readback"
+        }
+      ]
+    },
+    "EvidenceFlags": {
+      "description": "Loss, redaction, and content indicators carried by a source contribution.",
+      "type": "object",
+      "properties": {
+        "contains_content": {
+          "description": "The body contains authorized content rather than structure only.",
+          "type": "boolean"
+        },
+        "loss_detected": {
+          "description": "The source reports missing or dropped evidence relevant to this item.",
+          "type": "boolean"
+        },
+        "redacted": {
+          "description": "At least one source field was redacted before transmission.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "loss_detected",
+        "redacted",
+        "contains_content"
+      ]
+    },
+    "EvidenceObjectRef": {
+      "description": "Immutable reference to separately authorized evidence content.",
+      "type": "object",
+      "properties": {
+        "object_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        },
+        "sha256": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "object_id",
+        "sha256",
+        "size_bytes"
+      ]
+    },
+    "EvidenceRef": {
+      "description": "An opaque reference carried instead of prompts, responses, arguments, or bodies.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "ExecutionCoverageState": {
+      "description": "Server-derived Execution Coverage states.",
+      "oneOf": [
+        {
+          "description": "The controlled host boundary met its declared capability without a gap.",
+          "type": "string",
+          "const": "host_verified"
+        },
+        {
+          "description": "Execution evidence exists with a known capability or loss gap.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "No qualifying source can observe the execution boundary.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "The run profile requires no execution assertion.",
+          "type": "string",
+          "const": "not_applicable"
+        },
+        {
+          "description": "A required execution source did not produce usable complete evidence.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    },
+    "InteractionEvent": {
+      "description": "Tool interaction lifecycle events.",
+      "oneOf": [
+        {
+          "description": "The interaction was requested but not observed running.",
+          "type": "string",
+          "const": "requested"
+        },
+        {
+          "description": "The interaction began.",
+          "type": "string",
+          "const": "started"
+        },
+        {
+          "description": "The interaction reached a terminal observation.",
+          "type": "string",
+          "const": "completed"
+        }
+      ]
+    },
+    "ObservedTime": {
+      "description": "Source-observed time and its known uncertainty.",
+      "type": "object",
+      "properties": {
+        "clock_basis": {
+          "$ref": "#/$defs/ClockBasis"
+        },
+        "uncertainty_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "unix_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "unix_ms",
+        "clock_basis"
+      ]
+    },
+    "OperationOutcome": {
+      "description": "Bounded outcome vocabulary shared by attempted operations.",
+      "oneOf": [
+        {
+          "description": "The operation reached its requested terminal state.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "The operation ran but did not reach its requested terminal state.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Policy or an enforcement point prevented the operation.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "The operation has not reached a terminal state.",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "Available evidence does not establish the operation result.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "OrderingCapability": {
+      "description": "Ordering guarantee declared by one source stream.",
+      "oneOf": [
+        {
+          "description": "Sequence is strictly increasing within a source stream.",
+          "type": "string",
+          "const": "strict_per_stream"
+        },
+        {
+          "description": "The source may deliver reordered items and reports observed gaps.",
+          "type": "string",
+          "const": "best_effort"
+        }
+      ]
+    },
+    "OrganizationId": {
+      "description": "An organization-scoped opaque identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "OutcomeClaimBody": {
+      "description": "An agent or provider outcome claim without prose or result content.",
+      "type": "object",
+      "properties": {
+        "basis_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "claim_type": {
+          "$ref": "#/$defs/OutcomeClaimKind"
+        },
+        "claimant_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "outcome": {
+          "$ref": "#/$defs/OperationOutcome"
+        },
+        "subject_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "claim_ref",
+        "claimant_ref",
+        "subject_ref",
+        "claim_type",
+        "outcome"
+      ]
+    },
+    "OutcomeClaimKind": {
+      "description": "Allowlisted claim classes.",
+      "oneOf": [
+        {
+          "description": "The assigned task completed.",
+          "type": "string",
+          "const": "task_completed"
+        },
+        {
+          "description": "A referenced test run passed.",
+          "type": "string",
+          "const": "tests_passed"
+        },
+        {
+          "description": "A referenced artifact was created.",
+          "type": "string",
+          "const": "artifact_created"
+        },
+        {
+          "description": "A referenced external state changed.",
+          "type": "string",
+          "const": "state_changed"
+        },
+        {
+          "description": "A referenced deployment completed.",
+          "type": "string",
+          "const": "deployment_completed"
+        }
+      ]
+    },
+    "OutcomeComparisonState": {
+      "description": "Comparison between a claim and an independent outcome check.",
+      "oneOf": [
+        {
+          "description": "The independent check matches the claimed outcome.",
+          "type": "string",
+          "const": "match"
+        },
+        {
+          "description": "The independent check disagrees with the claimed outcome.",
+          "type": "string",
+          "const": "mismatch"
+        },
+        {
+          "description": "A definitive comparison is not currently available.",
+          "type": "string",
+          "const": "unresolved"
+        }
+      ]
+    },
+    "OutcomeCoverageState": {
+      "description": "Server-derived Outcome Coverage states.",
+      "oneOf": [
+        {
+          "description": "A required outcome was independently checked, whether matching or not.",
+          "type": "string",
+          "const": "verified"
+        },
+        {
+          "description": "An outcome was claimed but not independently checked.",
+          "type": "string",
+          "const": "unconfirmed"
+        },
+        {
+          "description": "A reliable claim/check relationship cannot be established.",
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "description": "The run profile requires no external outcome.",
+          "type": "string",
+          "const": "not_applicable"
+        }
+      ]
+    },
+    "OutcomeVerificationBody": {
+      "description": "An independent comparison of an outcome claim with an opaque observation.",
+      "type": "object",
+      "properties": {
+        "claim_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "comparison": {
+          "$ref": "#/$defs/OutcomeComparisonState"
+        },
+        "observation_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "outcome": {
+          "$ref": "#/$defs/OperationOutcome"
+        },
+        "verification_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "verifier_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "verification_ref",
+        "claim_ref",
+        "verifier_ref",
+        "observation_ref",
+        "comparison",
+        "outcome"
+      ]
+    },
+    "PolicyDecisionBody": {
+      "description": "A policy decision kept separate from any enforcement report.",
+      "type": "object",
+      "properties": {
+        "basis_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision": {
+          "$ref": "#/$defs/PolicyDecisionKind"
+        },
+        "decision_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "policy_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "reason_code": {
+          "$ref": "#/$defs/PolicyReasonCode"
+        },
+        "subject_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "decision_ref",
+        "policy_ref",
+        "subject_ref",
+        "decision",
+        "reason_code"
+      ]
+    },
+    "PolicyDecisionKind": {
+      "description": "Policy evaluation decisions.",
+      "oneOf": [
+        {
+          "description": "Policy permits the subject operation.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Policy denies the subject operation.",
+          "type": "string",
+          "const": "deny"
+        },
+        {
+          "description": "A separate approval is required before actuation.",
+          "type": "string",
+          "const": "require_approval"
+        },
+        {
+          "description": "The policy does not apply to the subject.",
+          "type": "string",
+          "const": "not_applicable"
+        },
+        {
+          "description": "The source cannot establish a decision.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "PolicyReasonCode": {
+      "description": "Stable, content-free policy reason classes.",
+      "oneOf": [
+        {
+          "description": "An explicit rule matched.",
+          "type": "string",
+          "const": "matched_rule"
+        },
+        {
+          "description": "The policy default determined the decision.",
+          "type": "string",
+          "const": "default_rule"
+        },
+        {
+          "description": "A human approval determined the decision.",
+          "type": "string",
+          "const": "human_approval"
+        },
+        {
+          "description": "The subject request was structurally invalid.",
+          "type": "string",
+          "const": "invalid_request"
+        },
+        {
+          "description": "Evidence was insufficient to decide.",
+          "type": "string",
+          "const": "insufficient_context"
+        },
+        {
+          "description": "The policy service was unavailable.",
+          "type": "string",
+          "const": "policy_unavailable"
+        }
+      ]
+    },
+    "PrincipalKind": {
+      "description": "The kind of authenticated identity acting within an Authority.",
+      "oneOf": [
+        {
+          "description": "An authenticated human identity.",
+          "type": "string",
+          "const": "human"
+        },
+        {
+          "description": "An authenticated workload identity.",
+          "type": "string",
+          "const": "workload"
+        }
+      ]
+    },
+    "PrincipalRef": {
+      "description": "A content-free reference to the Principal acting in a run.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PrincipalKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ]
+    },
+    "PrivacyCapability": {
+      "description": "Privacy-preserving payload representations a source can produce.",
+      "oneOf": [
+        {
+          "description": "Typed allowlisted metadata with no raw prompt, result, body, or argv.",
+          "type": "string",
+          "const": "structure_only"
+        },
+        {
+          "description": "Immutable object reference subject to separate capture and read policy.",
+          "type": "string",
+          "const": "authorized_content_reference"
+        }
+      ]
+    },
+    "ProtocolInteractionBody": {
+      "description": "An MCP or A2A interaction represented only by identities and metadata.",
+      "type": "object",
+      "properties": {
+        "agent_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "interaction_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "operation": {
+          "$ref": "#/$defs/ProtocolOperation"
+        },
+        "outcome": {
+          "$ref": "#/$defs/OperationOutcome"
+        },
+        "peer_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "protocol": {
+          "$ref": "#/$defs/AgentProtocol"
+        },
+        "request_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "interaction_ref",
+        "agent_ref",
+        "protocol",
+        "peer_ref",
+        "operation",
+        "outcome"
+      ]
+    },
+    "ProtocolOperation": {
+      "description": "Allowlisted protocol operations; they carry no request or response body.",
+      "oneOf": [
+        {
+          "description": "Invoke an MCP tool.",
+          "type": "string",
+          "const": "tool_call"
+        },
+        {
+          "description": "Read an MCP resource.",
+          "type": "string",
+          "const": "resource_read"
+        },
+        {
+          "description": "Resolve an MCP prompt template by reference.",
+          "type": "string",
+          "const": "prompt_template"
+        },
+        {
+          "description": "Submit an A2A task.",
+          "type": "string",
+          "const": "task_submit"
+        },
+        {
+          "description": "Observe or publish an A2A task update.",
+          "type": "string",
+          "const": "task_update"
+        },
+        {
+          "description": "Exchange an artifact reference without artifact content.",
+          "type": "string",
+          "const": "artifact_reference"
+        },
+        {
+          "description": "Exchange a message reference without message content.",
+          "type": "string",
+          "const": "message_reference"
+        }
+      ]
+    },
+    "RegisteredSource": {
+      "description": "Server-accepted source registration facts.\n\nA source may declare its capabilities and boundary in `SourceManifest`, but\nonly the accepting control plane assigns the effective trust profile and\norganization scope represented here.",
+      "type": "object",
+      "properties": {
+        "effective_trust_profile": {
+          "$ref": "#/$defs/TrustProfile"
+        },
+        "manifest": {
+          "$ref": "#/$defs/SourceManifest"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "manifest",
+        "effective_trust_profile"
+      ]
+    },
+    "RunDescriptor": {
+      "description": "The immutable opening descriptor and current state for an Agent Run.",
+      "type": "object",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityRef"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentKind"
+        },
+        "objective_ref": {
+          "type": "string"
+        },
+        "organization_id": {
+          "$ref": "#/$defs/OrganizationId"
+        },
+        "principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "state": {
+          "$ref": "#/$defs/RunState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "organization_id",
+        "run_id",
+        "authority",
+        "principal",
+        "objective_ref",
+        "environment",
+        "state"
+      ]
+    },
+    "RunId": {
+      "description": "An organization-scoped Agent Run identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "RunState": {
+      "description": "Lifecycle states for an Agent Run.",
+      "oneOf": [
+        {
+          "description": "Identity and source policy are being validated.",
+          "type": "string",
+          "const": "opening"
+        },
+        {
+          "description": "Registered sources may contribute evidence.",
+          "type": "string",
+          "const": "active"
+        },
+        {
+          "description": "Terminal declarations and gaps are being reconciled.",
+          "type": "string",
+          "const": "finishing"
+        },
+        {
+          "description": "The run is sealed without an unresolved required-source gap.",
+          "type": "string",
+          "const": "finished"
+        },
+        {
+          "description": "The run is sealed with at least one terminal or evidence gap.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    },
+    "RunStateTransition": {
+      "description": "An append-only lifecycle fact retained in an Agent Execution Record.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "State before the transition.",
+          "$ref": "#/$defs/RunState"
+        },
+        "recorded_at_unix_ms": {
+          "description": "Server-recorded transition time.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "to": {
+          "description": "State after the transition.",
+          "$ref": "#/$defs/RunState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to",
+        "recorded_at_unix_ms"
+      ]
+    },
+    "RuntimeAttribution": {
+      "description": "Explicit quality of a run-to-runtime correlation.",
+      "oneOf": [
+        {
+          "description": "An explicitly propagated identity was independently validated.",
+          "type": "string",
+          "const": "exact"
+        },
+        {
+          "description": "A non-unique heuristic selected one most likely runtime.",
+          "type": "string",
+          "const": "inferred"
+        },
+        {
+          "description": "Multiple plausible runtime identities remain.",
+          "type": "string",
+          "const": "ambiguous"
+        },
+        {
+          "description": "No qualifying runtime identity could be assigned.",
+          "type": "string",
+          "const": "unattributed"
+        }
+      ]
+    },
+    "RuntimeBinding": {
+      "description": "A versioned, evidence-backed relation between a run and runtime identity.",
+      "type": "object",
+      "properties": {
+        "alternative_runtime_candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeBindingCandidate"
+          }
+        },
+        "asserting_source_id": {
+          "$ref": "#/$defs/SourceId"
+        },
+        "attribution": {
+          "$ref": "#/$defs/RuntimeAttribution"
+        },
+        "binding_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        },
+        "confidence_bps": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 10000,
+          "minimum": 0
+        },
+        "evidence_basis": {
+          "$ref": "#/$defs/RuntimeBindingBasis"
+        },
+        "evidence_basis_ref": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "identity_kind": {
+          "$ref": "#/$defs/RuntimeIdentityKind"
+        },
+        "identity_ref": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "valid_from_unix_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "valid_until_unix_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "asserting_source_id",
+        "identity_kind",
+        "identity_ref",
+        "valid_from_unix_ms",
+        "evidence_basis",
+        "evidence_basis_ref",
+        "attribution",
+        "reason_codes",
+        "alternative_runtime_candidates"
+      ]
+    },
+    "RuntimeBindingBasis": {
+      "description": "Evidence method used to establish a runtime correlation.",
+      "oneOf": [
+        {
+          "description": "A propagated runtime identifier was checked at an independent boundary.",
+          "type": "string",
+          "const": "propagated_and_validated"
+        },
+        {
+          "description": "A provider asserted the runtime relation inside its own boundary.",
+          "type": "string",
+          "const": "provider_attestation"
+        },
+        {
+          "description": "PID, time, path, argument, name, or comparable heuristic matching.",
+          "type": "string",
+          "const": "heuristic_match"
+        },
+        {
+          "description": "No qualifying basis was available.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    },
+    "RuntimeBindingCandidate": {
+      "description": "One scored alternative retained for an ambiguous runtime relation.",
+      "type": "object",
+      "properties": {
+        "confidence_bps": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 10000,
+          "minimum": 0
+        },
+        "evidence_basis_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "identity_ref": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "identity_ref",
+        "reason_codes",
+        "confidence_bps",
+        "evidence_basis_refs"
+      ]
+    },
+    "RuntimeEffectBody": {
+      "description": "A host or managed-runtime effect represented by opaque identities.",
+      "type": "object",
+      "properties": {
+        "effect_kind": {
+          "$ref": "#/$defs/RuntimeEffectKind"
+        },
+        "effect_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "outcome": {
+          "$ref": "#/$defs/OperationOutcome"
+        },
+        "runtime_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "target_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "effect_ref",
+        "runtime_ref",
+        "effect_kind",
+        "outcome"
+      ]
+    },
+    "RuntimeEffectKind": {
+      "description": "Runtime effect classes visible without retaining raw values.",
+      "oneOf": [
+        {
+          "description": "Process lifecycle or control effect.",
+          "type": "string",
+          "const": "process"
+        },
+        {
+          "description": "File or filesystem effect.",
+          "type": "string",
+          "const": "file"
+        },
+        {
+          "description": "Network effect.",
+          "type": "string",
+          "const": "network"
+        },
+        {
+          "description": "Identity or credential boundary effect.",
+          "type": "string",
+          "const": "identity"
+        },
+        {
+          "description": "Container, Pod, VM, or infrastructure effect.",
+          "type": "string",
+          "const": "workload"
+        }
+      ]
+    },
+    "RuntimeIdentityKind": {
+      "description": "Runtime identity categories supported by the v0.1 binding contract.",
+      "oneOf": [
+        {
+          "description": "Operating-system process identity.",
+          "type": "string",
+          "const": "process"
+        },
+        {
+          "description": "Linux cgroup identity.",
+          "type": "string",
+          "const": "cgroup"
+        },
+        {
+          "description": "Container-runtime identity.",
+          "type": "string",
+          "const": "container"
+        },
+        {
+          "description": "Kubernetes Pod identity.",
+          "type": "string",
+          "const": "pod"
+        },
+        {
+          "description": "Virtual-machine identity.",
+          "type": "string",
+          "const": "vm"
+        },
+        {
+          "description": "CI or development runner identity.",
+          "type": "string",
+          "const": "runner"
+        },
+        {
+          "description": "Provider-managed workload identity.",
+          "type": "string",
+          "const": "provider_workload"
+        }
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Wire schema versions understood by this crate.",
+      "oneOf": [
+        {
+          "description": "Agent Execution Record schema v0.1.",
+          "type": "string",
+          "const": "0.1"
+        }
+      ]
+    },
+    "SemanticCoverageState": {
+      "description": "Server-derived Semantic Coverage states.",
+      "oneOf": [
+        {
+          "description": "All required semantic lifecycle evidence was observed.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "Useful semantic evidence exists with a known required gap.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "The semantic boundary is intentionally opaque.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "Expected semantic evidence is not usable or available.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    },
+    "SourceCapability": {
+      "description": "A source capability declaration, not a per-run completeness claim.",
+      "oneOf": [
+        {
+          "description": "Agent/run lifecycle semantics.",
+          "type": "string",
+          "const": "semantic_lifecycle"
+        },
+        {
+          "description": "Agent delegation lifecycle.",
+          "type": "string",
+          "const": "delegation"
+        },
+        {
+          "description": "Declared tool-call lifecycle.",
+          "type": "string",
+          "const": "tool_calls"
+        },
+        {
+          "description": "MCP lifecycle and correlation identifiers.",
+          "type": "string",
+          "const": "mcp"
+        },
+        {
+          "description": "A2A task lifecycle and identifiers.",
+          "type": "string",
+          "const": "a2a"
+        },
+        {
+          "description": "Process execution observations.",
+          "type": "string",
+          "const": "process"
+        },
+        {
+          "description": "File operation observations.",
+          "type": "string",
+          "const": "file"
+        },
+        {
+          "description": "Network operation observations.",
+          "type": "string",
+          "const": "network"
+        },
+        {
+          "description": "Workload/runtime binding observations.",
+          "type": "string",
+          "const": "workload"
+        },
+        {
+          "description": "Agent, tool, or provider outcome claims.",
+          "type": "string",
+          "const": "claimed_outcome"
+        },
+        {
+          "description": "Independently checked outcome evidence.",
+          "type": "string",
+          "const": "verified_outcome"
+        },
+        {
+          "description": "Source health, loss, or terminal-position evidence.",
+          "type": "string",
+          "const": "source_health"
+        }
+      ]
+    },
+    "SourceDiagnosticBody": {
+      "description": "A source-health observation without logs or captured content.",
+      "type": "object",
+      "properties": {
+        "affected_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1
+        },
+        "diagnostic_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "kind": {
+          "$ref": "#/$defs/SourceDiagnosticKind"
+        },
+        "related_event_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/DiagnosticSeverity"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "diagnostic_ref",
+        "source_ref",
+        "kind",
+        "severity"
+      ]
+    },
+    "SourceDiagnosticKind": {
+      "description": "Stable source diagnostic classes.",
+      "oneOf": [
+        {
+          "description": "The source started a stream.",
+          "type": "string",
+          "const": "started"
+        },
+        {
+          "description": "The source reported liveness.",
+          "type": "string",
+          "const": "heartbeat"
+        },
+        {
+          "description": "The source detected missing evidence.",
+          "type": "string",
+          "const": "loss_detected"
+        },
+        {
+          "description": "The source enabled sampling.",
+          "type": "string",
+          "const": "sampling_enabled"
+        },
+        {
+          "description": "The source truncated evidence.",
+          "type": "string",
+          "const": "evidence_truncated"
+        },
+        {
+          "description": "The source failed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "The source recovered after a failure.",
+          "type": "string",
+          "const": "recovered"
+        },
+        {
+          "description": "The source ended a stream.",
+          "type": "string",
+          "const": "finished"
+        }
+      ]
+    },
+    "SourceEnvelope": {
+      "description": "A source-supplied evidence contribution before server acceptance.\n\nOrganization scope, effective trust, ingest order, and ingest time are not\naccepted from the source; they are present only in `AcceptedSourceEnvelope`.",
+      "type": "object",
+      "properties": {
+        "correlation": {
+          "$ref": "#/$defs/CorrelationRefs"
+        },
+        "flags": {
+          "$ref": "#/$defs/EvidenceFlags"
+        },
+        "inline_payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TypedEvidencePayload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "object_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceObjectRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at": {
+          "$ref": "#/$defs/ObservedTime"
+        },
+        "payload_digest": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "payload_type": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        },
+        "payload_version": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "source_event_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        },
+        "source_id": {
+          "$ref": "#/$defs/SourceId"
+        },
+        "source_sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "source_stream_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "source_id",
+        "source_stream_id",
+        "source_event_id",
+        "source_sequence",
+        "observed_at",
+        "correlation",
+        "flags",
+        "payload_type",
+        "payload_version",
+        "payload_digest"
+      ]
+    },
+    "SourceId": {
+      "description": "A registered Evidence Source identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "SourceKind": {
+      "description": "Evidence Source integration categories.",
+      "oneOf": [
+        {
+          "description": "Agent or IDE lifecycle hook.",
+          "type": "string",
+          "const": "semantic_hook"
+        },
+        {
+          "description": "In-process SDK processor.",
+          "type": "string",
+          "const": "sdk_processor"
+        },
+        {
+          "description": "MCP, A2A, or other protocol evidence tap.",
+          "type": "string",
+          "const": "protocol_tap"
+        },
+        {
+          "description": "Provider API or audit adapter.",
+          "type": "string",
+          "const": "provider_adapter"
+        },
+        {
+          "description": "Customer-controlled execution boundary witness.",
+          "type": "string",
+          "const": "runtime_witness"
+        },
+        {
+          "description": "Independent outcome read-back integration.",
+          "type": "string",
+          "const": "outcome_verifier"
+        }
+      ]
+    },
+    "SourceLifecycleEvent": {
+      "description": "Expected source lifecycle markers.",
+      "oneOf": [
+        {
+          "description": "Source stream start declaration.",
+          "type": "string",
+          "const": "started"
+        },
+        {
+          "description": "Optional source liveness declaration.",
+          "type": "string",
+          "const": "heartbeat"
+        },
+        {
+          "description": "Source stream terminal declaration.",
+          "type": "string",
+          "const": "finished"
+        }
+      ]
+    },
+    "SourceManifest": {
+      "description": "Versioned declaration of an Evidence Source's identity and limits.",
+      "type": "object",
+      "properties": {
+        "adapter_name": {
+          "type": "string"
+        },
+        "adapter_version": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceCapability"
+          },
+          "minItems": 1
+        },
+        "declared_boundary": {
+          "$ref": "#/$defs/EvidenceBoundary"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentKind"
+        },
+        "expected_lifecycle": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceLifecycleEvent"
+          }
+        },
+        "ordering": {
+          "$ref": "#/$defs/OrderingCapability"
+        },
+        "privacy_capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PrivacyCapability"
+          },
+          "minItems": 1
+        },
+        "redacted_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "redaction_profile_ref": {
+          "type": "string"
+        },
+        "samples": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "source_id": {
+          "$ref": "#/$defs/SourceId"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/SourceKind"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "source_id",
+        "source_kind",
+        "declared_boundary",
+        "adapter_name",
+        "adapter_version",
+        "environment",
+        "capabilities",
+        "expected_lifecycle",
+        "ordering",
+        "samples",
+        "redaction_profile_ref",
+        "redacted_fields",
+        "privacy_capabilities"
+      ]
+    },
+    "ToolCapability": {
+      "description": "Allowlisted tool capability classes.",
+      "oneOf": [
+        {
+          "description": "Process creation or control.",
+          "type": "string",
+          "const": "process"
+        },
+        {
+          "description": "File or filesystem access.",
+          "type": "string",
+          "const": "file"
+        },
+        {
+          "description": "Network access.",
+          "type": "string",
+          "const": "network"
+        },
+        {
+          "description": "Browser or UI automation.",
+          "type": "string",
+          "const": "browser"
+        },
+        {
+          "description": "Database access.",
+          "type": "string",
+          "const": "database"
+        },
+        {
+          "description": "Messaging or collaboration system access.",
+          "type": "string",
+          "const": "messaging"
+        },
+        {
+          "description": "Identity or credential boundary access.",
+          "type": "string",
+          "const": "identity"
+        },
+        {
+          "description": "Workload or infrastructure control.",
+          "type": "string",
+          "const": "workload"
+        }
+      ]
+    },
+    "ToolInteractionBody": {
+      "description": "A tool interaction without raw arguments or results.",
+      "type": "object",
+      "properties": {
+        "agent_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "capability": {
+          "$ref": "#/$defs/ToolCapability"
+        },
+        "event": {
+          "$ref": "#/$defs/InteractionEvent"
+        },
+        "interaction_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "outcome": {
+          "$ref": "#/$defs/OperationOutcome"
+        },
+        "request_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "interaction_ref",
+        "agent_ref",
+        "tool_ref",
+        "capability",
+        "event",
+        "outcome"
+      ]
+    },
+    "TrustProfile": {
+      "description": "The trust boundary under which source statements are interpreted.",
+      "oneOf": [
+        {
+          "description": "A source declared a fact without an independent observer.",
+          "type": "string",
+          "const": "declared"
+        },
+        {
+          "description": "A harness observed lifecycle or tool semantics.",
+          "type": "string",
+          "const": "harness_observed"
+        },
+        {
+          "description": "A customer-controlled host boundary observed execution.",
+          "type": "string",
+          "const": "host_verified"
+        },
+        {
+          "description": "A vendor attests activity inside its own boundary.",
+          "type": "string",
+          "const": "provider_attested"
+        },
+        {
+          "description": "The execution boundary is not observable by a qualifying source.",
+          "type": "string",
+          "const": "opaque"
+        },
+        {
+          "description": "Expected trust evidence is missing, lost, or otherwise incomplete.",
+          "type": "string",
+          "const": "incomplete"
+        }
+      ]
+    },
+    "TypedEvidencePayload": {
+      "description": "Every structure-only v0.1 payload body accepted by the typed evidence seam.",
+      "oneOf": [
+        {
+          "description": "Agent lifecycle evidence.",
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/AgentLifecycleBody"
+            },
+            "evidence_type": {
+              "type": "string",
+              "const": "agent_lifecycle"
+            }
+          },
+          "required": [
+            "evidence_type",
+            "body"
+          ]
+        },
+        {
+          "description": "Delegation lifecycle evidence.",
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/DelegationLifecycleBody"
+            },
+            "evidence_type": {
+              "type": "string",
+              "const": "delegation_lifecycle"
+            }
+          },
+          "required": [
+            "evidence_type",
+            "body"
+          ]
+        },
+        {
+          "description": "Tool interaction evidence.",
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/ToolInteractionBody"
+            },
+            "evidence_type": {
+              "type": "string",
+              "const": "tool_interaction"
+            }
+          },
+          "required": [
+            "evidence_type",
+            "body"
+          ]
+        },
+        {
+          "description": "MCP or A2A protocol interaction evidence.",
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/ProtocolInteractionBody"
+            },
+            "evidence_type": {
+              "type": "string",
+              "const": "protocol_interaction"
+            }
+          },
+          "required": [
+            "evidence_type",
+            "body"
+          ]
+        },
+        {
+          "description": "Policy decision evidence.",
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/PolicyDecisionBody"
+            },
+            "evidence_type": {
+              "type": "string",
+              "const": "policy_decision"
+            }
+          },
+          "required": [
+            "evidence_type",
+            "body"
+          ]
+        },
+        {
+          "description": "Policy actuation evidence.",
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/ActuationReportBody"
+            },
+            "evidence_type": {
+              "type": "string",
+              "const": "actuation_report"
+            }
+          },
+          "required": [
+            "evidence_type",
+            "body"
+          ]
+        },
+        {
+          "description": "Runtime effect evidence.",
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/RuntimeEffectBody"
+            },
+            "evidence_type": {
+              "type": "string",
+              "const": "runtime_effect"
+            }
+          },
+          "required": [
+            "evidence_type",
+            "body"
+          ]
+        },
+        {
+          "description": "Claimed outcome evidence.",
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/OutcomeClaimBody"
+            },
+            "evidence_type": {
+              "type": "string",
+              "const": "outcome_claim"
+            }
+          },
+          "required": [
+            "evidence_type",
+            "body"
+          ]
+        },
+        {
+          "description": "Independently verified outcome evidence.",
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/OutcomeVerificationBody"
+            },
+            "evidence_type": {
+              "type": "string",
+              "const": "outcome_verification"
+            }
+          },
+          "required": [
+            "evidence_type",
+            "body"
+          ]
+        },
+        {
+          "description": "Source health and loss evidence.",
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/SourceDiagnosticBody"
+            },
+            "evidence_type": {
+              "type": "string",
+              "const": "source_diagnostic"
+            }
+          },
+          "required": [
+            "evidence_type",
+            "body"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "view_version": "0",
+  "run_id": "run-source-loss-001",
+  "window": {"start_unix_ms": 1783901000000, "end_unix_ms": 1783901060000},
+  "items": [
+    {
+      "event_ref": "event-gap-001",
+      "lane": "coverage_gap",
+      "item_type": "source_sequence_gap",
+      "observed_at": {"unix_ms": 1783901020000, "clock_basis": "wall_clock", "uncertainty_ms": 2500},
+      "ingested_at_unix_ms": 1783901024000,
+      "ingest_sequence": 31,
+      "source": {"source_id": "source-runtime-loss", "trust_profile": "incomplete"},
+      "outcome": "unknown",
+      "attribution": {"state": "unattributed", "reason_codes": ["source_sequence_missing"]},
+      "evidence_refs": [{"evidence_ref": "evidence-gap-001", "category": "coverage_gap", "source_id": "source-runtime-loss", "access": "metadata_only", "redacted": true, "size_bytes": null}]
+    }
+  ],
+  "limit": 50,
+  "next_cursor": "cursor-source-loss-next",
+  "projection": {"view_version": "0", "computation_version": "console_v0", "projection_revision": 5, "input_watermark": 31, "projected_at_unix_ms": 1783901030000, "freshness": "stale", "lag_ms": 6000}
+}

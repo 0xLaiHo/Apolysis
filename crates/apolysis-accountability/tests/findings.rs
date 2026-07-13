@@ -6,6 +6,52 @@ use apolysis_accountability::{
 };
 
 #[test]
+fn finding_kind_v1_accepts_every_golden_wire_value() {
+    let wire_values: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/finding-kind-v1-wire-values.json"))
+            .expect("valid finding-kind v1 golden fixture");
+
+    let kinds = [
+        FindingKind::MissingIntent,
+        FindingKind::UnobservedIntent,
+        FindingKind::UndeclaredAction,
+        FindingKind::CredentialRead,
+        FindingKind::WorkspaceBoundary,
+        FindingKind::UnknownEgress,
+        FindingKind::DangerousCommand,
+        FindingKind::ServiceAccountTokenRead,
+    ];
+    let serialized_kinds: Vec<_> = kinds
+        .into_iter()
+        .map(|kind| serde_json::to_value(kind).expect("serialize finding kind"))
+        .collect();
+    assert_eq!(serialized_kinds, wire_values);
+
+    for wire_value in wire_values {
+        let _: FindingKind = serde_json::from_value(wire_value.clone())
+            .unwrap_or_else(|error| panic!("unsupported v1 wire value {wire_value}: {error}"));
+    }
+}
+
+#[test]
+fn finding_v1_serializes_a_complete_jsonl_record_through_the_shared_interface() {
+    let finding = AccountabilityAnalyzer::evaluate(None, &effect(EffectKind::Exec, "cargo test"))
+        .into_iter()
+        .next()
+        .expect("missing-intent finding");
+
+    let record = finding
+        .to_record_value()
+        .expect("serialize complete finding record");
+    assert_eq!(record["record_type"], "accountability_finding");
+    assert_eq!(record["schema_version"], 1);
+    assert_eq!(record["kind"], "missing_intent");
+    let decoded: apolysis_accountability::AccountabilityFinding =
+        serde_json::from_value(record).expect("record remains compatible with finding v1");
+    assert_eq!(decoded, finding);
+}
+
+#[test]
 fn marked_workload_without_intent_produces_missing_intent_review() {
     let findings = AccountabilityAnalyzer::evaluate(None, &effect(EffectKind::Exec, "cargo test"));
     assert_finding(

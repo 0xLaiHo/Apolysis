@@ -1,0 +1,26 @@
+{
+  "schema_version": "0.1",
+  "run_id": "run_01",
+  "source_id": "source_codex",
+  "source_stream_id": "stream_codex_01",
+  "source_event_id": "event_tool_01",
+  "source_sequence": 0,
+  "observed_at": {"unix_ms": 1783891200000, "clock_basis": "wall_clock", "uncertainty_ms": 25},
+  "correlation": {"trace_ref": null, "agent_ref": null, "tool_ref": null, "runtime_ref": null},
+  "flags": {"loss_detected": false, "redacted": true, "contains_content": false},
+  "payload_type": "source_diagnostic",
+  "payload_version": "0.1",
+  "payload_digest": "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "inline_payload": {
+    "evidence_type": "source_diagnostic",
+    "body": {
+      "diagnostic_ref": "diagnostic_01",
+      "source_ref": "source_codex",
+      "kind": "heartbeat",
+      "severity": "info",
+      "related_event_ref": null,
+      "affected_count": null
+    }
+  },
+  "object_ref": null
+}

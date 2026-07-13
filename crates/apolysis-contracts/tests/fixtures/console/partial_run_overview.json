@@ -1,0 +1,66 @@
+{
+  "view_version": "0",
+  "organization_id": "org-synthetic",
+  "run_id": "run-partial-001",
+  "authority": {"kind": "service", "id": "authority-ci"},
+  "principal": {"kind": "workload", "id": "principal-runner"},
+  "objective_ref": "objective-sha256-partial",
+  "primary_agent_ref": "agent-copilot-001",
+  "environment": "ci_runner_or_remote_workspace",
+  "state": "active",
+  "started_at_unix_ms": 1783900900000,
+  "finished_at_unix_ms": null,
+  "coverage": {
+    "schema_version": "0.1",
+    "semantic": {"state": "partial", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["source_loss"], "evidence_refs": ["evidence-semantic-partial"], "contributing_source_refs": [], "coverage_gap_refs": []},
+    "execution": {"state": "opaque", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["opaque_boundary"], "evidence_refs": [], "contributing_source_refs": [], "coverage_gap_refs": []},
+    "outcome": {"state": "unconfirmed", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["verifier_missing"], "evidence_refs": ["evidence-claim-partial"], "contributing_source_refs": [], "coverage_gap_refs": []},
+    "outcome_comparison": "unresolved"
+  },
+  "outcome": {
+    "coverage": "unconfirmed",
+    "comparison": "unresolved",
+    "claimed": {"state": "succeeded", "source_id": "source-ci-hook", "observed_at_unix_ms": 1783900930000, "evidence_refs": [{"evidence_ref": "evidence-claim-partial", "category": "claimed_outcome", "source_id": "source-ci-hook", "access": "metadata_only", "redacted": true, "size_bytes": null}]},
+    "verified": null
+  },
+  "source_health": [
+    {
+      "source_id": "source-ci-hook",
+      "source_kind": "semantic_hook",
+      "trust_profile": "harness_observed",
+      "expected": true,
+      "joined": true,
+      "expected_capabilities": ["semantic_lifecycle", "tool_calls", "source_health"],
+      "state": "degraded",
+      "reason_codes": ["loss_reported", "sequence_gap", "redaction_applied"],
+      "source_stream_ref": "stream-ci-partial",
+      "last_durable_sequence": 17,
+      "terminal_sequence": null,
+      "last_ingested_at_unix_ms": 1783900931000,
+      "sampling": false,
+      "redacted": true,
+      "gaps": [{"gap_ref": "gap-ci-001", "reason_code": "source_loss", "required": true, "source_id": "source-ci-hook", "source_stream_ref": "stream-ci-partial", "missing_from_sequence": 8, "missing_to_sequence": 9, "detected_at_unix_ms": 1783900920000, "resolved_at_unix_ms": null}]
+    },
+    {
+      "source_id": "source-hosted-runner",
+      "source_kind": "runtime_witness",
+      "trust_profile": "opaque",
+      "expected": false,
+      "joined": false,
+      "expected_capabilities": ["process", "file", "network"],
+      "state": "opaque",
+      "reason_codes": ["opaque_boundary"],
+      "source_stream_ref": null,
+      "last_durable_sequence": null,
+      "terminal_sequence": null,
+      "last_ingested_at_unix_ms": null,
+      "sampling": false,
+      "redacted": false,
+      "gaps": []
+    }
+  ],
+  "coverage_gaps": [{"gap_ref": "gap-ci-001", "reason_code": "source_loss", "required": true, "source_id": "source-ci-hook", "source_stream_ref": "stream-ci-partial", "missing_from_sequence": 8, "missing_to_sequence": 9, "detected_at_unix_ms": 1783900920000, "resolved_at_unix_ms": null}],
+  "findings": [],
+  "evidence_refs": [{"evidence_ref": "evidence-semantic-partial", "category": "semantic", "source_id": "source-ci-hook", "access": "metadata_only", "redacted": true, "size_bytes": null}],
+  "projection": {"view_version": "0", "computation_version": "console_v0", "projection_revision": 7, "input_watermark": 17, "projected_at_unix_ms": 1783900932000, "freshness": "current", "lag_ms": 1000}
+}

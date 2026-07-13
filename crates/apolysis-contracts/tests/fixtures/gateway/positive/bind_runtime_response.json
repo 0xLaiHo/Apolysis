@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1",
+  "run_id": "run_01",
+  "binding_id": "binding_pod_01",
+  "accepted": true,
+  "idempotent_replay": false
+}

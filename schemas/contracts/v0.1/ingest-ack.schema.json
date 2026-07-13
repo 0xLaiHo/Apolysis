@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IngestAck",
+  "description": "Durable batch acknowledgement with replay counts and sequence-gap state.",
+  "type": "object",
+  "properties": {
+    "acknowledgements": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EnvelopeAck"
+      }
+    },
+    "committed_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "duplicate_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "durable_ingest_watermark": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "known_gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SequenceGap"
+      }
+    },
+    "run_id": {
+      "$ref": "#/$defs/RunId"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "source_watermark": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "acknowledgements",
+    "committed_count",
+    "duplicate_count",
+    "durable_ingest_watermark",
+    "source_watermark",
+    "known_gaps"
+  ],
+  "$defs": {
+    "EnvelopeAck": {
+      "description": "Per-envelope acknowledgement in an ingest result.",
+      "type": "object",
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/IngestDisposition"
+        },
+        "ingest_sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source_event_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_event_id",
+        "disposition"
+      ]
+    },
+    "IngestDisposition": {
+      "description": "Per-envelope durable ingest disposition.",
+      "oneOf": [
+        {
+          "description": "Newly committed to durable storage.",
+          "type": "string",
+          "const": "committed"
+        },
+        {
+          "description": "Exact prior event and digest returned its original acknowledgement.",
+          "type": "string",
+          "const": "duplicate"
+        }
+      ]
+    },
+    "RunId": {
+      "description": "An organization-scoped Agent Run identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "SchemaVersion": {
+      "description": "Wire schema versions understood by this crate.",
+      "oneOf": [
+        {
+          "description": "Agent Execution Record schema v0.1.",
+          "type": "string",
+          "const": "0.1"
+        }
+      ]
+    },
+    "SequenceGap": {
+      "description": "Inclusive missing source-sequence range known at acknowledgement time.",
+      "type": "object",
+      "properties": {
+        "first_missing_sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "last_missing_sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "first_missing_sequence",
+        "last_missing_sequence"
+      ]
+    }
+  }
+}

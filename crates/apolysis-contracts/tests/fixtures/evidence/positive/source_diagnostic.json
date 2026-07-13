@@ -1,0 +1,11 @@
+{
+  "evidence_type": "source_diagnostic",
+  "body": {
+    "diagnostic_ref": "source_diagnostic_01",
+    "source_ref": "source_runtime",
+    "kind": "loss_detected",
+    "severity": "warning",
+    "related_event_ref": "event_runtime_41",
+    "affected_count": 2
+  }
+}

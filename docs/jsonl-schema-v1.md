@@ -205,13 +205,18 @@ Fields:
 - `record_type`: always `accountability_finding`
 - `schema_version`: finding schema version, currently `1`
 - `session_id`: session identifier
-- `kind`: `missing_intent` or `unobserved_intent`
-- `decision`: currently `review`
+- `kind`: one of `missing_intent`, `unobserved_intent`, `undeclared_action`,
+  `credential_read`, `workspace_boundary`, `unknown_egress`,
+  `dangerous_command`, or `service_account_token_read`. The intent correlation
+  command currently emits the first two; the shared accountability analyzer
+  can emit the remaining kinds.
+- `decision`: `notify` or `review`; intent correlation currently emits `review`
 - `reason`: human-readable explanation
 - `evidence_ref`: `raw_event_id` for observed side effects, or `intent_id` for
   declared intent without host evidence
 - `runtime`: runtime metadata object when available
-- `evidence_boundary`: boundary label, currently `host_boundary`
+- `evidence_boundary`: `host_boundary` or `guest_semantic`; intent correlation
+  currently emits `host_boundary`
 
 ### `policy_violation`
 

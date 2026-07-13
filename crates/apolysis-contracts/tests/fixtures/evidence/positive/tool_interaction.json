@@ -1,0 +1,13 @@
+{
+  "evidence_type": "tool_interaction",
+  "body": {
+    "interaction_ref": "tool_interaction_01",
+    "agent_ref": "agent_primary",
+    "tool_ref": "tool_exec_command",
+    "capability": "process",
+    "event": "completed",
+    "request_ref": "request_digest_01",
+    "response_ref": "response_digest_01",
+    "outcome": "succeeded"
+  }
+}

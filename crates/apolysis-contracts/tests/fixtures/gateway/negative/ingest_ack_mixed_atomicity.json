@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "run_id": "run_01",
+  "acknowledgements": [
+    {"source_event_id": "event_01", "disposition": "committed", "ingest_sequence": 41},
+    {"source_event_id": "event_02", "disposition": "backpressured", "ingest_sequence": null}
+  ],
+  "committed_count": 1,
+  "duplicate_count": 0,
+  "durable_ingest_watermark": 41,
+  "source_watermark": 2,
+  "known_gaps": []
+}
