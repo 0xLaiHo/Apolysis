@@ -37,6 +37,98 @@
     "fact"
   ],
   "$defs": {
+    "AcceptedRunFinalization": {
+      "description": "Server-accepted cumulative declaration used to rebuild finalization.",
+      "type": "object",
+      "properties": {
+        "accepted_deadline_unix_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "declared_by_principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        },
+        "declared_by_source_registration_id": {
+          "type": "string"
+        },
+        "declared_by_source_stream_id": {
+          "type": "string"
+        },
+        "outcome_claim_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64
+        },
+        "registration_policy_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "terminal_positions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TerminalSourcePosition"
+          },
+          "maxItems": 256,
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "declared_by_source_registration_id",
+        "declared_by_source_stream_id",
+        "declared_by_principal",
+        "registration_policy_revision",
+        "terminal_positions",
+        "outcome_claim_refs",
+        "accepted_deadline_unix_ms"
+      ]
+    },
+    "AcceptedRuntimeBinding": {
+      "description": "Runtime binding after server-side source and policy acceptance.",
+      "type": "object",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/RuntimeBinding"
+        },
+        "effective_trust_profile": {
+          "$ref": "#/$defs/TrustProfile"
+        },
+        "manifest_digest": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest_version": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "registration_policy_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "source_registration_id": {
+          "type": "string"
+        },
+        "source_stream_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_registration_id",
+        "source_stream_id",
+        "registration_policy_revision",
+        "effective_trust_profile",
+        "manifest_version",
+        "manifest_digest",
+        "binding"
+      ]
+    },
     "AcceptedSourceEnvelope": {
       "description": "Effective trust assigned to an unchanged source item after acceptance.\n\nOrganization, run, ingest position, and ingest time remain exclusively on\nthe enclosing `AgentExecutionRecordItem`.",
       "type": "object",
@@ -55,10 +147,24 @@
         },
         "manifest_version": {
           "$ref": "#/$defs/SchemaVersion"
+        },
+        "registration_policy_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "source_registration_id": {
+          "type": "string"
+        },
+        "source_stream_id": {
+          "type": "string"
         }
       },
       "additionalProperties": false,
       "required": [
+        "source_registration_id",
+        "source_stream_id",
+        "registration_policy_revision",
         "effective_trust_profile",
         "manifest_version",
         "manifest_digest",
@@ -171,6 +277,23 @@
           ]
         },
         {
+          "description": "Server-accepted cumulative terminal positions, outcomes, and deadline.",
+          "type": "object",
+          "properties": {
+            "fact": {
+              "$ref": "#/$defs/AcceptedRunFinalization"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "run_finalization_declared"
+            }
+          },
+          "required": [
+            "fact_type",
+            "fact"
+          ]
+        },
+        {
           "description": "Server-accepted source registration and effective trust.",
           "type": "object",
           "properties": {
@@ -192,7 +315,7 @@
           "type": "object",
           "properties": {
             "fact": {
-              "$ref": "#/$defs/RuntimeBinding"
+              "$ref": "#/$defs/AcceptedRuntimeBinding"
             },
             "fact_type": {
               "type": "string",
@@ -1478,10 +1601,28 @@
         },
         "manifest": {
           "$ref": "#/$defs/SourceManifest"
+        },
+        "principal": {
+          "$ref": "#/$defs/PrincipalRef"
+        },
+        "registration_policy_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "source_registration_id": {
+          "type": "string"
+        },
+        "source_stream_id": {
+          "type": "string"
         }
       },
       "additionalProperties": false,
       "required": [
+        "source_registration_id",
+        "source_stream_id",
+        "registration_policy_revision",
+        "principal",
         "manifest",
         "effective_trust_profile"
       ]
@@ -1501,6 +1642,9 @@
         },
         "organization_id": {
           "$ref": "#/$defs/OrganizationId"
+        },
+        "policy": {
+          "$ref": "#/$defs/RunPolicySelection"
         },
         "principal": {
           "$ref": "#/$defs/PrincipalRef"
@@ -1524,6 +1668,7 @@
         "principal",
         "objective_ref",
         "environment",
+        "policy",
         "state"
       ]
     },
@@ -1533,6 +1678,31 @@
       "maxLength": 128,
       "minLength": 1,
       "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+    },
+    "RunPolicySelection": {
+      "description": "Immutable server-approved policy selections recorded when a run opens.",
+      "type": "object",
+      "properties": {
+        "expected_source_kinds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceKind"
+          },
+          "minItems": 1
+        },
+        "privacy_profile_ref": {
+          "type": "string"
+        },
+        "retention_profile_ref": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "privacy_profile_ref",
+        "retention_profile_ref",
+        "expected_source_kinds"
+      ]
     },
     "RunState": {
       "description": "Lifecycle states for an Agent Run.",
@@ -1928,6 +2098,16 @@
           "const": "a2a"
         },
         {
+          "description": "Policy decisions produced at a supported decision seam.",
+          "type": "string",
+          "const": "policy_decisions"
+        },
+        {
+          "description": "Confirmed policy actuation reports from a registered actuator.",
+          "type": "string",
+          "const": "policy_actuation"
+        },
+        {
           "description": "Process execution observations.",
           "type": "string",
           "const": "process"
@@ -1941,6 +2121,11 @@
           "description": "Network operation observations.",
           "type": "string",
           "const": "network"
+        },
+        {
+          "description": "Identity or credential-boundary observations.",
+          "type": "string",
+          "const": "identity"
         },
         {
           "description": "Workload/runtime binding observations.",
@@ -2284,6 +2469,32 @@
         "redaction_profile_ref",
         "redacted_fields",
         "privacy_capabilities"
+      ]
+    },
+    "TerminalSourcePosition": {
+      "description": "Final declared position for one expected source stream.",
+      "type": "object",
+      "properties": {
+        "final_source_sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "source_id": {
+          "$ref": "#/$defs/SourceId"
+        },
+        "source_stream_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "source_stream_id",
+        "final_source_sequence"
       ]
     },
     "ToolCapability": {

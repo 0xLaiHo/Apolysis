@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use apolysis_contracts::{OperationOutcome, TypedEvidencePayload};
+use apolysis_contracts::{OperationOutcome, SourceCapability, TypedEvidencePayload};
 
 const POSITIVE_FIXTURES: &[(&str, &str)] = &[
     (
@@ -94,6 +94,29 @@ fn v0_1_positive_fixtures_cover_every_typed_evidence_variant() {
             OperationOutcome::Unknown,
         ])
     );
+}
+
+#[test]
+fn every_v0_1_evidence_payload_has_an_explicit_source_capability() {
+    for (fixture_name, json) in POSITIVE_FIXTURES {
+        let payload: TypedEvidencePayload = serde_json::from_str(json)
+            .unwrap_or_else(|error| panic!("{fixture_name} must deserialize: {error}"));
+        let expected = match *fixture_name {
+            "agent_lifecycle" => SourceCapability::SemanticLifecycle,
+            "delegation_lifecycle" => SourceCapability::Delegation,
+            "tool_interaction" => SourceCapability::ToolCalls,
+            "protocol_interaction_mcp" => SourceCapability::Mcp,
+            "protocol_interaction_a2a" => SourceCapability::A2a,
+            "policy_decision" => SourceCapability::PolicyDecisions,
+            "actuation_report" => SourceCapability::PolicyActuation,
+            "runtime_effect" => SourceCapability::Network,
+            "outcome_claim" => SourceCapability::ClaimedOutcome,
+            "outcome_verification" => SourceCapability::VerifiedOutcome,
+            "source_diagnostic" => SourceCapability::SourceHealth,
+            unknown => panic!("missing expected capability for {unknown}"),
+        };
+        assert_eq!(payload.required_source_capability(), expected);
+    }
 }
 
 #[test]

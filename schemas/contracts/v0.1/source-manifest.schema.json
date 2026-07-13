@@ -213,6 +213,16 @@
           "const": "a2a"
         },
         {
+          "description": "Policy decisions produced at a supported decision seam.",
+          "type": "string",
+          "const": "policy_decisions"
+        },
+        {
+          "description": "Confirmed policy actuation reports from a registered actuator.",
+          "type": "string",
+          "const": "policy_actuation"
+        },
+        {
           "description": "Process execution observations.",
           "type": "string",
           "const": "process"
@@ -226,6 +236,11 @@
           "description": "Network operation observations.",
           "type": "string",
           "const": "network"
+        },
+        {
+          "description": "Identity or credential-boundary observations.",
+          "type": "string",
+          "const": "identity"
         },
         {
           "description": "Workload/runtime binding observations.",

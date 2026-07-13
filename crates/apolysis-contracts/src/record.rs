@@ -3,8 +3,9 @@
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::{
-    AcceptedSourceEnvelope, ContractError, CoverageSummary, OrganizationId, RegisteredSource,
-    RunDescriptor, RunId, RunStateTransition, RuntimeBinding, SchemaVersion,
+    AcceptedRunFinalization, AcceptedRuntimeBinding, AcceptedSourceEnvelope, ContractError,
+    CoverageSummary, OrganizationId, RegisteredSource, RunDescriptor, RunId, RunStateTransition,
+    SchemaVersion,
 };
 
 /// The typed fact retained in one append-oriented record item.
@@ -15,10 +16,12 @@ pub enum AgentExecutionRecordFact {
     RunOpened(Box<RunDescriptor>),
     /// One legal lifecycle transition.
     RunStateChanged(RunStateTransition),
+    /// Server-accepted cumulative terminal positions, outcomes, and deadline.
+    RunFinalizationDeclared(Box<AcceptedRunFinalization>),
     /// Server-accepted source registration and effective trust.
     SourceRegistered(Box<RegisteredSource>),
     /// Evidence-backed relation between the run and an execution identity.
-    RuntimeBound(Box<RuntimeBinding>),
+    RuntimeBound(Box<AcceptedRuntimeBinding>),
     /// Source evidence after acceptance and effective-trust assignment.
     EvidenceAccepted(Box<AcceptedSourceEnvelope>),
     /// A rebuildable server-side coverage computation.
@@ -35,8 +38,9 @@ impl<'de> Deserialize<'de> for AgentExecutionRecordFact {
         enum Wire {
             RunOpened(Box<RunDescriptor>),
             RunStateChanged(RunStateTransition),
+            RunFinalizationDeclared(Box<AcceptedRunFinalization>),
             SourceRegistered(Box<RegisteredSource>),
-            RuntimeBound(Box<RuntimeBinding>),
+            RuntimeBound(Box<AcceptedRuntimeBinding>),
             EvidenceAccepted(Box<AcceptedSourceEnvelope>),
             CoverageComputed(Box<CoverageSummary>),
         }
@@ -44,6 +48,7 @@ impl<'de> Deserialize<'de> for AgentExecutionRecordFact {
         Ok(match Wire::deserialize(deserializer)? {
             Wire::RunOpened(value) => Self::RunOpened(value),
             Wire::RunStateChanged(value) => Self::RunStateChanged(value),
+            Wire::RunFinalizationDeclared(value) => Self::RunFinalizationDeclared(value),
             Wire::SourceRegistered(value) => Self::SourceRegistered(value),
             Wire::RuntimeBound(value) => Self::RuntimeBound(value),
             Wire::EvidenceAccepted(value) => Self::EvidenceAccepted(value),
@@ -70,6 +75,31 @@ pub struct AgentExecutionRecordItem {
 }
 
 impl AgentExecutionRecordItem {
+    /// Construct a validated server-owned append item.
+    pub fn new(
+        organization_id: OrganizationId,
+        run_id: RunId,
+        ingest_sequence: u64,
+        ingested_at_unix_ms: u64,
+        fact: AgentExecutionRecordFact,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            schema_version: SchemaVersion::V0_1,
+            organization_id,
+            run_id,
+            ingest_sequence,
+            ingested_at_unix_ms,
+            fact,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the wire schema marker.
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+
     /// Return the organization scope assigned at acceptance.
     pub fn organization_id(&self) -> &OrganizationId {
         &self.organization_id
@@ -83,6 +113,11 @@ impl AgentExecutionRecordItem {
     /// Return the durable append position assigned by the accepting plane.
     pub fn ingest_sequence(&self) -> u64 {
         self.ingest_sequence
+    }
+
+    /// Return the server-recorded durable acceptance time.
+    pub fn ingested_at_unix_ms(&self) -> u64 {
+        self.ingested_at_unix_ms
     }
 
     /// Return the typed fact without changing its trust level.
@@ -116,6 +151,9 @@ impl AgentExecutionRecordItem {
                 }
             }
             AgentExecutionRecordFact::RunStateChanged(transition) => transition.validate()?,
+            AgentExecutionRecordFact::RunFinalizationDeclared(declaration) => {
+                declaration.validate()?
+            }
             AgentExecutionRecordFact::SourceRegistered(source) => source.validate()?,
             AgentExecutionRecordFact::RuntimeBound(binding) => binding.validate()?,
             AgentExecutionRecordFact::EvidenceAccepted(accepted) => {

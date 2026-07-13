@@ -2,7 +2,7 @@
   "schema_version": "0.1",
   "mode": "join",
   "client_operation_id": "operation_join_01",
-  "request_digest": "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "request_digest": "5bbe3c7716a9ec4f63155cca6dd78587314deea0df161f8412e9748f072a89d4",
   "run_id": "run_01",
   "join_proof": {
     "kind": "grant",

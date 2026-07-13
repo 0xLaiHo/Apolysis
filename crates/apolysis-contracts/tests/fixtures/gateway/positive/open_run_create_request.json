@@ -2,7 +2,7 @@
   "schema_version": "0.1",
   "mode": "create",
   "client_operation_id": "operation_open_01",
-  "request_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "request_digest": "5d509404863816fa3270afc5b1353e6390eefa71dcfae637df09071f0d87d692",
   "client_run_key": "github_pr_42_attempt_1",
   "environment": "ci_runner_or_remote_workspace",
   "authority": {"kind": "service", "id": "authority_ci"},

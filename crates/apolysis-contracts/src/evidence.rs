@@ -7,7 +7,9 @@ use std::num::NonZeroU64;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::{id::validate_contract_identifier, ContractError, OutcomeComparisonState};
+use crate::{
+    id::validate_contract_identifier, ContractError, OutcomeComparisonState, SourceCapability,
+};
 
 /// An opaque reference carried instead of prompts, responses, arguments, or bodies.
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -207,6 +209,11 @@ pub struct ProtocolInteractionBody {
 }
 
 impl ProtocolInteractionBody {
+    /// Return the protocol family whose capability must be registered.
+    pub fn protocol(&self) -> AgentProtocol {
+        self.protocol
+    }
+
     fn validate(&self) -> Result<(), ContractError> {
         let valid = matches!(
             (self.protocol, self.operation),
@@ -370,6 +377,13 @@ pub struct RuntimeEffectBody {
     outcome: OperationOutcome,
 }
 
+impl RuntimeEffectBody {
+    /// Return the runtime capability required for this effect.
+    pub fn effect_kind(&self) -> RuntimeEffectKind {
+        self.effect_kind
+    }
+}
+
 /// Allowlisted claim classes.
 #[derive(schemars::JsonSchema, Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -511,6 +525,36 @@ impl TypedEvidencePayload {
             Self::OutcomeClaim(body) => Some(body.outcome),
             Self::OutcomeVerification(body) => Some(body.outcome),
             Self::PolicyDecision(_) | Self::SourceDiagnostic(_) => None,
+        }
+    }
+
+    /// Return the source capability required to submit this payload.
+    ///
+    /// Every accepted v0.1 evidence body has an explicit capability. Keeping
+    /// policy decision, actuation, and identity evidence distinct prevents a
+    /// source from gaining those powers through an unrelated tool or file
+    /// capability.
+    pub fn required_source_capability(&self) -> SourceCapability {
+        match self {
+            Self::AgentLifecycle(_) => SourceCapability::SemanticLifecycle,
+            Self::DelegationLifecycle(_) => SourceCapability::Delegation,
+            Self::ToolInteraction(_) => SourceCapability::ToolCalls,
+            Self::ProtocolInteraction(body) => match body.protocol() {
+                AgentProtocol::Mcp => SourceCapability::Mcp,
+                AgentProtocol::A2a => SourceCapability::A2a,
+            },
+            Self::PolicyDecision(_) => SourceCapability::PolicyDecisions,
+            Self::ActuationReport(_) => SourceCapability::PolicyActuation,
+            Self::RuntimeEffect(body) => match body.effect_kind() {
+                RuntimeEffectKind::Process => SourceCapability::Process,
+                RuntimeEffectKind::File => SourceCapability::File,
+                RuntimeEffectKind::Network => SourceCapability::Network,
+                RuntimeEffectKind::Identity => SourceCapability::Identity,
+                RuntimeEffectKind::Workload => SourceCapability::Workload,
+            },
+            Self::OutcomeClaim(_) => SourceCapability::ClaimedOutcome,
+            Self::OutcomeVerification(_) => SourceCapability::VerifiedOutcome,
+            Self::SourceDiagnostic(_) => SourceCapability::SourceHealth,
         }
     }
 }

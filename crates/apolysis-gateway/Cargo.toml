@@ -1,0 +1,20 @@
+[package]
+name = "apolysis-gateway"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+apolysis-contracts = { path = "../apolysis-contracts" }
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_json_canonicalizer.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lib]
+path = "src/lib.rs"

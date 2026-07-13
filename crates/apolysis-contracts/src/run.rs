@@ -4,7 +4,7 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::{
     id::{validate_contract_identifier, validate_reference},
-    ContractError, OrganizationId, RunId, SchemaVersion,
+    ContractError, OrganizationId, RunId, SchemaVersion, SourceKind,
 };
 
 /// The supported environment profiles for an Agent Run.
@@ -87,7 +87,7 @@ impl<'de> Deserialize<'de> for AuthorityRef {
 }
 
 /// The kind of authenticated identity acting within an Authority.
-#[derive(schemars::JsonSchema, Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(schemars::JsonSchema, Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrincipalKind {
     /// An authenticated human identity.
@@ -125,7 +125,7 @@ impl PrincipalRef {
         &self.id
     }
 
-    fn validate(&self) -> Result<(), ContractError> {
+    pub(crate) fn validate(&self) -> Result<(), ContractError> {
         validate_contract_identifier(&self.id, "principal.id")
     }
 }
@@ -185,6 +185,90 @@ impl RunState {
     }
 }
 
+/// Immutable server-approved policy selections recorded when a run opens.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct RunPolicySelection {
+    privacy_profile_ref: String,
+    retention_profile_ref: String,
+    #[schemars(length(min = 1))]
+    expected_source_kinds: Vec<SourceKind>,
+}
+
+impl RunPolicySelection {
+    /// Create the immutable policy selections admitted by server-side policy.
+    pub fn new(
+        privacy_profile_ref: impl Into<String>,
+        retention_profile_ref: impl Into<String>,
+        expected_source_kinds: Vec<SourceKind>,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            privacy_profile_ref: privacy_profile_ref.into(),
+            retention_profile_ref: retention_profile_ref.into(),
+            expected_source_kinds,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Return the server-approved privacy profile reference.
+    pub fn privacy_profile_ref(&self) -> &str {
+        &self.privacy_profile_ref
+    }
+
+    /// Return the server-approved retention profile reference.
+    pub fn retention_profile_ref(&self) -> &str {
+        &self.retention_profile_ref
+    }
+
+    /// Return source roles required by the run's accepted policy selection.
+    pub fn expected_source_kinds(&self) -> &[SourceKind] {
+        &self.expected_source_kinds
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        validate_contract_identifier(&self.privacy_profile_ref, "privacy_profile_ref")?;
+        validate_contract_identifier(&self.retention_profile_ref, "retention_profile_ref")?;
+        if self.expected_source_kinds.is_empty() {
+            return Err(ContractError::InvalidField {
+                field: "expected_source_kinds",
+                reason: "must declare at least one expected source kind",
+            });
+        }
+        for (index, kind) in self.expected_source_kinds.iter().enumerate() {
+            if self.expected_source_kinds[..index].contains(kind) {
+                return Err(ContractError::DuplicateValue {
+                    field: "expected_source_kinds",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for RunPolicySelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(schemars::JsonSchema, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            privacy_profile_ref: String,
+            retention_profile_ref: String,
+            expected_source_kinds: Vec<SourceKind>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.privacy_profile_ref,
+            wire.retention_profile_ref,
+            wire.expected_source_kinds,
+        )
+        .map_err(de::Error::custom)
+    }
+}
+
 /// The immutable opening descriptor and current state for an Agent Run.
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[schemars(deny_unknown_fields)]
@@ -196,6 +280,7 @@ pub struct RunDescriptor {
     principal: PrincipalRef,
     objective_ref: String,
     environment: EnvironmentKind,
+    policy: RunPolicySelection,
     state: RunState,
 }
 
@@ -208,6 +293,7 @@ impl RunDescriptor {
         principal: PrincipalRef,
         objective_ref: impl Into<String>,
         environment: EnvironmentKind,
+        policy: RunPolicySelection,
     ) -> Result<Self, ContractError> {
         let value = Self {
             schema_version: SchemaVersion::V0_1,
@@ -217,6 +303,7 @@ impl RunDescriptor {
             principal,
             objective_ref: objective_ref.into(),
             environment,
+            policy,
             state: RunState::Opening,
         };
         value.validate()?;
@@ -236,6 +323,11 @@ impl RunDescriptor {
     /// Return the canonical Agent Run identifier.
     pub fn run_id(&self) -> &RunId {
         &self.run_id
+    }
+
+    /// Return the immutable server-approved run policy selection.
+    pub fn policy(&self) -> &RunPolicySelection {
+        &self.policy
     }
 
     /// Return the current lifecycle state.
@@ -258,7 +350,8 @@ impl RunDescriptor {
     fn validate(&self) -> Result<(), ContractError> {
         self.authority.validate()?;
         self.principal.validate()?;
-        validate_reference(&self.objective_ref, "objective_ref")
+        validate_reference(&self.objective_ref, "objective_ref")?;
+        self.policy.validate()
     }
 }
 
@@ -277,6 +370,7 @@ impl<'de> Deserialize<'de> for RunDescriptor {
             principal: PrincipalRef,
             objective_ref: String,
             environment: EnvironmentKind,
+            policy: RunPolicySelection,
             state: RunState,
         }
 
@@ -289,6 +383,7 @@ impl<'de> Deserialize<'de> for RunDescriptor {
             principal: wire.principal,
             objective_ref: wire.objective_ref,
             environment: wire.environment,
+            policy: wire.policy,
             state: wire.state,
         };
         value.validate().map_err(de::Error::custom)?;
