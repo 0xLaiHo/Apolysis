@@ -355,6 +355,9 @@ impl<'de> Deserialize<'de> for SourceEnvelope {
 #[schemars(deny_unknown_fields)]
 pub struct AcceptedSourceEnvelope {
     effective_trust_profile: TrustProfile,
+    manifest_version: SchemaVersion,
+    #[schemars(length(equal = 64), regex(pattern = r"^[0-9a-f]{64}$"))]
+    manifest_digest: String,
     envelope: SourceEnvelope,
 }
 
@@ -383,7 +386,13 @@ impl AcceptedSourceEnvelope {
         self.effective_trust_profile
     }
 
+    /// Return the immutable manifest digest used during acceptance.
+    pub fn manifest_digest(&self) -> &str {
+        &self.manifest_digest
+    }
+
     fn validate(&self) -> Result<(), ContractError> {
+        validate_sha256(&self.manifest_digest, "manifest_digest")?;
         self.envelope.validate()
     }
 }
@@ -397,12 +406,16 @@ impl<'de> Deserialize<'de> for AcceptedSourceEnvelope {
         #[serde(deny_unknown_fields)]
         struct Wire {
             effective_trust_profile: TrustProfile,
+            manifest_version: SchemaVersion,
+            manifest_digest: String,
             envelope: SourceEnvelope,
         }
 
         let wire = Wire::deserialize(deserializer)?;
         let value = Self {
             effective_trust_profile: wire.effective_trust_profile,
+            manifest_version: wire.manifest_version,
+            manifest_digest: wire.manifest_digest,
             envelope: wire.envelope,
         };
         value.validate().map_err(de::Error::custom)?;

@@ -46,11 +46,22 @@
         },
         "envelope": {
           "$ref": "#/$defs/SourceEnvelope"
+        },
+        "manifest_digest": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "manifest_version": {
+          "$ref": "#/$defs/SchemaVersion"
         }
       },
       "additionalProperties": false,
       "required": [
         "effective_trust_profile",
+        "manifest_version",
+        "manifest_digest",
         "envelope"
       ]
     },
@@ -169,6 +180,23 @@
             "fact_type": {
               "type": "string",
               "const": "source_registered"
+            }
+          },
+          "required": [
+            "fact_type",
+            "fact"
+          ]
+        },
+        {
+          "description": "Evidence-backed relation between the run and an execution identity.",
+          "type": "object",
+          "properties": {
+            "fact": {
+              "$ref": "#/$defs/RuntimeBinding"
+            },
+            "fact_type": {
+              "type": "string",
+              "const": "runtime_bound"
             }
           },
           "required": [
@@ -362,6 +390,18 @@
         "computation_version": {
           "type": "string"
         },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "evidence_refs": {
           "type": "array",
           "items": {
@@ -396,7 +436,9 @@
         "projection_revision",
         "input_watermark",
         "reason_codes",
-        "evidence_refs"
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
       ]
     },
     "ComputedCoverage2": {
@@ -405,6 +447,18 @@
       "properties": {
         "computation_version": {
           "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "evidence_refs": {
           "type": "array",
@@ -440,7 +494,9 @@
         "projection_revision",
         "input_watermark",
         "reason_codes",
-        "evidence_refs"
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
       ]
     },
     "ComputedCoverage3": {
@@ -449,6 +505,18 @@
       "properties": {
         "computation_version": {
           "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "evidence_refs": {
           "type": "array",
@@ -484,7 +552,9 @@
         "projection_revision",
         "input_watermark",
         "reason_codes",
-        "evidence_refs"
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
       ]
     },
     "CorrelationRefs": {
@@ -1513,6 +1583,171 @@
         "recorded_at_unix_ms"
       ]
     },
+    "RuntimeAttribution": {
+      "description": "Explicit quality of a run-to-runtime correlation.",
+      "oneOf": [
+        {
+          "description": "An explicitly propagated identity was independently validated.",
+          "type": "string",
+          "const": "exact"
+        },
+        {
+          "description": "A non-unique heuristic selected one most likely runtime.",
+          "type": "string",
+          "const": "inferred"
+        },
+        {
+          "description": "Multiple plausible runtime identities remain.",
+          "type": "string",
+          "const": "ambiguous"
+        },
+        {
+          "description": "No qualifying runtime identity could be assigned.",
+          "type": "string",
+          "const": "unattributed"
+        }
+      ]
+    },
+    "RuntimeBinding": {
+      "description": "A versioned, evidence-backed relation between a run and runtime identity.",
+      "type": "object",
+      "properties": {
+        "alternative_runtime_candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeBindingCandidate"
+          }
+        },
+        "attribution": {
+          "$ref": "#/$defs/RuntimeAttribution"
+        },
+        "binding_id": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
+        },
+        "confidence_bps": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 10000,
+          "minimum": 0
+        },
+        "evidence_basis": {
+          "$ref": "#/$defs/RuntimeBindingBasis"
+        },
+        "evidence_basis_ref": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "identity_kind": {
+          "$ref": "#/$defs/RuntimeIdentityKind"
+        },
+        "identity_ref": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "valid_from_unix_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "valid_until_unix_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "identity_kind",
+        "identity_ref",
+        "valid_from_unix_ms",
+        "evidence_basis",
+        "evidence_basis_ref",
+        "attribution",
+        "reason_codes",
+        "alternative_runtime_candidates"
+      ]
+    },
+    "RuntimeBindingBasis": {
+      "description": "Evidence method used to establish a runtime correlation.",
+      "oneOf": [
+        {
+          "description": "A propagated runtime identifier was checked at an independent boundary.",
+          "type": "string",
+          "const": "propagated_and_validated"
+        },
+        {
+          "description": "A provider asserted the runtime relation inside its own boundary.",
+          "type": "string",
+          "const": "provider_attestation"
+        },
+        {
+          "description": "PID, time, path, argument, name, or comparable heuristic matching.",
+          "type": "string",
+          "const": "heuristic_match"
+        },
+        {
+          "description": "No qualifying basis was available.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    },
+    "RuntimeBindingCandidate": {
+      "description": "One scored alternative retained for an ambiguous runtime relation.",
+      "type": "object",
+      "properties": {
+        "confidence_bps": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 10000,
+          "minimum": 0
+        },
+        "evidence_basis_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "identity_ref": {
+          "type": "string",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "identity_ref",
+        "reason_codes",
+        "confidence_bps",
+        "evidence_basis_refs"
+      ]
+    },
     "RuntimeEffectBody": {
       "description": "A host or managed-runtime effect represented by opaque identities.",
       "type": "object",
@@ -1575,6 +1810,46 @@
           "description": "Container, Pod, VM, or infrastructure effect.",
           "type": "string",
           "const": "workload"
+        }
+      ]
+    },
+    "RuntimeIdentityKind": {
+      "description": "Runtime identity categories supported by the v0.1 binding contract.",
+      "oneOf": [
+        {
+          "description": "Operating-system process identity.",
+          "type": "string",
+          "const": "process"
+        },
+        {
+          "description": "Linux cgroup identity.",
+          "type": "string",
+          "const": "cgroup"
+        },
+        {
+          "description": "Container-runtime identity.",
+          "type": "string",
+          "const": "container"
+        },
+        {
+          "description": "Kubernetes Pod identity.",
+          "type": "string",
+          "const": "pod"
+        },
+        {
+          "description": "Virtual-machine identity.",
+          "type": "string",
+          "const": "vm"
+        },
+        {
+          "description": "CI or development runner identity.",
+          "type": "string",
+          "const": "runner"
+        },
+        {
+          "description": "Provider-managed workload identity.",
+          "type": "string",
+          "const": "provider_workload"
         }
       ]
     },

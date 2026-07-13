@@ -700,6 +700,76 @@ pub enum RuntimeBindingBasis {
     Unavailable,
 }
 
+/// One scored alternative retained for an ambiguous runtime relation.
+#[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
+#[schemars(deny_unknown_fields)]
+pub struct RuntimeBindingCandidate {
+    #[schemars(length(min = 1, max = 512))]
+    identity_ref: String,
+    #[schemars(length(min = 1))]
+    reason_codes: Vec<String>,
+    #[schemars(range(max = 10000))]
+    confidence_bps: u16,
+    #[schemars(length(min = 1))]
+    evidence_basis_refs: Vec<String>,
+}
+
+impl RuntimeBindingCandidate {
+    /// Return the candidate's bounded projector score in basis points.
+    pub fn confidence_bps(&self) -> u16 {
+        self.confidence_bps
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        validate_reference(&self.identity_ref, "binding.candidate.identity_ref")?;
+        validate_reason_codes(&self.reason_codes, "binding.candidate.reason_codes")?;
+        if self.confidence_bps > 10_000 {
+            return Err(ContractError::InvalidField {
+                field: "binding.candidate.confidence_bps",
+                reason: "must be between 0 and 10000",
+            });
+        }
+        if self.evidence_basis_refs.is_empty() {
+            return Err(ContractError::InvalidField {
+                field: "binding.candidate.evidence_basis_refs",
+                reason: "must not be empty",
+            });
+        }
+        for reference in &self.evidence_basis_refs {
+            validate_reference(reference, "binding.candidate.evidence_basis_refs")?;
+        }
+        reject_duplicate_refs(
+            self.evidence_basis_refs.iter().map(String::as_str),
+            "binding.candidate.evidence_basis_refs",
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeBindingCandidate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(schemars::JsonSchema, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            identity_ref: String,
+            reason_codes: Vec<String>,
+            confidence_bps: u16,
+            evidence_basis_refs: Vec<String>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let value = Self {
+            identity_ref: wire.identity_ref,
+            reason_codes: wire.reason_codes,
+            confidence_bps: wire.confidence_bps,
+            evidence_basis_refs: wire.evidence_basis_refs,
+        };
+        value.validate().map_err(de::Error::custom)?;
+        Ok(value)
+    }
+}
+
 /// A versioned, evidence-backed relation between a run and runtime identity.
 #[derive(schemars::JsonSchema, Clone, Debug, Eq, PartialEq, Serialize)]
 #[schemars(deny_unknown_fields)]
@@ -719,7 +789,10 @@ pub struct RuntimeBinding {
     #[schemars(length(min = 1, max = 512))]
     evidence_basis_ref: String,
     attribution: RuntimeAttribution,
-    alternative_runtime_refs: Vec<String>,
+    reason_codes: Vec<String>,
+    #[schemars(range(max = 10000))]
+    confidence_bps: Option<u16>,
+    alternative_runtime_candidates: Vec<RuntimeBindingCandidate>,
 }
 
 impl RuntimeBinding {
@@ -733,7 +806,13 @@ impl RuntimeBinding {
         self.attribution
     }
 
-    fn validate(&self) -> Result<(), ContractError> {
+    /// Return every scored alternative retained for an ambiguous binding.
+    pub fn alternative_runtime_candidates(&self) -> &[RuntimeBindingCandidate] {
+        &self.alternative_runtime_candidates
+    }
+
+    /// Validate binding evidence without consulting run or lease state.
+    pub fn validate(&self) -> Result<(), ContractError> {
         validate_contract_identifier(&self.binding_id, "binding.binding_id")?;
         validate_reference(&self.identity_ref, "binding.identity_ref")?;
         validate_reference(&self.evidence_basis_ref, "binding.evidence_basis_ref")?;
@@ -752,37 +831,78 @@ impl RuntimeBinding {
                 reason: "must be greater than valid_from_unix_ms",
             });
         }
-        for alternative in &self.alternative_runtime_refs {
-            validate_reference(alternative, "binding.alternative_runtime_refs")?;
+        for candidate in &self.alternative_runtime_candidates {
+            candidate.validate()?;
         }
         reject_duplicate_refs(
-            self.alternative_runtime_refs.iter().map(String::as_str),
-            "binding.alternative_runtime_refs",
+            self.alternative_runtime_candidates
+                .iter()
+                .map(|candidate| candidate.identity_ref.as_str()),
+            "binding.alternative_runtime_candidates",
         )?;
+
         match self.attribution {
-            RuntimeAttribution::Exact
-                if self.evidence_basis != RuntimeBindingBasis::PropagatedAndValidated =>
-            {
-                Err(ContractError::InvalidField {
-                    field: "binding.attribution",
-                    reason: "exact requires a propagated and independently validated identity",
-                })
+            RuntimeAttribution::Exact => {
+                if self.evidence_basis != RuntimeBindingBasis::PropagatedAndValidated
+                    || !self.reason_codes.is_empty()
+                    || self.confidence_bps.is_some()
+                    || !self.alternative_runtime_candidates.is_empty()
+                {
+                    return Err(ContractError::InvalidField {
+                        field: "binding.attribution",
+                        reason: "exact requires propagated validation without heuristic scoring",
+                    });
+                }
             }
-            RuntimeAttribution::Ambiguous if self.alternative_runtime_refs.is_empty() => {
-                Err(ContractError::InvalidField {
-                    field: "binding.alternative_runtime_refs",
-                    reason: "ambiguous attribution must retain at least one alternative",
-                })
+            RuntimeAttribution::Inferred => {
+                validate_reason_codes(&self.reason_codes, "binding.reason_codes")?;
+                if self.confidence_bps.is_none_or(|value| value > 10_000)
+                    || !self.alternative_runtime_candidates.is_empty()
+                {
+                    return Err(ContractError::InvalidField {
+                        field: "binding.confidence_bps",
+                        reason: "inferred requires one bounded score and no alternatives",
+                    });
+                }
             }
-            RuntimeAttribution::Exact if !self.alternative_runtime_refs.is_empty() => {
-                Err(ContractError::InvalidField {
-                    field: "binding.alternative_runtime_refs",
-                    reason: "exact attribution cannot retain alternatives",
-                })
+            RuntimeAttribution::Ambiguous => {
+                validate_reason_codes(&self.reason_codes, "binding.reason_codes")?;
+                if self.confidence_bps.is_some() || self.alternative_runtime_candidates.is_empty() {
+                    return Err(ContractError::InvalidField {
+                        field: "binding.alternative_runtime_candidates",
+                        reason: "ambiguous requires scored alternatives and no best score",
+                    });
+                }
             }
-            _ => Ok(()),
+            RuntimeAttribution::Unattributed => {
+                validate_reason_codes(&self.reason_codes, "binding.reason_codes")?;
+                if self.confidence_bps.is_some() || !self.alternative_runtime_candidates.is_empty()
+                {
+                    return Err(ContractError::InvalidField {
+                        field: "binding.attribution",
+                        reason: "unattributed cannot carry scores or candidates",
+                    });
+                }
+            }
         }
+        Ok(())
     }
+}
+
+fn validate_reason_codes(
+    reason_codes: &[String],
+    field: &'static str,
+) -> Result<(), ContractError> {
+    if reason_codes.is_empty() {
+        return Err(ContractError::InvalidField {
+            field,
+            reason: "must not be empty",
+        });
+    }
+    for reason in reason_codes {
+        validate_contract_identifier(reason, field)?;
+    }
+    reject_duplicate_refs(reason_codes.iter().map(String::as_str), field)
 }
 
 impl<'de> Deserialize<'de> for RuntimeBinding {
@@ -801,7 +921,9 @@ impl<'de> Deserialize<'de> for RuntimeBinding {
             evidence_basis: RuntimeBindingBasis,
             evidence_basis_ref: String,
             attribution: RuntimeAttribution,
-            alternative_runtime_refs: Vec<String>,
+            reason_codes: Vec<String>,
+            confidence_bps: Option<u16>,
+            alternative_runtime_candidates: Vec<RuntimeBindingCandidate>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let value = Self {
@@ -813,7 +935,9 @@ impl<'de> Deserialize<'de> for RuntimeBinding {
             evidence_basis: wire.evidence_basis,
             evidence_basis_ref: wire.evidence_basis_ref,
             attribution: wire.attribution,
-            alternative_runtime_refs: wire.alternative_runtime_refs,
+            reason_codes: wire.reason_codes,
+            confidence_bps: wire.confidence_bps,
+            alternative_runtime_candidates: wire.alternative_runtime_candidates,
         };
         value.validate().map_err(de::Error::custom)?;
         Ok(value)
@@ -845,6 +969,11 @@ impl BindRuntimeRequest {
     /// Return the required lease assertion.
     pub fn lease_id(&self) -> &str {
         &self.lease_id
+    }
+
+    /// Return the versioned runtime relation asserted by this request.
+    pub fn binding(&self) -> &RuntimeBinding {
+        &self.binding
     }
 
     fn validate(&self) -> Result<(), ContractError> {
@@ -987,10 +1116,6 @@ pub enum IngestDisposition {
     Committed,
     /// Exact prior event and digest returned its original acknowledgement.
     Duplicate,
-    /// Rejected without a novel commit.
-    Rejected,
-    /// Not committed because the bounded write plane has no capacity.
-    Backpressured,
 }
 
 /// Per-envelope acknowledgement in an ingest result.
@@ -1011,7 +1136,6 @@ impl EnvelopeAck {
             {
                 Ok(())
             }
-            (IngestDisposition::Rejected | IngestDisposition::Backpressured, None) => Ok(()),
             _ => Err(ContractError::InvalidField {
                 field: "acknowledgements.ingest_sequence",
                 reason: "must be present only for committed or duplicate envelopes",
@@ -1148,7 +1272,6 @@ impl IngestAck {
             match acknowledgement.disposition {
                 IngestDisposition::Committed => committed += 1,
                 IngestDisposition::Duplicate => duplicates += 1,
-                IngestDisposition::Rejected | IngestDisposition::Backpressured => {}
             }
             max_ingest_sequence =
                 max_ingest_sequence.max(acknowledgement.ingest_sequence.unwrap_or_default());

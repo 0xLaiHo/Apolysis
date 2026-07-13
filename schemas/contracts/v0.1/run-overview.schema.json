@@ -163,6 +163,18 @@
         "computation_version": {
           "type": "string"
         },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "evidence_refs": {
           "type": "array",
           "items": {
@@ -197,7 +209,9 @@
         "projection_revision",
         "input_watermark",
         "reason_codes",
-        "evidence_refs"
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
       ]
     },
     "ComputedCoverage2": {
@@ -206,6 +220,18 @@
       "properties": {
         "computation_version": {
           "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "evidence_refs": {
           "type": "array",
@@ -241,7 +267,9 @@
         "projection_revision",
         "input_watermark",
         "reason_codes",
-        "evidence_refs"
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
       ]
     },
     "ComputedCoverage3": {
@@ -250,6 +278,18 @@
       "properties": {
         "computation_version": {
           "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "evidence_refs": {
           "type": "array",
@@ -285,7 +325,9 @@
         "projection_revision",
         "input_watermark",
         "reason_codes",
-        "evidence_refs"
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
       ]
     },
     "CoverageGap": {
@@ -754,21 +796,6 @@
           "description": "Kubernetes service-account token access.",
           "type": "string",
           "const": "service_account_token_read"
-        },
-        {
-          "description": "Required source or sequence coverage gap.",
-          "type": "string",
-          "const": "source_gap"
-        },
-        {
-          "description": "Claimed and independently verified outcomes disagree.",
-          "type": "string",
-          "const": "outcome_mismatch"
-        },
-        {
-          "description": "Multiple attribution candidates remain.",
-          "type": "string",
-          "const": "ambiguous_attribution"
         }
       ]
     },

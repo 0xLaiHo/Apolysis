@@ -92,16 +92,6 @@
           "description": "Exact prior event and digest returned its original acknowledgement.",
           "type": "string",
           "const": "duplicate"
-        },
-        {
-          "description": "Rejected without a novel commit.",
-          "type": "string",
-          "const": "rejected"
-        },
-        {
-          "description": "Not committed because the bounded write plane has no capacity.",
-          "type": "string",
-          "const": "backpressured"
         }
       ]
     },

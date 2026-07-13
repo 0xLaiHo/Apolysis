@@ -189,8 +189,10 @@ causality or source honesty.
 A Finding has a stable identifier, canonical kind, rule version, severity,
 state, affected entities, evidence references, relevant coverage state, and
 creation/update times. Deduplication must be deterministic within its declared
-scope. The current implementation's finding vocabulary and the JSONL contract
-must agree before a frontend contract is frozen.
+scope. Console v0 and legacy JSONL v1 share the same eight finding kinds,
+locked by the accountability golden fixture. Coverage gaps, outcome mismatch,
+and ambiguous attribution remain typed read-model states rather than silently
+expanding that vocabulary.
 
 For Console v0, Findings are read-only investigation results. Acknowledgement,
 assignment, resolution, suppression, and other workflow transitions belong to

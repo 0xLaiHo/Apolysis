@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::{
+    id::validate_contract_identifier,
     AuthorityRef, ClockBasis, ContractErrorCode, CoverageReasonCode, CoverageSummary,
     EnvironmentKind, OrganizationId, OutcomeComparisonState, OutcomeCoverageState, PrincipalRef,
     RunId, RunState, SourceCapability, SourceId, SourceKind, TrustProfile,
@@ -808,12 +809,6 @@ pub enum FindingKind {
     DangerousCommand,
     /// Kubernetes service-account token access.
     ServiceAccountTokenRead,
-    /// Required source or sequence coverage gap.
-    SourceGap,
-    /// Claimed and independently verified outcomes disagree.
-    OutcomeMismatch,
-    /// Multiple attribution candidates remain.
-    AmbiguousAttribution,
 }
 
 /// Finding severity supplied by the versioned finding projector.
@@ -924,25 +919,8 @@ fn validate_safe_reference(value: &str) -> Result<(), &'static str> {
 }
 
 fn validate_opaque_reference(value: &str) -> Result<(), &'static str> {
-    if value.is_empty()
-        || value.len() > 128
-        || value == "."
-        || value == ".."
-        || !value
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_ascii_alphanumeric())
-        || !value
-            .chars()
-            .next_back()
-            .is_some_and(|character| character.is_ascii_alphanumeric())
-        || !value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
-    {
-        return Err("opaque reference must use safe identifier syntax");
-    }
-    Ok(())
+    validate_contract_identifier(value, "query_reference")
+        .map_err(|_| "opaque reference must use safe identifier syntax")
 }
 
 fn validate_reason_codes(values: &[String]) -> Result<(), &'static str> {

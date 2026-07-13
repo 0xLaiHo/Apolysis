@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_contracts::{
-    AgentExecutionRecordItem, CoverageSummary, EvidenceBoundary, ExecutionCoverageState,
-    OutcomeCoverageState, PrivacyCapability, RunDescriptor, SemanticCoverageState, SourceEnvelope,
-    SourceManifest,
+    AgentExecutionRecordFact, AgentExecutionRecordItem, CoverageSummary, EvidenceBoundary,
+    ExecutionCoverageState, OutcomeCoverageState, PrivacyCapability, RunDescriptor,
+    SemanticCoverageState, SourceEnvelope, SourceManifest,
 };
 
 #[test]
@@ -36,6 +36,16 @@ fn positive_fixtures_deserialize_through_validated_public_contracts() {
         serde_json::from_str(include_str!("fixtures/positive/coverage_states.json"))
             .expect("all coverage states are valid");
     assert_eq!(summaries.len(), 5);
+    assert!(summaries[0]
+        .semantic()
+        .contributing_source_refs()
+        .iter()
+        .any(|source| source.as_str() == "source_semantic"));
+    assert!(summaries[1]
+        .semantic()
+        .coverage_gap_refs()
+        .iter()
+        .any(|gap| gap == "gap_semantic_missing"));
     assert_eq!(
         summaries
             .iter()
@@ -92,6 +102,19 @@ fn append_item_round_trips_with_server_scope_and_source_assertion_separated() {
         serde_json::to_value(&item).expect("serialize item"),
         serde_json::from_str::<serde_json::Value>(source).expect("fixture JSON")
     );
+}
+
+#[test]
+fn runtime_binding_is_a_first_class_append_fact() {
+    let item: AgentExecutionRecordItem = serde_json::from_str(include_str!(
+        "fixtures/positive/record_item_runtime_bound.json"
+    ))
+    .expect("valid runtime-bound append item");
+    assert!(matches!(
+        item.fact(),
+        AgentExecutionRecordFact::RuntimeBound(binding)
+            if binding.attribution() == apolysis_contracts::RuntimeAttribution::Exact
+    ));
 }
 
 #[test]
@@ -170,5 +193,30 @@ fn source_envelope_enforces_typed_content_off_payloads_and_integrity() {
         let error = serde_json::from_str::<SourceEnvelope>(fixture)
             .expect_err("invalid source payload boundary must fail");
         assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn every_coverage_state_has_a_deterministic_negative_case() {
+    let positives: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/positive/coverage_states.json"))
+            .expect("valid coverage positives");
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/negative/coverage_state_cases.json"))
+            .expect("valid coverage negative-case fixture");
+    assert_eq!(cases.len(), 13);
+
+    for case in cases {
+        let dimension = case["dimension"].as_str().expect("dimension string");
+        let state = case["state"].as_str().expect("state string");
+        let mut invalid = positives
+            .iter()
+            .find(|summary| summary[dimension]["state"] == state)
+            .unwrap_or_else(|| panic!("missing positive {dimension}/{state}"))
+            .clone();
+        invalid[dimension]["reason_codes"] = serde_json::json!([]);
+        let error = serde_json::from_value::<CoverageSummary>(invalid)
+            .expect_err("coverage without a reason must fail");
+        assert!(error.to_string().contains("reason_codes"));
     }
 }

@@ -28,6 +28,15 @@ fn four_gateway_operations_have_stable_positive_wire_fixtures() {
 
     let _: OpenRunResponse = parse("positive/open_run_response.json");
     let _: BindRuntimeRequest = parse("positive/bind_runtime_request.json");
+    let ambiguous: BindRuntimeRequest = parse("positive/bind_runtime_ambiguous_request.json");
+    assert_eq!(
+        ambiguous.binding().alternative_runtime_candidates().len(),
+        1
+    );
+    assert_eq!(
+        ambiguous.binding().alternative_runtime_candidates()[0].confidence_bps(),
+        6400
+    );
     let _: BindRuntimeResponse = parse("positive/bind_runtime_response.json");
 
     let ingest: IngestRequest = parse("positive/ingest_request.json");
@@ -142,6 +151,10 @@ fn semantic_validation_rejects_invalid_batches_bindings_positions_and_acks() {
         serde_json::from_str::<IngestAck>(&fixture("negative/ingest_ack_invalid_gap.json"))
             .is_err()
     );
+    assert!(serde_json::from_str::<IngestAck>(&fixture(
+        "negative/ingest_ack_mixed_atomicity.json"
+    ))
+    .is_err());
 
     let mut oversized: serde_json::Value =
         serde_json::from_str(&fixture("positive/ingest_request.json")).unwrap();

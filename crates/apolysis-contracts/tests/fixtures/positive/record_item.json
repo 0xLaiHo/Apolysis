@@ -8,6 +8,8 @@
     "fact_type": "evidence_accepted",
     "fact": {
       "effective_trust_profile": "harness_observed",
+      "manifest_version": "0.1",
+      "manifest_digest": "7123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "envelope": {
         "schema_version": "0.1",
         "run_id": "run_01",

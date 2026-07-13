@@ -13,6 +13,8 @@
     "evidence_basis": "propagated_and_validated",
     "evidence_basis_ref": "kubernetes_uid_readback_01",
     "attribution": "exact",
-    "alternative_runtime_refs": []
+    "reason_codes": [],
+    "confidence_bps": null,
+    "alternative_runtime_candidates": []
   }
 }

@@ -1,0 +1,23 @@
+{
+  "schema_version": "0.1",
+  "organization_id": "org_acme",
+  "run_id": "run_01",
+  "ingest_sequence": 2,
+  "ingested_at_unix_ms": 1783891200100,
+  "fact": {
+    "fact_type": "runtime_bound",
+    "fact": {
+      "binding_id": "binding_pod_01",
+      "identity_kind": "pod",
+      "identity_ref": "cluster_a:namespace_default:pod_agent_01",
+      "valid_from_unix_ms": 1783891200000,
+      "valid_until_unix_ms": 1783894800000,
+      "evidence_basis": "propagated_and_validated",
+      "evidence_basis_ref": "kubernetes_uid_readback_01",
+      "attribution": "exact",
+      "reason_codes": [],
+      "confidence_bps": null,
+      "alternative_runtime_candidates": []
+    }
+  }
+}

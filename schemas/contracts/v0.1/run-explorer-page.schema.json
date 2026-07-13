@@ -40,6 +40,18 @@
         "computation_version": {
           "type": "string"
         },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "evidence_refs": {
           "type": "array",
           "items": {
@@ -74,7 +86,9 @@
         "projection_revision",
         "input_watermark",
         "reason_codes",
-        "evidence_refs"
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
       ]
     },
     "ComputedCoverage2": {
@@ -83,6 +97,18 @@
       "properties": {
         "computation_version": {
           "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "evidence_refs": {
           "type": "array",
@@ -118,7 +144,9 @@
         "projection_revision",
         "input_watermark",
         "reason_codes",
-        "evidence_refs"
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
       ]
     },
     "ComputedCoverage3": {
@@ -127,6 +155,18 @@
       "properties": {
         "computation_version": {
           "type": "string"
+        },
+        "contributing_source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceId"
+          }
+        },
+        "coverage_gap_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "evidence_refs": {
           "type": "array",
@@ -162,7 +202,9 @@
         "projection_revision",
         "input_watermark",
         "reason_codes",
-        "evidence_refs"
+        "evidence_refs",
+        "contributing_source_refs",
+        "coverage_gap_refs"
       ]
     },
     "CoverageReasonCode": {
@@ -608,6 +650,13 @@
           "const": "unavailable"
         }
       ]
+    },
+    "SourceId": {
+      "description": "A registered Evidence Source identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
     }
   }
 }

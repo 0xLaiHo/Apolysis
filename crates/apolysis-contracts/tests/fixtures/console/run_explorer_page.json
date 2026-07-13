@@ -10,9 +10,9 @@
       "finished_at_unix_ms": 1783900860000,
       "coverage": {
         "schema_version": "0.1",
-        "semantic": {"state": "complete", "computation_version": "coverage_v1", "projection_revision": 12, "input_watermark": 42, "reason_codes": ["requirements_satisfied"], "evidence_refs": ["evidence-semantic-001"]},
-        "execution": {"state": "host_verified", "computation_version": "coverage_v1", "projection_revision": 12, "input_watermark": 42, "reason_codes": ["requirements_satisfied"], "evidence_refs": ["evidence-execution-001"]},
-        "outcome": {"state": "verified", "computation_version": "coverage_v1", "projection_revision": 12, "input_watermark": 42, "reason_codes": ["requirements_satisfied"], "evidence_refs": ["evidence-readback-001"]},
+        "semantic": {"state": "complete", "computation_version": "coverage_v1", "projection_revision": 12, "input_watermark": 42, "reason_codes": ["requirements_satisfied"], "evidence_refs": ["evidence-semantic-001"], "contributing_source_refs": [], "coverage_gap_refs": []},
+        "execution": {"state": "host_verified", "computation_version": "coverage_v1", "projection_revision": 12, "input_watermark": 42, "reason_codes": ["requirements_satisfied"], "evidence_refs": ["evidence-execution-001"], "contributing_source_refs": [], "coverage_gap_refs": []},
+        "outcome": {"state": "verified", "computation_version": "coverage_v1", "projection_revision": 12, "input_watermark": 42, "reason_codes": ["requirements_satisfied"], "evidence_refs": ["evidence-readback-001"], "contributing_source_refs": [], "coverage_gap_refs": []},
         "outcome_comparison": "match"
       },
       "active_finding_count": 0,
@@ -29,9 +29,9 @@
       "finished_at_unix_ms": null,
       "coverage": {
         "schema_version": "0.1",
-        "semantic": {"state": "partial", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["source_loss"], "evidence_refs": []},
-        "execution": {"state": "opaque", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["opaque_boundary"], "evidence_refs": []},
-        "outcome": {"state": "unconfirmed", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["verifier_missing"], "evidence_refs": ["evidence-claim-partial"]},
+        "semantic": {"state": "partial", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["source_loss"], "evidence_refs": [], "contributing_source_refs": [], "coverage_gap_refs": []},
+        "execution": {"state": "opaque", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["opaque_boundary"], "evidence_refs": [], "contributing_source_refs": [], "coverage_gap_refs": []},
+        "outcome": {"state": "unconfirmed", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["verifier_missing"], "evidence_refs": ["evidence-claim-partial"], "contributing_source_refs": [], "coverage_gap_refs": []},
         "outcome_comparison": "unresolved"
       },
       "active_finding_count": 1,

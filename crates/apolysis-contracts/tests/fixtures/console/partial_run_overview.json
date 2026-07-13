@@ -12,9 +12,9 @@
   "finished_at_unix_ms": null,
   "coverage": {
     "schema_version": "0.1",
-    "semantic": {"state": "partial", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["source_loss"], "evidence_refs": ["evidence-semantic-partial"]},
-    "execution": {"state": "opaque", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["opaque_boundary"], "evidence_refs": []},
-    "outcome": {"state": "unconfirmed", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["verifier_missing"], "evidence_refs": ["evidence-claim-partial"]},
+    "semantic": {"state": "partial", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["source_loss"], "evidence_refs": ["evidence-semantic-partial"], "contributing_source_refs": [], "coverage_gap_refs": []},
+    "execution": {"state": "opaque", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["opaque_boundary"], "evidence_refs": [], "contributing_source_refs": [], "coverage_gap_refs": []},
+    "outcome": {"state": "unconfirmed", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["verifier_missing"], "evidence_refs": ["evidence-claim-partial"], "contributing_source_refs": [], "coverage_gap_refs": []},
     "outcome_comparison": "unresolved"
   },
   "outcome": {
@@ -60,7 +60,7 @@
     }
   ],
   "coverage_gaps": [{"gap_ref": "gap-ci-001", "reason_code": "source_loss", "required": true, "source_id": "source-ci-hook", "source_stream_ref": "stream-ci-partial", "missing_from_sequence": 8, "missing_to_sequence": 9, "detected_at_unix_ms": 1783900920000, "resolved_at_unix_ms": null}],
-  "findings": [{"finding_ref": "finding-source-gap-001", "kind": "source_gap", "severity": "medium", "state": "open", "rule_ref": "rule-required-source-gap", "rule_version": "1.0.0", "affected_entity_refs": ["run-partial-001", "source-ci-hook"], "coverage_reason_codes": ["source_loss"], "evidence_refs": [{"evidence_ref": "evidence-semantic-partial", "category": "finding", "source_id": "source-ci-hook", "access": "metadata_only", "redacted": true, "size_bytes": null}], "first_seen_at_unix_ms": 1783900920000, "last_seen_at_unix_ms": 1783900931000}],
+  "findings": [],
   "evidence_refs": [{"evidence_ref": "evidence-semantic-partial", "category": "semantic", "source_id": "source-ci-hook", "access": "metadata_only", "redacted": true, "size_bytes": null}],
   "projection": {"view_version": "0", "computation_version": "console_v0", "projection_revision": 7, "input_watermark": 17, "projected_at_unix_ms": 1783900932000, "freshness": "current", "lag_ms": 1000}
 }

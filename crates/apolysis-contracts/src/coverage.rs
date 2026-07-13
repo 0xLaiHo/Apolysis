@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use serde::{de, Deserialize, Deserializer, Serialize};
 
-use crate::{id::validate_contract_identifier, ContractError, SchemaVersion};
+use crate::{id::validate_contract_identifier, ContractError, SchemaVersion, SourceId};
 
 /// Server-derived Semantic Coverage states.
 #[derive(
@@ -112,6 +112,8 @@ pub struct ComputedCoverage<S> {
     #[schemars(length(min = 1))]
     reason_codes: Vec<CoverageReasonCode>,
     evidence_refs: Vec<String>,
+    contributing_source_refs: Vec<SourceId>,
+    coverage_gap_refs: Vec<String>,
 }
 
 impl<S> ComputedCoverage<S> {
@@ -128,6 +130,16 @@ impl<S> ComputedCoverage<S> {
     /// Return the durable input watermark used by this computation.
     pub fn input_watermark(&self) -> u64 {
         self.input_watermark
+    }
+
+    /// Return sources that contributed to this coverage computation.
+    pub fn contributing_source_refs(&self) -> &[SourceId] {
+        &self.contributing_source_refs
+    }
+
+    /// Return explicit Coverage Gap identities that limit this dimension.
+    pub fn coverage_gap_refs(&self) -> &[String] {
+        &self.coverage_gap_refs
     }
 
     fn validate(&self) -> Result<(), ContractError> {
@@ -153,6 +165,16 @@ impl<S> ComputedCoverage<S> {
                 });
             }
         }
+        reject_duplicates(&self.contributing_source_refs, "contributing_source_refs")?;
+        let mut gaps = BTreeSet::new();
+        for reference in &self.coverage_gap_refs {
+            validate_contract_identifier(reference, "coverage_gap_refs")?;
+            if !gaps.insert(reference) {
+                return Err(ContractError::DuplicateValue {
+                    field: "coverage_gap_refs",
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -166,6 +188,8 @@ struct ComputedCoverageWire<S> {
     input_watermark: u64,
     reason_codes: Vec<CoverageReasonCode>,
     evidence_refs: Vec<String>,
+    contributing_source_refs: Vec<SourceId>,
+    coverage_gap_refs: Vec<String>,
 }
 
 impl<'de, S> Deserialize<'de> for ComputedCoverage<S>
@@ -184,6 +208,8 @@ where
             input_watermark: wire.input_watermark,
             reason_codes: wire.reason_codes,
             evidence_refs: wire.evidence_refs,
+            contributing_source_refs: wire.contributing_source_refs,
+            coverage_gap_refs: wire.coverage_gap_refs,
         };
         value.validate().map_err(de::Error::custom)?;
         Ok(value)

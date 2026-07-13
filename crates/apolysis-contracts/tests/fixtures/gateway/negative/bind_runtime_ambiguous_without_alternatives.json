@@ -7,6 +7,8 @@
     "binding_id": "binding_pid_01", "identity_kind": "process", "identity_ref": "pid_123",
     "valid_from_unix_ms": 1783891200000, "valid_until_unix_ms": null,
     "evidence_basis": "heuristic_match",
-    "evidence_basis_ref": "pid_time_match_01", "attribution": "ambiguous", "alternative_runtime_refs": []
+    "evidence_basis_ref": "pid_time_match_01", "attribution": "ambiguous",
+    "reason_codes": ["pid_time_match"], "confidence_bps": null,
+    "alternative_runtime_candidates": []
   }
 }

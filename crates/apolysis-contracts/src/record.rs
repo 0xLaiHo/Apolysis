@@ -4,7 +4,7 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::{
     AcceptedSourceEnvelope, ContractError, CoverageSummary, OrganizationId, RegisteredSource,
-    RunDescriptor, RunId, RunStateTransition, SchemaVersion,
+    RunDescriptor, RunId, RunStateTransition, RuntimeBinding, SchemaVersion,
 };
 
 /// The typed fact retained in one append-oriented record item.
@@ -17,6 +17,8 @@ pub enum AgentExecutionRecordFact {
     RunStateChanged(RunStateTransition),
     /// Server-accepted source registration and effective trust.
     SourceRegistered(Box<RegisteredSource>),
+    /// Evidence-backed relation between the run and an execution identity.
+    RuntimeBound(Box<RuntimeBinding>),
     /// Source evidence after acceptance and effective-trust assignment.
     EvidenceAccepted(Box<AcceptedSourceEnvelope>),
     /// A rebuildable server-side coverage computation.
@@ -34,6 +36,7 @@ impl<'de> Deserialize<'de> for AgentExecutionRecordFact {
             RunOpened(Box<RunDescriptor>),
             RunStateChanged(RunStateTransition),
             SourceRegistered(Box<RegisteredSource>),
+            RuntimeBound(Box<RuntimeBinding>),
             EvidenceAccepted(Box<AcceptedSourceEnvelope>),
             CoverageComputed(Box<CoverageSummary>),
         }
@@ -42,6 +45,7 @@ impl<'de> Deserialize<'de> for AgentExecutionRecordFact {
             Wire::RunOpened(value) => Self::RunOpened(value),
             Wire::RunStateChanged(value) => Self::RunStateChanged(value),
             Wire::SourceRegistered(value) => Self::SourceRegistered(value),
+            Wire::RuntimeBound(value) => Self::RuntimeBound(value),
             Wire::EvidenceAccepted(value) => Self::EvidenceAccepted(value),
             Wire::CoverageComputed(value) => Self::CoverageComputed(value),
         })
@@ -113,6 +117,7 @@ impl AgentExecutionRecordItem {
             }
             AgentExecutionRecordFact::RunStateChanged(transition) => transition.validate()?,
             AgentExecutionRecordFact::SourceRegistered(source) => source.validate()?,
+            AgentExecutionRecordFact::RuntimeBound(binding) => binding.validate()?,
             AgentExecutionRecordFact::EvidenceAccepted(accepted) => {
                 if accepted.envelope().run_id() != &self.run_id {
                     return Err(ContractError::InvalidField {

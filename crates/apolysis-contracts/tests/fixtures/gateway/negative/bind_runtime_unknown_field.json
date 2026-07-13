@@ -7,7 +7,8 @@
     "binding_id": "binding_pod_01", "identity_kind": "pod", "identity_ref": "pod_agent_01",
     "valid_from_unix_ms": 1783891200000, "valid_until_unix_ms": null,
     "evidence_basis": "propagated_and_validated",
-    "evidence_basis_ref": "kubernetes_uid_01", "attribution": "exact", "alternative_runtime_refs": []
+    "evidence_basis_ref": "kubernetes_uid_01", "attribution": "exact",
+    "reason_codes": [], "confidence_bps": null, "alternative_runtime_candidates": []
   },
   "authenticated_principal": "forged"
 }

@@ -1,12 +1,12 @@
 {
   "finding_ref": "finding-read-only-001",
-  "kind": "outcome_mismatch",
+  "kind": "missing_intent",
   "severity": "high",
   "state": "open",
-  "rule_ref": "rule-outcome-mismatch",
+  "rule_ref": "rule-missing-intent",
   "rule_version": "1.0.0",
   "affected_entity_refs": ["run-outcome-mismatch-001", "tool-call-001"],
-  "coverage_reason_codes": ["outcome_mismatch"],
+  "coverage_reason_codes": ["required_evidence_missing"],
   "evidence_refs": [
     {"evidence_ref": "evidence-claim-mismatch", "category": "claimed_outcome", "source_id": "source-agent-claim", "access": "metadata_only", "redacted": true, "size_bytes": null},
     {"evidence_ref": "evidence-readback-mismatch", "category": "verified_outcome", "source_id": "source-git-readback", "access": "metadata_only", "redacted": true, "size_bytes": null}

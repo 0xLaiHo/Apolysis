@@ -81,7 +81,8 @@ window, evidence basis, and relation representation.
 - An explicitly propagated, independently validated runtime identifier may be
   `exact` within its trust boundary.
 - PID, time, working-directory, argument, or name matching remains `inferred`
-  or `ambiguous` and records alternatives.
+  or `ambiguous` and records typed reasons, bounded confidence, evidence basis,
+  and every scored alternative rather than only a selected best match.
 - A conflicting exclusive runtime identity is rejected or represented as an
   explicit conflict; it is never silently reassigned between active runs.
 - Repeating the same binding identifier and digest is idempotent. Reusing it
@@ -99,9 +100,12 @@ the batch. Exact duplicates may be acknowledged alongside newly committed
 envelopes.
 
 For each novel accepted envelope, the Gateway atomically persists the envelope,
-deduplication digest, server ingest sequence, and projection-outbox intent. An
-acknowledgement distinguishes committed, duplicate, rejected, and backpressured
-inputs and reports the durable watermark and any known source-sequence gaps.
+deduplication digest, server ingest sequence, and projection-outbox intent. A
+successful acknowledgement contains only newly committed and exact duplicate
+inputs, and reports the durable watermark and any known source-sequence gaps.
+Schema, capability, privacy, or integrity rejection is an operation-level error
+for the whole batch. Backpressure is also an operation-level retryable error and
+commits no novel envelope; neither case returns a mixed per-envelope result.
 
 An acknowledgement means durable acceptance, not projection visibility,
 verified outcome, or successful execution.
