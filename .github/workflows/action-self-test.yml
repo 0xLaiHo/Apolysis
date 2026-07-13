@@ -352,10 +352,10 @@ jobs:
           check 'legacy workspace output symlink remains untouched' \
             "[[ -L .apolysis-action && $(readlink .apolysis-action) == '$sentinel' ]]"
           check 'root-owned sentinel directory remains unchanged' \
-            "[[ $(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%a' '$sentinel') == 0:0:700 ]]"
+            '[[ $(/usr/bin/sudo -n /usr/bin/stat -c "%u:%g:%a" "$sentinel") == 0:0:700 ]]'
           check 'root-owned sentinel file remains unchanged' \
-            "[[ $(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%a' '$sentinel/unchanged.txt') == 0:0:600 \
-              && $(/usr/bin/sudo -n /usr/bin/cat '$sentinel/unchanged.txt') == root-owned-sentinel ]]"
+            '[[ $(/usr/bin/sudo -n /usr/bin/stat -c "%u:%g:%a" "$sentinel/unchanged.txt") == 0:0:600 \
+              && $(/usr/bin/sudo -n /usr/bin/cat "$sentinel/unchanged.txt") == root-owned-sentinel ]]'
           check 'no root-owned Action path survives success or rejection' \
             "! /usr/bin/sudo -n find /var/tmp -maxdepth 1 -type d \
               \( -name 'apolysis-action-stage.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.*' \

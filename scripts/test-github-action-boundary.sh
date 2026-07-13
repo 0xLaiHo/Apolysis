@@ -5,6 +5,7 @@ set -Eeuo pipefail
 readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly repository_root="$(cd -- "$script_dir/.." && pwd)"
 readonly action_file="$repository_root/action.yml"
+readonly action_self_test="$repository_root/.github/workflows/action-self-test.yml"
 readonly boundary_helper="$repository_root/scripts/github-action-boundary.sh"
 readonly pinned_bundle_digest='6d6ea336fc4fdd9461bb85fdb6829ec5b7343a81c8040aa899ded3ab1affb78e'
 
@@ -139,6 +140,9 @@ privileged_shell_count="$(grep -c \
     || fail 'a composite run step can import caller-controlled Bash startup state'
 if grep -Eq '/usr/bin/sudo.*/usr/bin/bash' "$action_file"; then
     fail 'the privileged observer path still starts a root Bash process'
+fi
+if grep -Eq "/usr/bin/(stat|cat).*'\\\$sentinel" "$action_self_test"; then
+    fail 'a sentinel assertion expands its path before the deferred eval check'
 fi
 
 env_block_count="$(grep -c '^      env:' "$action_file")"
