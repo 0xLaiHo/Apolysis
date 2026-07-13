@@ -61,15 +61,17 @@ pilot。每次 run 将分别显示 semantic、execution 与 outcome coverage。
 W1–W2 现已建立独立的 `apolysis-contracts` 边界、版本化 record、Gateway、coverage 与
 Query/Console wire type、兼容性 fixture 和规范契约文档。当前 `pre-release`
 实现线在该输入之上实现了带认证上下文的 application core、非耐久内存
-reference adapter，以及一个由 migration 管理的初始 PostgreSQL write adapter，它们共同
-覆盖四个标准 Gateway 操作。这些原型验证了服务器端 grant/policy join、RFC 8785
+reference adapter、一个覆盖四个标准 Gateway 操作且由 migration 管理的初始 PostgreSQL
+write adapter，以及首个由 PostgreSQL current credential authority 支撑的 direct-mTLS
+`open_run` transport 切片。这些原型验证了服务器端 grant/policy join、RFC 8785
 摘要黄金向量、record append 与 outbox 的原子语义、加密的精确 operation replay，
 以及有界的 finishing 生命周期。
 
 该切片尚不能投入生产，也不代表 W3–W6 已完成。它尚未通过 server restart、
 WAL/crash、多进程或高可用资格验证，没有生产 KMS integration 或 database RLS
-deployment，也未提供网络传输与实时凭证撤销、对象存储解析器、后台清理/deadline
-reaper，以及生产级速率或请求大小限制。耐久 projector、Query service 和 Web Console
+deployment；`bind_runtime`、`ingest` 与 `finish_run` 尚未经过 transport，current authority
+也尚未与 ledger commit 做原子复核，lease/credential rotation 门禁仍然开启；此外还没有
+对象存储解析器或后台清理/deadline reaper。耐久 projector、Query service 和 Web Console
 仍是 roadmap 目标。
 外部退出门禁也会保持开启，直到三个合格设计伙伴实际确认其部署和数据边界。在公开路径完成加固前，
 不要把当前 Action 用于不可信仓库或 GitHub 拉取请求（PR）。
@@ -127,6 +129,8 @@ Apolysis 关联层
   adapter。
 - `apolysis-gateway-postgres`：初始 PostgreSQL Gateway write adapter，提供由 migration
   管理的 ledger/outbox 存储与加密 replay record。
+- `apolysis-gateway-server`：首个 direct-mTLS Gateway listener、PostgreSQL current source
+  authority 与有界 authority 管理工具。
 - `apolysis-runtime`：本地、Docker 和运行时元数据适配。
 - `apolysis-policy`：策略解析和决策逻辑。
 - `apolysis-store`：追加式 JSONL 和哈希链存储。
