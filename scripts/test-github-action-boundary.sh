@@ -109,6 +109,22 @@ grep -Fq 'SUDO_GID="$runner_gid"' "$action_file" \
     || fail 'the pinned observer is not forced to restore the invoking non-root gid'
 grep -Fq -- '--mode=0600' "$action_file" \
     || fail 'live evidence is not reserved as a root-only file'
+timeline_reservation_block="$(awk '
+    /--mode=0600/ { capture=1 }
+    capture { print }
+    capture && /chgrp.*secure_dir/ { exit }
+' "$action_file")"
+grep -Fq '/usr/bin/test -f "$timeline"' <<<"$timeline_reservation_block" \
+    || fail 'the empty reserved timeline is not validated as a regular file'
+grep -Fq '/usr/bin/test ! -L "$timeline"' <<<"$timeline_reservation_block" \
+    || fail 'the empty reserved timeline is not rejected when it is a symlink'
+grep -Fq "stat -c '%u:%g:%h:%a'" <<<"$timeline_reservation_block" \
+    || fail 'the empty reserved timeline is not validated with stable numeric metadata'
+grep -Fq "'0:0:1:600'" <<<"$timeline_reservation_block" \
+    || fail 'the empty reserved timeline does not require root ownership, one link, and mode 0600'
+if grep -Fq "stat -c '%u:%g:%F:%h:%a'" <<<"$timeline_reservation_block"; then
+    fail 'the empty reserved timeline still relies on the size-sensitive stat file-type label'
+fi
 grep -Fq "'0:0:regular file:1:600'" "$action_file" \
     || fail 'root-only live evidence mode is not asserted'
 grep -Fq 'if-no-files-found: error' "$action_file" \

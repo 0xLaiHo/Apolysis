@@ -352,8 +352,13 @@ runs:
           --group=0 \
           --mode=0600 \
           -- /dev/null "$timeline"
-        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$timeline")" == \
-          '0:0:regular file:1:600' ]]
+        if ! /usr/bin/sudo -n /usr/bin/test -f "$timeline" \
+          || ! /usr/bin/sudo -n /usr/bin/test ! -L "$timeline" \
+          || [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%h:%a' -- "$timeline")" != \
+            '0:0:1:600' ]]; then
+          echo 'Apolysis could not reserve a root-only regular timeline.' >&2
+          exit 1
+        fi
         /usr/bin/sudo -n /usr/bin/chgrp "$runner_gid" "$secure_dir" "$command_script"
         /usr/bin/sudo -n /usr/bin/chmod 0710 "$secure_dir"
         /usr/bin/sudo -n /usr/bin/chmod 0440 "$command_script"
