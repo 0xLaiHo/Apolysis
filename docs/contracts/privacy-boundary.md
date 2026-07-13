@@ -34,6 +34,16 @@ tokenized path, command, socket, repository, and workload values. A hash must
 not be used when a small input space makes reversal practical; use an
 organization-scoped keyed token instead.
 
+The current local observer enforces this boundary at one shared persistence
+seam used by fixture, standalone live, and daemon paths. Exec argv is replaced
+with `argv_redacted:true` plus allowlisted truncation markers, canonical
+`process_command` is omitted, and executable identity is represented by a
+session-scoped reference normalized across path forms. Managed-agent metadata
+records a content-off marker and does not persist its command fingerprint.
+Kernel-side argv capture is still transiently available for process-context
+resolution; disabling capture at the kernel boundary is a separate hardening
+gate and no captured argv may reach JSONL, hash-chain, or future Gateway writes.
+
 Secrets, credential values, authorization headers, kubeconfig contents, and
 provider API keys must never enter an evidence payload or object. Detection of
 a secret path records the category and a redacted reference, not the secret.

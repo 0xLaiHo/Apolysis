@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -32,8 +31,9 @@ use crate::abi::{
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
 use crate::{
-    append_policy_evaluation, canonicalize, load_policy, write_observer_metadata, AyaLoaderPlan,
-    EventIdSequence, ObserveResult, ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor,
+    append_policy_evaluation, canonicalize, load_policy, redact_runtime_event_for_persistence,
+    write_observer_metadata, AyaLoaderPlan, EventIdSequence, ObserveResult, ObserverBackend,
+    ObserverMode, ObserverRunnerPlan, Redactor,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -193,10 +193,6 @@ impl AgentRegistration {
             kind: self.kind,
             root_pid: self.pid,
             executable: self.executable,
-            command: self
-                .command
-                .unwrap_or_else(|| format!("fingerprint:{}", self.command_fingerprint)),
-            command_fingerprint: Some(self.command_fingerprint),
             workspace_root: self.workspace_root.display().to_string(),
             start_time_ticks: Some(self.start_time_ticks),
         }
@@ -354,8 +350,6 @@ struct AgentScopeMetadata {
     kind: String,
     root_pid: u32,
     executable: String,
-    command: String,
-    command_fingerprint: Option<String>,
     workspace_root: String,
     start_time_ticks: Option<u64>,
 }
@@ -957,8 +951,6 @@ fn spawn_managed_agent(
         kind: request.kind.clone(),
         root_pid,
         executable: request.executable().to_string(),
-        command: request.redacted_command(),
-        command_fingerprint: Some(command_fingerprint_from_args(&request.command)),
         workspace_root: workspace_root.display().to_string(),
         start_time_ticks: read_process_start_time_ticks(root_pid),
     };
@@ -981,14 +973,17 @@ fn write_agent_supervisor_metadata(
     metadata: &AgentScopeMetadata,
     store: &mut JsonlStore,
 ) -> Result<(), String> {
-    let mut entries = vec![
+    let entries = vec![
         (
             resources::AGENT_SUPERVISOR_MODE,
             metadata.supervisor_mode.clone(),
         ),
         (resources::AGENT_KIND, metadata.kind.clone()),
         (resources::AGENT_ROOT_PID, metadata.root_pid.to_string()),
-        (resources::AGENT_COMMAND, metadata.command.clone()),
+        (
+            resources::AGENT_COMMAND,
+            "argv_redacted:true,content_off:true".to_string(),
+        ),
         (resources::AGENT_EXECUTABLE, metadata.executable.clone()),
         (
             resources::AGENT_WORKSPACE_ROOT,
@@ -1002,9 +997,6 @@ fn write_agent_supervisor_metadata(
                 .unwrap_or_else(|| "start_time_ticks:unavailable".to_string()),
         ),
     ];
-    if let Some(fingerprint) = metadata.command_fingerprint.as_ref() {
-        entries.push((resources::AGENT_COMMAND_FINGERPRINT, fingerprint.clone()));
-    }
     for (resource, action) in entries {
         write_runtime_metadata_event(session_id, actors::OBSERVER, resource, action, store)?;
     }
@@ -1271,10 +1263,6 @@ fn parse_proc_stat_start_time_ticks(stat: &str) -> Option<u64> {
     after_comm.split_whitespace().nth(19)?.parse().ok()
 }
 
-fn command_fingerprint_from_args(args: &[String]) -> String {
-    command_fingerprint(args.join("\0").as_bytes())
-}
-
 fn command_fingerprint(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut output = String::from("sha256:");
@@ -1350,6 +1338,14 @@ fn redact_command_credential_paths(arg: &str) -> String {
     } else {
         arg.to_string()
     }
+}
+
+fn looks_like_credential_path(value: &str) -> bool {
+    value.ends_with("/.env")
+        || value.contains("/.env.")
+        || value.contains("/.ssh/")
+        || value.contains("/.aws/")
+        || value.contains("/var/run/secrets/")
 }
 
 fn secret_flag(value: &str) -> bool {
@@ -1608,200 +1604,12 @@ fn redact_for_persistence(
     canonical: &CanonicalEvent,
     redactor: &Redactor,
 ) -> (RawKernelEvent, CanonicalEvent) {
-    let mut persisted_raw = raw.clone();
-    let mut persisted_canonical = canonical.clone();
-    let resource = redactor.redact_resource(canonical.event_type.clone(), &canonical.resource);
-    persisted_raw.resource.clone_from(&resource.value);
-    persisted_canonical.resource = resource.value;
-    if resource.redacted {
-        append_marker(&mut persisted_raw.raw_payload, "redacted:resource");
-    }
-
-    if canonical.event_type == apolysis_core::EventType::FileRename && !raw.raw_payload.is_empty() {
-        let payload =
-            redactor.redact_resource(apolysis_core::EventType::FileRename, &raw.raw_payload);
-        persisted_raw.raw_payload = payload.value;
-        if payload.redacted {
-            append_marker(&mut persisted_raw.raw_payload, "redacted:payload");
-        }
-    }
-    if canonical.event_type == apolysis_core::EventType::Exec && !raw.raw_payload.is_empty() {
-        let (payload, redacted) = redact_exec_payload_for_persistence(&raw.raw_payload, redactor);
-        persisted_raw.raw_payload = payload;
-        if redacted {
-            append_marker(&mut persisted_raw.raw_payload, "redacted:payload");
-        }
-    }
-    if let Some(command) = canonical.process_command.as_deref() {
-        let (command, _) = redact_process_command_for_persistence(
-            command,
-            canonical.process_executable.as_deref(),
-            redactor,
-        );
-        persisted_canonical.process_command = Some(command);
-    }
-    (persisted_raw, persisted_canonical)
-}
-
-fn append_marker(payload: &mut String, marker: &str) {
-    if !payload.is_empty() {
-        payload.push(',');
-    }
-    payload.push_str(marker);
-}
-
-fn redact_exec_payload_for_persistence(payload: &str, redactor: &Redactor) -> (String, bool) {
-    let (argv, markers) = payload.split_once(',').unwrap_or((payload, ""));
-    let Some(argv) = argv.strip_prefix("argv:") else {
-        return (payload.to_string(), false);
-    };
-
-    let mut redacted = false;
-    let mut redact_next = false;
-    let mut args = Vec::new();
-    for arg in argv.split_whitespace() {
-        if redact_next {
-            args.push("<redacted>".to_string());
-            redacted = true;
-            redact_next = false;
-            continue;
-        }
-
-        if secret_flag(arg) {
-            args.push(arg.to_string());
-            redact_next = true;
-            continue;
-        }
-
-        if let Some((key, value)) = arg.split_once('=') {
-            if secret_word(key) {
-                args.push(format!("{key}=<redacted>"));
-                redacted = true;
-                continue;
-            }
-            let (value, value_redacted) = redact_argv_resource(value, redactor);
-            if value_redacted {
-                args.push(format!("{key}={value}"));
-                redacted = true;
-                continue;
-            }
-        }
-
-        if looks_like_secret_value(arg) {
-            args.push("<redacted>".to_string());
-            redacted = true;
-            continue;
-        }
-
-        let (arg, arg_redacted) = redact_argv_resource(arg, redactor);
-        args.push(arg);
-        redacted |= arg_redacted;
-    }
-
-    let mut persisted = format!("argv:{}", args.join(" "));
-    if !markers.is_empty() {
-        persisted.push(',');
-        persisted.push_str(markers);
-    }
-    (persisted, redacted)
-}
-
-fn redact_process_command_for_persistence(
-    command: &str,
-    executable: Option<&str>,
-    redactor: &Redactor,
-) -> (String, bool) {
-    let mut redacted = false;
-    let mut redact_next = false;
-    let mut args = Vec::new();
-    for (index, arg) in command.split_whitespace().enumerate() {
-        if index == 0 && executable == Some(arg) {
-            args.push(arg.to_string());
-            continue;
-        }
-
-        if redact_next {
-            args.push("<redacted>".to_string());
-            redacted = true;
-            redact_next = false;
-            continue;
-        }
-
-        if secret_flag(arg) {
-            args.push(arg.to_string());
-            redact_next = true;
-            continue;
-        }
-
-        if let Some((key, value)) = arg.split_once('=') {
-            if secret_word(key) {
-                args.push(format!("{key}=<redacted>"));
-                redacted = true;
-                continue;
-            }
-            let (value, value_redacted) = redact_argv_resource(value, redactor);
-            if value_redacted {
-                args.push(format!("{key}={value}"));
-                redacted = true;
-                continue;
-            }
-        }
-
-        if looks_like_secret_value(arg) {
-            args.push("<redacted>".to_string());
-            redacted = true;
-            continue;
-        }
-
-        let (arg, arg_redacted) = redact_argv_resource(arg, redactor);
-        args.push(arg);
-        redacted |= arg_redacted;
-    }
-
-    (args.join(" "), redacted)
-}
-
-fn redact_argv_resource(value: &str, redactor: &Redactor) -> (String, bool) {
-    if let Some(resource) = network_argument_resource(value) {
-        let redacted =
-            redactor.redact_resource(apolysis_core::EventType::NetworkConnect, &resource);
-        return (redacted.value, redacted.redacted);
-    }
-    if !looks_like_path_argument(value) {
-        return (value.to_string(), false);
-    }
-    let event_type = if looks_like_credential_path(value) {
-        apolysis_core::EventType::CredentialRead
-    } else {
-        apolysis_core::EventType::FileOpen
-    };
-    let redacted = redactor.redact_resource(event_type, value);
-    (redacted.value, redacted.redacted)
-}
-
-fn network_argument_resource(value: &str) -> Option<String> {
-    let trimmed = value.trim_matches(|ch| matches!(ch, '\'' | '"' | ',' | ';'));
-    if trimmed.parse::<SocketAddr>().is_ok() {
-        return Some(trimmed.to_string());
-    }
-
-    let ip = trimmed.trim_start_matches('[').trim_end_matches(']');
-    ip.parse::<IpAddr>().ok().map(|_| ip.to_string())
-}
-
-fn looks_like_path_argument(value: &str) -> bool {
-    value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.starts_with("~/")
-}
-
-fn looks_like_credential_path(value: &str) -> bool {
-    value.ends_with("/.env")
-        || value.contains("/.env.")
-        || value.contains("/.ssh/")
-        || value.contains("/.aws/")
-        || value.contains("/var/run/secrets/")
+    redact_runtime_event_for_persistence(
+        raw,
+        canonical,
+        redactor,
+        canonical.event_type == apolysis_core::EventType::CredentialRead,
+    )
 }
 
 pub struct ObserverBatchDecoder {
@@ -2105,6 +1913,38 @@ mod tests {
     }
 
     #[test]
+    fn persisted_supervisor_metadata_is_content_off() {
+        let path = std::env::temp_dir().join(format!(
+            "apolysis-supervisor-content-off-{}-{}.jsonl",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut store = JsonlStore::create(&path).expect("metadata store");
+        let metadata = AgentScopeMetadata {
+            supervisor_mode: "apolysis_managed_launch".to_string(),
+            kind: "codex".to_string(),
+            root_pid: 101,
+            executable: "/usr/bin/codex".to_string(),
+            workspace_root: "/workspace".to_string(),
+            start_time_ticks: Some(77),
+        };
+
+        write_agent_supervisor_metadata("session-a", &metadata, &mut store)
+            .expect("persist metadata");
+        store.flush().expect("flush metadata");
+        let timeline = std::fs::read_to_string(&path).expect("read metadata");
+
+        assert!(timeline.contains("argv_redacted:true,content_off:true"));
+        assert!(!timeline.contains("agent-command-fingerprint"));
+        assert!(!timeline.contains("sha256:"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn managed_agent_run_as_uses_sudo_operator_identity_for_root_observer() {
         let env = BTreeMap::from([
             ("SUDO_UID", "1000"),
@@ -2155,7 +1995,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_exec_payload_redacts_argv_credentials_and_sensitive_paths() {
+    fn persisted_exec_payload_removes_all_argv_content() {
         let raw = RawKernelEvent::new(
             1,
             "session-a",
@@ -2187,18 +2027,22 @@ mod tests {
         let (persisted_raw, _persisted_canonical) =
             redact_for_persistence(&raw, &canonical, &redactor);
 
-        assert!(persisted_raw.raw_payload.contains("--api-key <redacted>"));
-        assert!(persisted_raw.raw_payload.contains("path_token:"));
-        assert!(persisted_raw.raw_payload.contains("address_token:"));
-        assert!(persisted_raw.raw_payload.contains("/workspace/src/main.rs"));
+        assert!(persisted_raw.raw_payload.contains("argv_redacted:true"));
         assert!(persisted_raw.raw_payload.contains("redacted:payload"));
-        assert!(!persisted_raw.raw_payload.contains("sk-test-secret"));
-        assert!(!persisted_raw.raw_payload.contains("/workspace/.env"));
-        assert!(!persisted_raw.raw_payload.contains("127.0.0.1"));
+        for forbidden in [
+            "/usr/bin/codex exec",
+            "--api-key",
+            "sk-test-secret",
+            "/workspace/.env",
+            "/workspace/src/main.rs",
+            "127.0.0.1",
+        ] {
+            assert!(!persisted_raw.raw_payload.contains(forbidden));
+        }
     }
 
     #[test]
-    fn persisted_process_command_redacts_argv_credentials_and_sensitive_paths() {
+    fn persisted_canonical_event_omits_process_command() {
         let raw = RawKernelEvent::new(
             1,
             "session-a",
@@ -2235,18 +2079,11 @@ mod tests {
         let (_persisted_raw, persisted_canonical) =
             redact_for_persistence(&raw, &canonical, &redactor);
 
-        let process_command = persisted_canonical
-            .process_command
+        assert_eq!(persisted_canonical.process_command, None);
+        assert!(persisted_canonical
+            .process_executable
             .as_deref()
-            .expect("process command");
-        assert!(process_command.starts_with("/usr/bin/codex exec --api-key <redacted>"));
-        assert!(process_command.contains("--api-key <redacted>"));
-        assert!(process_command.contains("path_token:"));
-        assert!(process_command.contains("address_token:"));
-        assert!(process_command.contains("/workspace/src/main.rs"));
-        assert!(!process_command.contains("sk-test-secret"));
-        assert!(!process_command.contains("/workspace/.env"));
-        assert!(!process_command.contains("127.0.0.1"));
+            .is_some_and(|value| value.starts_with("executable_token:")));
     }
 
     #[test]

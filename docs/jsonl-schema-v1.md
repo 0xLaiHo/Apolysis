@@ -79,15 +79,18 @@ Fields:
 - `action`: action or metadata value
 - `container_id`: container identifier or `null`
 - `cgroup_id`: cgroup identifier or `null`
-- `process_command`: redacted command context known for the PID, or `null`
-- `process_executable`: executable path known for the PID, or `null`
+- `process_command`: legacy redacted command context, or `null`; current
+  content-off observer producers emit `null`
+- `process_executable`: session-scoped executable reference known for the PID,
+  or `null`
 - `process_started_at_unix_ms`: command-context start timestamp, or `null`
 
 Runtime metadata records are canonical `event` records with
 `event_type:"runtime_metadata"`. Agent supervisor metadata uses resources such
 as `agent-supervisor-mode`, `agent-kind`, `agent-root-pid`, `agent-command`,
-`agent-command-fingerprint`, `agent-executable`, `agent-workspace-root`,
-`agent-start-time`, and `agent-exit-status`.
+`agent-executable`, `agent-workspace-root`, `agent-start-time`, and
+`agent-exit-status`. The current writer records `agent-command` as a fixed
+content-off marker and does not emit `agent-command-fingerprint`.
 
 ### `raw_kernel_event`
 
@@ -114,8 +117,9 @@ Fields:
 - `cgroup_id`: cgroup identifier or `null`
 - `raw_payload`: bounded raw payload after persistence-time redaction
 
-Exec payloads may include redacted argv evidence. Truncation is explicit through
-markers such as `argv_truncated:true`, `payload_truncated:true`, and
+Persisted exec payloads never contain argv. They contain
+`argv_redacted:true`, `redacted:payload`, and applicable truncation markers such
+as `argv_truncated:true`, `payload_truncated:true`, and
 `resource_truncated:true`.
 
 ### `intent`
@@ -138,13 +142,14 @@ Fields:
 - `declared_action`: normalized action class such as `shell.command`, or
   `null`
 - `target`: declared target scope, resource class, or `null`
-- `command`: redacted command or tool payload summary, or `null`
+- `command`: content-off executable reference plus `argv_redacted:true`, or
+  `null`
 - `raw_event_id`: observed raw kernel event ID after correlation, or `null`
 
 The first adapter is `codex-jsonl`. It consumes Codex JSONL `response_item`
 function/tool-call records and writes `intent` records with source
-`intent_source:"codex"`. Payload redaction reuses command redaction rules for
-secret-looking argv values and credential-looking paths.
+`intent_source:"codex"`. Content-off persistence retains an executable
+reference but omits the supplied command, arguments, and tool payload.
 
 Example ingestion:
 
@@ -318,19 +323,19 @@ Use these fields for deterministic joins:
 - `enforcement_metadata.observed_event_id` links enforcement metadata to the
   observed raw event.
 
-Process context is a separate enrichment model. When available,
-`process_command`, `process_executable`, and `process_started_at_unix_ms` attach
-the latest successful exec context known for the PID at observation time. Intent
-correlation treats `exec` records as matchable command evidence, but unmatched
-`exec` records do not by themselves produce `missing_intent` findings; those
-findings are reserved for observed file, network, credential, and similar side
+Process context is a separate enrichment model. Current observer producers keep
+a session-scoped `process_executable` reference and
+`process_started_at_unix_ms`, but set `process_command` to `null`. Intent
+correlation can still use the normalized executable reference; unmatched
+`exec` records do not by themselves produce `missing_intent` findings, which
+remain reserved for observed file, network, credential, and similar side
 effects.
 
 ## Redaction And Truncation
 
 Persistence-time redaction applies before JSONL output:
 
-- Secret-looking argv values are replaced with `<redacted>`.
+- Exec argv is removed as a whole and replaced with `argv_redacted:true`.
 - Credential-looking paths outside the allowed workspace may become
   `path_token:<digest>` values.
 - Socket addresses may be tokenized while retaining non-sensitive routing
@@ -362,7 +367,7 @@ jq -c 'select(.record_type=="raw_kernel_event" and .event_id!=null)' timeline.js
 
 jq -c 'select(.record_type=="event" and .raw_event_id!=null) | {raw_event_id,event_type,pid,resource}' timeline.jsonl
 
-jq -c 'select(.record_type=="event" and .process_command!=null) | {event_type,pid,process_command,process_executable,process_started_at_unix_ms,raw_event_id}' timeline.jsonl
+jq -c 'select(.record_type=="event" and .process_executable!=null) | {event_type,pid,process_executable,process_started_at_unix_ms,raw_event_id}' timeline.jsonl
 
 jq -c 'select(.record_type=="intent") | {intent_source,intent_id,tool_name,declared_action,command,raw_event_id}' timeline.jsonl
 
