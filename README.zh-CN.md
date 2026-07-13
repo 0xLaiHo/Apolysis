@@ -33,10 +33,15 @@ eBPF——并打印出声明意图和 fixture 中的 OS 观测事件在哪里出
 ## 在 CI 里审计智能体（GitHub Action）
 
 ```yaml
-- uses: 0xLaiHo/Apolysis@c00a84650e306d01b44e2fbd6b80f1395c852f74 # v0.3.0
+# 仅表示 merge 后的评估形态；当前 pre-release ref 仍是 legacy wrapper。
+- uses: 0xLaiHo/Apolysis@pre-release
   with:
     run: 'codex exec --json "run the project tests"'
+    session: agent-task
 ```
+
+在开放的加固 Pull Request 通过 review 并 merge 前，不要使用该 ref。生产使用必须固定到
+后续不可变的加固 release commit。
 
 一个 step 就能在 runner 上记录该命令在 session scope 内的内核观测和 syscall 尝试，
 把摘要打进 job summary，并把 JSONL 时间线作为 artifact 上传。见
@@ -79,13 +84,23 @@ deployment、`bind_runtime`、`ingest` 与 `finish_run` 的 transport、current 
 ledger commit 的原子复核、lease/credential rotation、object plane、后台 reaper 与
 resource limit 也仍待完成。HTTPS trace 与 error-body secret surface、耐久 projector、
 Query service 和 Web Console 仍是 roadmap 目标。
-外部退出门禁也会保持开启，直到三个合格设计伙伴实际确认其部署和数据边界。在公开路径完成加固前，
-不要把当前 Action 用于不可信仓库或 GitHub 拉取请求（PR）。
+外部退出门禁也会保持开启，直到三个合格设计伙伴实际确认其部署和数据边界。受保护的
+`pre-release` 现包含 Action candidate：固定特权 release bundle，
+拒绝调用方选择
+executable/BPF/output path，以 root 封存 evidence artifact，并移除影响安全判断的 workflow
+output。它尚未成为不可变的公开 release；v0.3.0 Action wrapper 仍保留旧接口。即使后续发布，
+当 workload 可能主动修改 same-UID runner state 时，也应使用真正的 sandbox，而不是这个
+审计 wrapper。Candidate 会设置 Linux `no_new_privs`，并在真实门禁中确认直接 sudo 被拒绝，
+但它不是 process 或 CI control-plane 隔离边界。它把顶层 `run` 文本移出 observer launch
+metadata；然而固定的 v0.3.0 executable 早于 content-off persistence seam，仍可能保留子进程
+argv 或重建后的 process-command content。不要在 `run` 或 argv 中放入 secret；不可变发布
+必须改用 post-content-off bundle，
+在该 bundle 存在前这仍是 release no-go。
 
-生产实现现通过受保护的 `pre-release` 分支推进。首个隐私门禁已把所有本地 observer
-持久化路径统一为默认 content-off：exec argv 与重建出的 process command 不会写入 JSONL
-或 daemon hash-chain record。后续加入 capture-off control 前，内核侧捕获仍只是瞬时实现
-细节。
+生产实现现通过受保护的 `pre-release` 分支推进。在当前源码 build 中，首个隐私门禁已把
+所有本地 observer 持久化路径统一为默认 content-off：exec argv 与重建出的 process
+command 不会写入 JSONL 或 daemon hash-chain record。只有把该源码发布为不可变 bundle，
+上述 Action 例外才会结束。后续加入 capture-off control 前，内核侧捕获仍只是瞬时实现细节。
 
 ## 核心能力
 

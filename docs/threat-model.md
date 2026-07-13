@@ -131,6 +131,29 @@ target contract are not excluded from the production MVP.
 - Keep schema changes append-only within a version.
 - Persist redaction and truncation markers explicitly.
 - Keep privileged live gates opt-in and document their host assumptions.
+- Keep the pre-release GitHub Action candidate's executable, BPF object, and
+  privileged output outside workspace control. Pin the release bundle with an
+  Action-embedded digest, reject already-root and primary-GID-0 runners, disable archive ownership
+  restoration, stage privileged inputs, the managed command, and output in
+  root-owned directories, suppress inherited shell/function/loader startup,
+  invoke the observer without a root shell, launch managed work with
+  `no_new_privs` and cleared supplementary groups, export only an expected
+  root-sealed regular evidence file, and never rely on same-UID workflow command
+  files for privileged paths or command success. Pin the artifact uploader to a
+  reviewed full commit and fail if the verified file is absent.
+- Treat the candidate's pinned v0.3.0 executable as an explicit privacy
+  exception. Staging removes the top-level `run` text from launch metadata, but
+  v0.3.0 may persist child exec arguments and reconstructed process-command
+  content. Do not publish an immutable hardened
+  Action ref until a post-content-off bundle is pinned and the live privacy gate
+  passes.
+- Treat ephemeral trusted workflow definitions as a separate prerequisite.
+  Rejecting privileged path overrides does not make secret-bearing untrusted
+  Pull Requests, `pull_request_target`, or arbitrary self-hosted runners safe.
+  The wrapper blocks direct setuid privilege regain, but same-UID workspace,
+  step-script, command-file, cached-action, and uploader state remains outside
+  its integrity claim. Detached children remain a runner-isolation concern even
+  though a non-sudo child cannot directly write the sealed local artifact.
 
 ## Required W1–W2 Target Controls
 

@@ -8,90 +8,239 @@ branding:
 
 inputs:
   run:
-    description: 'Command to run under observation (executed with bash -c).'
+    description: 'Non-empty command staged in a root-owned file and executed by non-root Bash with startup loading disabled.'
     required: true
   session:
-    description: 'Session id written into every record. Defaults to apolysis-<run id>-<attempt>.'
-    required: false
-    default: ''
+    description: 'Unique safe session id (letters, digits, dot, underscore, hyphen; at most 128 characters).'
+    required: true
   agent-kind:
-    description: 'Agent adapter hint, for example codex. Any non-empty label works.'
+    description: 'Bounded agent adapter hint, for example codex.'
     required: false
     default: 'ci-agent'
   policy:
-    description: 'Path to an Apolysis policy file. A minimal audit-only policy is generated when omitted.'
+    description: 'Regular non-symlink policy inside the workspace (maximum 1 MiB); generated when omitted.'
     required: false
     default: ''
   intent-log:
-    description: 'Optional Codex response-items JSONL to correlate declared intent against the observed timeline.'
+    description: 'Optional Codex response-items JSONL used for an advisory correlation summary.'
     required: false
     default: ''
-  version:
-    description: 'Apolysis release tag to download when binary/bpf-object are not provided.'
-    required: false
-    default: 'v0.3.0'
-  binary:
-    description: 'Path to a pre-built apolysis binary (skips the release download).'
-    required: false
-    default: ''
-  bpf-object:
-    description: 'Path to a pre-built CO-RE observer object (skips the release download).'
-    required: false
-    default: ''
-  output-dir:
-    description: 'Directory for the timeline and reports, uploaded as a workflow artifact.'
-    required: false
-    default: '.apolysis-action'
-
-outputs:
-  timeline:
-    description: 'Path to the recorded JSONL timeline.'
-    value: ${{ steps.observe.outputs.timeline }}
-  exit-code:
-    description: 'Exit code of the observed command.'
-    value: ${{ steps.observe.outputs.exit-code }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Install Apolysis
-      id: install
-      shell: bash
+    - name: Validate public inputs and runner identity
+      id: validate
+      shell: /usr/bin/bash --noprofile --norc -p -e -o pipefail {0}
       env:
-        IN_BINARY: ${{ inputs.binary }}
-        IN_BPF: ${{ inputs.bpf-object }}
-        IN_VERSION: ${{ inputs.version }}
+        BASHOPTS: ''
+        BASH_XTRACEFD: ''
+        BASH_ENV: /dev/null
+        CDPATH: ''
+        ENV: /dev/null
+        GCONV_PATH: ''
+        GLOBIGNORE: ''
+        GLIBC_TUNABLES: ''
+        LD_AUDIT: ''
+        LD_DEBUG: ''
+        LD_DEBUG_OUTPUT: ''
+        LD_LIBRARY_PATH: ''
+        LD_PRELOAD: ''
+        LD_PROFILE: ''
+        LOCPATH: ''
+        PS4: '+ '
+        SHELLOPTS: ''
+        ACTION_PATH: ${{ github.action_path }}
+        RUN_CMD: ${{ inputs.run }}
+        SESSION: ${{ inputs.session }}
+        AGENT_KIND: ${{ inputs.agent-kind }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
       run: |
         set -euo pipefail
-        if [[ -n "$IN_BINARY" && -n "$IN_BPF" ]]; then
-          echo "bin=$IN_BINARY" >>"$GITHUB_OUTPUT"
-          echo "bpf=$IN_BPF" >>"$GITHUB_OUTPUT"
-          exit 0
-        fi
-        package="apolysis-${IN_VERSION}-x86_64-unknown-linux-gnu"
-        url="https://github.com/0xLaiHo/Apolysis/releases/download/${IN_VERSION}/${package}.tar.gz"
-        dest="$RUNNER_TEMP/apolysis-install"
-        mkdir -p "$dest"
-        curl -fsSL "$url" -o "$dest/$package.tar.gz"
-        curl -fsSL "$url.sha256" -o "$dest/$package.tar.gz.sha256"
-        (cd "$dest" && sha256sum -c "$package.tar.gz.sha256")
-        tar -xzf "$dest/$package.tar.gz" -C "$dest"
-        echo "bin=$dest/$package/bin/apolysis" >>"$GITHUB_OUTPUT"
-        echo "bpf=$dest/$package/ebpf/apolysis_observer.bpf.o" >>"$GITHUB_OUTPUT"
+        [[ "$RUN_CMD" =~ [^[:space:]] ]] || {
+          echo 'Apolysis requires a non-empty managed command.' >&2
+          exit 1
+        }
+        [[ "$(/usr/bin/id -u)" -ne 0 ]] || {
+          echo 'Apolysis refuses to launch a managed command from an already-root runner.' >&2
+          exit 1
+        }
+        [[ "$(/usr/bin/id -g)" -ne 0 ]] || {
+          echo 'Apolysis refuses to launch a managed command from a runner with primary group 0.' >&2
+          exit 1
+        }
+        /usr/bin/test -x /usr/bin/setpriv
+        /usr/bin/test -x /usr/bin/python3
+        /usr/bin/sudo -n --preserve-env /usr/bin/true
+        [[ "$(/usr/bin/stat -c '%u:%F:%a' -- /var/tmp)" == '0:directory:1777' ]]
+        "$ACTION_PATH/scripts/github-action-boundary.sh" validate-session "$SESSION" >/dev/null
+        "$ACTION_PATH/scripts/github-action-boundary.sh" validate-agent-kind "$AGENT_KIND" >/dev/null
+        "$ACTION_PATH/scripts/github-action-boundary.sh" action-scope \
+          "$RUN_ID" "$RUN_ATTEMPT" "$SESSION" >/dev/null
 
-    - name: Prepare policy
-      id: policy
-      shell: bash
+    - name: Install pinned privileged inputs
+      id: install
+      shell: /usr/bin/bash --noprofile --norc -p -e -o pipefail {0}
       env:
-        IN_POLICY: ${{ inputs.policy }}
+        BASHOPTS: ''
+        BASH_XTRACEFD: ''
+        BASH_ENV: /dev/null
+        CDPATH: ''
+        ENV: /dev/null
+        GCONV_PATH: ''
+        GLOBIGNORE: ''
+        GLIBC_TUNABLES: ''
+        LD_AUDIT: ''
+        LD_DEBUG: ''
+        LD_DEBUG_OUTPUT: ''
+        LD_LIBRARY_PATH: ''
+        LD_PRELOAD: ''
+        LD_PROFILE: ''
+        LOCPATH: ''
+        PS4: '+ '
+        SHELLOPTS: ''
+        ACTION_PATH: ${{ github.action_path }}
+        SESSION: ${{ inputs.session }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
       run: |
         set -euo pipefail
+        readonly RELEASE_VERSION='v0.3.0'
+        readonly RELEASE_DIGEST='6d6ea336fc4fdd9461bb85fdb6829ec5b7343a81c8040aa899ded3ab1affb78e'
+        readonly package="apolysis-${RELEASE_VERSION}-x86_64-unknown-linux-gnu"
+        readonly url="https://github.com/0xLaiHo/Apolysis/releases/download/${RELEASE_VERSION}/${package}.tar.gz"
+        scope="$($ACTION_PATH/scripts/github-action-boundary.sh action-scope \
+          "$RUN_ID" "$RUN_ATTEMPT" "$SESSION")"
+        readonly scope
+        readonly secure_dir="/var/tmp/apolysis-action-stage.${scope}"
+        readonly artifact_dir="/var/tmp/apolysis-action-output.${scope}"
+        readonly marker='.apolysis-action-scope'
+        readonly archive="$secure_dir/$package.tar.gz"
+        readonly bin="$secure_dir/apolysis"
+        readonly bpf="$secure_dir/apolysis_observer.bpf.o"
+        readonly sanitizer="$secure_dir/environment-sanitizer.py"
+        secure_created=false
+        artifact_created=false
+        cleanup_failed_install() {
+          local status=$?
+          if [[ $status -ne 0 ]]; then
+            if [[ "$artifact_created" == true ]]; then
+              /usr/bin/sudo -n /usr/bin/rm -f -- "$artifact_dir/$marker"
+              /usr/bin/sudo -n /usr/bin/rmdir -- "$artifact_dir" >/dev/null 2>&1 || true
+            fi
+            if [[ "$secure_created" == true ]]; then
+              /usr/bin/sudo -n /usr/bin/rm -f -- \
+                "$archive" "$bin" "$bpf" "$sanitizer" "$secure_dir/$marker"
+              /usr/bin/sudo -n /usr/bin/rmdir -- "$secure_dir" >/dev/null 2>&1 || true
+            fi
+          fi
+          exit "$status"
+        }
+        trap cleanup_failed_install EXIT
+        /usr/bin/sudo -n /usr/bin/mkdir --mode=0700 -- "$secure_dir"
+        secure_created=true
+        printf '%s\n' "$scope" | /usr/bin/sudo -n /usr/bin/tee "$secure_dir/$marker" >/dev/null
+        /usr/bin/sudo -n /usr/bin/chmod 0400 "$secure_dir/$marker"
+        /usr/bin/sudo -n /usr/bin/mkdir --mode=0700 -- "$artifact_dir"
+        artifact_created=true
+        printf '%s\n' "$scope" | /usr/bin/sudo -n /usr/bin/tee "$artifact_dir/$marker" >/dev/null
+        /usr/bin/sudo -n /usr/bin/chmod 0400 "$artifact_dir/$marker"
+        /usr/bin/sudo -n /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin \
+          /usr/bin/curl --disable \
+          --proto '=https' \
+          --tlsv1.2 \
+          --fail \
+          --silent \
+          --show-error \
+          --location \
+          --retry 3 \
+          "$url" \
+          --output "$archive"
+        actual_digest="$(/usr/bin/sudo -n /usr/bin/sha256sum "$archive" | /usr/bin/awk '{print $1}')"
+        [[ "$actual_digest" == "$RELEASE_DIGEST" ]]
+        /usr/bin/sudo -n /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin \
+          /usr/bin/tar \
+          --extract \
+          --use-compress-program=/usr/bin/gzip \
+          --no-same-owner \
+          --no-same-permissions \
+          --file "$archive" \
+          --directory "$secure_dir" \
+          --strip-components=2 \
+          "$package/bin/apolysis" \
+          "$package/ebpf/apolysis_observer.bpf.o"
+        /usr/bin/sudo -n /usr/bin/chmod 0400 "$archive" "$bpf"
+        /usr/bin/sudo -n /usr/bin/chmod 0500 "$bin"
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$bin")" == \
+          '0:0:regular file:1:500' ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$bpf")" == \
+          '0:0:regular file:1:400' ]]
+        /usr/bin/sudo -n /usr/bin/tee "$sanitizer" >/dev/null <<'PY'
+        import os
+        import sys
+
+        blocked = {
+            "BASHOPTS", "BASH_ENV", "BASH_XTRACEFD", "CDPATH", "ENV",
+            "GLOBIGNORE", "PS4", "SHELLOPTS", "APOLYSIS_BPF_LSM_AVAILABLE",
+        }
+        for name in tuple(os.environ):
+            if name in blocked or name.startswith("BASH_FUNC_"):
+                os.environ.pop(name, None)
+        os.execv(sys.argv[1], sys.argv[1:])
+        PY
+        /usr/bin/sudo -n /usr/bin/chmod 0400 "$sanitizer"
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$sanitizer")" == \
+          '0:0:regular file:1:400' ]]
+        trap - EXIT
+
+    - name: Stage bounded policy and managed command
+      shell: /usr/bin/bash --noprofile --norc -p -e -o pipefail {0}
+      env:
+        BASHOPTS: ''
+        BASH_XTRACEFD: ''
+        BASH_ENV: /dev/null
+        CDPATH: ''
+        ENV: /dev/null
+        GCONV_PATH: ''
+        GLOBIGNORE: ''
+        GLIBC_TUNABLES: ''
+        LD_AUDIT: ''
+        LD_DEBUG: ''
+        LD_DEBUG_OUTPUT: ''
+        LD_LIBRARY_PATH: ''
+        LD_PRELOAD: ''
+        LD_PROFILE: ''
+        LOCPATH: ''
+        PS4: '+ '
+        SHELLOPTS: ''
+        ACTION_PATH: ${{ github.action_path }}
+        IN_POLICY: ${{ inputs.policy }}
+        RUN_CMD: ${{ inputs.run }}
+        SESSION: ${{ inputs.session }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        scope="$($ACTION_PATH/scripts/github-action-boundary.sh action-scope \
+          "$RUN_ID" "$RUN_ATTEMPT" "$SESSION")"
+        readonly scope
+        readonly secure_dir="/var/tmp/apolysis-action-stage.${scope}"
+        readonly marker="$secure_dir/.apolysis-action-scope"
+        readonly policy="$secure_dir/policy.yaml"
+        readonly sanitizer="$secure_dir/environment-sanitizer.py"
+        readonly command_script="$secure_dir/managed-command.sh"
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%a' -- "$secure_dir")" == \
+          '0:0:directory:700' ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$marker")" == \
+          '0:0:regular file:1:400' ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/cat -- "$marker")" == "$scope" ]]
         if [[ -n "$IN_POLICY" ]]; then
-          echo "path=$IN_POLICY" >>"$GITHUB_OUTPUT"
-          exit 0
-        fi
-        policy="$RUNNER_TEMP/apolysis-default-policy.yaml"
-        cat >"$policy" <<'EOF'
+          "$ACTION_PATH/scripts/github-action-boundary.sh" copy-policy \
+            "$GITHUB_WORKSPACE" "$IN_POLICY" 1048576 \
+            | /usr/bin/sudo -n /usr/bin/tee "$policy" >/dev/null
+        else
+          /usr/bin/sudo -n /usr/bin/tee "$policy" >/dev/null <<'EOF'
         version: 1
 
         workspace:
@@ -119,62 +268,253 @@ runs:
           max_seconds: 3600
           max_processes: 4096
         EOF
-        echo "path=$policy" >>"$GITHUB_OUTPUT"
+        fi
+        /usr/bin/sudo -n /usr/bin/chmod 0400 "$policy"
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$policy")" == \
+          '0:0:regular file:1:400' ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$sanitizer")" == \
+          '0:0:regular file:1:400' ]]
+        /usr/bin/printf '%s\n' "$RUN_CMD" \
+          | /usr/bin/sudo -n /usr/bin/tee "$command_script" >/dev/null
+        /usr/bin/sudo -n /usr/bin/chmod 0400 "$command_script"
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$command_script")" == \
+          '0:0:regular file:1:400' ]]
 
-    - name: Observe
+    - name: Observe and seal evidence
       id: observe
-      shell: bash
+      shell: /usr/bin/bash --noprofile --norc -p -e -o pipefail {0}
       env:
-        RUN_CMD: ${{ inputs.run }}
-        IN_SESSION: ${{ inputs.session }}
+        BASHOPTS: ''
+        BASH_XTRACEFD: ''
+        BASH_ENV: /dev/null
+        CDPATH: ''
+        ENV: /dev/null
+        GCONV_PATH: ''
+        GLOBIGNORE: ''
+        GLIBC_TUNABLES: ''
+        LD_AUDIT: ''
+        LD_DEBUG: ''
+        LD_DEBUG_OUTPUT: ''
+        LD_LIBRARY_PATH: ''
+        LD_PRELOAD: ''
+        LD_PROFILE: ''
+        LOCPATH: ''
+        PS4: '+ '
+        SHELLOPTS: ''
+        ACTION_PATH: ${{ github.action_path }}
+        SESSION: ${{ inputs.session }}
         AGENT_KIND: ${{ inputs.agent-kind }}
-        OUT_DIR: ${{ inputs.output-dir }}
-        BIN: ${{ steps.install.outputs.bin }}
-        BPF: ${{ steps.install.outputs.bpf }}
-        POLICY: ${{ steps.policy.outputs.path }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
       run: |
         set -euo pipefail
-        session="${IN_SESSION:-apolysis-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
-        mkdir -p "$OUT_DIR"
-        SUDO=""
-        if [[ "$(id -u)" != "0" ]]; then SUDO="sudo"; fi
-        # '|| code=$?' keeps this step alive under the runner's default -e so
-        # the digest, artifact, and exit-code propagation still happen when the
-        # observed command (or the observer itself) fails.
+        "$ACTION_PATH/scripts/github-action-boundary.sh" validate-session "$SESSION" >/dev/null
+        agent_kind="$($ACTION_PATH/scripts/github-action-boundary.sh \
+          validate-agent-kind "$AGENT_KIND")"
+        scope="$($ACTION_PATH/scripts/github-action-boundary.sh action-scope \
+          "$RUN_ID" "$RUN_ATTEMPT" "$SESSION")"
+        readonly agent_kind scope
+        readonly secure_dir="/var/tmp/apolysis-action-stage.${scope}"
+        readonly artifact_dir="/var/tmp/apolysis-action-output.${scope}"
+        readonly marker="$secure_dir/.apolysis-action-scope"
+        readonly bin="$secure_dir/apolysis"
+        readonly bpf="$secure_dir/apolysis_observer.bpf.o"
+        readonly policy="$secure_dir/policy.yaml"
+        readonly sanitizer="$secure_dir/environment-sanitizer.py"
+        readonly command_script="$secure_dir/managed-command.sh"
+        readonly timeline="$secure_dir/timeline.jsonl"
+        readonly artifact_timeline="$artifact_dir/timeline.jsonl"
+        readonly runner_uid="$(/usr/bin/id -u)"
+        readonly runner_gid="$(/usr/bin/id -g)"
+        readonly runner_home="$HOME"
+        readonly runner_path="$PATH"
+        readonly runner_user="$(/usr/bin/id -un)"
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%a' -- "$secure_dir")" == \
+          '0:0:directory:700' ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%a' -- "$artifact_dir")" == \
+          '0:0:directory:700' ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/cat -- "$marker")" == "$scope" ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$bin")" == \
+          '0:0:regular file:1:500' ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$bpf")" == \
+          '0:0:regular file:1:400' ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$policy")" == \
+          '0:0:regular file:1:400' ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$sanitizer")" == \
+          '0:0:regular file:1:400' ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$command_script")" == \
+          '0:0:regular file:1:400' ]]
+        # Reserve the timeline as a root-only regular file before the observer
+        # opens it, then keep workflow command files and startup hooks out of
+        # the managed environment.
+        /usr/bin/sudo -n /usr/bin/install \
+          --owner=0 \
+          --group=0 \
+          --mode=0600 \
+          -- /dev/null "$timeline"
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$timeline")" == \
+          '0:0:regular file:1:600' ]]
+        /usr/bin/sudo -n /usr/bin/chgrp "$runner_gid" "$secure_dir" "$command_script"
+        /usr/bin/sudo -n /usr/bin/chmod 0710 "$secure_dir"
+        /usr/bin/sudo -n /usr/bin/chmod 0440 "$command_script"
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$command_script")" == \
+          "0:${runner_gid}:regular file:1:440" ]]
         code=0
-        $SUDO "$BIN" observe \
+        /usr/bin/sudo -n --preserve-env /usr/bin/env \
+          -u GITHUB_OUTPUT \
+          -u GITHUB_ENV \
+          -u GITHUB_PATH \
+          -u GITHUB_STEP_SUMMARY \
+          -u GITHUB_STATE \
+          -u BASH_ENV \
+          -u ENV \
+          -u BASHOPTS \
+          -u BASH_XTRACEFD \
+          -u CDPATH \
+          -u GLOBIGNORE \
+          -u PS4 \
+          -u SHELLOPTS \
+          -u LD_PRELOAD \
+          -u LD_AUDIT \
+          -u LD_LIBRARY_PATH \
+          -u LD_DEBUG \
+          -u LD_DEBUG_OUTPUT \
+          -u LD_PROFILE \
+          -u GLIBC_TUNABLES \
+          -u GCONV_PATH \
+          -u LOCPATH \
+          -u ACTIONS_RUNTIME_TOKEN \
+          -u ACTIONS_RUNTIME_URL \
+          -u ACTIONS_RESULTS_URL \
+          -u ACTIONS_CACHE_URL \
+          -u APOLYSIS_BPF_LSM_AVAILABLE \
+          -u SUDO_UID \
+          -u SUDO_GID \
+          -u SUDO_USER \
+          HOME="$runner_home" \
+          USER="$runner_user" \
+          LOGNAME="$runner_user" \
+          PATH="$runner_path" \
+          SUDO_UID="$runner_uid" \
+          SUDO_GID="$runner_gid" \
+          SUDO_USER="$runner_user" \
+          /usr/bin/python3 -I -S "$sanitizer" "$bin" observe \
           --backend live \
-          --session "$session" \
-          --policy "$POLICY" \
-          --output "$OUT_DIR/timeline.jsonl" \
-          --bpf-object "$BPF" \
+          --session "$SESSION" \
+          --policy "$policy" \
+          --output "$timeline" \
+          --bpf-object "$bpf" \
           --workspace-root "$GITHUB_WORKSPACE" \
-          --agent-kind "$AGENT_KIND" \
-          --agent-run -- bash -c "$RUN_CMD" || code=$?
-        $SUDO chown -R "$(id -u):$(id -g)" "$OUT_DIR" || true
-        echo "exit-code=$code" >>"$GITHUB_OUTPUT"
-        echo "session=$session" >>"$GITHUB_OUTPUT"
-        echo "timeline=$OUT_DIR/timeline.jsonl" >>"$GITHUB_OUTPUT"
+          --agent-kind "$agent_kind" \
+          --agent-run -- /usr/bin/env \
+          -u SUDO_UID -u SUDO_GID -u SUDO_USER \
+          /usr/bin/setpriv --no-new-privs \
+          /usr/bin/bash --noprofile --norc -p "$command_script" || code=$?
+        if /usr/bin/sudo -n /usr/bin/test -s "$timeline" \
+          && /usr/bin/sudo -n /usr/bin/test ! -L "$timeline" \
+          && [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$timeline")" == \
+            '0:0:regular file:1:600' ]]; then
+          /usr/bin/sudo -n /usr/bin/install \
+            --owner=0 \
+            --group="$runner_gid" \
+            --mode=0440 \
+            -- "$timeline" "$artifact_timeline"
+        else
+          echo 'Apolysis did not produce a sealed regular timeline.' >&2
+          if [[ $code -eq 0 ]]; then code=1; fi
+        fi
+        /usr/bin/sudo -n /usr/bin/chgrp "$runner_gid" "$artifact_dir"
+        /usr/bin/sudo -n /usr/bin/chmod 0750 "$artifact_dir"
+        # The trusted binary becomes read/execute-only for the runner after the
+        # workload so the advisory intent report can run without root.
+        /usr/bin/sudo -n /usr/bin/chgrp "$runner_gid" "$secure_dir" "$bin"
+        /usr/bin/sudo -n /usr/bin/chmod 0710 "$secure_dir"
+        /usr/bin/sudo -n /usr/bin/chmod 0550 "$bin"
+        exit "$code"
+
+    - name: Verify sealed evidence boundary
+      id: verify
+      if: ${{ always() && steps.validate.outcome == 'success' && steps.install.outcome == 'success' }}
+      shell: /usr/bin/bash --noprofile --norc -p -e -o pipefail {0}
+      env:
+        BASHOPTS: ''
+        BASH_XTRACEFD: ''
+        BASH_ENV: /dev/null
+        CDPATH: ''
+        ENV: /dev/null
+        GCONV_PATH: ''
+        GLOBIGNORE: ''
+        GLIBC_TUNABLES: ''
+        LD_AUDIT: ''
+        LD_DEBUG: ''
+        LD_DEBUG_OUTPUT: ''
+        LD_LIBRARY_PATH: ''
+        LD_PRELOAD: ''
+        LD_PROFILE: ''
+        LOCPATH: ''
+        PATH: /usr/bin:/bin
+        PS4: '+ '
+        SHELLOPTS: ''
+        SESSION: ${{ inputs.session }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        readonly scope="${RUN_ID}.${RUN_ATTEMPT}.${SESSION}"
+        readonly artifact_dir="/var/tmp/apolysis-action-output.${scope}"
+        readonly timeline="$artifact_dir/timeline.jsonl"
+        readonly runner_gid="$(/usr/bin/id -g)"
+        if ! /usr/bin/sudo -n /usr/bin/test -s "$timeline"; then
+          echo 'No timeline is available to verify; an earlier Action step failed.' >&2
+          exit 1
+        fi
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%a' -- "$artifact_dir")" == \
+          "0:${runner_gid}:directory:750" ]]
+        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$timeline")" == \
+          "0:${runner_gid}:regular file:1:440" ]]
 
     - name: Report
-      shell: bash
+      if: ${{ always() && steps.validate.outcome == 'success' && steps.install.outcome == 'success' && steps.verify.outcome == 'success' }}
+      shell: /usr/bin/bash --noprofile --norc -p -e -o pipefail {0}
       env:
-        OUT_DIR: ${{ inputs.output-dir }}
+        BASHOPTS: ''
+        BASH_XTRACEFD: ''
+        BASH_ENV: /dev/null
+        CDPATH: ''
+        ENV: /dev/null
+        GCONV_PATH: ''
+        GLOBIGNORE: ''
+        GLIBC_TUNABLES: ''
+        LD_AUDIT: ''
+        LD_DEBUG: ''
+        LD_DEBUG_OUTPUT: ''
+        LD_LIBRARY_PATH: ''
+        LD_PRELOAD: ''
+        LD_PROFILE: ''
+        LOCPATH: ''
+        PATH: /usr/bin:/bin
+        PS4: '+ '
+        SHELLOPTS: ''
+        ACTION_STATUS: ${{ github.action_status }}
         INTENT_LOG: ${{ inputs.intent-log }}
-        BIN: ${{ steps.install.outputs.bin }}
-        SESSION: ${{ steps.observe.outputs.session }}
-        AGENT_EXIT: ${{ steps.observe.outputs.exit-code }}
+        SESSION: ${{ inputs.session }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
       run: |
         set -euo pipefail
-        timeline="$OUT_DIR/timeline.jsonl"
+        readonly scope="${RUN_ID}.${RUN_ATTEMPT}.${SESSION}"
+        readonly secure_dir="/var/tmp/apolysis-action-stage.${scope}"
+        readonly artifact_dir="/var/tmp/apolysis-action-output.${scope}"
+        readonly timeline="$artifact_dir/timeline.jsonl"
+        readonly bin="$secure_dir/apolysis"
         {
-          echo "## Apolysis agent audit"
-          echo ""
-          echo "Session \`$SESSION\` — observed command exited with code \`$AGENT_EXIT\`."
-          echo ""
+          echo '## Apolysis agent audit'
+          echo ''
+          echo "Session \`$SESSION\` — Action result: \`$ACTION_STATUS\`."
+          echo ''
         } >>"$GITHUB_STEP_SUMMARY"
-        if [[ ! -s "$timeline" ]]; then
-          echo "No timeline was recorded; see the Observe step log." >>"$GITHUB_STEP_SUMMARY"
+        if ! /usr/bin/sudo -n /usr/bin/test -s "$timeline"; then
+          echo 'No timeline was recorded; see the preceding Action logs.' >>"$GITHUB_STEP_SUMMARY"
           exit 0
         fi
         events=$(grep -c '"record_type":"event"' "$timeline" || true)
@@ -182,53 +522,129 @@ runs:
         credentials=$(grep -c '"event_type":"credential_read"' "$timeline" || true)
         connects=$(grep -c '"event_type":"network_connect"' "$timeline" || true)
         {
-          echo "| Observed events | Policy findings | Credential reads | Network connects |"
-          echo "| --- | --- | --- | --- |"
+          echo '| Observed events | Policy findings | Credential reads | Network connects |'
+          echo '| --- | --- | --- | --- |'
           echo "| $events | $violations | $credentials | $connects |"
-          echo ""
+          echo ''
         } >>"$GITHUB_STEP_SUMMARY"
-        # Fail loud on event loss: a quiet timeline is not proof of absence.
         dropped=$(grep -oE '"kind":"(ring_buffer_reserve_failure|map_pressure|decode_failure)","count":[0-9]+' "$timeline" | grep -oE '[0-9]+$' | awk '{s+=$1} END{print s+0}' || true)
         truncated=$(grep -oE '"kind":"truncation","count":[0-9]+' "$timeline" | grep -oE '[0-9]+$' | awk '{s+=$1} END{print s+0}' || true)
         if [[ "$dropped" -gt 0 || "$truncated" -gt 0 ]]; then
           {
             echo "> ⚠️ **Evidence may be incomplete:** $dropped event(s) dropped, $truncated truncated. A quiet timeline is not proof of absence."
-            echo ""
+            echo ''
           } >>"$GITHUB_STEP_SUMMARY"
         fi
-        if [[ -n "$INTENT_LOG" && -f "$INTENT_LOG" ]]; then
-          # Plain correlate keeps this compatible with every release binary
-          # (v0.2.0 lacks --summary); v0.3.0+ also accept --summary locally.
-          "$BIN" intent ingest \
+        if [[ -n "$INTENT_LOG" && -f "$INTENT_LOG" && -x "$bin" ]]; then
+          report_dir="$(mktemp -d "$RUNNER_TEMP/apolysis-intent-report.XXXXXXXX")"
+          trap 'rm -rf -- "$report_dir"' EXIT
+          "$bin" intent ingest \
             --adapter codex-jsonl \
             --input "$INTENT_LOG" \
             --session "$SESSION" \
-            --output "$OUT_DIR/intent.jsonl" \
+            --output "$report_dir/intent.jsonl" \
             --workspace-root "$GITHUB_WORKSPACE"
-          "$BIN" intent correlate \
-            --intent-input "$OUT_DIR/intent.jsonl" \
+          "$bin" intent correlate \
+            --intent-input "$report_dir/intent.jsonl" \
             --timeline-input "$timeline" \
-            --output "$OUT_DIR/intent-correlation.jsonl"
-          correlation="$OUT_DIR/intent-correlation.jsonl"
+            --output "$report_dir/intent-correlation.jsonl"
+          correlation="$report_dir/intent-correlation.jsonl"
           matched=$(grep -c '"record_type":"intent_correlation"' "$correlation" || true)
           missing=$(grep -c '"kind":"missing_intent"' "$correlation" || true)
           {
-            echo "**Intent correlation:** $matched side effect(s) matched declared intent,"
-            echo "$missing finding(s) with no declared intent (\`missing_intent\`)."
-            echo ""
+            echo "**Advisory intent correlation:** $matched side effect(s) matched declared intent,"
+            echo "$missing finding(s) had no declared intent (\`missing_intent\`)."
+            echo ''
           } >>"$GITHUB_STEP_SUMMARY"
         fi
-        echo "The full JSONL evidence is attached as a workflow artifact." >>"$GITHUB_STEP_SUMMARY"
+        echo 'The sealed JSONL timeline is attached as a workflow artifact.' >>"$GITHUB_STEP_SUMMARY"
 
-    - name: Upload evidence
-      uses: actions/upload-artifact@v4
-      with:
-        name: apolysis-evidence-${{ steps.observe.outputs.session }}
-        path: ${{ inputs.output-dir }}
-        if-no-files-found: warn
-
-    - name: Propagate observed command exit code
-      shell: bash
+    - name: Upload sealed evidence
+      if: ${{ always() && steps.validate.outcome == 'success' && steps.install.outcome == 'success' && steps.verify.outcome == 'success' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       env:
-        AGENT_EXIT: ${{ steps.observe.outputs.exit-code }}
-      run: exit "$AGENT_EXIT"
+        BASHOPTS: ''
+        BASH_XTRACEFD: ''
+        BASH_ENV: /dev/null
+        CDPATH: ''
+        ENV: /dev/null
+        GCONV_PATH: ''
+        GLOBIGNORE: ''
+        GLIBC_TUNABLES: ''
+        LD_AUDIT: ''
+        LD_DEBUG: ''
+        LD_DEBUG_OUTPUT: ''
+        LD_LIBRARY_PATH: ''
+        LD_PRELOAD: ''
+        LD_PROFILE: ''
+        LOCPATH: ''
+        NODE_PATH: ''
+        NODE_OPTIONS: ''
+        PATH: /usr/bin:/bin
+        PS4: '+ '
+        SHELLOPTS: ''
+      with:
+        name: apolysis-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.session }}
+        path: /var/tmp/apolysis-action-output.${{ github.run_id }}.${{ github.run_attempt }}.${{ inputs.session }}/timeline.jsonl
+        if-no-files-found: error
+
+    - name: Clean exact Action-owned paths
+      if: ${{ always() && steps.validate.outcome == 'success' && steps.install.outcome == 'success' }}
+      shell: /usr/bin/bash --noprofile --norc -p -e -o pipefail {0}
+      env:
+        BASHOPTS: ''
+        BASH_XTRACEFD: ''
+        BASH_ENV: /dev/null
+        CDPATH: ''
+        ENV: /dev/null
+        GCONV_PATH: ''
+        GLOBIGNORE: ''
+        GLIBC_TUNABLES: ''
+        LD_AUDIT: ''
+        LD_DEBUG: ''
+        LD_DEBUG_OUTPUT: ''
+        LD_LIBRARY_PATH: ''
+        LD_PRELOAD: ''
+        LD_PROFILE: ''
+        LOCPATH: ''
+        PATH: /usr/bin:/bin
+        PS4: '+ '
+        SHELLOPTS: ''
+        SESSION: ${{ inputs.session }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        readonly scope="${RUN_ID}.${RUN_ATTEMPT}.${SESSION}"
+        readonly secure_dir="/var/tmp/apolysis-action-stage.${scope}"
+        readonly artifact_dir="/var/tmp/apolysis-action-output.${scope}"
+        readonly marker='.apolysis-action-scope'
+        verify_owned_stage() {
+          local directory="$1"
+          /usr/bin/sudo -n /usr/bin/test -d "$directory" || return 1
+          /usr/bin/sudo -n /usr/bin/test ! -L "$directory"
+          [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%F' -- "$directory")" == '0:directory' ]]
+          [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$directory/$marker")" == \
+            '0:0:regular file:1:400' ]]
+          [[ "$(/usr/bin/sudo -n /usr/bin/cat -- "$directory/$marker")" == "$scope" ]]
+        }
+        if /usr/bin/sudo -n /usr/bin/test -e "$secure_dir"; then
+          verify_owned_stage "$secure_dir"
+          /usr/bin/sudo -n /usr/bin/rm -f -- \
+            "$secure_dir/apolysis-v0.3.0-x86_64-unknown-linux-gnu.tar.gz" \
+            "$secure_dir/apolysis" \
+            "$secure_dir/apolysis_observer.bpf.o" \
+            "$secure_dir/environment-sanitizer.py" \
+            "$secure_dir/policy.yaml" \
+            "$secure_dir/managed-command.sh" \
+            "$secure_dir/timeline.jsonl" \
+            "$secure_dir/$marker"
+          /usr/bin/sudo -n /usr/bin/rmdir -- "$secure_dir"
+        fi
+        if /usr/bin/sudo -n /usr/bin/test -e "$artifact_dir"; then
+          verify_owned_stage "$artifact_dir"
+          /usr/bin/sudo -n /usr/bin/rm -f -- \
+            "$artifact_dir/timeline.jsonl" \
+            "$artifact_dir/$marker"
+          /usr/bin/sudo -n /usr/bin/rmdir -- "$artifact_dir"
+        fi
