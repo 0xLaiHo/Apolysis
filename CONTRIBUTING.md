@@ -40,6 +40,10 @@ release-preparation branch. Promote `pre-release` to `main` through a dedicated
 pull request only after the complete planned milestone and its release gates
 pass.
 
+```bash
+gh pr create --base main --head pre-release
+```
+
 ## Verification
 
 Run the smallest relevant gate for the change first, then run the broader gates
