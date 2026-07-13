@@ -589,6 +589,13 @@
             "null"
           ]
         },
+        "repository_ref": {
+          "description": "Repository identity, when supplied by a hook, CI, or provider source.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "runtime_ref": {
           "description": "Process, container, Pod, VM, runner, or provider workload identity.",
           "type": [
@@ -1618,6 +1625,9 @@
             "$ref": "#/$defs/RuntimeBindingCandidate"
           }
         },
+        "asserting_source_id": {
+          "$ref": "#/$defs/SourceId"
+        },
         "attribution": {
           "$ref": "#/$defs/RuntimeAttribution"
         },
@@ -1675,6 +1685,7 @@
       "additionalProperties": false,
       "required": [
         "binding_id",
+        "asserting_source_id",
         "identity_kind",
         "identity_ref",
         "valid_from_unix_ms",

@@ -779,6 +779,7 @@ pub struct RuntimeBinding {
         regex(pattern = r"^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$")
     )]
     binding_id: String,
+    asserting_source_id: SourceId,
     identity_kind: RuntimeIdentityKind,
     #[schemars(length(min = 1, max = 512))]
     identity_ref: String,
@@ -799,6 +800,16 @@ impl RuntimeBinding {
     /// Return the idempotent binding identity.
     pub fn binding_id(&self) -> &str {
         &self.binding_id
+    }
+
+    /// Return the registered Evidence Source asserting this relation.
+    pub fn asserting_source_id(&self) -> &SourceId {
+        &self.asserting_source_id
+    }
+
+    /// Return the selected or first retained candidate score, when non-exact.
+    pub fn confidence_bps(&self) -> Option<u16> {
+        self.confidence_bps
     }
 
     /// Return the explicit correlation quality.
@@ -867,10 +878,13 @@ impl RuntimeBinding {
             }
             RuntimeAttribution::Ambiguous => {
                 validate_reason_codes(&self.reason_codes, "binding.reason_codes")?;
-                if self.confidence_bps.is_some() || self.alternative_runtime_candidates.is_empty() {
+                if self.confidence_bps.is_none_or(|value| value > 10_000)
+                    || self.alternative_runtime_candidates.is_empty()
+                {
                     return Err(ContractError::InvalidField {
                         field: "binding.alternative_runtime_candidates",
-                        reason: "ambiguous requires scored alternatives and no best score",
+                        reason:
+                            "ambiguous requires scores and evidence for every retained candidate",
                     });
                 }
             }
@@ -914,6 +928,7 @@ impl<'de> Deserialize<'de> for RuntimeBinding {
         #[serde(deny_unknown_fields)]
         struct Wire {
             binding_id: String,
+            asserting_source_id: SourceId,
             identity_kind: RuntimeIdentityKind,
             identity_ref: String,
             valid_from_unix_ms: u64,
@@ -928,6 +943,7 @@ impl<'de> Deserialize<'de> for RuntimeBinding {
         let wire = Wire::deserialize(deserializer)?;
         let value = Self {
             binding_id: wire.binding_id,
+            asserting_source_id: wire.asserting_source_id,
             identity_kind: wire.identity_kind,
             identity_ref: wire.identity_ref,
             valid_from_unix_ms: wire.valid_from_unix_ms,

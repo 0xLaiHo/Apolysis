@@ -37,6 +37,11 @@ fn four_gateway_operations_have_stable_positive_wire_fixtures() {
         ambiguous.binding().alternative_runtime_candidates()[0].confidence_bps(),
         6400
     );
+    assert_eq!(ambiguous.binding().confidence_bps(), Some(7100));
+    assert_eq!(
+        ambiguous.binding().asserting_source_id().as_str(),
+        "source_runtime"
+    );
     let _: BindRuntimeResponse = parse("positive/bind_runtime_response.json");
 
     let ingest: IngestRequest = parse("positive/ingest_request.json");

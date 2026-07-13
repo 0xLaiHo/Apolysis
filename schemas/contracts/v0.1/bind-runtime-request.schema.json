@@ -84,6 +84,9 @@
             "$ref": "#/$defs/RuntimeBindingCandidate"
           }
         },
+        "asserting_source_id": {
+          "$ref": "#/$defs/SourceId"
+        },
         "attribution": {
           "$ref": "#/$defs/RuntimeAttribution"
         },
@@ -141,6 +144,7 @@
       "additionalProperties": false,
       "required": [
         "binding_id",
+        "asserting_source_id",
         "identity_kind",
         "identity_ref",
         "valid_from_unix_ms",
@@ -263,6 +267,13 @@
           "const": "0.1"
         }
       ]
+    },
+    "SourceId": {
+      "description": "A registered Evidence Source identifier.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$"
     }
   }
 }

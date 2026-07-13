@@ -8,6 +8,7 @@
     "fact_type": "runtime_bound",
     "fact": {
       "binding_id": "binding_pod_01",
+      "asserting_source_id": "source_runtime",
       "identity_kind": "pod",
       "identity_ref": "cluster_a:namespace_default:pod_agent_01",
       "valid_from_unix_ms": 1783891200000,

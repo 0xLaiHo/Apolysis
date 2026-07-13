@@ -331,6 +331,13 @@
             "null"
           ]
         },
+        "repository_ref": {
+          "description": "Repository identity, when supplied by a hook, CI, or provider source.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "runtime_ref": {
           "description": "Process, container, Pod, VM, runner, or provider workload identity.",
           "type": [

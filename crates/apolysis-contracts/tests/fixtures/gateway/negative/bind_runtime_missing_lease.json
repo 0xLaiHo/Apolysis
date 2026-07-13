@@ -4,7 +4,7 @@
   "request_digest": "2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "run_id": "run_01",
   "binding": {
-    "binding_id": "binding_pod_01", "identity_kind": "pod", "identity_ref": "pod_agent_01",
+    "binding_id": "binding_pod_01", "asserting_source_id": "source_runtime", "identity_kind": "pod", "identity_ref": "pod_agent_01",
     "valid_from_unix_ms": 1783891200000, "valid_until_unix_ms": null,
     "evidence_basis": "propagated_and_validated",
     "evidence_basis_ref": "kubernetes_uid_01", "attribution": "exact",

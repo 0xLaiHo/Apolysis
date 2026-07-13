@@ -100,6 +100,9 @@ pub struct CorrelationRefs {
     /// Outcome artifact identity, when supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_ref: Option<String>,
+    /// Repository identity, when supplied by a hook, CI, or provider source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_ref: Option<String>,
 }
 
 impl CorrelationRefs {
@@ -115,6 +118,7 @@ impl CorrelationRefs {
             ("correlation.runtime_ref", self.runtime_ref.as_deref()),
             ("correlation.provider_ref", self.provider_ref.as_deref()),
             ("correlation.artifact_ref", self.artifact_ref.as_deref()),
+            ("correlation.repository_ref", self.repository_ref.as_deref()),
         ] {
             if let Some(value) = value {
                 validate_contract_identifier(value, field)?;

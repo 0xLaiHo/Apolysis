@@ -4,11 +4,11 @@
   "request_digest": "2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "run_id": "run_01", "lease_id": "lease_01",
   "binding": {
-    "binding_id": "binding_pid_01", "identity_kind": "process", "identity_ref": "pid_123",
+    "binding_id": "binding_pid_01", "asserting_source_id": "source_runtime", "identity_kind": "process", "identity_ref": "pid_123",
     "valid_from_unix_ms": 1783891200000, "valid_until_unix_ms": null,
     "evidence_basis": "heuristic_match",
     "evidence_basis_ref": "pid_time_match_01", "attribution": "ambiguous",
-    "reason_codes": ["pid_time_match"], "confidence_bps": null,
+    "reason_codes": ["pid_time_match"], "confidence_bps": 5000,
     "alternative_runtime_candidates": []
   }
 }

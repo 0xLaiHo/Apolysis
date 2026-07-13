@@ -198,24 +198,79 @@ fn source_envelope_enforces_typed_content_off_payloads_and_integrity() {
 
 #[test]
 fn every_coverage_state_has_a_deterministic_negative_case() {
-    let positives: Vec<serde_json::Value> =
-        serde_json::from_str(include_str!("fixtures/positive/coverage_states.json"))
-            .expect("valid coverage positives");
-    let cases: Vec<serde_json::Value> =
-        serde_json::from_str(include_str!("fixtures/negative/coverage_state_cases.json"))
-            .expect("valid coverage negative-case fixture");
+    let cases = [
+        (
+            "semantic",
+            "complete",
+            include_str!("fixtures/negative/coverage/semantic_complete.json"),
+        ),
+        (
+            "semantic",
+            "partial",
+            include_str!("fixtures/negative/coverage/semantic_partial.json"),
+        ),
+        (
+            "semantic",
+            "opaque",
+            include_str!("fixtures/negative/coverage/semantic_opaque.json"),
+        ),
+        (
+            "semantic",
+            "unavailable",
+            include_str!("fixtures/negative/coverage/semantic_unavailable.json"),
+        ),
+        (
+            "execution",
+            "host_verified",
+            include_str!("fixtures/negative/coverage/execution_host_verified.json"),
+        ),
+        (
+            "execution",
+            "partial",
+            include_str!("fixtures/negative/coverage/execution_partial.json"),
+        ),
+        (
+            "execution",
+            "opaque",
+            include_str!("fixtures/negative/coverage/execution_opaque.json"),
+        ),
+        (
+            "execution",
+            "not_applicable",
+            include_str!("fixtures/negative/coverage/execution_not_applicable.json"),
+        ),
+        (
+            "execution",
+            "incomplete",
+            include_str!("fixtures/negative/coverage/execution_incomplete.json"),
+        ),
+        (
+            "outcome",
+            "verified",
+            include_str!("fixtures/negative/coverage/outcome_verified.json"),
+        ),
+        (
+            "outcome",
+            "unconfirmed",
+            include_str!("fixtures/negative/coverage/outcome_unconfirmed.json"),
+        ),
+        (
+            "outcome",
+            "unknown",
+            include_str!("fixtures/negative/coverage/outcome_unknown.json"),
+        ),
+        (
+            "outcome",
+            "not_applicable",
+            include_str!("fixtures/negative/coverage/outcome_not_applicable.json"),
+        ),
+    ];
     assert_eq!(cases.len(), 13);
 
-    for case in cases {
-        let dimension = case["dimension"].as_str().expect("dimension string");
-        let state = case["state"].as_str().expect("state string");
-        let mut invalid = positives
-            .iter()
-            .find(|summary| summary[dimension]["state"] == state)
-            .unwrap_or_else(|| panic!("missing positive {dimension}/{state}"))
-            .clone();
-        invalid[dimension]["reason_codes"] = serde_json::json!([]);
-        let error = serde_json::from_value::<CoverageSummary>(invalid)
+    for (dimension, state, fixture) in cases {
+        let wire: serde_json::Value = serde_json::from_str(fixture).expect("valid JSON fixture");
+        assert_eq!(wire[dimension]["state"], state);
+        let error = serde_json::from_str::<CoverageSummary>(fixture)
             .expect_err("coverage without a reason must fail");
         assert!(error.to_string().contains("reason_codes"));
     }

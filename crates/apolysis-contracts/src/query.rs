@@ -11,10 +11,10 @@ use std::collections::BTreeSet;
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::{
-    id::validate_contract_identifier,
-    AuthorityRef, ClockBasis, ContractErrorCode, CoverageReasonCode, CoverageSummary,
-    EnvironmentKind, OrganizationId, OutcomeComparisonState, OutcomeCoverageState, PrincipalRef,
-    RunId, RunState, SourceCapability, SourceId, SourceKind, TrustProfile,
+    id::validate_contract_identifier, AuthorityRef, ClockBasis, ContractErrorCode,
+    CoverageReasonCode, CoverageSummary, EnvironmentKind, OrganizationId, OutcomeComparisonState,
+    OutcomeCoverageState, PrincipalRef, RunId, RunState, SourceCapability, SourceId, SourceKind,
+    TrustProfile,
 };
 
 /// Maximum number of projected rows in one Query API page.
