@@ -13,9 +13,10 @@ use axum::{
     body::to_bytes,
     extract::{Request, State},
     http::{
-        header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, WWW_AUTHENTICATE},
+        header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, RETRY_AFTER, WWW_AUTHENTICATE},
         HeaderMap, HeaderValue, StatusCode,
     },
+    middleware,
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
@@ -25,13 +26,19 @@ use axum_server_mtls::PeerCertificates;
 use crate::{error::GatewayServerErrorKind, AuthorityStore, GatewayServerError};
 
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
-const AUTHORITY_HEADERS: [&str; 6] = [
-    "x-organization-id",
-    "x-tenant-id",
-    "x-principal-id",
-    "x-source-id",
-    "x-source-registration-id",
-    "x-policy-revision",
+const ALLOWED_REQUEST_HEADERS: [&str; 12] = [
+    "accept",
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "content-type",
+    "expect",
+    "host",
+    "te",
+    "traceparent",
+    "tracestate",
+    "transfer-encoding",
+    "user-agent",
 ];
 
 type GatewayApplication =
@@ -55,24 +62,14 @@ impl GatewayHttpState {
 pub(crate) fn router(state: GatewayHttpState) -> Router {
     Router::new()
         .route("/gateway/v0.1/open-run", post(open_run))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
+        .layer(middleware::map_response(apply_no_store))
 }
 
 async fn open_run(State(state): State<GatewayHttpState>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
-    if !accepts_json(&parts.headers)
-        || !has_json_content_type(&parts.headers)
-        || contains_authority_headers(&parts.headers)
-    {
-        return contract_error(
-            StatusCode::BAD_REQUEST,
-            ContractErrorCode::InvalidContract,
-            "Request headers do not match the Gateway contract",
-            false,
-            None,
-        );
-    }
-
     let Some(peer_certificates) = parts.extensions.get::<PeerCertificates>() else {
         return unauthenticated_response();
     };
@@ -89,6 +86,19 @@ async fn open_run(State(state): State<GatewayHttpState>, request: Request) -> Re
         Ok(context) => context,
         Err(error) => return authority_error(error),
     };
+
+    if !accepts_json(&parts.headers)
+        || !has_json_content_type(&parts.headers)
+        || contains_disallowed_headers(&parts.headers)
+    {
+        return contract_error(
+            StatusCode::BAD_REQUEST,
+            ContractErrorCode::InvalidContract,
+            "Request headers do not match the Gateway contract",
+            false,
+            None,
+        );
+    }
 
     if content_length_exceeds_limit(&parts.headers) {
         return body_too_large_response();
@@ -114,6 +124,31 @@ async fn open_run(State(state): State<GatewayHttpState>, request: Request) -> Re
         Ok(response) => success(response),
         Err(failure) => gateway_error(failure),
     }
+}
+
+async fn not_found() -> Response {
+    contract_error(
+        StatusCode::NOT_FOUND,
+        ContractErrorCode::NotFound,
+        "Gateway route was not found",
+        false,
+        None,
+    )
+}
+
+async fn method_not_allowed() -> Response {
+    contract_error(
+        StatusCode::METHOD_NOT_ALLOWED,
+        ContractErrorCode::InvalidContract,
+        "HTTP method is not supported by this Gateway route",
+        false,
+        None,
+    )
+}
+
+async fn apply_no_store(mut response: Response) -> Response {
+    set_no_store(response.headers_mut());
+    response
 }
 
 fn success(response: OpenRunResponse) -> Response {
@@ -144,15 +179,27 @@ fn authority_error(error: GatewayServerError) -> Response {
             false,
             None,
         ),
-        GatewayServerErrorKind::Database => contract_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            ContractErrorCode::Backpressure,
-            "Gateway persistence is temporarily unavailable",
-            true,
-            Some(250),
-        ),
-        _ => internal_response(),
+        GatewayServerErrorKind::Database => {
+            report_authority_failure(&error);
+            contract_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ContractErrorCode::Backpressure,
+                "Gateway persistence is temporarily unavailable",
+                true,
+                Some(250),
+            )
+        }
+        _ => {
+            report_authority_failure(&error);
+            internal_response()
+        }
     }
+}
+
+fn report_authority_failure(error: &GatewayServerError) {
+    // GatewayServerError deliberately retains only closed diagnostic labels.
+    // Never add request, certificate, URL, or source-error data at this seam.
+    eprintln!("Gateway current-authority request failed: {error}");
 }
 
 fn unauthenticated_response() -> Response {
@@ -189,6 +236,7 @@ fn contract_error(
 }
 
 fn wire_error(status: StatusCode, body: GatewayErrorResponse, authenticate: bool) -> Response {
+    let retry_after_ms = body.retry_after_ms();
     let mut response = (status, Json(body)).into_response();
     set_no_store(response.headers_mut());
     if authenticate {
@@ -196,6 +244,12 @@ fn wire_error(status: StatusCode, body: GatewayErrorResponse, authenticate: bool
             WWW_AUTHENTICATE,
             HeaderValue::from_static("Mutual realm=\"apolysis-gateway\""),
         );
+    }
+    if let Some(retry_after_ms) = retry_after_ms {
+        let retry_after_seconds = retry_after_seconds(retry_after_ms);
+        if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+            response.headers_mut().insert(RETRY_AFTER, value);
+        }
     }
     response
 }
@@ -239,6 +293,10 @@ fn set_no_store(headers: &mut HeaderMap) {
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
 }
 
+fn retry_after_seconds(retry_after_ms: u64) -> u64 {
+    retry_after_ms / 1_000 + u64::from(!retry_after_ms.is_multiple_of(1_000))
+}
+
 fn has_json_content_type(headers: &HeaderMap) -> bool {
     headers
         .get(CONTENT_TYPE)
@@ -259,10 +317,10 @@ fn accepts_json(headers: &HeaderMap) -> bool {
         })
 }
 
-fn contains_authority_headers(headers: &HeaderMap) -> bool {
-    AUTHORITY_HEADERS
-        .iter()
-        .any(|header_name| headers.contains_key(*header_name))
+fn contains_disallowed_headers(headers: &HeaderMap) -> bool {
+    headers
+        .keys()
+        .any(|header_name| !ALLOWED_REQUEST_HEADERS.contains(&header_name.as_str()))
 }
 
 fn content_length_exceeds_limit(headers: &HeaderMap) -> bool {
@@ -271,4 +329,112 @@ fn content_length_exceeds_limit(headers: &HeaderMap) -> bool {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
         .is_some_and(|value| value > MAX_REQUEST_BODY_BYTES)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_authority_and_proxy_header_variants() {
+        for header_name in [
+            "authorization",
+            "cookie",
+            "forwarded",
+            "proxy-authorization",
+            "x-apolysis-organization-id",
+            "x-auth-request-user",
+            "x-auth-user",
+            "x-forwarded-client-cert",
+            "x-forwarded-organization-id",
+            "x-original-principal-id",
+            "x-organization-id",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header_name.parse::<axum::http::HeaderName>().unwrap(),
+                HeaderValue::from_static("untrusted"),
+            );
+
+            assert!(
+                contains_disallowed_headers(&headers),
+                "expected {header_name} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_only_bounded_transport_representation_and_trace_headers() {
+        let mut headers = HeaderMap::new();
+        for header_name in ALLOWED_REQUEST_HEADERS {
+            let mut individual_headers = HeaderMap::new();
+            individual_headers.insert(
+                header_name.parse::<axum::http::HeaderName>().unwrap(),
+                HeaderValue::from_static("bounded"),
+            );
+
+            assert!(
+                !contains_disallowed_headers(&individual_headers),
+                "expected {header_name} to be accepted"
+            );
+        }
+        headers.insert(
+            "traceparent".parse::<axum::http::HeaderName>().unwrap(),
+            HeaderValue::from_static("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        );
+        headers.insert(
+            "tracestate".parse::<axum::http::HeaderName>().unwrap(),
+            HeaderValue::from_static("vendor=value"),
+        );
+
+        assert!(!contains_disallowed_headers(&headers));
+    }
+
+    #[test]
+    fn retry_after_rounds_milliseconds_up_to_seconds() {
+        assert_eq!(retry_after_seconds(0), 0);
+        assert_eq!(retry_after_seconds(1), 1);
+        assert_eq!(retry_after_seconds(999), 1);
+        assert_eq!(retry_after_seconds(1_000), 1);
+        assert_eq!(retry_after_seconds(1_001), 2);
+        assert_eq!(retry_after_seconds(u64::MAX), u64::MAX / 1_000 + 1);
+    }
+
+    #[test]
+    fn wire_error_sets_retry_after_and_no_store() {
+        let body = GatewayErrorResponse::new(
+            ContractErrorCode::Backpressure,
+            "Gateway persistence is temporarily unavailable",
+            true,
+            Some(1_001),
+        )
+        .unwrap();
+
+        let response = wire_error(StatusCode::SERVICE_UNAVAILABLE, body, false);
+
+        assert_eq!(
+            response.headers().get(RETRY_AFTER),
+            Some(&HeaderValue::from_static("2"))
+        );
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+    }
+
+    #[test]
+    fn status_mapping_covers_retryable_contract_failures() {
+        assert_eq!(
+            status_for_contract_error(ContractErrorCode::RateLimited),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            status_for_contract_error(ContractErrorCode::Backpressure),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status_for_contract_error(ContractErrorCode::ProjectionUnavailable),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 }

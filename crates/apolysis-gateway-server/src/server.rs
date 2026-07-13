@@ -80,7 +80,7 @@ pub async fn serve(config: GatewayServerConfig) -> Result<(), GatewayServerError
             address.ok_or_else(|| GatewayServerError::configuration("Gateway listener failed to bind"))?
         }
         result = &mut server => {
-            result.map_err(GatewayServerError::io)?;
+            result.map_err(|error| GatewayServerError::io_at("listener-serve", error))?;
             return Err(GatewayServerError::configuration("Gateway stopped before becoming ready"));
         }
     };
@@ -92,7 +92,9 @@ pub async fn serve(config: GatewayServerConfig) -> Result<(), GatewayServerError
         shutdown_handle.graceful_shutdown(Some(Duration::from_secs(10)));
     });
 
-    server.await.map_err(GatewayServerError::io)
+    server
+        .await
+        .map_err(|error| GatewayServerError::io_at("listener-serve", error))
 }
 
 fn build_tls_config(
@@ -111,28 +113,28 @@ fn build_tls_config(
     let mut certificate_reader = BufReader::new(server_certificate.as_slice());
     let certificate_chain = rustls_pemfile::certs(&mut certificate_reader)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| GatewayServerError::tls())?;
+        .map_err(|_| GatewayServerError::tls_at("server-certificate"))?;
     if certificate_chain.is_empty() {
-        return Err(GatewayServerError::tls());
+        return Err(GatewayServerError::tls_at("server-certificate"));
     }
 
     let mut private_key_reader = BufReader::new(server_private_key.as_slice());
     let private_key = rustls_pemfile::private_key(&mut private_key_reader)
-        .map_err(|_| GatewayServerError::tls())?
-        .ok_or_else(GatewayServerError::tls)?;
+        .map_err(|_| GatewayServerError::tls_at("server-private-key"))?
+        .ok_or_else(|| GatewayServerError::tls_at("server-private-key"))?;
 
     let mut client_ca_reader = BufReader::new(client_ca.as_slice());
     let client_ca_certificates = rustls_pemfile::certs(&mut client_ca_reader)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| GatewayServerError::tls())?;
+        .map_err(|_| GatewayServerError::tls_at("client-ca"))?;
     if client_ca_certificates.is_empty() {
-        return Err(GatewayServerError::tls());
+        return Err(GatewayServerError::tls_at("client-ca"));
     }
     let mut roots = RootCertStore::empty();
     for certificate in client_ca_certificates {
         roots
             .add(certificate)
-            .map_err(|_| GatewayServerError::tls())?;
+            .map_err(|_| GatewayServerError::tls_at("client-ca"))?;
     }
 
     // SQLx also enables rustls' ring provider. Selecting AWS-LC explicitly
@@ -141,13 +143,13 @@ fn build_tls_config(
     let client_verifier =
         WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
             .build()
-            .map_err(|_| GatewayServerError::tls())?;
+            .map_err(|_| GatewayServerError::tls_at("client-verifier"))?;
     let mut server_config = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .map_err(|_| GatewayServerError::tls())?
+        .map_err(|_| GatewayServerError::tls_at("protocol-versions"))?
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(certificate_chain, private_key)
-        .map_err(|_| GatewayServerError::tls())?;
+        .map_err(|_| GatewayServerError::tls_at("server-identity"))?;
     server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(RustlsConfig::from_config(Arc::new(server_config)))
 }
@@ -206,9 +208,13 @@ fn write_ready_file(path: &Path, bound_address: SocketAddr) -> Result<(), Gatewa
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-    let mut file = options.open(path).map_err(GatewayServerError::io)?;
-    writeln!(file, "https://{bound_address}").map_err(GatewayServerError::io)?;
-    file.sync_all().map_err(GatewayServerError::io)
+    let mut file = options
+        .open(path)
+        .map_err(|error| GatewayServerError::io_at("ready-open", error))?;
+    writeln!(file, "https://{bound_address}")
+        .map_err(|error| GatewayServerError::io_at("ready-write", error))?;
+    file.sync_all()
+        .map_err(|error| GatewayServerError::io_at("ready-sync", error))
 }
 
 async fn wait_for_shutdown() {

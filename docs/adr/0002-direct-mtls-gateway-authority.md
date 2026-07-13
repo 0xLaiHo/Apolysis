@@ -6,7 +6,8 @@ The Gateway write listener requires a client certificate issued by its
 configured CA. It derives a domain-separated SHA-256 fingerprint from the
 verified leaf DER certificate and resolves the current organization,
 principal, source registration, policy revision, credential epoch, validity,
-and revocation state from PostgreSQL for every HTTP request. Certificate
+and revocation state from PostgreSQL for every recognized lifecycle HTTP
+request. Certificate
 subjects and SANs are descriptive only; request bodies and headers cannot
 assert authority. Authority-looking headers are rejected, and the resulting
 `AuthenticatedSourceContext` remains a server-only input with no wire

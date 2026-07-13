@@ -47,6 +47,16 @@ random_hex() {
     od -An -N "$byte_count" -tx1 /dev/urandom | tr -d '[:space:]'
 }
 
+assert_no_store() {
+    local header_file="$1"
+    local context="$2"
+
+    if ! grep -Eiq '^cache-control:[[:space:]]*no-store[[:space:]]*$' "$header_file"; then
+        printf 'error: %s response omitted Cache-Control: no-store\n' "$context" >&2
+        exit 1
+    fi
+}
+
 for command in cargo curl date docker grep head jq mktemp od openssl stat timeout tr; do
     require_command "$command"
 done
@@ -287,6 +297,18 @@ printf 'Migrating and provisioning the current mTLS authority state...\n'
         --registration "$policy_file" \
         --client-certificate "$client_cert"
 
+readonly rotation_registration="${secret_directory}/source-registration.rotation.json"
+jq '.policy_revision = 2 | .credential_epoch = 2' \
+    "$policy_file" >"$rotation_registration"
+if "$authority_bin" register-source \
+    --database-url-file "$database_url_file" \
+    --registration "$rotation_registration" \
+    --client-certificate "$unknown_client_cert" \
+    >/dev/null 2>&1; then
+    printf 'error: credential rotation was accepted before the rotation safety gate\n' >&2
+    exit 1
+fi
+
 printf 'Starting the production mTLS Gateway on an ephemeral loopback port...\n'
 "$gateway_bin" \
         --listen 127.0.0.1:0 \
@@ -339,6 +361,7 @@ if curl --silent --show-error \
 fi
 
 readonly unknown_response="${secret_directory}/unknown-credential.response.json"
+readonly unknown_headers="${secret_directory}/unknown-credential.response.headers"
 unknown_status="$(curl --silent --show-error \
     --connect-timeout 5 \
     --max-time 20 \
@@ -348,6 +371,7 @@ unknown_status="$(curl --silent --show-error \
     --header 'Accept: application/json' \
     --header 'Content-Type: application/json' \
     --data '{}' \
+    --dump-header "$unknown_headers" \
     --output "$unknown_response" \
     --write-out '%{http_code}' \
     "${gateway_base_url}/gateway/v0.1/open-run")"
@@ -356,6 +380,7 @@ if [[ "$unknown_status" != "401" ]]; then
         "$unknown_status" >&2
     exit 1
 fi
+assert_no_store "$unknown_headers" 'unregistered credential'
 if ! jq -e '.code == "unauthenticated" and .retryable == false' \
     "$unknown_response" >/dev/null; then
     printf 'error: unregistered credential response violated the safe error contract\n' >&2
@@ -385,6 +410,14 @@ readonly revoked_response="${secret_directory}/open-run.revoked.json"
 readonly injected_response="${secret_directory}/open-run.injected.json"
 readonly oversized_request="${secret_directory}/open-run.oversized.json"
 readonly oversized_response="${secret_directory}/open-run.oversized.response.json"
+readonly first_headers="${secret_directory}/open-run.response.headers"
+readonly revoked_headers="${secret_directory}/open-run.revoked.headers"
+readonly injected_headers="${secret_directory}/open-run.injected.headers"
+readonly oversized_headers="${secret_directory}/open-run.oversized.response.headers"
+readonly not_found_response="${secret_directory}/not-found.response.json"
+readonly not_found_headers="${secret_directory}/not-found.response.headers"
+readonly method_response="${secret_directory}/method-not-allowed.response.json"
+readonly method_headers="${secret_directory}/method-not-allowed.response.headers"
 
 jq -n \
     --arg operation_id "operation_live_${random_suffix}" \
@@ -435,16 +468,18 @@ injected_status="$(curl --silent --show-error \
     --key "$client_key" \
     --header 'Accept: application/json' \
     --header 'Content-Type: application/json' \
-    --header 'X-Organization-Id: attacker_controlled' \
+    --header 'X-Forwarded-Organization-Id: attacker_controlled' \
     --data-binary "@${signed_request}" \
+    --dump-header "$injected_headers" \
     --output "$injected_response" \
     --write-out '%{http_code}' \
     "${gateway_base_url}/gateway/v0.1/open-run")"
 if [[ "$injected_status" != "400" ]] || \
     ! jq -e '.code == "invalid_contract"' "$injected_response" >/dev/null; then
-    printf 'error: request-supplied organization authority was not rejected\n' >&2
+    printf 'error: forwarded request authority was not rejected\n' >&2
     exit 1
 fi
+assert_no_store "$injected_headers" 'authority-header rejection'
 
 head -c 1048577 /dev/zero | tr '\0' 'a' >"$oversized_request"
 oversized_status="$(curl --silent --show-error \
@@ -456,6 +491,7 @@ oversized_status="$(curl --silent --show-error \
     --header 'Accept: application/json' \
     --header 'Content-Type: application/json' \
     --data-binary "@${oversized_request}" \
+    --dump-header "$oversized_headers" \
     --output "$oversized_response" \
     --write-out '%{http_code}' \
     "${gateway_base_url}/gateway/v0.1/open-run")"
@@ -464,6 +500,44 @@ if [[ "$oversized_status" != "413" ]] || \
     printf 'error: oversized Gateway request did not fail closed with HTTP 413\n' >&2
     exit 1
 fi
+assert_no_store "$oversized_headers" 'oversized request'
+
+not_found_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --dump-header "$not_found_headers" \
+    --output "$not_found_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/not-a-route")"
+if [[ "$not_found_status" != "404" ]] || \
+    ! jq -e '.code == "not_found" and .retryable == false' \
+        "$not_found_response" >/dev/null; then
+    printf 'error: unknown Gateway route did not return the safe JSON 404 contract\n' >&2
+    exit 1
+fi
+assert_no_store "$not_found_headers" 'unknown route'
+
+method_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --request GET \
+    --dump-header "$method_headers" \
+    --output "$method_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/open-run")"
+if [[ "$method_status" != "405" ]] || \
+    ! jq -e '.code == "invalid_contract" and .retryable == false' \
+        "$method_response" >/dev/null; then
+    printf 'error: unsupported Gateway method did not return the safe JSON 405 contract\n' >&2
+    exit 1
+fi
+assert_no_store "$method_headers" 'unsupported method'
 
 printf 'Opening a real Agent Run through the mTLS HTTP seam...\n'
 first_status="$(curl --silent --show-error \
@@ -475,6 +549,7 @@ first_status="$(curl --silent --show-error \
     --header 'Accept: application/json' \
     --header 'Content-Type: application/json' \
     --data-binary "@${signed_request}" \
+    --dump-header "$first_headers" \
     --output "$first_response" \
     --write-out '%{http_code}' \
     "${gateway_base_url}/gateway/v0.1/open-run")"
@@ -485,6 +560,7 @@ if [[ "$first_status" != "200" ]]; then
         "$first_response" >&2 || true
     exit 1
 fi
+assert_no_store "$first_headers" 'authenticated open_run'
 
 jq -e \
     --arg source_id "$source_id" \
@@ -518,7 +594,7 @@ printf 'Revoking the current transport credential in PostgreSQL...\n'
         --reason "live_transport_gate_${random_suffix}"
 
 readonly revoked_registration="${secret_directory}/source-registration.revoked.json"
-jq '.policy_revision = 2 | .credential_epoch = 2' \
+jq '.policy_revision = 3 | .credential_epoch = 3' \
     "$policy_file" >"$revoked_registration"
 if "$authority_bin" register-source \
     --database-url-file "$database_url_file" \
@@ -537,7 +613,9 @@ revoked_status="$(curl --silent --show-error \
     --key "$client_key" \
     --header 'Accept: application/json' \
     --header 'Content-Type: application/json' \
+    --header 'X-Organization-Id: attacker_controlled' \
     --data-binary "@${signed_request}" \
+    --dump-header "$revoked_headers" \
     --output "$revoked_response" \
     --write-out '%{http_code}' \
     "${gateway_base_url}/gateway/v0.1/open-run")"
@@ -547,6 +625,7 @@ if [[ "$revoked_status" != "401" ]]; then
         "$revoked_status" >&2
     exit 1
 fi
+assert_no_store "$revoked_headers" 'revoked credential'
 
 jq -e \
     '.schema_version == "0.1"
