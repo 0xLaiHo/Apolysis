@@ -4,6 +4,7 @@ members = [
     "crates/apolysis-contracts",
     "crates/apolysis-gateway",
     "crates/apolysis-gateway-postgres",
+    "crates/apolysis-gateway-server",
     "crates/apolysis-gateway-testkit",
     "crates/apolysis-core",
     "crates/apolysis-daemon",

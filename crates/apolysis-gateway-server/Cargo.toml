@@ -1,0 +1,56 @@
+[package]
+name = "apolysis-gateway-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+apolysis-contracts = { path = "../apolysis-contracts" }
+apolysis-gateway = { path = "../apolysis-gateway" }
+apolysis-gateway-postgres = { path = "../apolysis-gateway-postgres" }
+axum = { version = "0.8.9", features = ["http1", "http2", "json", "tokio"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+axum-server-mtls = "0.1.2"
+getrandom.workspace = true
+libc.workspace = true
+rustls = { version = "0.23.41", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-pemfile = "2.2.0"
+rustls-pki-types = "1.14.0"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "json",
+    "macros",
+    "migrate",
+    "postgres",
+    "runtime-tokio-rustls",
+] }
+tokio = { workspace = true, features = [
+    "fs",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+x509-parser = "0.18.0"
+zeroize = "1.8.2"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "apolysis-gateway-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "apolysis-gateway-authority"
+path = "src/bin/apolysis-gateway-authority.rs"
+
+[[bin]]
+name = "apolysis-gateway-request"
+path = "src/bin/apolysis-gateway-request.rs"

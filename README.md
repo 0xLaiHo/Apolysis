@@ -71,8 +71,10 @@ W1–W2 now has an independent `apolysis-contracts` boundary, versioned record,
 Gateway, coverage, and Query/Console wire types, compatibility fixtures, and
 normative contract documents. The current `pre-release` implementation builds
 on that input with an authenticated application core, a non-durable in-memory
-reference adapter, and an initial migration-managed PostgreSQL write adapter
-for the four canonical Gateway operations. These prototypes exercise
+reference adapter, an initial migration-managed PostgreSQL write adapter for
+the four canonical Gateway operations, and the first direct-mTLS `open_run`
+transport slice backed by current PostgreSQL credential authority. These
+prototypes exercise
 server-side grant/policy joins, RFC 8785 golden digest vectors, atomic
 record-append/outbox semantics, encrypted exact-operation replay, and a bounded
 finishing lifecycle.
@@ -80,10 +82,11 @@ finishing lifecycle.
 That slice is not production-ready and does not complete W3–W6. It has no
 server-restart, WAL/crash, multiprocess, or high-availability qualification;
 no production KMS integration or database row-level-security deployment; no
-network transport or live credential revocation; no object-store resolver or
-background cleanup/deadline reaper; and no production rate or request-size
-limits. Durable projectors, the Query service, and the Web Console remain
-roadmap targets. The external exit gate also remains open until three qualified
+transport coverage for `bind_runtime`, `ingest`, or `finish_run`; no atomic
+authority revalidation with ledger commit or lease/credential rotation gate;
+and no object-store resolver or background cleanup/deadline reaper. Durable
+projectors, the Query service, and the Web Console remain roadmap targets. The
+external exit gate also remains open until three qualified
 design partners approve their deployment and data boundaries. Do not treat the
 current Action as safe for untrusted repositories or Pull Requests until the
 public path is hardened.
@@ -147,6 +150,8 @@ Core crates:
   conformance adapter.
 - `apolysis-gateway-postgres`: initial PostgreSQL Gateway write adapter with
   migration-managed ledger/outbox storage and encrypted replay records.
+- `apolysis-gateway-server`: first direct-mTLS Gateway listener, current
+  PostgreSQL source authority, and bounded authority-administration tools.
 - `apolysis-runtime`: local, Docker, and runtime metadata adapters.
 - `apolysis-policy`: policy parser and decision logic.
 - `apolysis-store`: append-only JSONL and hash-chain storage.

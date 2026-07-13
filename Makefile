@@ -1,5 +1,6 @@
 .PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
 	test-gateway-postgres \
+	test-gateway-transport-mtls \
 	test-local-agent-command-attribution \
 	test-policy-guardrails test-policy-guardrails-bpf-lsm-live test-runtime-guardrails \
 	test-runtime-foundation test-runtime-foundation-runtime \
@@ -51,6 +52,12 @@ test-quickstart:
 # the default workspace suite never requires Docker or a database.
 test-gateway-postgres:
 	./scripts/test-gateway-postgres.sh
+
+# Opt-in production-transport gate. This starts a real PostgreSQL server,
+# creates a real CA and leaf certificates, and exercises the Gateway through
+# an mTLS loopback listener. No in-memory repository or transport mock is used.
+test-gateway-transport-mtls:
+	./scripts/test-gateway-transport-mtls.sh
 
 test-local-agent-command-attribution:
 	./scripts/test-local-agent-command-attribution.sh
