@@ -1,6 +1,7 @@
 .PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
+	test-projection-postgres \
 	test-gateway-transport-mtls \
 	test-local-agent-command-attribution \
 	test-policy-guardrails test-policy-guardrails-bpf-lsm-live test-runtime-guardrails \
@@ -64,6 +65,11 @@ test-gateway-postgres-crash-recovery:
 # an mTLS loopback listener. No in-memory repository or transport mock is used.
 test-gateway-transport-mtls:
 	./scripts/test-gateway-transport-mtls.sh
+
+# Opt-in durability and recovery qualification. This owns two disposable
+# PostgreSQL containers and never uses an operator-supplied database.
+test-projection-postgres:
+	./scripts/test-projection-postgres.sh
 
 test-local-agent-command-attribution:
 	./scripts/test-local-agent-command-attribution.sh

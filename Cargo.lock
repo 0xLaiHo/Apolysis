@@ -205,6 +205,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "apolysis-projection-postgres"
+version = "0.1.0"
+dependencies = [
+ "apolysis-contracts",
+ "apolysis-gateway",
+ "apolysis-gateway-postgres",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2 0.11.0",
+ "sqlx",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "apolysis-runtime"
 version = "0.1.0"
 dependencies = [
