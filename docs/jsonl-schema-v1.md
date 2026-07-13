@@ -81,8 +81,8 @@ Fields:
 - `cgroup_id`: cgroup identifier or `null`
 - `process_command`: legacy redacted command context, or `null`; current
   content-off observer producers emit `null`
-- `process_executable`: session-scoped executable reference known for the PID,
-  or `null`
+- `process_executable`: allowlisted `executable_ref:<basename>` known for the
+  PID, or `null`; paths and small-space executable hashes are not persisted
 - `process_started_at_unix_ms`: command-context start timestamp, or `null`
 
 Runtime metadata records are canonical `event` records with
@@ -324,7 +324,7 @@ Use these fields for deterministic joins:
   observed raw event.
 
 Process context is a separate enrichment model. Current observer producers keep
-a session-scoped `process_executable` reference and
+an allowlisted `process_executable` basename reference and
 `process_started_at_unix_ms`, but set `process_command` to `null`. Intent
 correlation can still use the normalized executable reference; unmatched
 `exec` records do not by themselves produce `missing_intent` findings, which

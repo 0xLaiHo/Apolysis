@@ -2,7 +2,7 @@
 
 use apolysis_core::{CanonicalEvent, EventSource, EventType, RawKernelEvent};
 use apolysis_observer::{
-    redact_command_text_for_persistence, redact_runtime_event_for_persistence, Redactor,
+    redact_command_text_for_persistence, Redactor, RuntimeEvidencePersistence,
 };
 
 #[test]
@@ -46,7 +46,7 @@ fn redaction_tokens_are_scoped_to_the_session() {
 }
 
 #[test]
-fn executable_references_normalize_path_forms_within_one_session() {
+fn executable_references_normalize_path_forms_without_persisting_paths() {
     let redactor = Redactor::new("session-a", "/workspace");
 
     let bare = redactor.redact_resource(EventType::Exec, "codex");
@@ -55,7 +55,7 @@ fn executable_references_normalize_path_forms_within_one_session() {
 
     assert_eq!(bare.value, installed.value);
     assert_eq!(bare.value, workspace.value);
-    assert!(bare.value.starts_with("executable_token:"));
+    assert_eq!(bare.value, "executable_ref:codex");
     assert!(!bare.value.contains("/usr/bin"));
 }
 
@@ -68,7 +68,7 @@ fn command_persistence_removes_workspace_and_credential_arguments() {
     );
 
     assert!(redacted.redacted);
-    assert!(redacted.value.starts_with("executable_token:"));
+    assert!(redacted.value.starts_with("executable_ref:"));
     assert!(redacted.value.ends_with(" argv_redacted:true"));
     assert!(!redacted
         .value
@@ -91,7 +91,7 @@ fn command_persistence_removes_network_arguments() {
     assert!(!redacted.value.contains("127.0.0.1"));
     assert!(!redacted.value.contains("1.1.1.1"));
     assert!(!redacted.value.contains("::1"));
-    assert!(redacted.value.starts_with("executable_token:"));
+    assert!(redacted.value.starts_with("executable_ref:"));
     assert!(redacted.value.ends_with(" argv_redacted:true"));
     assert!(!redacted.value.contains("address_token:"));
     assert!(!redacted.value.contains(":port:443"));
@@ -133,7 +133,7 @@ fn content_off_runtime_persistence_removes_exec_argv_and_process_command() {
     let redactor = Redactor::new("session-a", "/workspace");
 
     let (persisted_raw, persisted_canonical) =
-        redact_runtime_event_for_persistence(&raw, &canonical, &redactor, false);
+        RuntimeEvidencePersistence::new(&redactor).persist_event(&raw, &canonical, false);
     let serialized = format!(
         "{}\n{}",
         persisted_raw.to_json_line(),
@@ -147,7 +147,7 @@ fn content_off_runtime_persistence_removes_exec_argv_and_process_command() {
     assert!(persisted_canonical
         .process_executable
         .as_deref()
-        .is_some_and(|value| value.starts_with("executable_token:")));
+        .is_some_and(|value| value.starts_with("executable_ref:")));
     for forbidden in [
         "write-the-secret",
         "sk-test-secret",
@@ -170,7 +170,7 @@ fn persisted_command_text_keeps_only_an_executable_reference() {
     );
 
     assert!(persisted.redacted);
-    assert!(persisted.value.starts_with("executable_token:"));
+    assert!(persisted.value.starts_with("executable_ref:"));
     assert!(persisted.value.ends_with(" argv_redacted:true"));
     assert!(!persisted.value.contains("write-the-secret"));
     assert!(!persisted.value.contains("sk-test-secret"));

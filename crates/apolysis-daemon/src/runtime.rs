@@ -10,8 +10,8 @@ use apolysis_accountability::{
 };
 use apolysis_core::RawKernelEvent;
 use apolysis_observer::{
-    raw_event_from_record, redact_raw_event_for_persistence, DaemonObserver, DaemonObserverBatch,
-    DaemonObserverCounters, Redactor,
+    raw_event_from_record, DaemonObserver, DaemonObserverBatch, DaemonObserverCounters, Redactor,
+    RuntimeEvidencePersistence,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -159,7 +159,8 @@ pub async fn ingest_observer_batch(
             && state
                 .credential_path_requires_redaction(&session_id, &raw.resource)
                 .await;
-        let persisted = redact_raw_event_for_persistence(&raw, &redactor, credential_read);
+        let persisted =
+            RuntimeEvidencePersistence::new(&redactor).persist_raw(&raw, credential_read);
         let payload = serde_json::json!({
             "record_type": apolysis_core::records::RAW_KERNEL_EVENT,
             "timestamp_unix_ms": persisted.timestamp_unix_ms,

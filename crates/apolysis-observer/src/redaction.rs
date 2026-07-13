@@ -27,14 +27,7 @@ impl Redactor {
 
     pub fn redact_resource(&self, event_type: EventType, resource: &str) -> RedactedValue {
         match event_type {
-            EventType::Exec => {
-                let executable = Path::new(resource)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or(resource);
-                self.token("executable", executable)
-            }
+            EventType::Exec => executable_reference(resource),
             EventType::CredentialRead => self.token("path", resource),
             EventType::FileOpen
             | EventType::FileCreate
@@ -117,7 +110,7 @@ fn relative_path_stays_in_workspace(path: &Path) -> bool {
     true
 }
 
-pub fn redact_raw_event_for_persistence(
+fn redact_raw_event_for_persistence(
     raw: &RawKernelEvent,
     redactor: &Redactor,
     credential_read: bool,
@@ -156,29 +149,46 @@ pub fn redact_raw_event_for_persistence(
     persisted
 }
 
-/// Apply the single content-off persistence policy used by standalone and
-/// daemon observer paths.
+/// The only persistence policy entry point for kernel-derived runtime events.
 ///
 /// Kernel capture may transiently contain argv so process context can be
 /// resolved, but persisted records keep only structure and truncation markers.
 /// Raw argv and reconstructed process commands never cross this seam.
-pub fn redact_runtime_event_for_persistence(
-    raw: &RawKernelEvent,
-    canonical: &CanonicalEvent,
-    redactor: &Redactor,
-    credential_read: bool,
-) -> (RawKernelEvent, CanonicalEvent) {
-    let persisted_raw = redact_raw_event_for_persistence(raw, redactor, credential_read);
-    let mut persisted_canonical = canonical.clone();
-    persisted_canonical.resource = redactor
-        .redact_resource(canonical.event_type.clone(), &canonical.resource)
-        .value;
-    persisted_canonical.process_command = None;
-    persisted_canonical.process_executable = canonical
-        .process_executable
-        .as_deref()
-        .map(|value| redactor.redact_resource(EventType::Exec, value).value);
-    (persisted_raw, persisted_canonical)
+pub struct RuntimeEvidencePersistence<'a> {
+    redactor: &'a Redactor,
+}
+
+impl<'a> RuntimeEvidencePersistence<'a> {
+    /// Bind persistence policy to one session-scoped redactor.
+    pub fn new(redactor: &'a Redactor) -> Self {
+        Self { redactor }
+    }
+
+    /// Apply content-off policy to a raw event when no canonical event exists.
+    pub fn persist_raw(&self, raw: &RawKernelEvent, credential_read: bool) -> RawKernelEvent {
+        redact_raw_event_for_persistence(raw, self.redactor, credential_read)
+    }
+
+    /// Apply content-off policy to a joined raw and canonical event pair.
+    pub fn persist_event(
+        &self,
+        raw: &RawKernelEvent,
+        canonical: &CanonicalEvent,
+        credential_read: bool,
+    ) -> (RawKernelEvent, CanonicalEvent) {
+        let persisted_raw = self.persist_raw(raw, credential_read);
+        let mut persisted_canonical = canonical.clone();
+        persisted_canonical.resource = self
+            .redactor
+            .redact_resource(canonical.event_type.clone(), &canonical.resource)
+            .value;
+        persisted_canonical.process_command = None;
+        persisted_canonical.process_executable = canonical
+            .process_executable
+            .as_deref()
+            .map(|value| executable_reference(value).value);
+        (persisted_raw, persisted_canonical)
+    }
 }
 
 pub fn redact_command_text_for_persistence(
@@ -211,6 +221,24 @@ fn content_off_exec_payload(payload: &str) -> String {
         }
     }
     markers.join(",")
+}
+
+fn executable_reference(resource: &str) -> RedactedValue {
+    let name = Path::new(resource)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-')
+                })
+        })
+        .unwrap_or("unknown");
+    RedactedValue {
+        value: format!("executable_ref:{name}"),
+        redacted: true,
+    }
 }
 
 fn append_marker(payload: &mut String, marker: &str) {

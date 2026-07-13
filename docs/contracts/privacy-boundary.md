@@ -38,8 +38,10 @@ The current local observer enforces this boundary at one shared persistence
 seam used by fixture, standalone live, and daemon paths. Exec argv is replaced
 with `argv_redacted:true` plus allowlisted truncation markers, canonical
 `process_command` is omitted, and executable identity is represented by a
-session-scoped reference normalized across path forms. Managed-agent metadata
-records a content-off marker and does not persist its command fingerprint.
+strictly allowlisted basename reference normalized across path forms rather
+than a reversible small-space hash. Managed-agent metadata records a
+content-off marker and does not persist its command fingerprint or workspace
+path.
 Kernel-side argv capture is still transiently available for process-context
 resolution; disabling capture at the kernel boundary is a separate hardening
 gate and no captured argv may reach JSONL, hash-chain, or future Gateway writes.

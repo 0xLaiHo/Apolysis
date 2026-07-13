@@ -23,8 +23,7 @@ pub use live::{
     ObserverBatchDecoder,
 };
 pub use redaction::{
-    redact_command_text_for_persistence, redact_raw_event_for_persistence,
-    redact_runtime_event_for_persistence, RedactedValue, Redactor,
+    redact_command_text_for_persistence, RedactedValue, Redactor, RuntimeEvidencePersistence,
 };
 pub use scope::{ScopeSet, ScopeSetError, MAX_TRACKED_CGROUPS};
 
@@ -282,12 +281,12 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
         let raw = parse_fixture_raw_event(raw_line, &request.session_id)?
             .with_event_id(event_ids.next_raw_event_id());
         let canonical = process_context.observe(&raw, canonicalize(&raw, &policy));
-        let (persisted_raw, persisted_canonical) = redact_runtime_event_for_persistence(
-            &raw,
-            &canonical,
-            &redactor,
-            canonical.event_type == EventType::CredentialRead,
-        );
+        let (persisted_raw, persisted_canonical) = RuntimeEvidencePersistence::new(&redactor)
+            .persist_event(
+                &raw,
+                &canonical,
+                canonical.event_type == EventType::CredentialRead,
+            );
         store
             .append(&persisted_raw)
             .map_err(|error| format!("failed to write raw kernel event: {error}"))?;

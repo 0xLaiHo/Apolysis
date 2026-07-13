@@ -31,9 +31,9 @@ use crate::abi::{
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
 use crate::{
-    append_policy_evaluation, canonicalize, load_policy, redact_runtime_event_for_persistence,
-    write_observer_metadata, AyaLoaderPlan, EventIdSequence, ObserveResult, ObserverBackend,
-    ObserverMode, ObserverRunnerPlan, Redactor,
+    append_policy_evaluation, canonicalize, load_policy, write_observer_metadata, AyaLoaderPlan,
+    EventIdSequence, ObserveResult, ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor,
+    RuntimeEvidencePersistence,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -691,16 +691,9 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 }
             };
             let canonical = process_context.observe(&raw, canonicalize(&raw, &policy));
-            let (persisted_raw, persisted_canonical) =
-                redact_for_persistence(&raw, &canonical, &redactor);
-            store
-                .append(&persisted_raw)
-                .map_err(|error| format!("failed to write live raw event: {error}"))?;
+            let persisted_canonical =
+                append_content_off_runtime_event(&raw, &canonical, &redactor, &mut store)?;
             raw_count += 1;
-
-            store
-                .append(&persisted_canonical)
-                .map_err(|error| format!("failed to write live canonical event: {error}"))?;
             append_policy_evaluation(
                 &canonical,
                 &policy,
@@ -973,6 +966,10 @@ fn write_agent_supervisor_metadata(
     metadata: &AgentScopeMetadata,
     store: &mut JsonlStore,
 ) -> Result<(), String> {
+    let redactor = Redactor::new(session_id, &metadata.workspace_root);
+    let executable_ref = redactor
+        .redact_resource(EventType::Exec, &metadata.executable)
+        .value;
     let entries = vec![
         (
             resources::AGENT_SUPERVISOR_MODE,
@@ -984,10 +981,10 @@ fn write_agent_supervisor_metadata(
             resources::AGENT_COMMAND,
             "argv_redacted:true,content_off:true".to_string(),
         ),
-        (resources::AGENT_EXECUTABLE, metadata.executable.clone()),
+        (resources::AGENT_EXECUTABLE, executable_ref),
         (
             resources::AGENT_WORKSPACE_ROOT,
-            metadata.workspace_root.clone(),
+            "workspace_ref:redacted".to_string(),
         ),
         (
             resources::AGENT_START_TIME,
@@ -1599,17 +1596,25 @@ fn append_diagnostic(
         .map_err(|error| format!("failed to write observer diagnostic: {error}"))
 }
 
-fn redact_for_persistence(
+fn append_content_off_runtime_event(
     raw: &RawKernelEvent,
     canonical: &CanonicalEvent,
     redactor: &Redactor,
-) -> (RawKernelEvent, CanonicalEvent) {
-    redact_runtime_event_for_persistence(
-        raw,
-        canonical,
-        redactor,
-        canonical.event_type == apolysis_core::EventType::CredentialRead,
-    )
+    store: &mut JsonlStore,
+) -> Result<CanonicalEvent, String> {
+    let (persisted_raw, persisted_canonical) = RuntimeEvidencePersistence::new(redactor)
+        .persist_event(
+            raw,
+            canonical,
+            canonical.event_type == apolysis_core::EventType::CredentialRead,
+        );
+    store
+        .append(&persisted_raw)
+        .map_err(|error| format!("failed to write live raw event: {error}"))?;
+    store
+        .append(&persisted_canonical)
+        .map_err(|error| format!("failed to write live canonical event: {error}"))?;
+    Ok(persisted_canonical)
 }
 
 pub struct ObserverBatchDecoder {
@@ -1880,7 +1885,7 @@ mod tests {
         let redactor = crate::Redactor::new("session-a", "/workspace");
 
         let (persisted_raw, persisted_canonical) =
-            redact_for_persistence(&raw, &canonical, &redactor);
+            RuntimeEvidencePersistence::new(&redactor).persist_event(&raw, &canonical, true);
 
         assert!(!persisted_raw.to_json_line().contains("/workspace/.env"));
         assert!(!persisted_canonical
@@ -1928,8 +1933,8 @@ mod tests {
             supervisor_mode: "apolysis_managed_launch".to_string(),
             kind: "codex".to_string(),
             root_pid: 101,
-            executable: "/usr/bin/codex".to_string(),
-            workspace_root: "/workspace".to_string(),
+            executable: "/home/alice/private/bin/codex".to_string(),
+            workspace_root: "/home/alice/private/workspace".to_string(),
             start_time_ticks: Some(77),
         };
 
@@ -1939,8 +1944,80 @@ mod tests {
         let timeline = std::fs::read_to_string(&path).expect("read metadata");
 
         assert!(timeline.contains("argv_redacted:true,content_off:true"));
+        assert!(timeline.contains("executable_ref:codex"));
+        assert!(timeline.contains("workspace_ref:redacted"));
         assert!(!timeline.contains("agent-command-fingerprint"));
         assert!(!timeline.contains("sha256:"));
+        assert!(!timeline.contains("/home/alice/private"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn standalone_live_writer_is_content_off_before_jsonl_append() {
+        let path = std::env::temp_dir().join(format!(
+            "apolysis-live-content-off-{}-{}.jsonl",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let raw = RawKernelEvent::new(
+            1,
+            "session-a",
+            EventSource::KernelTracepoint,
+            "sched_process_exec",
+            101,
+            100,
+            1000,
+            1000,
+            "codex",
+            "/home/alice/private/bin/codex",
+            "exec",
+            None,
+            Some("42".to_string()),
+            "argv:/home/alice/private/bin/codex write-the-secret sk-live-secret,argv_truncated:true,payload_truncated:true",
+        );
+        let canonical = CanonicalEvent::new(
+            "session-a",
+            EventSource::KernelTracepoint,
+            EventType::Exec,
+            101,
+            100,
+            "codex",
+            "/home/alice/private/bin/codex",
+            "exec",
+        )
+        .with_process_context(
+            "/home/alice/private/bin/codex write-the-secret sk-live-secret",
+            "/home/alice/private/bin/codex",
+            1,
+        );
+        let redactor = crate::Redactor::new("session-a", "/home/alice/private/workspace");
+        let mut store = JsonlStore::create(&path).expect("live store");
+
+        append_content_off_runtime_event(&raw, &canonical, &redactor, &mut store)
+            .expect("append runtime event");
+        store.flush().expect("flush live store");
+        let timeline = std::fs::read_to_string(&path).expect("read live timeline");
+
+        assert!(timeline.contains("argv_redacted:true"));
+        assert!(timeline.contains("argv_truncated:true"));
+        assert!(timeline.contains("payload_truncated:true"));
+        assert!(timeline.contains("executable_ref:codex"));
+        assert!(timeline.contains(r#""process_command":null"#));
+        for forbidden in [
+            "write-the-secret",
+            "sk-live-secret",
+            "/home/alice/private",
+            "agent-command-fingerprint",
+        ] {
+            assert!(
+                !timeline.contains(forbidden),
+                "leaked {forbidden}: {timeline}"
+            );
+        }
         let _ = std::fs::remove_file(path);
     }
 
@@ -2025,7 +2102,7 @@ mod tests {
         let redactor = crate::Redactor::new("session-a", "/workspace");
 
         let (persisted_raw, _persisted_canonical) =
-            redact_for_persistence(&raw, &canonical, &redactor);
+            RuntimeEvidencePersistence::new(&redactor).persist_event(&raw, &canonical, false);
 
         assert!(persisted_raw.raw_payload.contains("argv_redacted:true"));
         assert!(persisted_raw.raw_payload.contains("redacted:payload"));
@@ -2077,13 +2154,13 @@ mod tests {
         let redactor = crate::Redactor::new("session-a", "/workspace");
 
         let (_persisted_raw, persisted_canonical) =
-            redact_for_persistence(&raw, &canonical, &redactor);
+            RuntimeEvidencePersistence::new(&redactor).persist_event(&raw, &canonical, false);
 
         assert_eq!(persisted_canonical.process_command, None);
         assert!(persisted_canonical
             .process_executable
             .as_deref()
-            .is_some_and(|value| value.starts_with("executable_token:")));
+            .is_some_and(|value| value.starts_with("executable_ref:")));
     }
 
     #[test]

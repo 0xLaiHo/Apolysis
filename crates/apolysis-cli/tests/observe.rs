@@ -338,7 +338,7 @@ fn observe_fixture_keeps_process_identity_without_command_content() {
         .expect("file event from exec-derived process context");
 
     assert!(file_event.contains(r#""process_command":null"#));
-    assert!(file_event.contains(r#""process_executable":"executable_token:"#));
+    assert!(file_event.contains(r#""process_executable":"executable_ref:"#));
     assert!(!file_event.contains("bash -lc fixture"));
     assert!(file_event.contains(r#""process_started_at_unix_ms":1780328000001"#));
 
