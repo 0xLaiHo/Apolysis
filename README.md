@@ -76,10 +76,17 @@ partners approve their deployment and data boundaries. Do not treat the
 current Action as safe for untrusted repositories or Pull Requests until the
 public path is hardened.
 
+Production implementation now proceeds through the protected `pre-release`
+branch. Its first privacy gate makes every local observer persistence path
+content-off by default: exec argv and reconstructed process commands are not
+written to JSONL or daemon hash-chain records. Kernel-side capture is still a
+transient implementation detail until the later capture-off control is added.
+
 ## Core Capabilities
 
-- Live and fixture observation for process, file, network, bounded exec argv,
-  and credential-path events, with explicit attempt/outcome limitations.
+- Live and fixture observation for process, file, network, and credential-path
+  events, with content-off persisted exec metadata and explicit
+  attempt/outcome limitations.
 - Managed local agent launch with process-tree attribution for Codex and other
   command-line agents.
 - Intent ingestion and heuristic correlation for declared tool calls versus
