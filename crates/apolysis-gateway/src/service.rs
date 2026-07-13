@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use apolysis_contracts::{
     AuthenticatedSourceContext, BindRuntimeRequest, BindRuntimeResponse, ContractErrorCode,
@@ -51,14 +51,9 @@ where
         validate_request_contract(request.validate())?;
         authorize_open_run(context, &request)?;
         verify_request_digest("open_run", request.request_digest(), &request)?;
-        let lease_expires_at_unix_ms =
-            now_unix_ms.checked_add(self.lease_ttl_ms).ok_or_else(|| {
-                GatewayFailure::new(
-                    ContractErrorCode::Backpressure,
-                    "Gateway time source is temporarily unavailable",
-                    AuditReason::RepositoryInvariant,
-                )
-            })?;
+        let lease_expires_at_unix_ms = now_unix_ms
+            .checked_add(self.lease_ttl_ms)
+            .ok_or_else(|| GatewayFailure::repository_fault(AuditReason::RepositoryInvariant))?;
         match self
             .repository
             .execute(
@@ -73,9 +68,7 @@ where
             .await?
         {
             LedgerOutcome::OpenRun(response) => Ok(response),
-            _ => Err(GatewayFailure::new(
-                ContractErrorCode::Backpressure,
-                "Gateway persistence returned an invalid outcome",
+            _ => Err(GatewayFailure::repository_fault(
                 AuditReason::RepositoryInvariant,
             )),
         }
@@ -101,9 +94,7 @@ where
             .await?
         {
             LedgerOutcome::Ingest(acknowledgement) => Ok(acknowledgement),
-            _ => Err(GatewayFailure::new(
-                ContractErrorCode::Backpressure,
-                "Gateway persistence returned an invalid outcome",
+            _ => Err(GatewayFailure::repository_fault(
                 AuditReason::RepositoryInvariant,
             )),
         }
@@ -151,9 +142,7 @@ where
             .await?
         {
             LedgerOutcome::BindRuntime(response) => Ok(response),
-            _ => Err(GatewayFailure::new(
-                ContractErrorCode::Backpressure,
-                "Gateway persistence returned an invalid outcome",
+            _ => Err(GatewayFailure::repository_fault(
                 AuditReason::RepositoryInvariant,
             )),
         }
@@ -171,13 +160,7 @@ where
         verify_request_digest("finish_run", request.request_digest(), &request)?;
         let policy_deadline = now_unix_ms
             .checked_add(self.finalization_window_ms)
-            .ok_or_else(|| {
-                GatewayFailure::new(
-                    ContractErrorCode::Backpressure,
-                    "Gateway time source is temporarily unavailable",
-                    AuditReason::RepositoryInvariant,
-                )
-            })?;
+            .ok_or_else(|| GatewayFailure::repository_fault(AuditReason::RepositoryInvariant))?;
         let finalization_deadline_unix_ms = request
             .requested_finalization_deadline_unix_ms()
             .map(|deadline| deadline.min(policy_deadline))
@@ -196,9 +179,7 @@ where
             .await?
         {
             LedgerOutcome::FinishRun(response) => Ok(response),
-            _ => Err(GatewayFailure::new(
-                ContractErrorCode::Backpressure,
-                "Gateway persistence returned an invalid outcome",
+            _ => Err(GatewayFailure::repository_fault(
                 AuditReason::RepositoryInvariant,
             )),
         }
@@ -375,7 +356,7 @@ fn validate_ingest_batch(
     request: &IngestRequest,
 ) -> GatewayResult<()> {
     let policy = context.registration_policy();
-    let mut event_ids = BTreeSet::new();
+    let mut event_ids = BTreeMap::new();
     let mut source_sequences = BTreeSet::new();
     for envelope in request.envelopes() {
         if envelope.run_id() != request.run_id() {
@@ -388,13 +369,17 @@ fn validate_ingest_batch(
         if envelope.source_id() != policy.source_id() {
             return Err(forbidden(AuditReason::SourceRegistrationMismatch));
         }
-        if !event_ids.insert(envelope.source_event_id()) {
-            return Err(GatewayFailure::new(
-                ContractErrorCode::SourceEventConflict,
-                "Batch contains a repeated source event identity",
-                AuditReason::IdempotencyConflict,
-            ));
+        if let Some(prior) = event_ids.get(envelope.source_event_id()) {
+            if *prior != envelope {
+                return Err(GatewayFailure::new(
+                    ContractErrorCode::SourceEventConflict,
+                    "Batch reuses a source event identity with different content",
+                    AuditReason::IdempotencyConflict,
+                ));
+            }
+            continue;
         }
+        event_ids.insert(envelope.source_event_id(), envelope);
         if !source_sequences.insert(envelope.source_sequence()) {
             return Err(GatewayFailure::new(
                 ContractErrorCode::SequenceConflict,

@@ -496,14 +496,14 @@ CREATE TABLE apolysis_gateway.operation_replays (
     operation_id bigint NOT NULL,
     outcome_schema_version apolysis_gateway.contract_schema_version NOT NULL DEFAULT '0.1',
     encryption_algorithm text NOT NULL
-        CHECK (encryption_algorithm IN ('aes-256-gcm', 'xchacha20-poly1305')),
+        CHECK (encryption_algorithm = 'aes-256-gcm'),
     cipher_version integer NOT NULL
         CHECK (cipher_version BETWEEN 1 AND 65535),
     encryption_key_ref apolysis_gateway.bounded_reference NOT NULL,
     wrapped_data_key bytea
         CHECK (wrapped_data_key IS NULL OR octet_length(wrapped_data_key) > 0),
     nonce bytea NOT NULL
-        CHECK (octet_length(nonce) BETWEEN 12 AND 24),
+        CHECK (octet_length(nonce) = 12),
     authentication_tag bytea NOT NULL
         CHECK (octet_length(authentication_tag) = 16),
     aad_digest apolysis_gateway.sha256_digest NOT NULL,
@@ -516,14 +516,6 @@ CREATE TABLE apolysis_gateway.operation_replays (
         FOREIGN KEY (organization_id, operation_id)
         REFERENCES apolysis_gateway.gateway_operations (organization_id, operation_id)
         ON DELETE CASCADE,
-    CONSTRAINT operation_replays_nonce_ck
-        CHECK (
-            (encryption_algorithm = 'aes-256-gcm' AND octet_length(nonce) = 12)
-            OR (
-                encryption_algorithm = 'xchacha20-poly1305'
-                AND octet_length(nonce) = 24
-            )
-        ),
     CONSTRAINT operation_replays_expiry_ck
         CHECK (expires_at_unix_ms > created_at_unix_ms)
 );
