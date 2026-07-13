@@ -79,14 +79,20 @@ server-side grant/policy joins, RFC 8785 golden digest vectors, atomic
 record-append/outbox semantics, encrypted exact-operation replay, and a bounded
 finishing lifecycle.
 
-That slice is not production-ready and does not complete W3–W6. It has no
-server-restart, WAL/crash, multiprocess, or high-availability qualification;
-no production KMS integration or database row-level-security deployment; no
-transport coverage for `bind_runtime`, `ingest`, or `finish_run`; no atomic
-authority revalidation with ledger commit or lease/credential rotation gate;
-and no object-store resolver or background cleanup/deadline reaper. Durable
-projectors, the Query service, and the Web Console remain roadmap targets. The
-external exit gate also remains open until three qualified
+That slice is not production-ready and does not complete W3–W6. A separate real
+PostgreSQL recovery gate now covers graceful database restart, PostgreSQL
+SIGKILL/WAL recovery, and Gateway application-process death before commit,
+after commit, and during replay while preserving rollback or exact convergence
+before a dedicated client acknowledgement is emitted. This qualifies a
+repository/application-process seam, not recovery of the HTTPS Gateway server.
+The broader multiprocess race matrix, load, replication, failover,
+backup/restore, and high availability remain unqualified, as do production KMS
+integration, database row-level-security deployment, transport coverage for
+`bind_runtime`, `ingest`, and `finish_run`, atomic authority revalidation with
+ledger commit, lease/credential rotation, the object plane, and background
+reapers and resource limits. HTTPS trace and error-body secret surfaces,
+durable projectors, the Query service, and the Web Console remain roadmap
+targets. The external exit gate also remains open until three qualified
 design partners approve their deployment and data boundaries. Do not treat the
 current Action as safe for untrusted repositories or Pull Requests until the
 public path is hardened.
