@@ -24,14 +24,24 @@ require_contains() {
 # The readable summary and both sides of the verdict must be present.
 require_contains "Apolysis accountability summary"
 require_contains "matched declared intent"
-require_contains "cargo test -p apolysis-cli --test intent"
 require_contains "missing_intent"
+require_contains "unobserved_intent"
+require_contains "codex:call-run-tests"
 require_contains "credential_read"
 require_contains ".aws/credentials"
 
 # The correlation JSONL must be written for anyone who wants the raw evidence.
 if [[ ! -s target/quickstart/correlation.jsonl ]]; then
     echo "quickstart check failed: target/quickstart/correlation.jsonl was not written" >&2
+    exit 1
+fi
+
+# Content-off persistence must not regress by exposing the declared argv in
+# either the human summary or the durable correlation evidence.
+forbidden_command="cargo test -p apolysis-cli --test intent"
+if printf '%s' "$output" | grep -qF -- "$forbidden_command" ||
+    grep -qF -- "$forbidden_command" target/quickstart/correlation.jsonl; then
+    echo "quickstart check failed: command content crossed the persistence boundary" >&2
     exit 1
 fi
 

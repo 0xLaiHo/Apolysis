@@ -23,7 +23,7 @@ pub use live::{
     ObserverBatchDecoder,
 };
 pub use redaction::{
-    redact_command_text_for_persistence, redact_raw_event_for_persistence, RedactedValue, Redactor,
+    redact_command_text_for_persistence, RedactedValue, Redactor, RuntimeEvidencePersistence,
 };
 pub use scope::{ScopeSet, ScopeSetError, MAX_TRACKED_CGROUPS};
 
@@ -268,6 +268,9 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
     let mut canonical_count = 0;
     let mut event_ids = EventIdSequence::new(&request.session_id);
     let mut process_context = ProcessContextTable::default();
+    let workspace_root = std::env::current_dir()
+        .map_err(|error| format!("failed to resolve fixture workspace root: {error}"))?;
+    let redactor = Redactor::new(&request.session_id, workspace_root);
 
     for raw_line in input.lines() {
         let raw_line = raw_line.trim();
@@ -277,21 +280,26 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
 
         let raw = parse_fixture_raw_event(raw_line, &request.session_id)?
             .with_event_id(event_ids.next_raw_event_id());
+        let canonical = process_context.observe(&raw, canonicalize(&raw, &policy));
+        let (persisted_raw, persisted_canonical) = RuntimeEvidencePersistence::new(&redactor)
+            .persist_event(
+                &raw,
+                &canonical,
+                canonical.event_type == EventType::CredentialRead,
+            );
         store
-            .append(&raw)
+            .append(&persisted_raw)
             .map_err(|error| format!("failed to write raw kernel event: {error}"))?;
         raw_count += 1;
-
-        let canonical = process_context.observe(&raw, canonicalize(&raw, &policy));
         store
-            .append(&canonical)
+            .append(&persisted_canonical)
             .map_err(|error| format!("failed to write canonical event: {error}"))?;
         append_policy_evaluation(
             &canonical,
             &policy,
             &capabilities,
             feedback.as_ref(),
-            None,
+            Some(&persisted_canonical.resource),
             &mut store,
         )?;
         canonical_count += 1;

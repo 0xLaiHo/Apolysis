@@ -10,5 +10,6 @@
 "event_type":"file_truncate"
 "event_type":"file_rename"
 "event_type":"file_unlink"
-"resource":"tests/fixtures/home/.ssh/id_rsa"
-"resource":"1.1.1.1:443"
+"resource":"path_token:
+"resource":"address_token:
+argv_redacted:true

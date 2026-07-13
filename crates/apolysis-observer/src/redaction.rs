@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use apolysis_core::{EventType, RawKernelEvent};
+use apolysis_core::{CanonicalEvent, EventType, RawKernelEvent};
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +27,7 @@ impl Redactor {
 
     pub fn redact_resource(&self, event_type: EventType, resource: &str) -> RedactedValue {
         match event_type {
+            EventType::Exec => executable_reference(resource),
             EventType::CredentialRead => self.token("path", resource),
             EventType::FileOpen
             | EventType::FileCreate
@@ -110,13 +110,14 @@ fn relative_path_stays_in_workspace(path: &Path) -> bool {
     true
 }
 
-pub fn redact_raw_event_for_persistence(
+fn redact_raw_event_for_persistence(
     raw: &RawKernelEvent,
     redactor: &Redactor,
     credential_read: bool,
 ) -> RawKernelEvent {
     let mut persisted = raw.clone();
     let event_type = match raw.event_name.as_str() {
+        "exec" | "execve" | "execveat" | "sched_process_exec" => EventType::Exec,
         "open" | "openat" | "openat2" if credential_read => EventType::CredentialRead,
         "open" | "openat" | "openat2" => EventType::FileOpen,
         "creat" => EventType::FileCreate,
@@ -126,19 +127,68 @@ pub fn redact_raw_event_for_persistence(
         "connect" => EventType::NetworkConnect,
         _ => return persisted,
     };
+    match event_type {
+        EventType::Exec => {
+            persisted.raw_payload = content_off_exec_payload(&raw.raw_payload);
+            append_marker(&mut persisted.raw_payload, "redacted:payload");
+        }
+        EventType::FileRename if !raw.raw_payload.is_empty() => {
+            let payload = redactor.redact_resource(EventType::FileRename, &raw.raw_payload);
+            persisted.raw_payload = payload.value;
+            if payload.redacted {
+                append_marker(&mut persisted.raw_payload, "redacted:payload");
+            }
+        }
+        _ => {}
+    }
     let resource = redactor.redact_resource(event_type.clone(), &raw.resource);
     persisted.resource = resource.value;
     if resource.redacted {
         append_marker(&mut persisted.raw_payload, "redacted:resource");
     }
-    if event_type == EventType::FileRename && !raw.raw_payload.is_empty() {
-        let payload = redactor.redact_resource(EventType::FileRename, &raw.raw_payload);
-        persisted.raw_payload = payload.value;
-        if payload.redacted {
-            append_marker(&mut persisted.raw_payload, "redacted:payload");
-        }
-    }
     persisted
+}
+
+/// The only persistence policy entry point for kernel-derived runtime events.
+///
+/// Kernel capture may transiently contain argv so process context can be
+/// resolved, but persisted records keep only structure and truncation markers.
+/// Raw argv and reconstructed process commands never cross this seam.
+pub struct RuntimeEvidencePersistence<'a> {
+    redactor: &'a Redactor,
+}
+
+impl<'a> RuntimeEvidencePersistence<'a> {
+    /// Bind persistence policy to one session-scoped redactor.
+    pub fn new(redactor: &'a Redactor) -> Self {
+        Self { redactor }
+    }
+
+    /// Apply content-off policy to a raw event when no canonical event exists.
+    pub fn persist_raw(&self, raw: &RawKernelEvent, credential_read: bool) -> RawKernelEvent {
+        redact_raw_event_for_persistence(raw, self.redactor, credential_read)
+    }
+
+    /// Apply content-off policy to a joined raw and canonical event pair.
+    pub fn persist_event(
+        &self,
+        raw: &RawKernelEvent,
+        canonical: &CanonicalEvent,
+        credential_read: bool,
+    ) -> (RawKernelEvent, CanonicalEvent) {
+        let persisted_raw = self.persist_raw(raw, credential_read);
+        let mut persisted_canonical = canonical.clone();
+        persisted_canonical.resource = self
+            .redactor
+            .redact_resource(canonical.event_type.clone(), &canonical.resource)
+            .value;
+        persisted_canonical.process_command = None;
+        persisted_canonical.process_executable = canonical
+            .process_executable
+            .as_deref()
+            .map(|value| executable_reference(value).value);
+        (persisted_raw, persisted_canonical)
+    }
 }
 
 pub fn redact_command_text_for_persistence(
@@ -147,137 +197,48 @@ pub fn redact_command_text_for_persistence(
     command: &str,
 ) -> RedactedValue {
     let redactor = Redactor::new(session_id, workspace_root);
-    let mut redacted = false;
-    let mut redact_next = false;
-    let mut args = Vec::new();
-    for arg in command.split_whitespace() {
-        if redact_next {
-            args.push("<redacted>".to_string());
-            redacted = true;
-            redact_next = false;
-            continue;
-        }
-
-        if secret_flag(arg) {
-            args.push(arg.to_string());
-            redact_next = true;
-            continue;
-        }
-
-        if authorization_marker(arg) {
-            args.push(arg.to_string());
-            redact_next = true;
-            continue;
-        }
-
-        if let Some((key, value)) = arg.split_once('=') {
-            if secret_word(key) {
-                args.push(format!("{key}=<redacted>"));
-                redacted = true;
-                continue;
-            }
-            let value = redact_command_argument_resource(&redactor, value);
-            if value.redacted {
-                redacted = true;
-                args.push(format!("{key}={}", value.value));
-                continue;
-            }
-        }
-
-        if looks_like_secret_value(arg) {
-            args.push("<redacted>".to_string());
-            redacted = true;
-            continue;
-        }
-
-        let value = redact_command_argument_resource(&redactor, arg);
-        redacted |= value.redacted;
-        args.push(value.value);
-    }
-
+    let executable = command
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(|value| redactor.redact_resource(EventType::Exec, value).value)
+        .unwrap_or_else(|| "executable:unavailable".to_string());
     RedactedValue {
-        value: args.join(" "),
-        redacted,
+        value: format!("{executable} argv_redacted:true"),
+        redacted: true,
     }
 }
 
-fn redact_command_argument_resource(redactor: &Redactor, value: &str) -> RedactedValue {
-    if let Some(resource) = network_argument_resource(value) {
-        return redactor.redact_resource(EventType::NetworkConnect, &resource);
+fn content_off_exec_payload(payload: &str) -> String {
+    let mut markers = vec!["argv_redacted:true"];
+    for marker in [
+        "resource_truncated:true",
+        "argv_truncated:true",
+        "payload_truncated:true",
+    ] {
+        if payload.split(',').any(|part| part == marker) {
+            markers.push(marker);
+        }
     }
-    if !looks_like_path_argument(value) {
-        return RedactedValue {
-            value: value.to_string(),
-            redacted: false,
-        };
+    markers.join(",")
+}
+
+fn executable_reference(resource: &str) -> RedactedValue {
+    let name = Path::new(resource)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-')
+                })
+        })
+        .unwrap_or("unknown");
+    RedactedValue {
+        value: format!("executable_ref:{name}"),
+        redacted: true,
     }
-    let event_type = if looks_like_credential_path(value) {
-        EventType::CredentialRead
-    } else {
-        EventType::FileOpen
-    };
-    redactor.redact_resource(event_type, value)
-}
-
-fn network_argument_resource(value: &str) -> Option<String> {
-    let trimmed = value.trim_matches(|ch| matches!(ch, '\'' | '"' | ',' | ';'));
-    if trimmed.parse::<SocketAddr>().is_ok() {
-        return Some(trimmed.to_string());
-    }
-
-    let ip = trimmed.trim_start_matches('[').trim_end_matches(']');
-    ip.parse::<IpAddr>().ok().map(|_| ip.to_string())
-}
-
-fn secret_flag(value: &str) -> bool {
-    value.starts_with("--") && secret_word(value.trim_start_matches('-'))
-}
-
-fn secret_word(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "credential",
-        "api-key",
-        "apikey",
-        "authorization",
-    ]
-    .iter()
-    .any(|word| normalized.contains(word))
-}
-
-fn looks_like_secret_value(value: &str) -> bool {
-    let normalized = value.trim_matches(|ch| matches!(ch, '\'' | '"' | ',' | ';'));
-    normalized.starts_with("sk-")
-        || normalized.starts_with("ghp_")
-        || normalized.starts_with("github_pat_")
-        || normalized.starts_with("Bearer ")
-}
-
-fn authorization_marker(value: &str) -> bool {
-    let normalized = value
-        .trim_matches(|ch| matches!(ch, '\'' | '"' | ',' | ';'))
-        .trim_end_matches(':')
-        .to_ascii_lowercase();
-    normalized == "authorization" || normalized == "bearer"
-}
-
-fn looks_like_path_argument(value: &str) -> bool {
-    value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.starts_with("~/")
-}
-
-fn looks_like_credential_path(value: &str) -> bool {
-    value.ends_with("/.env")
-        || value.contains("/.env.")
-        || value.contains("/.ssh/")
-        || value.contains("/.aws/")
-        || value.contains("/var/run/secrets/")
 }
 
 fn append_marker(payload: &mut String, marker: &str) {

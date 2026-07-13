@@ -174,6 +174,67 @@ async fn observer_batch_submits_only_records_with_session_ownership() {
 }
 
 #[tokio::test]
+async fn daemon_exec_persistence_is_content_off_by_default() {
+    let config = config();
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(
+            intent("content-off-session", "policy.yaml"),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("register intent");
+    state
+        .discover_cgroup("content-off-session", 77)
+        .await
+        .expect("discover cgroup");
+    let pipeline = state.pipeline();
+    let (shutdown, receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(receiver).await })
+    };
+
+    ingest_observer_batch(
+        &state,
+        &pipeline,
+        DaemonObserverBatch {
+            events: vec![kernel_exec_event(
+                77,
+                "argv:/usr/bin/codex exec write-the-secret --api-key sk-test-secret /workspace/private.txt,argv_truncated:true",
+            )],
+            decode_failures: 0,
+            truncations: 1,
+        },
+    )
+    .await;
+    shutdown.send(()).unwrap();
+    writer.await.unwrap().expect("writer drain");
+
+    let timeline = std::fs::read_to_string(
+        config
+            .state_dir
+            .join("sessions/content-off-session/timeline.jsonl"),
+    )
+    .expect("session timeline");
+    assert!(timeline.contains("argv_redacted:true"));
+    assert!(timeline.contains("argv_truncated:true"));
+    for forbidden in [
+        "write-the-secret",
+        "sk-test-secret",
+        "/workspace/private.txt",
+        "/usr/bin/codex exec",
+    ] {
+        assert!(
+            !timeline.contains(forbidden),
+            "leaked {forbidden}: {timeline}"
+        );
+    }
+
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn observer_batch_appends_accountability_findings_for_registered_intent() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
@@ -298,6 +359,15 @@ fn kernel_network_event(cgroup_id: u64, endpoint: &str) -> DaemonKernelEvent {
     event.record.event_kind = KernelEventKind::Connect as u32;
     event.record.action[..7].copy_from_slice(b"connect");
     event.record.resource[..endpoint.len()].copy_from_slice(endpoint.as_bytes());
+    event
+}
+
+fn kernel_exec_event(cgroup_id: u64, argv: &str) -> DaemonKernelEvent {
+    let mut event = kernel_event(cgroup_id);
+    let executable = b"/usr/bin/codex";
+    event.record.resource[..executable.len()].copy_from_slice(executable);
+    event.record.action[..4].copy_from_slice(b"exec");
+    event.record.payload[..argv.len()].copy_from_slice(argv.as_bytes());
     event
 }
 

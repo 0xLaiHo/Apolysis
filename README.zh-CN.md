@@ -64,10 +64,15 @@ Gateway、耐久 projector、Query service 和 Web Console 仍是 roadmap 目标
 会保持开启，直到三个合格设计伙伴实际确认其部署和数据边界。在公开路径完成加固前，
 不要把当前 Action 用于不可信仓库或 GitHub 拉取请求（PR）。
 
+生产实现现通过受保护的 `pre-release` 分支推进。首个隐私门禁已把所有本地 observer
+持久化路径统一为默认 content-off：exec argv 与重建出的 process command 不会写入 JSONL
+或 daemon hash-chain record。后续加入 capture-off control 前，内核侧捕获仍只是瞬时实现
+细节。
+
 ## 核心能力
 
-- 通过离线数据和实时 eBPF 观测采集进程、文件、网络、受限命令参数和凭证路径事件，
-  并显式说明 attempt/outcome 局限。
+- 通过离线数据和实时 eBPF 观测采集进程、文件、网络和凭证路径事件；持久化的 exec
+  metadata 默认 content-off，并显式说明 attempt/outcome 局限。
 - 由 Apolysis 托管启动本地智能体命令，并为 Codex 等命令行智能体追踪进程树。
 - 摄入智能体声明的工具调用意图，并与主机侧观测事件做启发式关联。
 - 关联本地进程、Docker/containerd 和 Kubernetes 工作负载的运行时元数据。

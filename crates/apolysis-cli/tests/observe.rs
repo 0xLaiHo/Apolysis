@@ -304,7 +304,7 @@ fn observe_fixture_links_raw_canonical_and_policy_records_by_event_id() {
 }
 
 #[test]
-fn observe_fixture_enriches_events_with_process_command_context() {
+fn observe_fixture_keeps_process_identity_without_command_content() {
     let output = temp_jsonl("apolysis-observe-process-context");
     let _ = std::fs::remove_file(&output);
 
@@ -337,8 +337,9 @@ fn observe_fixture_enriches_events_with_process_command_context() {
         })
         .expect("file event from exec-derived process context");
 
-    assert!(file_event.contains(r#""process_command":"bash -lc fixture""#));
-    assert!(file_event.contains(r#""process_executable":"/usr/bin/bash""#));
+    assert!(file_event.contains(r#""process_command":null"#));
+    assert!(file_event.contains(r#""process_executable":"executable_ref:"#));
+    assert!(!file_event.contains("bash -lc fixture"));
     assert!(file_event.contains(r#""process_started_at_unix_ms":1780328000001"#));
 
     let _ = std::fs::remove_file(&output);

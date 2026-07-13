@@ -152,6 +152,10 @@ target contract are not excluded from the production MVP.
 - Disable prompt, response, raw payload, raw argv, and raw object collection by
   default. Reject or redact content outside the registered privacy policy before
   durable acceptance.
+- Route fixture, standalone live, and daemon observer output through the same
+  content-off persistence seam. Persist only executable references and explicit
+  argv/truncation markers; never persist reconstructed process commands or
+  managed-agent command fingerprints by default.
 - Authorize object access independently from possession of a reference. Audit
   raw reads, exports, retention changes, and Finding workflow actions.
 - Propagate revocation, redaction, and deletion through write records,

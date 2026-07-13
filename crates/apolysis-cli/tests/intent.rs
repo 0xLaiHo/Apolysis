@@ -47,8 +47,9 @@ fn intent_ingest_codex_jsonl_writes_redacted_intent_records() {
     assert!(timeline.contains(r#""source_event_id":"call-1""#));
     assert!(timeline.contains(r#""tool_name":"exec_command""#));
     assert!(timeline.contains(r#""declared_action":"shell.command""#));
-    assert!(timeline.contains(r#""command":"cat Cargo.toml""#));
-    assert!(timeline.contains("<redacted>"));
+    assert!(timeline.contains("argv_redacted:true"));
+    assert!(!timeline.contains("cat Cargo.toml"));
+    assert!(!timeline.contains("curl -H"));
     assert!(!timeline.contains("sk-test-secret"));
     assert!(timeline
         .lines()
