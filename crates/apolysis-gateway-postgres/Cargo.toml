@@ -1,0 +1,34 @@
+[package]
+name = "apolysis-gateway-postgres"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+aes-gcm = "0.10.3"
+apolysis-contracts = { path = "../apolysis-contracts" }
+apolysis-gateway = { path = "../apolysis-gateway" }
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_json_canonicalizer.workspace = true
+sha2.workspace = true
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "json",
+    "macros",
+    "migrate",
+    "postgres",
+    "runtime-tokio-rustls",
+] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tracing = "0.1.44"
+zeroize = "1.8.2"
+
+[dev-dependencies]
+apolysis-gateway-testkit = { path = "../apolysis-gateway-testkit" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[lib]
+path = "src/lib.rs"

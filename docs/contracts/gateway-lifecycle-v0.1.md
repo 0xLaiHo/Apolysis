@@ -1,8 +1,9 @@
 # Execution Evidence Gateway Lifecycle v0.1
 
-Status: normative W1–W2 target contract. An application core and non-durable
-reference adapter are implemented on the `pre-release` development line; the
-production Execution Evidence Gateway is not.
+Status: normative W1–W2 target contract. An application core, non-durable
+reference adapter, and initial PostgreSQL write-adapter prototype are
+implemented on the `pre-release` development line; the production Execution
+Evidence Gateway is not.
 
 ## Boundary
 
@@ -31,23 +32,53 @@ The Gateway foundation slice currently implements:
   committed golden vectors for requests and inline payloads;
 - an in-memory reference adapter that commits record append, deduplication,
   ingest sequence, and projection-outbox intent atomically, including batches
-  containing exact duplicates and novel envelopes; and
+  containing exact duplicates and novel envelopes;
+- a migration-managed PostgreSQL adapter for the same atomic-command seam,
+  with normalized ledger/outbox state, hashed lease and join references,
+  encrypted exact-operation replay, and bounded retry for serialization or
+  deadlock failures;
+- a run-wide admission cap of 256 source streams plus bounded,
+  transaction-local PostgreSQL lock and statement deadlines; and
 - bounded finishing declarations and deadlines, sealing a reconciled run as
   `finished`, and lazy command-boundary reconciliation that seals an active or
   finishing run after its last lease or finalization deadline expires.
 
+The 28 shared repository scenarios run against both adapters, including the
+256-stream admission boundary and atomic rejection of the 257th stream. The
+explicit real-PostgreSQL gate also has seven targeted tests for repository/pool
+reconstruction, post-commit/pre-ack retry, two identical-operation concurrent
+tasks, distinct operation IDs racing on one client run key, plaintext lease
+absence, and contiguous organization sequence with one outbox row per ledger
+record, plus replay expiry that remains a durable idempotency tombstone after
+reconstruction. The concurrency checks use independent repositories and
+connection pools. The distinct-operation race produces one deterministic
+winner and one idempotency conflict. State inspection for conformance is test-only; the
+PostgreSQL repository exposes no public snapshot/read API.
+
+Current PostgreSQL gap discovery evaluates a window over the full persisted
+history for one source stream; its SQL limit bounds returned gaps rather than
+scan work. Novel envelopes are assigned organization sequences and inserted
+row by row while organization sequencing is held. Incremental watermark/gap
+state, sequence-range reservation, bulk insertion, and load/capacity
+qualification are required before the W3–W6 storage exit gate.
+
 The slice is a conformance foundation, not a production service, and does not
 complete W3–W6. In particular, it has:
 
-- no PostgreSQL adapter or durability, restart-recovery, crash, and concurrent
-  writer validation;
+- no PostgreSQL server-restart, WAL/crash, multiprocess, replication/failover,
+  backup/restore, full lifecycle race-matrix, or high-availability
+  qualification;
+- no production KMS/envelope-data-key integration, database role model, or RLS
+  deployment; the built-in AES-256-GCM protector is a direct-key in-process
+  keyring;
 - no HTTP or gRPC transport, transport-level mTLS/JWT verification, or live
   credential-revocation integration;
 - no object-store resolver for referenced payloads;
-- no background deadline reaper—expiration is reconciled only when a later
-  novel lifecycle command reaches the application core;
-- no production rate, batch-byte, request-byte, source, or organization limit
-  enforcement; and
+- no background deadline or encrypted-replay cleanup reaper—run expiration is
+  reconciled only when a later novel lifecycle command reaches the application
+  core, while an expired replay is rejected but not deleted;
+- no production rate, batch-byte, request-byte, or organization limit
+  enforcement beyond the run-wide stream cap; and
 - no durable projectors, Query service, or Web Console.
 
 The following sections remain the normative production behavior even where the
@@ -141,15 +172,20 @@ lease's source stream. The Gateway validates the entire batch's authentication,
 scope, schema, capability, privacy classification, size, and integrity before
 committing any novel envelope. A validation failure does not partially commit
 the batch. Exact duplicates may be acknowledged alongside newly committed
-envelopes.
+envelopes. Repeated instances of the same exact source event within one batch
+are coalesced to one acknowledgement; reusing that event identity with a
+different sequence or envelope content rejects the whole batch as
+`source_event_conflict` without consuming the operation identity.
 
 For each novel accepted envelope, the Gateway atomically persists the envelope,
 deduplication digest, server ingest sequence, and projection-outbox intent. A
 successful acknowledgement contains only newly committed and exact duplicate
 inputs, and reports the durable watermark and any known source-sequence gaps.
 Schema, capability, privacy, or integrity rejection is an operation-level error
-for the whole batch. Backpressure is also an operation-level retryable error and
-commits no novel envelope; neither case returns a mixed per-envelope result.
+for the whole batch. Transient persistence or admitted-write-capacity
+backpressure is also operation-level and commits no novel envelope; neither
+case returns a mixed per-envelope result. Clients follow the `retryable` field
+and bounded-retry rules defined below.
 
 An acknowledgement means durable acceptance, not projection visibility,
 verified outcome, or successful execution.
@@ -266,6 +302,12 @@ the bearer value is never plaintext in database indexes or logs. Integers
 outside the exact interoperable range `[-(2^53-1), 2^53-1]` are rejected before
 JCS.
 
+The current PostgreSQL prototype stores AES-256-GCM ciphertext using an
+in-process direct-key keyring and rejects replay after its configured TTL. Its
+schema reserves an optional wrapped-data-key field for a future
+envelope-encryption implementation, but the built-in protector does not create
+or wrap data keys and no cleanup reaper is implemented.
+
 The committed Gateway fixtures and `crates/apolysis-gateway/tests/digest_vectors.rs`
 lock request and inline-payload digest outputs as interoperability inputs. Any
 change to field omission, domain separation, canonicalization, or expected
@@ -274,10 +316,32 @@ digest values is a protocol change that requires fixture and contract review.
 ## Backpressure and availability
 
 The Gateway enforces bounded request, batch, source, and organization limits.
-When capacity is unavailable it returns an explicit retryable response with a
-retry delay and commits nothing from the rejected batch. Sources use bounded,
-encrypted local buffers according to their privacy policy and report loss when
-the buffer cannot retain an item. Silent dropping is forbidden.
+`backpressure` means that the Gateway durable-persistence path or admitted
+write capacity is temporarily unavailable. It does not represent authentication,
+authorization, validation, rate limiting, or projection lag; those conditions
+retain their dedicated v0.1 codes.
+
+The response's `retryable` field is authoritative. The frozen v0.1
+`backpressure` code remains reserved for a transient condition in which nothing
+novel committed. This implementation emits it with `retryable: true` and a
+bounded server-selected `retry_after_ms` from 1 through 60,000 milliseconds.
+For v0.1 compatibility, readers must also accept a missing or `null` hint and
+then apply a bounded local backoff. A source may retry only the exact operation,
+preserving its operation identifier and digest. Its retry policy must also
+bound total attempts or elapsed time and apply backoff or jitter.
+
+Configured run-scoped admission limits are not reported as `backpressure` in
+v0.1; they fail through the existing non-retryable lifecycle code. Generic
+internal repository faults cannot be safely described by any permanent v0.1
+machine code, so the current implementation preserves bounded v0.1
+`backpressure` and records the actual invariant only in protected audit
+metadata. This compatibility fallback is not a claim that an invariant will
+self-heal; a future contract version requires a dedicated internal-unavailable
+code and transport mapping. Clients never retry without a total-attempt or
+elapsed-time bound, and always handle `retryable: false` conservatively.
+Sources use bounded, encrypted local buffers according to their privacy policy
+and report loss when the buffer cannot retain an item. Silent dropping is
+forbidden.
 
 Authentication, organization binding, content-policy validation, and
 idempotency integrity fail closed. An unavailable projector does not invalidate

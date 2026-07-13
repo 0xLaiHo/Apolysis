@@ -1,0 +1,36 @@
+name: Gateway PostgreSQL
+
+on:
+  pull_request:
+    branches:
+      - pre-release
+    paths:
+      - .github/workflows/gateway-postgres.yml
+      - scripts/test-gateway-postgres.sh
+      - Makefile
+      - Cargo.toml
+      - Cargo.lock
+      - crates/apolysis-contracts/**
+      - crates/apolysis-gateway/**
+      - crates/apolysis-gateway-postgres/**
+      - crates/apolysis-gateway-testkit/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gateway-postgres-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gateway-postgres:
+    name: gateway postgres integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run isolated PostgreSQL integration tests
+        run: make test-gateway-postgres

@@ -237,3 +237,70 @@ fn contract_error_wire_codes_are_closed_and_stable() {
     assert!(error.retryable());
     assert_eq!(error.retry_after_ms(), Some(250));
 }
+
+#[test]
+fn gateway_error_wire_preserves_v0_1_retry_hint_compatibility() {
+    let transient = GatewayErrorResponse::new(
+        ContractErrorCode::Backpressure,
+        "Gateway persistence is temporarily unavailable",
+        true,
+        Some(250),
+    )
+    .expect("transient backpressure is a safe wire response");
+    let permanent = GatewayErrorResponse::new(
+        ContractErrorCode::InvalidLifecycleTransition,
+        "Gateway operation cannot be completed in its current state",
+        false,
+        None,
+    )
+    .expect("permanent lifecycle failure is a safe wire response");
+
+    assert!(transient.retryable());
+    assert_eq!(transient.retry_after_ms(), Some(250));
+    assert!(!permanent.retryable());
+    assert_eq!(permanent.retry_after_ms(), None);
+
+    for response in [transient.clone(), permanent.clone()] {
+        let wire = serde_json::to_string(&response).expect("serialize gateway error");
+        let round_trip: GatewayErrorResponse =
+            serde_json::from_str(&wire).expect("deserialize gateway error");
+        assert_eq!(round_trip, response);
+    }
+
+    let transient_wire = serde_json::to_value(transient).expect("serialize transient response");
+    let permanent_wire = serde_json::to_value(permanent).expect("serialize permanent response");
+    assert_eq!(transient_wire["retry_after_ms"], 250);
+    assert!(permanent_wire["retry_after_ms"].is_null());
+
+    assert!(GatewayErrorResponse::new(
+        ContractErrorCode::Backpressure,
+        "Gateway persistence is temporarily unavailable",
+        true,
+        None,
+    )
+    .is_ok());
+
+    assert!(GatewayErrorResponse::new(
+        ContractErrorCode::InvalidLifecycleTransition,
+        "Gateway operation cannot be completed in its current state",
+        false,
+        Some(250),
+    )
+    .is_err());
+
+    let retryable_without_delay = serde_json::json!({
+        "schema_version": "0.1",
+        "code": "backpressure",
+        "message": "Gateway persistence is temporarily unavailable",
+        "retryable": true
+    });
+    let permanent_with_null_delay = serde_json::json!({
+        "schema_version": "0.1",
+        "code": "invalid_lifecycle_transition",
+        "message": "Gateway operation cannot be completed in its current state",
+        "retryable": false,
+        "retry_after_ms": null
+    });
+    assert!(serde_json::from_value::<GatewayErrorResponse>(retryable_without_delay).is_ok());
+    assert!(serde_json::from_value::<GatewayErrorResponse>(permanent_with_null_delay).is_ok());
+}

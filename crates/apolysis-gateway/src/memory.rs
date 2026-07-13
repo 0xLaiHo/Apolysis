@@ -22,7 +22,7 @@ use crate::{
         canonical_source_manifest_digest,
     },
     lease_id_digest, AuditReason, GatewayFailure, GatewayIdGenerator, GatewayRepository,
-    LedgerCommand, LedgerOperation, LedgerOutcome, RepositoryFuture,
+    LedgerCommand, LedgerOperation, LedgerOutcome, RepositoryFuture, MAX_SOURCE_STREAMS_PER_RUN,
 };
 
 /// Non-durable reference adapter used by the shared Gateway conformance suite.
@@ -193,6 +193,7 @@ struct BindingKey {
 #[derive(Clone)]
 struct StoredBinding {
     digest: String,
+    accepted: AcceptedRuntimeBinding,
     response: BindRuntimeResponse,
 }
 
@@ -343,6 +344,7 @@ impl MemoryGatewayRepository {
             || spec.proof_ref.len() > 512
             || spec.proof_ref.chars().any(char::is_control)
             || spec.expires_at_unix_ms == 0
+            || spec.expires_at_unix_ms <= issuer.authentication().authenticated_at_unix_ms()
         {
             return Err(GatewayFailure::new(
                 ContractErrorCode::InvalidContract,
@@ -428,13 +430,7 @@ impl MemoryGatewayRepository {
             operation: "open_run",
             client_operation_id: request.client_operation_id().to_string(),
         };
-        let mut committed_state = self.state.lock().map_err(|_| {
-            GatewayFailure::new(
-                ContractErrorCode::Backpressure,
-                "Gateway persistence is temporarily unavailable",
-                AuditReason::RepositoryInvariant,
-            )
-        })?;
+        let mut committed_state = self.state.lock().map_err(|_| repository_invariant())?;
         let mut state = committed_state.clone();
         if let Some(stored) = state.operations.get(&operation_key) {
             if stored.request_digest != request.request_digest() {
@@ -573,6 +569,17 @@ impl MemoryGatewayRepository {
                         AuditReason::RepositoryInvariant,
                     ));
                 }
+                let stream_count = state
+                    .streams
+                    .keys()
+                    .filter(|key| {
+                        key.organization_id == context.organization_id().as_str()
+                            && key.run_id == run_id.as_str()
+                    })
+                    .count();
+                if stream_count >= MAX_SOURCE_STREAMS_PER_RUN {
+                    return Err(GatewayFailure::admission_limit(AuditReason::AdmissionLimit));
+                }
                 let run_finalization_deadline_unix_ms = if run.state == RunState::Finishing {
                     let deadline = run
                         .finalization_deadline_unix_ms
@@ -641,8 +648,8 @@ impl MemoryGatewayRepository {
             })
             || state.leases.contains_key(&lease_key)
         {
-            return Err(GatewayFailure::classified(
-                ContractErrorCode::Backpressure,
+            return Err(GatewayFailure::repository_backpressure(
+                250,
                 AuditReason::EntropyUnavailable,
             ));
         }
@@ -767,13 +774,7 @@ impl MemoryGatewayRepository {
         request: IngestRequest,
         now_unix_ms: u64,
     ) -> Result<IngestAck, GatewayFailure> {
-        let mut committed_state = self.state.lock().map_err(|_| {
-            GatewayFailure::new(
-                ContractErrorCode::Backpressure,
-                "Gateway persistence is temporarily unavailable",
-                AuditReason::RepositoryInvariant,
-            )
-        })?;
+        let mut committed_state = self.state.lock().map_err(|_| repository_invariant())?;
         let mut state = committed_state.clone();
         let operation_key = OperationKey {
             organization_id: context.organization_id().to_string(),
@@ -845,6 +846,7 @@ impl MemoryGatewayRepository {
             .map_err(|_| repository_invariant())?;
 
         let mut classified = Vec::with_capacity(request.envelopes().len());
+        let mut batch_events = BTreeMap::new();
         let mut batch_sequences = stream.sequences.clone();
         for envelope in request.envelopes() {
             if envelope.run_id() != request.run_id() {
@@ -892,6 +894,22 @@ impl MemoryGatewayRepository {
             }
             let digest =
                 canonical_source_envelope_digest(envelope).map_err(|_| repository_invariant())?;
+            if let Some((prior_sequence, prior_digest)) =
+                batch_events.get(envelope.source_event_id())
+            {
+                if *prior_sequence != envelope.source_sequence() || prior_digest != &digest {
+                    return Err(GatewayFailure::new(
+                        ContractErrorCode::SourceEventConflict,
+                        "Source event identity was reused with different content",
+                        AuditReason::IdempotencyConflict,
+                    ));
+                }
+                continue;
+            }
+            batch_events.insert(
+                envelope.source_event_id().to_string(),
+                (envelope.source_sequence(), digest.clone()),
+            );
             let event_key = EventKey {
                 organization_id: context.organization_id().to_string(),
                 run_id: request.run_id().to_string(),
@@ -914,6 +932,7 @@ impl MemoryGatewayRepository {
                     digest,
                     IngestDisposition::Duplicate,
                     existing.ingest_sequence,
+                    envelope.clone(),
                 ));
                 continue;
             }
@@ -930,13 +949,19 @@ impl MemoryGatewayRepository {
                 envelope.source_sequence(),
                 envelope.source_event_id().to_string(),
             );
-            classified.push((event_key, digest, IngestDisposition::Committed, 0));
+            classified.push((
+                event_key,
+                digest,
+                IngestDisposition::Committed,
+                0,
+                envelope.clone(),
+            ));
         }
 
         if matches!(run.state, RunState::Finished | RunState::Incomplete)
             && classified
                 .iter()
-                .any(|(_, _, disposition, _)| *disposition == IngestDisposition::Committed)
+                .any(|(_, _, disposition, _, _)| *disposition == IngestDisposition::Committed)
         {
             return Err(GatewayFailure::new(
                 ContractErrorCode::InvalidLifecycleTransition,
@@ -949,9 +974,7 @@ impl MemoryGatewayRepository {
         let mut acknowledgements = Vec::with_capacity(classified.len());
         let mut committed_count = 0_u32;
         let mut duplicate_count = 0_u32;
-        for ((event_key, digest, disposition, prior_ingest_sequence), envelope) in
-            classified.into_iter().zip(request.envelopes())
-        {
+        for (event_key, digest, disposition, prior_ingest_sequence, envelope) in classified {
             let ingest_sequence = match disposition {
                 IngestDisposition::Committed => {
                     let accepted = AcceptedSourceEnvelope::new(
@@ -1156,6 +1179,16 @@ impl MemoryGatewayRepository {
         let binding_digest = canonical_runtime_binding_digest(request.binding())
             .map_err(|_| repository_invariant())?;
         if let Some(existing) = state.bindings.get(&binding_key).cloned() {
+            if existing.accepted.source_registration_id() != context.source_registration_id()
+                || existing.accepted.source_stream_id() != lease.source_stream_id
+                || existing.accepted.registration_policy_revision()
+                    != stream.registration_policy_revision
+                || existing.accepted.effective_trust_profile() != stream.effective_trust_profile
+                || existing.accepted.manifest_version() != stream.manifest.schema_version()
+                || existing.accepted.manifest_digest() != manifest_digest
+            {
+                return Err(lease_scope_failure(ContractErrorCode::LeaseScopeMismatch));
+            }
             if existing.digest != binding_digest {
                 return Err(GatewayFailure::new(
                     ContractErrorCode::IdempotencyConflict,
@@ -1223,12 +1256,13 @@ impl MemoryGatewayRepository {
             &context,
             request.run_id(),
             now_unix_ms,
-            AgentExecutionRecordFact::RuntimeBound(Box::new(accepted_binding)),
+            AgentExecutionRecordFact::RuntimeBound(Box::new(accepted_binding.clone())),
         )?;
         state.bindings.insert(
             binding_key,
             StoredBinding {
                 digest: binding_digest,
+                accepted: accepted_binding,
                 response: response.clone(),
             },
         );
@@ -1757,21 +1791,12 @@ fn unauthorized_join_not_found() -> GatewayFailure {
 }
 
 fn repository_invariant() -> GatewayFailure {
-    GatewayFailure::new(
-        ContractErrorCode::Backpressure,
-        "Gateway persistence is temporarily unavailable",
-        AuditReason::RepositoryInvariant,
-    )
+    GatewayFailure::repository_fault(AuditReason::RepositoryInvariant)
 }
 
 fn next_id(ids: &dyn GatewayIdGenerator, kind: &'static str) -> Result<String, GatewayFailure> {
-    ids.next_id(kind).map_err(|_| {
-        GatewayFailure::new(
-            ContractErrorCode::Backpressure,
-            "Gateway identity generation is temporarily unavailable",
-            AuditReason::EntropyUnavailable,
-        )
-    })
+    ids.next_id(kind)
+        .map_err(|_| GatewayFailure::repository_backpressure(250, AuditReason::EntropyUnavailable))
 }
 
 fn contract_invariant(_error: apolysis_contracts::ContractError) -> GatewayFailure {

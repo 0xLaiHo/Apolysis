@@ -1,9 +1,10 @@
 # W1–W2 Scope and Environment Profiles
 
 Status: frozen product scope for W1–W2. An authenticated Gateway application
-core and non-durable memory conformance adapter are now implementation inputs;
-they do not imply that the target production Gateway, durable storage, Query,
-or Console runtime capabilities are implemented.
+core, non-durable memory reference adapter, and initial PostgreSQL write-adapter
+prototype are now implementation inputs; they do not imply that the target
+production Gateway transport, storage qualification, Query, or Console runtime
+capabilities are implemented.
 
 ## Primary user and decision
 

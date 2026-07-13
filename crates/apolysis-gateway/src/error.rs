@@ -4,6 +4,9 @@ use std::fmt;
 
 use apolysis_contracts::{ContractError, ContractErrorCode, GatewayErrorResponse};
 
+const MIN_REPOSITORY_RETRY_AFTER_MS: u64 = 1;
+const MAX_REPOSITORY_RETRY_AFTER_MS: u64 = 60_000;
+
 /// Internal audit classification. It is deliberately not serializable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuditReason {
@@ -15,7 +18,9 @@ pub enum AuditReason {
     RequestDigestMismatch,
     IdempotencyConflict,
     ClientRunKeyConflict,
+    RepositoryUnavailable,
     RepositoryInvariant,
+    AdmissionLimit,
     EntropyUnavailable,
 }
 
@@ -75,8 +80,29 @@ impl GatewayFailure {
             "Gateway persistence is temporarily unavailable",
             audit_reason,
         );
-        failure.retry_after_ms = Some(retry_after_ms.clamp(1, 60_000));
+        failure.retryable = true;
+        failure.retry_after_ms = Some(
+            retry_after_ms.clamp(MIN_REPOSITORY_RETRY_AFTER_MS, MAX_REPOSITORY_RETRY_AFTER_MS),
+        );
         failure
+    }
+
+    /// Preserve the frozen v0.1 bounded-backpressure response for an internal
+    /// repository fault. Protected diagnostics distinguish the real invariant;
+    /// the caller sees no SQL, storage identifier, or implementation detail.
+    /// A future contract version needs a dedicated permanent internal code.
+    pub fn repository_fault(audit_reason: AuditReason) -> Self {
+        Self::repository_backpressure(250, audit_reason)
+    }
+
+    /// Reject a run-scoped admission limit without classifying it as transient
+    /// persistence backpressure in the frozen v0.1 contract.
+    pub fn admission_limit(audit_reason: AuditReason) -> Self {
+        Self::new(
+            ContractErrorCode::InvalidLifecycleTransition,
+            "Gateway operation cannot be completed in its current state",
+            audit_reason,
+        )
     }
 
     /// Return the stable machine error code.
