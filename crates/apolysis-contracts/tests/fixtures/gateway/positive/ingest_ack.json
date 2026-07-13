@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "run_id": "run_01",
+  "acknowledgements": [
+    {"source_event_id": "event_tool_01", "disposition": "committed", "ingest_sequence": 42},
+    {"source_event_id": "event_tool_03", "disposition": "duplicate", "ingest_sequence": 41}
+  ],
+  "committed_count": 1,
+  "duplicate_count": 1,
+  "durable_ingest_watermark": 42,
+  "source_watermark": 3,
+  "known_gaps": [{"first_missing_sequence": 2, "last_missing_sequence": 2}]
+}

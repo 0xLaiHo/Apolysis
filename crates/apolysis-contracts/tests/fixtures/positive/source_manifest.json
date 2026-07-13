@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "source_id": "source_codex",
+  "source_kind": "semantic_hook",
+  "declared_boundary": "agent_harness",
+  "adapter_name": "codex_hook",
+  "adapter_version": "1.0.0",
+  "environment": "local_cli_or_ide",
+  "capabilities": ["semantic_lifecycle", "tool_calls", "claimed_outcome"],
+  "expected_lifecycle": ["started", "finished"],
+  "ordering": "strict_per_stream",
+  "samples": false,
+  "redaction_profile_ref": "redaction_structure_only_v1",
+  "redacted_fields": ["payload.command"],
+  "privacy_capabilities": ["structure_only"]
+}

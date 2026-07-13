@@ -1,0 +1,11 @@
+{
+  "evidence_type": "outcome_verification",
+  "body": {
+    "verification_ref": "outcome_verification_01",
+    "claim_ref": "outcome_claim_01",
+    "verifier_ref": "ci_readback_01",
+    "observation_ref": "check_run_digest_01",
+    "comparison": "mismatch",
+    "outcome": "succeeded"
+  }
+}

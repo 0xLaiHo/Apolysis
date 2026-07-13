@@ -1,0 +1,8 @@
+{
+  "evidence_ref": "evidence-redacted-001",
+  "category": "finding",
+  "source_id": "source-runtime-witness",
+  "access": "not_authorized",
+  "redacted": true,
+  "size_bytes": null
+}

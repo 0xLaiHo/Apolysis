@@ -56,9 +56,13 @@ envelope。两者都不是已被独立锚定的取证记录。
 Evidence Gateway、耐久存储，以及展示 run inventory、独立 coverage、timeline、source
 health 和 finding 的 Minimum Console v0；后续 source integration 最终形成带 Agent Run
 Graph、跨 run search 与有限 workflow action 的 Investigation Console v1，再进入受控伙伴
-pilot。每次 run 将分别显示 semantic、execution 与 outcome coverage。这些都是 roadmap
-目标，不是当前能力。在公开路径完成加固前，不要把
-当前 Action 用于不可信仓库或 GitHub 拉取请求（PR）。
+pilot。每次 run 将分别显示 semantic、execution 与 outcome coverage。
+
+W1–W2 现已建立独立的 `apolysis-contracts` 边界、版本化 record、Gateway、coverage 与
+Query/Console wire type、兼容性 fixture 和规范契约文档。这冻结的是后续实现输入；remote
+Gateway、耐久 projector、Query service 和 Web Console 仍是 roadmap 目标。外部退出门禁也
+会保持开启，直到三个合格设计伙伴实际确认其部署和数据边界。在公开路径完成加固前，
+不要把当前 Action 用于不可信仓库或 GitHub 拉取请求（PR）。
 
 ## 核心能力
 
@@ -103,6 +107,7 @@ Apolysis 关联层
 - `apolysis-cli`：命令行入口。
 - `apolysis-observer`：离线和实时观测后端。
 - `apolysis-core`：共享 JSONL 记录和模式类型。
+- `apolysis-contracts`：版本化生产 record、Gateway 与 Query wire contract。
 - `apolysis-runtime`：本地、Docker 和运行时元数据适配。
 - `apolysis-policy`：策略解析和决策逻辑。
 - `apolysis-store`：追加式 JSONL 和哈希链存储。

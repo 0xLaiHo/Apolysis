@@ -1,0 +1,44 @@
+{
+  "items": [
+    {
+      "organization_id": "org-synthetic",
+      "run_id": "run-normal-001",
+      "environment": "local_cli_or_ide",
+      "state": "finished",
+      "primary_agent_ref": "agent-codex-001",
+      "started_at_unix_ms": 1783900800000,
+      "finished_at_unix_ms": 1783900860000,
+      "coverage": {
+        "schema_version": "0.1",
+        "semantic": {"state": "complete", "computation_version": "coverage_v1", "projection_revision": 12, "input_watermark": 42, "reason_codes": ["requirements_satisfied"], "evidence_refs": ["evidence-semantic-001"], "contributing_source_refs": [], "coverage_gap_refs": []},
+        "execution": {"state": "host_verified", "computation_version": "coverage_v1", "projection_revision": 12, "input_watermark": 42, "reason_codes": ["requirements_satisfied"], "evidence_refs": ["evidence-execution-001"], "contributing_source_refs": [], "coverage_gap_refs": []},
+        "outcome": {"state": "verified", "computation_version": "coverage_v1", "projection_revision": 12, "input_watermark": 42, "reason_codes": ["requirements_satisfied"], "evidence_refs": ["evidence-readback-001"], "contributing_source_refs": [], "coverage_gap_refs": []},
+        "outcome_comparison": "match"
+      },
+      "active_finding_count": 0,
+      "degraded_source_count": 0,
+      "projection": {"view_version": "0", "computation_version": "console_v0", "projection_revision": 12, "input_watermark": 42, "projected_at_unix_ms": 1783900861000, "freshness": "current", "lag_ms": 1000}
+    },
+    {
+      "organization_id": "org-synthetic",
+      "run_id": "run-partial-001",
+      "environment": "ci_runner_or_remote_workspace",
+      "state": "active",
+      "primary_agent_ref": "agent-copilot-001",
+      "started_at_unix_ms": 1783900900000,
+      "finished_at_unix_ms": null,
+      "coverage": {
+        "schema_version": "0.1",
+        "semantic": {"state": "partial", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["source_loss"], "evidence_refs": [], "contributing_source_refs": [], "coverage_gap_refs": []},
+        "execution": {"state": "opaque", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["opaque_boundary"], "evidence_refs": [], "contributing_source_refs": [], "coverage_gap_refs": []},
+        "outcome": {"state": "unconfirmed", "computation_version": "coverage_v1", "projection_revision": 7, "input_watermark": 17, "reason_codes": ["verifier_missing"], "evidence_refs": ["evidence-claim-partial"], "contributing_source_refs": [], "coverage_gap_refs": []},
+        "outcome_comparison": "unresolved"
+      },
+      "active_finding_count": 1,
+      "degraded_source_count": 2,
+      "projection": {"view_version": "0", "computation_version": "console_v0", "projection_revision": 7, "input_watermark": 17, "projected_at_unix_ms": 1783900932000, "freshness": "current", "lag_ms": 1000}
+    }
+  ],
+  "limit": 25,
+  "next_cursor": "cursor-run-explorer-page-2"
+}

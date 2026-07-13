@@ -1,0 +1,11 @@
+{
+  "schema_version": "0.1",
+  "client_operation_id": "operation_finish_01",
+  "request_digest": "4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "run_id": "run_01", "lease_id": "lease_01",
+  "terminal_positions": [
+    {"source_id": "source_codex", "source_stream_id": "stream_codex_01", "final_source_sequence": 3},
+    {"source_id": "source_codex", "source_stream_id": "stream_codex_01", "final_source_sequence": 4}
+  ],
+  "outcome_claim_refs": [], "requested_finalization_deadline_unix_ms": null
+}

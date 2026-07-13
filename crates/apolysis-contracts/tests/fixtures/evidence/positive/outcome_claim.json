@@ -1,0 +1,11 @@
+{
+  "evidence_type": "outcome_claim",
+  "body": {
+    "claim_ref": "outcome_claim_01",
+    "claimant_ref": "agent_primary",
+    "subject_ref": "task_implementation_01",
+    "claim_type": "tests_passed",
+    "basis_ref": "test_summary_digest_01",
+    "outcome": "succeeded"
+  }
+}

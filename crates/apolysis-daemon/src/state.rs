@@ -602,16 +602,9 @@ fn append_integrity_finding(
 fn finding_payload(
     finding: apolysis_accountability::AccountabilityFinding,
 ) -> Result<Value, String> {
-    let mut payload = serde_json::to_value(finding)
-        .map_err(|error| format!("failed to serialize accountability finding: {error}"))?;
-    let object = payload
-        .as_object_mut()
-        .ok_or_else(|| "accountability finding did not serialize as an object".to_string())?;
-    object.insert(
-        "record_type".to_string(),
-        Value::String("accountability_finding".to_string()),
-    );
-    Ok(payload)
+    finding
+        .to_record_value()
+        .map_err(|error| format!("failed to serialize accountability finding: {error}"))
 }
 
 fn adapter_name(adapter: AdapterKind) -> &'static str {

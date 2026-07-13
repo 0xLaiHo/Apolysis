@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/apolysis-accountability",
+    "crates/apolysis-contracts",
     "crates/apolysis-core",
     "crates/apolysis-daemon",
     "crates/apolysis-feedback",
@@ -27,6 +28,7 @@ aya = "0.13.1"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "1.2.1"
 sha2 = "0.11.0"
 tokio = { version = "1", default-features = false }
 toml_edit = "0.23"

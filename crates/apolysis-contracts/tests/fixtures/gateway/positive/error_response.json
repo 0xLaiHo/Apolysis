@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1",
+  "code": "backpressure",
+  "message": "gateway capacity is temporarily unavailable",
+  "retryable": true,
+  "retry_after_ms": 250
+}
