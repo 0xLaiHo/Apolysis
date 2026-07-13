@@ -1,6 +1,6 @@
 # PostgreSQL schema notes
 
-`migrations/0001_gateway_ledger.sql` is the initial durable Gateway ledger
+`migrations/0001_gateway_ledger.sql` is the initial PostgreSQL Gateway ledger
 schema. Run it only through the crate's migration runner. The SQL deliberately
 does not use blanket `IF NOT EXISTS`: the runner's version/checksum table is the
 repeat-execution guard, and unexpected pre-existing objects must surface as
@@ -20,9 +20,13 @@ Security invariants:
   nonce, tag, AAD digest, key reference, optional wrapped data key for envelope
   encryption, and mandatory expiry. A direct KMS or secret-manager key
   reference leaves the wrapped-data-key column null. It has no plaintext
-  response or bearer column.
+  response or bearer column. The current built-in AES-256-GCM protector is a
+  direct-key in-process keyring and does not populate or wrap a data key; the
+  optional column is schema capacity for a future envelope-encryption
+  implementation.
 - `gateway_operations` remains after replay ciphertext expires so an old
-  operation identifier cannot become novel again.
+  operation identifier cannot become novel again. Expired replay is rejected,
+  but no background cleanup reaper is implemented yet.
 
 `record_items` and `projection_outbox` use deferred mutual foreign keys. A
 transaction therefore cannot commit one without the other, preserving the
@@ -40,9 +44,31 @@ vocabularies are also domains so source, environment, principal, trust,
 operation, lifecycle, and runtime-identity variants cannot drift between
 tables.
 
-Cross-row semantic checks that remain transaction-adapter responsibilities
-rather than trigger logic include sequential/cumulative finalization revisions,
-matching normalized rows to the corresponding ledger fact kind, and keeping
-child-table cardinalities within the wire-contract limits. These behaviors
-require the PostgreSQL conformance and concurrent-writer gates; a successful
-migration alone is not a production claim.
+The adapter transactions currently implement sequential/cumulative
+finalization revisions, normalized-row/ledger-fact writes, organization
+sequence allocation, operation and event deduplication, lease/join state, and
+the record/outbox commit boundary. The application adapter also caps a run at
+256 source streams and installs bounded transaction-local PostgreSQL lock and
+statement deadlines. Other child-table cardinalities and production admission
+limits remain application responsibilities rather than trigger logic.
+
+Current ingest gap discovery runs a window over the full event history for the
+source stream; `LIMIT 257` bounds returned ranges but not scanned history. Novel
+events are appended and inserted row by row while the organization sequence
+row is locked. Incremental watermark/gap state, bounded scan work,
+sequence-range reservation, bulk insertion, and load/capacity qualification
+remain required before this schema path can leave the W3–W6 storage gate.
+
+The explicit real-PostgreSQL gate runs 28 shared conformance scenarios,
+including the 256-stream admission boundary, and seven targeted tests. Those
+targeted tests cover repository/pool reconstruction,
+post-commit/pre-ack retry, two identical-operation concurrent tasks, distinct
+operation IDs racing on the same client run key with one winner and one
+idempotency conflict, plaintext lease scanning, and contiguous organization
+sequence plus 1:1 outbox state, and replay expiry that remains a durable
+idempotency tombstone after reconstruction. The concurrency checks use
+independent repositories and connection pools. They do not restart the
+PostgreSQL server or validate WAL/crash recovery,
+the full multiprocess/lifecycle race matrix, HA behavior, production KMS
+integration, database roles, or RLS. A successful migration or test run is
+therefore not a production claim.
