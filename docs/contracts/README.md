@@ -1,16 +1,17 @@
 # W1–W2 Contract Set
 
 Status: normative W1–W2 contract. The active Gateway foundation slice includes
-an application core and a non-durable reference adapter, not a production
-Gateway service.
+an application core, a non-durable reference adapter, and an initial PostgreSQL
+write-adapter prototype, not a production Gateway service.
 
 These documents freeze the W1–W2 product and evidence contract. The independent
 machine types, schemas, and fixtures live in `apolysis-contracts`. The
 current `pre-release` implementation now applies the Gateway types in an
-authenticated application core and an in-memory conformance adapter. The
-remaining contracts describe what durable Gateway storage, projection, Query
-API, and Console implementations must do without claiming those production
-runtime components exist.
+authenticated application core, an in-memory reference adapter, and a
+migration-managed PostgreSQL write adapter. The remaining contracts describe
+what the production Gateway transport, storage qualification, projection,
+Query API, and Console implementations must do without claiming those runtime
+components exist.
 
 Read the contracts in this order:
 
@@ -31,12 +32,27 @@ validation; this set is authoritative for product meaning and claim boundaries.
 A schema that permits a state forbidden here is a contract defect, not
 permission to make the broader claim.
 
+Gateway clients treat the error response's `retryable` field, not its `code`,
+as the authority for automatic retry. Frozen v0.1 `backpressure` remains a
+transient persistence/capacity signal; this implementation emits a bounded
+retry hint, while compatible readers still accept the old missing or `null`
+hint shape. A run-scoped admission limit uses the existing non-retryable
+lifecycle code, where that machine meaning remains accurate. Generic internal
+repository faults retain bounded v0.1
+backpressure for wire compatibility and are distinguished in protected audit
+metadata; a future version needs a dedicated internal-unavailable code. Clients
+must never retry indefinitely from the code alone.
+
 ## Machine artifacts
 
 - Rust wire types: `crates/apolysis-contracts/src/`
 - Gateway application core and non-durable reference adapter:
   `crates/apolysis-gateway/src/`
-- Gateway conformance and RFC 8785 golden-vector tests:
+- Shared Gateway repository conformance scenarios:
+  `crates/apolysis-gateway-testkit/`
+- Initial PostgreSQL Gateway write adapter and migration:
+  `crates/apolysis-gateway-postgres/`
+- Application-core conformance invocation and RFC 8785 golden-vector tests:
   `crates/apolysis-gateway/tests/`
 - Generated JSON Schema: `schemas/contracts/v0.1/`
 - Positive and negative compatibility fixtures:
@@ -67,13 +83,32 @@ accountability, runtime metadata, and Linux observation paths. The
 `pre-release` implementation line also provides the four-operation Gateway
 application core, server-side join grant/policy checks, RFC 8785 request and
 inline-payload golden vectors, bounded lifecycle reconciliation, and a
-non-durable memory adapter. The adapter models atomic record append,
-deduplication, ingest sequencing, and projection-outbox mutation for conformance
-testing.
+non-durable memory adapter. An initial PostgreSQL adapter applies the same
+atomic-command seam to normalized ledger/outbox state, hashed lease and join
+references, encrypted exact-operation replay, a 256-stream-per-run admission
+cap, and bounded transaction-local lock/statement deadlines. The shared
+28-scenario suite runs against both adapters and verifies atomic rejection at
+the stream boundary; an explicit real-PostgreSQL gate
+adds seven targeted transaction, reconstruction, two-shape cross-pool
+concurrency, plaintext-absence, sequencing, and replay-expiry checks. The
+second concurrency shape races distinct operation IDs on one client run key
+and requires one winner plus one idempotency conflict. Expired replay remains
+a durable idempotency tombstone after repository reconstruction. Database
+inspection used by conformance is test-only; the production repository exposes
+no snapshot/read API.
+
+Current PostgreSQL ingest still uses a full per-stream history window for gap
+discovery—the SQL limit bounds returned gaps, not scan work—and inserts novel
+events row by row while holding organization sequencing. Incremental
+watermark/gap state, sequence-range reservation, bulk insertion, and
+load/capacity qualification remain W3–W6 storage work.
 
 This is not a production Gateway and does not complete W3–W6. There is no
-PostgreSQL durability, restart recovery, or concurrency validation; network
-transport or live credential revocation; object-store resolver; background
-deadline reaper; or production rate and request-size enforcement. The
-organization-scoped Query API, versioned projectors, and Web Console specified
-here are also not implemented.
+PostgreSQL server restart, WAL/crash, multiprocess, replication/failover, or HA
+qualification, including the full lifecycle race matrix; production
+KMS/envelope-key integration or database RLS
+deployment; network transport or live credential revocation; object-store
+resolver; background deadline/replay cleanup; or production rate and
+request-size enforcement beyond the implemented stream cap. The
+organization-scoped Query API, versioned
+projectors, and Web Console specified here are also not implemented.

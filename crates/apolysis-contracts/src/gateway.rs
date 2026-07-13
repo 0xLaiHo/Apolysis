@@ -2170,7 +2170,8 @@ impl IngestAck {
         &self.run_id
     }
 
-    /// Return the input-ordered per-envelope acknowledgements.
+    /// Return input-ordered acknowledgements for each unique source event.
+    /// Exact repeats of one event within the same batch are coalesced.
     pub fn acknowledgements(&self) -> &[EnvelopeAck] {
         &self.acknowledgements
     }

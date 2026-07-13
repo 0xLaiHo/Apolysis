@@ -21,3 +21,7 @@ pub use repository::{
     GatewayRepository, LedgerCommand, LedgerOperation, LedgerOutcome, RepositoryFuture,
 };
 pub use service::ExecutionEvidenceGateway;
+
+/// Maximum source streams admitted to one run so cumulative finalization fits
+/// the v0.1 terminal-position contract.
+pub const MAX_SOURCE_STREAMS_PER_RUN: usize = 256;

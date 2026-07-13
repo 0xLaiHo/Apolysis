@@ -20,15 +20,21 @@ The crate currently includes:
   atomic record append, deduplication, ingest sequencing, and projection-outbox
   mutation.
 
-The memory adapter is not a deployable production Gateway. It provides no
-PostgreSQL durability, restart recovery, crash or concurrent-writer guarantees,
-network transport, transport-level authentication, live credential revocation,
-object-store resolution, background deadline reaping, or production rate and
-request-size enforcement. Expired active or finishing runs are reconciled only
-when a later novel lifecycle command reaches the application core. Its
-exact-replay lease response exists only in process memory; the PostgreSQL
-adapter must use a hashed lookup key and separately KMS or envelope-encrypted,
-TTL-bound replay material instead of plaintext bearer values.
+`MemoryGatewayRepository` is not a deployable production Gateway. It provides
+no persistence or cross-process guarantees. The sibling
+`apolysis-gateway-postgres` crate is an initial PostgreSQL write-adapter
+prototype for the same transaction seam; see its README for its narrower
+verified boundary.
+
+The application contract and both adapters enforce a run-wide cap of 256
+source streams. The PostgreSQL adapter additionally installs bounded,
+transaction-local lock and statement deadlines.
+
+Neither adapter supplies network transport, transport-level authentication,
+live credential revocation, object-store resolution, background deadline or
+replay cleanup, broader production admission limits, durable projection, or a
+Query service. Expired active or finishing runs are reconciled only when a
+later novel lifecycle command reaches the application core.
 
 Run the crate gates with:
 
@@ -37,6 +43,9 @@ cargo test -p apolysis-gateway
 cargo test -p apolysis-gateway --test gateway_conformance
 cargo test -p apolysis-gateway --test digest_vectors
 ```
+
+Run the shared suite plus the targeted real-PostgreSQL checks with the explicit
+Docker-backed gate documented by `apolysis-gateway-postgres`.
 
 The normative lifecycle and claim boundaries live in
 [`docs/contracts/gateway-lifecycle-v0.1.md`](../../docs/contracts/gateway-lifecycle-v0.1.md).
