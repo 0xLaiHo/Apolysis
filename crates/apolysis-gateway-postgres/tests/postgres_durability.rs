@@ -10,11 +10,14 @@ use std::sync::{
 use apolysis_contracts::{ContractErrorCode, OpenRunOutcome};
 use apolysis_gateway::{
     AuditReason, ExecutionEvidenceGateway, GatewayFailure, GatewayIdGenerator, GatewayRepository,
-    LedgerCommand, LedgerOutcome, RepositoryFuture,
+    LedgerCommand, LedgerOutcome, OsRandomIdGenerator, RepositoryFuture, SystemClock,
 };
 use apolysis_gateway_postgres::{PostgresGatewayConfig, PostgresGatewayRepository};
 use sqlx::Row;
-use support::{create_request, source_context, FixedClock, FixedIds, TestDatabase, NOW_UNIX_MS};
+use support::{
+    create_request, ingest_request, runtime_source_context, source_context, FixedClock, FixedIds,
+    TestDatabase, NOW_UNIX_MS,
+};
 
 const RUN_ID: &str = "run_durable_01";
 const STREAM_ID: &str = "stream_durable_01";
@@ -535,6 +538,453 @@ async fn organization_ledger_sequences_are_contiguous_with_exactly_one_outbox_pe
     assert_eq!(unmatched_records, 0);
     assert_eq!(unmatched_outbox, 0);
     assert_eq!(paired_count, sequences.len() as i64);
+}
+
+async fn install_sequence_update_audit(database: &TestDatabase) {
+    sqlx::raw_sql(
+        "DROP TRIGGER IF EXISTS organization_sequence_update_audit \
+             ON apolysis_gateway.organization_sequences; \
+         DROP FUNCTION IF EXISTS apolysis_gateway.audit_organization_sequence_update(); \
+         DROP TABLE IF EXISTS apolysis_gateway.sequence_update_audit; \
+         CREATE TABLE apolysis_gateway.sequence_update_audit ( \
+             old_next_ingest_sequence bigint NOT NULL, \
+             new_next_ingest_sequence bigint NOT NULL \
+         ); \
+         CREATE FUNCTION apolysis_gateway.audit_organization_sequence_update() \
+         RETURNS trigger LANGUAGE plpgsql AS $audit$ \
+         BEGIN \
+             INSERT INTO apolysis_gateway.sequence_update_audit ( \
+                 old_next_ingest_sequence, new_next_ingest_sequence \
+             ) VALUES (OLD.next_ingest_sequence, NEW.next_ingest_sequence); \
+             RETURN NEW; \
+         END \
+         $audit$; \
+         CREATE TRIGGER organization_sequence_update_audit \
+         AFTER UPDATE ON apolysis_gateway.organization_sequences \
+         FOR EACH ROW EXECUTE FUNCTION \
+             apolysis_gateway.audit_organization_sequence_update();",
+    )
+    .execute(database.pool())
+    .await
+    .expect("install the real sequence-update audit trigger");
+}
+
+async fn clear_sequence_update_audit(database: &TestDatabase) {
+    sqlx::query("TRUNCATE TABLE apolysis_gateway.sequence_update_audit")
+        .execute(database.pool())
+        .await
+        .expect("clear the sequence reservation audit");
+}
+
+async fn sequence_update_audit(database: &TestDatabase) -> (i64, Option<i64>) {
+    sqlx::query_as(
+        "SELECT count(*), \
+                sum(new_next_ingest_sequence-old_next_ingest_sequence)::bigint \
+         FROM apolysis_gateway.sequence_update_audit",
+    )
+    .fetch_one(database.pool())
+    .await
+    .expect("read the sequence reservation audit")
+}
+
+#[tokio::test]
+#[ignore = "requires APOLYSIS_TEST_DATABASE_URL and an explicit PostgreSQL durability gate"]
+async fn max_ingest_batch_reserves_one_exact_organization_sequence_range() {
+    const MAX_BATCH_ITEMS: u64 = 256;
+
+    let database = TestDatabase::start()
+        .await
+        .expect("start isolated PostgreSQL durability test");
+    let gateway = ExecutionEvidenceGateway::new(
+        database
+            .repository()
+            .await
+            .expect("construct the PostgreSQL repository"),
+        SystemClock,
+        OsRandomIdGenerator,
+    );
+    let context = runtime_source_context();
+    let opened = gateway
+        .open_run(
+            &context,
+            create_request("operation_range_open_01", "client_range_open_01"),
+        )
+        .await
+        .expect("open the range-reservation test run");
+
+    install_sequence_update_audit(&database).await;
+
+    let acknowledgement = gateway
+        .ingest(
+            &context,
+            ingest_request(
+                opened.run_id().as_str(),
+                opened.lease().lease_id(),
+                opened.source_stream_id(),
+                "operation_range_ingest_01",
+                1..=MAX_BATCH_ITEMS,
+            ),
+        )
+        .await
+        .expect("commit one maximum-sized ingest batch");
+
+    let updates = sequence_update_audit(&database).await;
+    assert_eq!(updates.0, 1, "one ingest batch must reserve one range");
+    assert_eq!(updates.1, Some(MAX_BATCH_ITEMS as i64));
+
+    let assigned = acknowledgement
+        .acknowledgements()
+        .iter()
+        .map(|acknowledgement| {
+            acknowledgement
+                .ingest_sequence()
+                .expect("committed acknowledgement has an ingest sequence")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(acknowledgement.committed_count(), MAX_BATCH_ITEMS as u32);
+    assert_eq!(acknowledgement.duplicate_count(), 0);
+    assert_eq!(assigned, (4..=MAX_BATCH_ITEMS + 3).collect::<Vec<_>>());
+    assert_eq!(
+        acknowledgement.durable_ingest_watermark(),
+        MAX_BATCH_ITEMS + 3
+    );
+
+    let persisted_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+             (SELECT count(*) FROM apolysis_gateway.evidence_events \
+              WHERE organization_id=$1), \
+             (SELECT count(*) FROM apolysis_gateway.record_items \
+              WHERE organization_id=$1 AND fact_kind='evidence_accepted'), \
+             (SELECT count(*) FROM apolysis_gateway.projection_outbox AS outbox \
+              JOIN apolysis_gateway.record_items AS record \
+                ON record.organization_id=outbox.organization_id \
+               AND record.ingest_sequence=outbox.ingest_sequence \
+              WHERE record.organization_id=$1 AND record.fact_kind='evidence_accepted')",
+    )
+    .bind(context.organization_id().as_str())
+    .fetch_one(database.pool())
+    .await
+    .expect("count committed evidence, ledger, and outbox rows");
+    assert_eq!(
+        persisted_counts,
+        (
+            MAX_BATCH_ITEMS as i64,
+            MAX_BATCH_ITEMS as i64,
+            MAX_BATCH_ITEMS as i64,
+        )
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires APOLYSIS_TEST_DATABASE_URL and an explicit PostgreSQL durability gate"]
+async fn mixed_and_duplicate_batches_reserve_only_novel_sequences() {
+    let database = TestDatabase::start()
+        .await
+        .expect("start isolated PostgreSQL durability test");
+    let gateway = ExecutionEvidenceGateway::new(
+        database
+            .repository()
+            .await
+            .expect("construct the PostgreSQL repository"),
+        SystemClock,
+        OsRandomIdGenerator,
+    );
+    let context = runtime_source_context();
+    let opened = gateway
+        .open_run(
+            &context,
+            create_request("operation_mixed_open_01", "client_mixed_open_01"),
+        )
+        .await
+        .expect("open the mixed-batch test run");
+    install_sequence_update_audit(&database).await;
+
+    let initial_request = ingest_request(
+        opened.run_id().as_str(),
+        opened.lease().lease_id(),
+        opened.source_stream_id(),
+        "operation_mixed_initial_01",
+        1..=4,
+    );
+    let initial = gateway
+        .ingest(&context, initial_request.clone())
+        .await
+        .expect("commit the initial novel batch");
+    assert_eq!(initial.committed_count(), 4);
+    assert_eq!(sequence_update_audit(&database).await, (1, Some(4)));
+    clear_sequence_update_audit(&database).await;
+
+    let exact_replay = gateway
+        .ingest(&context, initial_request)
+        .await
+        .expect("replay the exact committed ingest operation");
+    assert_eq!(exact_replay, initial);
+    assert_eq!(sequence_update_audit(&database).await, (0, None));
+
+    // A later retry must rebuild exact duplicate envelopes independently of
+    // the wall-clock millisecond in which the request is assembled.
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let mixed = gateway
+        .ingest(
+            &context,
+            ingest_request(
+                opened.run_id().as_str(),
+                opened.lease().lease_id(),
+                opened.source_stream_id(),
+                "operation_mixed_retry_01",
+                [1, 5, 2, 6],
+            ),
+        )
+        .await
+        .expect("commit only the novel members of a mixed batch");
+    assert_eq!(mixed.committed_count(), 2);
+    assert_eq!(mixed.duplicate_count(), 2);
+    assert_eq!(
+        mixed
+            .acknowledgements()
+            .iter()
+            .map(|acknowledgement| acknowledgement.ingest_sequence().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![4, 8, 5, 9]
+    );
+    assert_eq!(sequence_update_audit(&database).await, (1, Some(2)));
+    clear_sequence_update_audit(&database).await;
+
+    let duplicates = gateway
+        .ingest(
+            &context,
+            ingest_request(
+                opened.run_id().as_str(),
+                opened.lease().lease_id(),
+                opened.source_stream_id(),
+                "operation_mixed_duplicates_01",
+                [1, 2, 5, 6],
+            ),
+        )
+        .await
+        .expect("acknowledge an all-duplicate batch without allocation");
+    assert_eq!(duplicates.committed_count(), 0);
+    assert_eq!(duplicates.duplicate_count(), 4);
+    assert_eq!(duplicates.durable_ingest_watermark(), 9);
+    assert_eq!(sequence_update_audit(&database).await, (0, None));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires APOLYSIS_TEST_DATABASE_URL and an explicit PostgreSQL durability gate"]
+async fn concurrent_ingest_writers_receive_disjoint_contiguous_sequence_ranges() {
+    const EVENTS_PER_WRITER: u64 = 32;
+
+    let database = TestDatabase::start()
+        .await
+        .expect("start isolated PostgreSQL durability test");
+    let context = runtime_source_context();
+    let left_gateway = ExecutionEvidenceGateway::new(
+        database
+            .repository()
+            .await
+            .expect("construct the left PostgreSQL repository and pool"),
+        SystemClock,
+        OsRandomIdGenerator,
+    );
+    let right_gateway = ExecutionEvidenceGateway::new(
+        database
+            .repository()
+            .await
+            .expect("construct the right PostgreSQL repository and pool"),
+        SystemClock,
+        OsRandomIdGenerator,
+    );
+    let left_opened = left_gateway
+        .open_run(
+            &context,
+            create_request("operation_range_left_open_01", "client_range_left_open_01"),
+        )
+        .await
+        .expect("open the left concurrent run");
+    let right_opened = right_gateway
+        .open_run(
+            &context,
+            create_request(
+                "operation_range_right_open_01",
+                "client_range_right_open_01",
+            ),
+        )
+        .await
+        .expect("open the right concurrent run");
+    install_sequence_update_audit(&database).await;
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let left_context = context.clone();
+    let left_barrier = barrier.clone();
+    let left = async move {
+        let request = ingest_request(
+            left_opened.run_id().as_str(),
+            left_opened.lease().lease_id(),
+            left_opened.source_stream_id(),
+            "operation_range_left_ingest_01",
+            1..=EVENTS_PER_WRITER,
+        );
+        left_barrier.wait().await;
+        left_gateway.ingest(&left_context, request).await
+    };
+    let right_context = context.clone();
+    let right = async move {
+        let request = ingest_request(
+            right_opened.run_id().as_str(),
+            right_opened.lease().lease_id(),
+            right_opened.source_stream_id(),
+            "operation_range_right_ingest_01",
+            1..=EVENTS_PER_WRITER,
+        );
+        barrier.wait().await;
+        right_gateway.ingest(&right_context, request).await
+    };
+    let (left, right) = tokio::join!(left, right);
+    let left = left.expect("commit the left concurrent range");
+    let right = right.expect("commit the right concurrent range");
+
+    let assigned = |acknowledgement: &apolysis_contracts::IngestAck| {
+        acknowledgement
+            .acknowledgements()
+            .iter()
+            .map(|item| item.ingest_sequence().unwrap_or_default())
+            .collect::<Vec<_>>()
+    };
+    let left_assigned = assigned(&left);
+    let right_assigned = assigned(&right);
+    assert!(left_assigned
+        .windows(2)
+        .all(|window| window[1] == window[0] + 1));
+    assert!(right_assigned
+        .windows(2)
+        .all(|window| window[1] == window[0] + 1));
+    let mut all_assigned = left_assigned;
+    all_assigned.extend(right_assigned);
+    all_assigned.sort_unstable();
+    assert_eq!(all_assigned, (7..=70).collect::<Vec<_>>());
+    assert_eq!(sequence_update_audit(&database).await, (2, Some(64)));
+
+    let deltas: Vec<i64> = sqlx::query_scalar(
+        "SELECT new_next_ingest_sequence-old_next_ingest_sequence \
+         FROM apolysis_gateway.sequence_update_audit \
+         ORDER BY old_next_ingest_sequence",
+    )
+    .fetch_all(database.pool())
+    .await
+    .expect("read each concurrent sequence reservation");
+    assert_eq!(deltas, vec![32, 32]);
+    let ledger_sequences: Vec<i64> = sqlx::query_scalar(
+        "SELECT ingest_sequence FROM apolysis_gateway.record_items \
+         WHERE organization_id=$1 ORDER BY ingest_sequence",
+    )
+    .bind(context.organization_id().as_str())
+    .fetch_all(database.pool())
+    .await
+    .expect("read the concurrent organization ledger");
+    assert_eq!(ledger_sequences, (1..=70).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+#[ignore = "requires APOLYSIS_TEST_DATABASE_URL and an explicit PostgreSQL durability gate"]
+async fn failed_write_rolls_back_the_reserved_range_without_a_ledger_hole() {
+    let database = TestDatabase::start()
+        .await
+        .expect("start isolated PostgreSQL durability test");
+    let gateway = ExecutionEvidenceGateway::new(
+        database
+            .repository()
+            .await
+            .expect("construct the PostgreSQL repository"),
+        SystemClock,
+        OsRandomIdGenerator,
+    );
+    let context = runtime_source_context();
+    let opened = gateway
+        .open_run(
+            &context,
+            create_request(
+                "operation_range_rollback_open_01",
+                "client_range_rollback_01",
+            ),
+        )
+        .await
+        .expect("open the range-rollback test run");
+    install_sequence_update_audit(&database).await;
+    sqlx::raw_sql(
+        "DROP TRIGGER IF EXISTS reject_range_test_evidence \
+             ON apolysis_gateway.evidence_events; \
+         DROP FUNCTION IF EXISTS apolysis_gateway.reject_range_test_evidence(); \
+         CREATE FUNCTION apolysis_gateway.reject_range_test_evidence() \
+         RETURNS trigger LANGUAGE plpgsql AS $reject$ \
+         BEGIN \
+             RAISE EXCEPTION 'range reservation rollback test rejection'; \
+         END \
+         $reject$; \
+         CREATE TRIGGER reject_range_test_evidence \
+         BEFORE INSERT ON apolysis_gateway.evidence_events \
+         FOR EACH ROW EXECUTE FUNCTION apolysis_gateway.reject_range_test_evidence();",
+    )
+    .execute(database.pool())
+    .await
+    .expect("install the test-owned evidence rejection trigger");
+
+    let request = ingest_request(
+        opened.run_id().as_str(),
+        opened.lease().lease_id(),
+        opened.source_stream_id(),
+        "operation_range_rollback_ingest_01",
+        1..=4,
+    );
+    gateway
+        .ingest(&context, request.clone())
+        .await
+        .expect_err("the real PostgreSQL trigger must reject the reserved batch");
+    sqlx::raw_sql(
+        "DROP TRIGGER reject_range_test_evidence \
+             ON apolysis_gateway.evidence_events; \
+         DROP FUNCTION apolysis_gateway.reject_range_test_evidence();",
+    )
+    .execute(database.pool())
+    .await
+    .expect("remove the test-owned evidence rejection trigger");
+
+    let next_sequence: i64 = sqlx::query_scalar(
+        "SELECT next_ingest_sequence \
+         FROM apolysis_gateway.organization_sequences WHERE organization_id=$1",
+    )
+    .bind(context.organization_id().as_str())
+    .fetch_one(database.pool())
+    .await
+    .expect("read the sequence after rollback");
+    assert_eq!(next_sequence, 4);
+    assert_eq!(sequence_update_audit(&database).await, (0, None));
+    let rolled_back_counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+             (SELECT count(*) FROM apolysis_gateway.evidence_events WHERE organization_id=$1), \
+             (SELECT count(*) FROM apolysis_gateway.record_items WHERE organization_id=$1), \
+             (SELECT count(*) FROM apolysis_gateway.projection_outbox WHERE organization_id=$1), \
+             (SELECT count(*) FROM apolysis_gateway.gateway_operations WHERE organization_id=$1), \
+             (SELECT count(*) FROM apolysis_gateway.operation_replays WHERE organization_id=$1)",
+    )
+    .bind(context.organization_id().as_str())
+    .fetch_one(database.pool())
+    .await
+    .expect("verify every reserved-batch write rolled back");
+    assert_eq!(rolled_back_counts, (0, 3, 3, 1, 1));
+
+    let retry = gateway
+        .ingest(&context, request)
+        .await
+        .expect("retry the rolled-back operation without skipping its range");
+    assert_eq!(
+        retry
+            .acknowledgements()
+            .iter()
+            .map(|acknowledgement| acknowledgement.ingest_sequence().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![4, 5, 6, 7]
+    );
+    assert_eq!(sequence_update_audit(&database).await, (1, Some(4)));
 }
 
 #[tokio::test]

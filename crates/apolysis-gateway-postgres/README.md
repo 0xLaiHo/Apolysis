@@ -43,14 +43,19 @@ integration and does not generate or wrap data keys.
 
 Unit tests and the PostgreSQL integration tests are intentionally separate.
 The detailed real-database gate runs the 28 shared repository-conformance
-scenarios, including the 256-stream admission boundary, plus seven targeted
+scenarios, including the 256-stream admission boundary, plus eleven targeted
 checks for pool/repository reconstruction,
 post-commit/pre-ack retry, identical-operation concurrent tasks, distinct
 operation IDs racing on one client run key, plaintext lease absence,
 contiguous ledger/outbox sequencing, and replay expiry that remains a durable
-idempotency tombstone after reconstruction. The concurrency checks use
-independent repositories and connection pools. The distinct-operation race
-requires one winner and one deterministic idempotency conflict:
+idempotency tombstone after reconstruction. Four sequence-range checks use
+runtime-generated operations against real PostgreSQL to prove one allocation
+update for a 256-item batch, zero allocation for exact replay or all-duplicate
+batches, novel-only allocation for mixed batches, disjoint contiguous ranges
+for concurrent writers, and rollback without a ledger hole after a database
+rejection. The concurrency checks use independent repositories and connection
+pools. The distinct-operation race requires one winner and one deterministic
+idempotency conflict:
 
 ```bash
 make test-gateway-postgres
@@ -106,11 +111,12 @@ cargo test -p apolysis-gateway-postgres
 
 Current gap discovery computes a window over the full persisted history for one
 source stream. The SQL `LIMIT` bounds the number of returned gap ranges, not the
-amount of history scanned. Novel batch items are also assigned organization
-sequences and inserted row by row while the organization sequence row remains
-locked. Before storage qualification, this must become incremental
-watermark/gap state with bounded scan work, sequence-range reservation, and
-bulk insertion, followed by load and capacity testing.
+amount of history scanned. Novel batch items now reserve one contiguous
+organization sequence range with one row update, but ledger, outbox, and
+evidence rows are still inserted individually while the transaction retains
+the organization sequencing lock. Before storage qualification, gap handling
+must become incremental and bounded, inserts must become bulk operations, and
+the result must pass load and capacity testing.
 
 ## Non-claims
 
@@ -124,6 +130,9 @@ availability. Production KMS/envelope-key integration, database roles and
 row-level-security deployment, complete network authority/revocation, object
 storage, background reapers, admission controls beyond the 256-stream cap,
 durable projectors, Query API, and Console remain outside this crate.
+The repository suite also qualifies one-update contiguous sequence reservation
+for maximum, mixed-duplicate, all-duplicate, concurrent, and rollback batches;
+those targeted tests do not close the broader race or capacity matrix.
 
 Conformance-state inspection is implemented by the test harness through a
 separate database pool. `PostgresGatewayRepository` exposes no public snapshot

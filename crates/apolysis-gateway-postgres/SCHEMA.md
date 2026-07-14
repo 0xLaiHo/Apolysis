@@ -54,13 +54,14 @@ limits remain application responsibilities rather than trigger logic.
 
 Current ingest gap discovery runs a window over the full event history for the
 source stream; `LIMIT 257` bounds returned ranges but not scanned history. Novel
-events are appended and inserted row by row while the organization sequence
-row is locked. Incremental watermark/gap state, bounded scan work,
-sequence-range reservation, bulk insertion, and load/capacity qualification
-remain required before this schema path can leave the W3–W6 storage gate.
+events reserve one contiguous organization sequence range with one row update,
+then record, outbox, and evidence rows are still inserted individually while
+the transaction retains the sequencing lock. Incremental watermark/gap state,
+bounded scan work, bulk insertion, and load/capacity qualification remain
+required before this schema path can leave the W3–W6 storage gate.
 
 The explicit real-PostgreSQL gate runs 28 shared conformance scenarios,
-including the 256-stream admission boundary, and seven targeted tests. Those
+including the 256-stream admission boundary, and eleven targeted tests. Those
 targeted tests cover repository/pool reconstruction,
 post-commit/pre-ack retry, two identical-operation concurrent tasks, distinct
 operation IDs racing on the same client run key with one winner and one
@@ -68,6 +69,11 @@ idempotency conflict, plaintext lease scanning, and contiguous organization
 sequence plus 1:1 outbox state, and replay expiry that remains a durable
 idempotency tombstone after reconstruction. The concurrency checks use
 independent repositories and connection pools.
+
+Four additional range scenarios prove one update for a maximum batch, no
+allocation for exact replay or an all-duplicate operation, novel-only allocation
+for a mixed batch, disjoint contiguous concurrent reservations, and full
+rollback/reuse after a real database rejection.
 
 The separate real crash-recovery gate uses the production repository with
 `SystemClock` and `OsRandomIdGenerator` against the pinned PostgreSQL 16 image

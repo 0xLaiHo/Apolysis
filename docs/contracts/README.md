@@ -89,7 +89,7 @@ references, encrypted exact-operation replay, a 256-stream-per-run admission
 cap, and bounded transaction-local lock/statement deadlines. The shared
 28-scenario suite runs against both adapters and verifies atomic rejection at
 the stream boundary; an explicit real-PostgreSQL gate
-adds seven targeted transaction, reconstruction, two-shape cross-pool
+adds eleven targeted transaction, reconstruction, range-allocation, two-shape cross-pool
 concurrency, plaintext-absence, sequencing, and replay-expiry checks. The
 second concurrency shape races distinct operation IDs on one client run key
 and requires one winner plus one idempotency conflict. Expired replay remains
@@ -113,10 +113,11 @@ HTTPS trace and error-body secret handling therefore remains part of the
 server-recovery gate.
 
 Current PostgreSQL ingest still uses a full per-stream history window for gap
-discovery—the SQL limit bounds returned gaps, not scan work—and inserts novel
-events row by row while holding organization sequencing. Incremental
-watermark/gap state, sequence-range reservation, bulk insertion, and
-load/capacity qualification remain W3–W6 storage work.
+discovery—the SQL limit bounds returned gaps, not scan work. A novel batch now
+reserves one contiguous organization sequence range with one row update, but
+record, outbox, and evidence inserts remain row-wise while holding organization
+sequencing. Incremental watermark/gap state, bulk insertion, and load/capacity
+qualification remain W3–W6 storage work.
 
 This is not a production Gateway and does not complete W3–W6. The broader
 multiprocess/lifecycle race matrix, sustained or capacity load,

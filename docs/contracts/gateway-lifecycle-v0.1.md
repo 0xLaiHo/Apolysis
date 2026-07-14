@@ -45,7 +45,7 @@ The Gateway foundation slice currently implements:
 
 The 28 shared repository scenarios run against both adapters, including the
 256-stream admission boundary and atomic rejection of the 257th stream. The
-explicit real-PostgreSQL gate also has seven targeted tests for repository/pool
+explicit real-PostgreSQL gate also has eleven targeted tests for repository/pool
 reconstruction, post-commit/pre-ack retry, two identical-operation concurrent
 tasks, distinct operation IDs racing on one client run key, plaintext lease
 absence, and contiguous organization sequence with one outbox row per ledger
@@ -53,7 +53,11 @@ record, plus replay expiry that remains a durable idempotency tombstone after
 reconstruction. The concurrency checks use independent repositories and
 connection pools. The distinct-operation race produces one deterministic
 winner and one idempotency conflict. State inspection for conformance is test-only; the
-PostgreSQL repository exposes no public snapshot/read API.
+PostgreSQL repository exposes no public snapshot/read API. The added
+range-reservation cases prove one sequence-row update for a maximum novel
+batch, zero allocation for exact replay or all-duplicate input, novel-only
+allocation for mixed input, disjoint concurrent ranges, and rollback without a
+ledger hole after a real database rejection.
 
 A separate real recovery gate drives the production PostgreSQL repository
 through the application core with `SystemClock`, `OsRandomIdGenerator`, and
@@ -71,10 +75,11 @@ application/repository process seam, not recovery of an HTTPS Gateway server.
 
 Current PostgreSQL gap discovery evaluates a window over the full persisted
 history for one source stream; its SQL limit bounds returned gaps rather than
-scan work. Novel envelopes are assigned organization sequences and inserted
-row by row while organization sequencing is held. Incremental watermark/gap
-state, sequence-range reservation, bulk insertion, and load/capacity
-qualification are required before the W3–W6 storage exit gate.
+scan work. Novel envelopes reserve one contiguous organization sequence range
+with one row update, but record, outbox, and evidence inserts remain row-wise
+while organization sequencing is held. Incremental watermark/gap state, bulk
+insertion, and load/capacity qualification are required before the W3–W6
+storage exit gate.
 
 The slice is a conformance foundation, not a production service, and does not
 complete W3–W6. In particular, it has:

@@ -697,64 +697,101 @@ impl PostgresGatewayRepository {
         ingested_at_unix_ms: u64,
         fact: AgentExecutionRecordFact,
     ) -> TxResult<u64> {
+        self.append_facts(
+            transaction,
+            context,
+            run_id,
+            ingested_at_unix_ms,
+            vec![fact],
+        )
+        .await?
+        .pop()
+        .ok_or_else(|| TxFailure::rollback(repository_failure()))
+    }
+
+    pub(crate) async fn append_facts(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        context: &AuthenticatedSourceContext,
+        run_id: &RunId,
+        ingested_at_unix_ms: u64,
+        facts: Vec<AgentExecutionRecordFact>,
+    ) -> TxResult<Vec<u64>> {
+        if facts.is_empty() {
+            return Ok(Vec::new());
+        }
         self.ensure_organization(
             transaction,
             context.organization_id().as_str(),
             ingested_at_unix_ms,
         )
         .await?;
-        let sequence: i64 = sqlx::query_scalar(
+        let fact_count =
+            u64::try_from(facts.len()).map_err(|_| TxFailure::rollback(repository_failure()))?;
+        let fact_count_sql = sql_i64(fact_count).map_err(TxFailure::rollback)?;
+        let first_sequence: i64 = sqlx::query_scalar(
             "UPDATE apolysis_gateway.organization_sequences \
-             SET next_ingest_sequence=next_ingest_sequence+1, updated_at_unix_ms=$2 \
-             WHERE organization_id=$1 RETURNING next_ingest_sequence-1",
+             SET next_ingest_sequence=next_ingest_sequence+$2, updated_at_unix_ms=$3 \
+             WHERE organization_id=$1 RETURNING next_ingest_sequence-$2",
         )
         .bind(context.organization_id().as_str())
+        .bind(fact_count_sql)
         .bind(sql_i64(ingested_at_unix_ms).map_err(TxFailure::rollback)?)
         .fetch_one(&mut **transaction)
         .await
-        .map_err(|error| TxFailure::from_sqlx_at("organization_sequence_allocate", error))?;
-        let sequence_u64 = sql_u64(sequence).map_err(TxFailure::rollback)?;
-        let fact_kind = fact_kind(&fact);
-        let item = AgentExecutionRecordItem::new(
-            context.organization_id().clone(),
-            run_id.clone(),
-            sequence_u64,
-            ingested_at_unix_ms,
-            fact,
-        )
-        .map_err(|_| TxFailure::rollback(repository_failure()))?;
-        let canonical = serde_json_canonicalizer::to_vec(&item)
-            .map_err(|_| TxFailure::rollback(repository_failure()))?;
-        let item_json = json_value(&item).map_err(TxFailure::rollback)?;
+        .map_err(|error| TxFailure::from_sqlx_at("organization_sequence_reserve", error))?;
+        let first_sequence = sql_u64(first_sequence).map_err(TxFailure::rollback)?;
         let ingested_at = sql_i64(ingested_at_unix_ms).map_err(TxFailure::rollback)?;
-        sqlx::query(
-            "INSERT INTO apolysis_gateway.record_items (\
-                organization_id, run_id, ingest_sequence, ingested_at_unix_ms, fact_kind, \
-                fact_json, fact_digest, outbox_ingest_sequence\
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$3)",
-        )
-        .bind(context.organization_id().as_str())
-        .bind(run_id.as_str())
-        .bind(sequence)
-        .bind(ingested_at)
-        .bind(fact_kind)
-        .bind(item_json)
-        .bind(sha256_bytes(&canonical))
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| TxFailure::from_sqlx_at("record_item_insert", error))?;
-        sqlx::query(
-            "INSERT INTO apolysis_gateway.projection_outbox (\
-                organization_id, ingest_sequence, available_at_unix_ms\
-             ) VALUES ($1,$2,$3)",
-        )
-        .bind(context.organization_id().as_str())
-        .bind(sequence)
-        .bind(ingested_at)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| TxFailure::from_sqlx_at("projection_outbox_insert", error))?;
-        Ok(sequence_u64)
+        let mut sequences = Vec::with_capacity(facts.len());
+        for (offset, fact) in facts.into_iter().enumerate() {
+            let offset =
+                u64::try_from(offset).map_err(|_| TxFailure::rollback(repository_failure()))?;
+            let sequence = first_sequence
+                .checked_add(offset)
+                .ok_or_else(|| TxFailure::rollback(repository_failure()))?;
+            let sequence_sql = sql_i64(sequence).map_err(TxFailure::rollback)?;
+            let fact_kind = fact_kind(&fact);
+            let item = AgentExecutionRecordItem::new(
+                context.organization_id().clone(),
+                run_id.clone(),
+                sequence,
+                ingested_at_unix_ms,
+                fact,
+            )
+            .map_err(|_| TxFailure::rollback(repository_failure()))?;
+            let canonical = serde_json_canonicalizer::to_vec(&item)
+                .map_err(|_| TxFailure::rollback(repository_failure()))?;
+            let item_json = json_value(&item).map_err(TxFailure::rollback)?;
+            sqlx::query(
+                "INSERT INTO apolysis_gateway.record_items (\
+                    organization_id, run_id, ingest_sequence, ingested_at_unix_ms, fact_kind, \
+                    fact_json, fact_digest, outbox_ingest_sequence\
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$3)",
+            )
+            .bind(context.organization_id().as_str())
+            .bind(run_id.as_str())
+            .bind(sequence_sql)
+            .bind(ingested_at)
+            .bind(fact_kind)
+            .bind(item_json)
+            .bind(sha256_bytes(&canonical))
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| TxFailure::from_sqlx_at("record_item_insert", error))?;
+            sqlx::query(
+                "INSERT INTO apolysis_gateway.projection_outbox (\
+                    organization_id, ingest_sequence, available_at_unix_ms\
+                 ) VALUES ($1,$2,$3)",
+            )
+            .bind(context.organization_id().as_str())
+            .bind(sequence_sql)
+            .bind(ingested_at)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| TxFailure::from_sqlx_at("projection_outbox_insert", error))?;
+            sequences.push(sequence);
+        }
+        Ok(sequences)
     }
 
     pub(crate) async fn load_run_for_update(

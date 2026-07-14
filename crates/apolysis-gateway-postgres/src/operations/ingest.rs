@@ -223,10 +223,45 @@ impl PostgresGatewayRepository {
             )));
         }
 
-        let mut acknowledgements = Vec::with_capacity(classified.len());
+        let mut prepared = Vec::with_capacity(classified.len());
+        let mut facts = Vec::new();
         for (classification, envelope) in classified {
             match classification {
                 ClassifiedEvent::Duplicate(ingest_sequence) => {
+                    prepared.push((PreparedEvent::Duplicate(ingest_sequence), envelope));
+                }
+                ClassifiedEvent::Novel(envelope_digest) => {
+                    let accepted = Box::new(
+                        AcceptedSourceEnvelope::new(
+                            context.source_registration_id(),
+                            &lease.source_stream_id,
+                            stream.registration_policy_revision,
+                            stream.effective_trust_profile,
+                            stream.manifest.schema_version(),
+                            stream.manifest_digest.clone(),
+                            envelope.clone(),
+                        )
+                        .map_err(|_| TxFailure::rollback(repository_failure()))?,
+                    );
+                    facts.push(AgentExecutionRecordFact::EvidenceAccepted(accepted.clone()));
+                    prepared.push((
+                        PreparedEvent::Novel {
+                            envelope_digest,
+                            accepted,
+                        },
+                        envelope,
+                    ));
+                }
+            }
+        }
+        let mut reserved_sequences = self
+            .append_facts(transaction, context, request.run_id(), now_unix_ms, facts)
+            .await?
+            .into_iter();
+        let mut acknowledgements = Vec::with_capacity(prepared.len());
+        for (classification, envelope) in prepared {
+            match classification {
+                PreparedEvent::Duplicate(ingest_sequence) => {
                     acknowledgements.push(
                         EnvelopeAck::new(
                             envelope.source_event_id(),
@@ -236,26 +271,13 @@ impl PostgresGatewayRepository {
                         .map_err(|_| TxFailure::rollback(repository_failure()))?,
                     );
                 }
-                ClassifiedEvent::Novel(envelope_digest) => {
-                    let accepted = AcceptedSourceEnvelope::new(
-                        context.source_registration_id(),
-                        &lease.source_stream_id,
-                        stream.registration_policy_revision,
-                        stream.effective_trust_profile,
-                        stream.manifest.schema_version(),
-                        stream.manifest_digest.clone(),
-                        envelope.clone(),
-                    )
-                    .map_err(|_| TxFailure::rollback(repository_failure()))?;
-                    let ingest_sequence = self
-                        .append_fact(
-                            transaction,
-                            context,
-                            request.run_id(),
-                            now_unix_ms,
-                            AgentExecutionRecordFact::EvidenceAccepted(Box::new(accepted.clone())),
-                        )
-                        .await?;
+                PreparedEvent::Novel {
+                    envelope_digest,
+                    accepted,
+                } => {
+                    let ingest_sequence = reserved_sequences
+                        .next()
+                        .ok_or_else(|| TxFailure::rollback(repository_failure()))?;
                     sqlx::query(
                         "INSERT INTO apolysis_gateway.evidence_events (\
                             organization_id, run_id, source_registration_id, source_stream_id, \
@@ -294,6 +316,9 @@ impl PostgresGatewayRepository {
                     );
                 }
             }
+        }
+        if reserved_sequences.next().is_some() {
+            return Err(TxFailure::rollback(repository_failure()));
         }
         let source_watermark = sql_u64(
             sqlx::query_scalar::<_, Option<i64>>(
@@ -411,6 +436,14 @@ struct ExistingEvent {
 enum ClassifiedEvent {
     Duplicate(u64),
     Novel(Vec<u8>),
+}
+
+enum PreparedEvent {
+    Duplicate(u64),
+    Novel {
+        envelope_digest: Vec<u8>,
+        accepted: Box<AcceptedSourceEnvelope>,
+    },
 }
 
 async fn load_lease(
