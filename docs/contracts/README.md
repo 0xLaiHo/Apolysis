@@ -97,16 +97,31 @@ a durable idempotency tombstone after repository reconstruction. Database
 inspection used by conformance is test-only; the production repository exposes
 no snapshot/read API.
 
+A separate real crash-recovery gate drives that production repository through
+the application core with `SystemClock`, `OsRandomIdGenerator`, and
+runtime-generated operations. On a pinned PostgreSQL 16 persistent volume with
+data checksums and durable write settings enabled, it proves exact replay across
+graceful database restart and PostgreSQL `SIGKILL`/WAL redo, complete rollback
+after application-process death before commit, and exact replay after
+application-process death post-commit/pre-ack. It withholds a distinct client
+acknowledgement, kills the first retry at the same pre-ack boundary, and uses a
+third process to prove exact convergence. Catalog-discovered plaintext
+scanning, `pg_amcheck`, `pg_dump`, generated-secret scans, private-file checks,
+and dedicated-resource cleanup are part of the gate. This qualifies the
+application/repository process seam, not HTTPS Gateway-server recovery.
+HTTPS trace and error-body secret handling therefore remains part of the
+server-recovery gate.
+
 Current PostgreSQL ingest still uses a full per-stream history window for gap
 discovery—the SQL limit bounds returned gaps, not scan work—and inserts novel
 events row by row while holding organization sequencing. Incremental
 watermark/gap state, sequence-range reservation, bulk insertion, and
 load/capacity qualification remain W3–W6 storage work.
 
-This is not a production Gateway and does not complete W3–W6. There is no
-PostgreSQL server restart, WAL/crash, multiprocess, replication/failover, or HA
-qualification, including the full lifecycle race matrix; production
-KMS/envelope-key integration or database RLS
+This is not a production Gateway and does not complete W3–W6. The broader
+multiprocess/lifecycle race matrix, sustained or capacity load,
+replication/failover, backup/restore, HA, and HTTPS Gateway-server recovery are
+not qualified; nor are production KMS/envelope-key integration or database RLS
 deployment; network transport or live credential revocation; object-store
 resolver; background deadline/replay cleanup; or production rate and
 request-size enforcement beyond the implemented stream cap. The
