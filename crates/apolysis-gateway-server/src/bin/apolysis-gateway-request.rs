@@ -8,8 +8,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use apolysis_contracts::OpenRunRequest;
+use apolysis_contracts::{BindRuntimeRequest, FinishRunRequest, IngestRequest, OpenRunRequest};
 use apolysis_gateway::canonical_request_digest;
+use serde::{de::DeserializeOwned, Serialize};
 
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
 
@@ -23,12 +24,26 @@ fn main() {
 fn run() -> Result<(), RequestCliError> {
     let command = parse_command()?;
     match command {
-        Command::OpenRun { input, output } => sign_open_run(&input, &output),
+        Command::OpenRun { input, output } => {
+            sign_request::<OpenRunRequest>("open_run", &input, &output)
+        }
+        Command::BindRuntime { input, output } => {
+            sign_request::<BindRuntimeRequest>("bind_runtime", &input, &output)
+        }
+        Command::Ingest { input, output } => {
+            sign_request::<IngestRequest>("ingest", &input, &output)
+        }
+        Command::FinishRun { input, output } => {
+            sign_request::<FinishRunRequest>("finish_run", &input, &output)
+        }
     }
 }
 
 enum Command {
     OpenRun { input: PathBuf, output: PathBuf },
+    BindRuntime { input: PathBuf, output: PathBuf },
+    Ingest { input: PathBuf, output: PathBuf },
+    FinishRun { input: PathBuf, output: PathBuf },
 }
 
 fn parse_command() -> Result<Command, RequestCliError> {
@@ -37,9 +52,17 @@ fn parse_command() -> Result<Command, RequestCliError> {
     let Some(command) = args.next() else {
         return Err(RequestCliError::Usage);
     };
-    if command != OsStr::new("open-run") {
+    let command = if command == OsStr::new("open-run") {
+        "open-run"
+    } else if command == OsStr::new("bind-runtime") {
+        "bind-runtime"
+    } else if command == OsStr::new("ingest") {
+        "ingest"
+    } else if command == OsStr::new("finish-run") {
+        "finish-run"
+    } else {
         return Err(RequestCliError::Usage);
-    }
+    };
 
     let mut input = None;
     let mut output = None;
@@ -55,19 +78,25 @@ fn parse_command() -> Result<Command, RequestCliError> {
         *destination = Some(PathBuf::from(path));
     }
 
-    match (input, output) {
-        (Some(input), Some(output)) => Ok(Command::OpenRun { input, output }),
+    match (command, input, output) {
+        ("open-run", Some(input), Some(output)) => Ok(Command::OpenRun { input, output }),
+        ("bind-runtime", Some(input), Some(output)) => Ok(Command::BindRuntime { input, output }),
+        ("ingest", Some(input), Some(output)) => Ok(Command::Ingest { input, output }),
+        ("finish-run", Some(input), Some(output)) => Ok(Command::FinishRun { input, output }),
         _ => Err(RequestCliError::Usage),
     }
 }
 
-fn sign_open_run(input: &Path, output: &Path) -> Result<(), RequestCliError> {
+fn sign_request<T>(operation: &str, input: &Path, output: &Path) -> Result<(), RequestCliError>
+where
+    T: DeserializeOwned + Serialize,
+{
     let bytes = read_bounded(input)?;
     let mut wire: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|_| RequestCliError::InvalidRequest)?;
-    let unsigned: OpenRunRequest =
+    let unsigned: T =
         serde_json::from_value(wire.clone()).map_err(|_| RequestCliError::InvalidRequest)?;
-    let digest = canonical_request_digest("open_run", &unsigned)
+    let digest = canonical_request_digest(operation, &unsigned)
         .map_err(|_| RequestCliError::DigestConstruction)?;
 
     let object = wire
@@ -80,11 +109,7 @@ fn sign_open_run(input: &Path, output: &Path) -> Result<(), RequestCliError> {
 
     // Reconstruct the public contract after signing so the emitted request is
     // exactly the shape the Gateway accepts, then run its semantic checks.
-    let signed: OpenRunRequest =
-        serde_json::from_value(wire).map_err(|_| RequestCliError::InvalidRequest)?;
-    signed
-        .validate()
-        .map_err(|_| RequestCliError::InvalidRequest)?;
+    let signed: T = serde_json::from_value(wire).map_err(|_| RequestCliError::InvalidRequest)?;
     let mut encoded = serde_json::to_vec(&signed).map_err(|_| RequestCliError::Serialization)?;
     encoded.push(b'\n');
 
@@ -180,11 +205,13 @@ enum RequestCliError {
 impl fmt::Display for RequestCliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Usage => "usage: open-run --input FILE --output FILE",
+            Self::Usage => {
+                "usage: (open-run|bind-runtime|ingest|finish-run) --input FILE --output FILE"
+            }
             Self::InputOpen => "unable to open the input file",
             Self::InputRead => "unable to read the input file",
             Self::InputTooLarge => "input exceeds the one-megabyte limit",
-            Self::InvalidRequest => "input is not a valid open-run request",
+            Self::InvalidRequest => "input is not a valid Gateway request",
             Self::DigestConstruction => "unable to construct the canonical request digest",
             Self::Serialization => "unable to serialize the signed request",
             Self::OutputExists => "output file already exists",

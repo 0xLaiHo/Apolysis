@@ -1,9 +1,9 @@
 # Execution Evidence Gateway Lifecycle v0.1
 
 Status: normative W1–W2 target contract. An application core, non-durable
-reference adapter, and initial PostgreSQL write-adapter prototype are
-implemented on the `pre-release` development line; the production Execution
-Evidence Gateway is not.
+reference adapter, PostgreSQL write adapter, and direct-mTLS lifecycle tracer
+are implemented on the `pre-release` development line; the production
+Execution Evidence Gateway is not.
 
 ## Boundary
 
@@ -37,6 +37,16 @@ The Gateway foundation slice currently implements:
   with normalized ledger/outbox state, hashed lease and join references,
   encrypted exact-operation replay, and bounded retry for serialization or
   deadlock failures;
+- a direct-mTLS HTTP tracer for all four lifecycle operations, with current
+  PostgreSQL credential authority, revocation on every route, bounded request
+  bodies, content-free errors, and durable replay across graceful Gateway
+  process restarts;
+- a deployment role model with a NOLOGIN schema owner and separate Gateway
+  runtime/control, evidence runtime/control, and deletion-acknowledgement
+  capabilities; served Gateway sessions use only the runtime capability;
+- novel-ingest admission for authorized, available evidence-object references,
+  bound transactionally to organization, run, source, capability, payload,
+  digest, size, retention, and object policy;
 - a run-wide admission cap of 256 source streams plus bounded,
   transaction-local PostgreSQL lock and statement deadlines; and
 - bounded finishing declarations and deadlines, sealing a reconciled run as
@@ -81,6 +91,19 @@ while organization sequencing is held. Incremental watermark/gap state, bulk
 insertion, and load/capacity qualification are required before the W3–W6
 storage exit gate.
 
+A durable PostgreSQL lifecycle projector now consumes strict Gateway ingest
+order, maintains organization-qualified generations and exact watermarks,
+publishes the active outbox, and supports from-zero rebuild with atomic
+cutover. Its bounded lifecycle membership cursor is internal: it is not public
+Query authorization, an external cursor, or a Console surface.
+
+The authorized evidence-object write lifecycle now reserves bounded metadata,
+performs encrypted S3-compatible upload and full authenticated read-back,
+binds novel Gateway events to available objects, and propagates deletion
+through a fenced reaper and consumer acknowledgements. It exposes no
+source-authorized or browser object-read API. Its fixed PostgreSQL capability
+roles are process-plane separation, not tenant RLS.
+
 The slice is a conformance foundation, not a production service, and does not
 complete W3–W6. In particular, it has:
 
@@ -89,20 +112,27 @@ complete W3–W6. In particular, it has:
   high-availability qualification; the narrower graceful PostgreSQL restart,
   PostgreSQL SIGKILL/WAL redo, and application-process pre-commit,
   post-commit/pre-ack, and replay/pre-ack crash slice is covered by the explicit
-  recovery gate, while HTTPS trace and error-body secret handling remains part
-  of the server gate;
-- no production KMS/envelope-data-key integration, database role model, or RLS
-  deployment; the built-in AES-256-GCM protector is a direct-key in-process
-  keyring;
-- no HTTP or gRPC transport, transport-level mTLS/JWT verification, or live
-  credential-revocation integration;
-- no object-store resolver for referenced payloads;
+  recovery gate; the transport gate covers bounded safe errors and generated-
+  secret log scans, but not the HTTPS post-commit/pre-ack crash seam;
+- no production KMS/envelope-data-key custody or tenant RLS deployment; the
+  built-in replay protector and evidence-object wrapping key are direct-key
+  in-process inputs, and the fixed database roles are not a shared-cluster
+  tenant-isolation profile;
+- a real direct-mTLS HTTP tracer covers all four lifecycle routes, live
+  credential revocation, cross-organization rejection, and graceful
+  Gateway-process restart, but transaction-time authority revalidation,
+  credential-epoch/lease rotation, post-commit/pre-ack crash qualification,
+  JWT/workload-identity profiles, and production admission remain open;
+- no authorized Query/object-read resolver for referenced payloads;
 - no background deadline or encrypted-replay cleanup reaper—run expiration is
   reconciled only when a later novel lifecycle command reaches the application
   core, while an expired replay is rejected but not deleted;
-- no production rate, batch-byte, request-byte, or organization limit
-  enforcement beyond the run-wide stream cap; and
-- no durable projectors, Query service, or Web Console.
+- no production Gateway request-rate, batch-byte, or organization limit
+  enforcement beyond the run-wide stream cap and the transport's one-MiB
+  request-body ceiling; evidence objects have a separate bounded policy; and
+- no public projector-backed Query authorization, external cursor or SSE,
+  evidence-object read projection, coverage/findings/source-health views, or
+  Web Console.
 
 The following sections remain the normative production behavior even where the
 reference adapter cannot yet demonstrate the associated durability or

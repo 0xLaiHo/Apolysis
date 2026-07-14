@@ -26,9 +26,11 @@ JWT or workload identity may be added behind the same current-authority seam.
 All PostgreSQL Gateway migrations remain in one ordered migration set so
 restart validation cannot observe split migration histories.
 
-The first implementation exposes only `POST /gateway/v0.1/open-run`. It proves
-real TLS identity, a real network listener, current PostgreSQL lookup, and
-credential revocation, but it does not close the W3–W6 transport gate. The
-remaining lifecycle routes, transaction-time authority revalidation,
-credential binding in leases and replay records, policy/credential rotation,
-same-connection and restart coverage, quotas, and rate limits remain required.
+The first implementation now exposes all four frozen lifecycle routes:
+`open-run`, `bind-runtime`, `ingest`, and `finish-run`. Its real tracer proves
+TLS identity, current PostgreSQL lookup, cross-organization rejection,
+credential revocation on every route, durable exact replay, and continuation
+across Gateway-process restarts. It still does not close the W3–W6 transport
+gate. Transaction-time authority revalidation, credential-epoch binding in
+leases and replay records, policy/credential rotation, post-commit/pre-ack
+crash qualification, quotas, and rate limits remain required.

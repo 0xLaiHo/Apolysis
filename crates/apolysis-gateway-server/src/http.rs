@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use apolysis_contracts::{
-    ContractErrorCode, GatewayErrorResponse, OpenRunRequest, OpenRunResponse,
+    AuthenticatedSourceContext, BindRuntimeRequest, ContractErrorCode, FinishRunRequest,
+    GatewayErrorResponse, IngestRequest, OpenRunRequest,
 };
 use apolysis_gateway::{
     ExecutionEvidenceGateway, GatewayClock, GatewayFailure, OsRandomIdGenerator, SystemClock,
@@ -22,6 +23,7 @@ use axum::{
     Json, Router,
 };
 use axum_server_mtls::PeerCertificates;
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{error::GatewayServerErrorKind, AuthorityStore, GatewayServerError};
 
@@ -62,68 +64,131 @@ impl GatewayHttpState {
 pub(crate) fn router(state: GatewayHttpState) -> Router {
     Router::new()
         .route("/gateway/v0.1/open-run", post(open_run))
+        .route("/gateway/v0.1/bind-runtime", post(bind_runtime))
+        .route("/gateway/v0.1/ingest", post(ingest))
+        .route("/gateway/v0.1/finish-run", post(finish_run))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
         .layer(middleware::map_response(apply_no_store))
 }
 
+async fn finish_run(State(state): State<GatewayHttpState>, request: Request) -> Response {
+    let (context, request) =
+        match authenticate_and_decode::<FinishRunRequest>(&state, request, "finish_run").await {
+            Ok(authenticated) => authenticated,
+            Err(response) => return response,
+        };
+
+    match state.gateway.finish_run(&context, request).await {
+        Ok(response) => success(response),
+        Err(failure) => gateway_error(failure),
+    }
+}
+
+async fn ingest(State(state): State<GatewayHttpState>, request: Request) -> Response {
+    let (context, request) =
+        match authenticate_and_decode::<IngestRequest>(&state, request, "ingest").await {
+            Ok(authenticated) => authenticated,
+            Err(response) => return response,
+        };
+
+    match state.gateway.ingest(&context, request).await {
+        Ok(response) => success(response),
+        Err(failure) => gateway_error(failure),
+    }
+}
+
+async fn bind_runtime(State(state): State<GatewayHttpState>, request: Request) -> Response {
+    let (context, request) = match authenticate_and_decode::<BindRuntimeRequest>(
+        &state,
+        request,
+        "bind_runtime",
+    )
+    .await
+    {
+        Ok(authenticated) => authenticated,
+        Err(response) => return response,
+    };
+
+    match state.gateway.bind_runtime(&context, request).await {
+        Ok(response) => success(response),
+        Err(failure) => gateway_error(failure),
+    }
+}
+
 async fn open_run(State(state): State<GatewayHttpState>, request: Request) -> Response {
+    let (context, request) =
+        match authenticate_and_decode::<OpenRunRequest>(&state, request, "open_run").await {
+            Ok(authenticated) => authenticated,
+            Err(response) => return response,
+        };
+
+    match state.gateway.open_run(&context, request).await {
+        Ok(response) => success(response),
+        Err(failure) => gateway_error(failure),
+    }
+}
+
+async fn authenticate_and_decode<T>(
+    state: &GatewayHttpState,
+    request: Request,
+    operation: &'static str,
+) -> Result<(AuthenticatedSourceContext, T), Response>
+where
+    T: DeserializeOwned,
+{
     let (parts, body) = request.into_parts();
     let Some(peer_certificates) = parts.extensions.get::<PeerCertificates>() else {
-        return unauthenticated_response();
+        return Err(unauthenticated_response());
     };
     let Some(leaf_certificate) = peer_certificates.leaf() else {
-        return unauthenticated_response();
+        return Err(unauthenticated_response());
     };
 
     let now_unix_ms = SystemClock.now_unix_ms();
     let context = match state
         .authority
-        .resolve_mtls(leaf_certificate.as_ref(), "open_run", now_unix_ms)
+        .resolve_mtls(leaf_certificate.as_ref(), operation, now_unix_ms)
         .await
     {
         Ok(context) => context,
-        Err(error) => return authority_error(error),
+        Err(error) => return Err(authority_error(error)),
     };
 
     if !accepts_json(&parts.headers)
         || !has_json_content_type(&parts.headers)
         || contains_disallowed_headers(&parts.headers)
     {
-        return contract_error(
+        return Err(contract_error(
             StatusCode::BAD_REQUEST,
             ContractErrorCode::InvalidContract,
             "Request headers do not match the Gateway contract",
             false,
             None,
-        );
+        ));
     }
 
     if content_length_exceeds_limit(&parts.headers) {
-        return body_too_large_response();
+        return Err(body_too_large_response());
     }
     let request_bytes = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(bytes) => bytes,
-        Err(_) => return body_too_large_response(),
+        Err(_) => return Err(body_too_large_response()),
     };
-    let request = match serde_json::from_slice::<OpenRunRequest>(&request_bytes) {
+    let request = match serde_json::from_slice::<T>(&request_bytes) {
         Ok(request) => request,
         Err(_) => {
-            return contract_error(
+            return Err(contract_error(
                 StatusCode::BAD_REQUEST,
                 ContractErrorCode::InvalidContract,
                 "Request does not match the Gateway contract",
                 false,
                 None,
-            )
+            ))
         }
     };
-
-    match state.gateway.open_run(&context, request).await {
-        Ok(response) => success(response),
-        Err(failure) => gateway_error(failure),
-    }
+    Ok((context, request))
 }
 
 async fn not_found() -> Response {
@@ -151,7 +216,7 @@ async fn apply_no_store(mut response: Response) -> Response {
     response
 }
 
-fn success(response: OpenRunResponse) -> Response {
+fn success<T: Serialize>(response: T) -> Response {
     let mut response = (StatusCode::OK, Json(response)).into_response();
     set_no_store(response.headers_mut());
     response
@@ -160,11 +225,7 @@ fn success(response: OpenRunResponse) -> Response {
 fn gateway_error(failure: GatewayFailure) -> Response {
     let status = status_for_contract_error(failure.code());
     match failure.response() {
-        Ok(body) => wire_error(
-            status,
-            body,
-            failure.code() == ContractErrorCode::Unauthenticated,
-        ),
+        Ok(body) => wire_error(status, body),
         Err(_) => internal_response(),
     }
 }
@@ -230,16 +291,16 @@ fn contract_error(
     retry_after_ms: Option<u64>,
 ) -> Response {
     match GatewayErrorResponse::new(code, message, retryable, retry_after_ms) {
-        Ok(body) => wire_error(status, body, code == ContractErrorCode::Unauthenticated),
+        Ok(body) => wire_error(status, body),
         Err(_) => internal_response(),
     }
 }
 
-fn wire_error(status: StatusCode, body: GatewayErrorResponse, authenticate: bool) -> Response {
+fn wire_error(status: StatusCode, body: GatewayErrorResponse) -> Response {
     let retry_after_ms = body.retry_after_ms();
     let mut response = (status, Json(body)).into_response();
     set_no_store(response.headers_mut());
-    if authenticate {
+    if status == StatusCode::UNAUTHORIZED {
         response.headers_mut().insert(
             WWW_AUTHENTICATE,
             HeaderValue::from_static("Mutual realm=\"apolysis-gateway\""),
@@ -410,7 +471,7 @@ mod tests {
         )
         .unwrap();
 
-        let response = wire_error(StatusCode::SERVICE_UNAVAILABLE, body, false);
+        let response = wire_error(StatusCode::SERVICE_UNAVAILABLE, body);
 
         assert_eq!(
             response.headers().get(RETRY_AFTER),
@@ -420,6 +481,31 @@ mod tests {
             response.headers().get(CACHE_CONTROL),
             Some(&HeaderValue::from_static("no-store"))
         );
+    }
+
+    #[test]
+    fn every_unauthorized_contract_error_sets_the_mtls_challenge() {
+        for code in [
+            ContractErrorCode::Unauthenticated,
+            ContractErrorCode::LeaseExpired,
+            ContractErrorCode::LeaseRevoked,
+        ] {
+            let response = contract_error(
+                status_for_contract_error(code),
+                code,
+                "Authentication or lease authority is unavailable",
+                false,
+                None,
+            );
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers().get(WWW_AUTHENTICATE),
+                Some(&HeaderValue::from_static(
+                    "Mutual realm=\"apolysis-gateway\""
+                ))
+            );
+        }
     }
 
     #[test]
