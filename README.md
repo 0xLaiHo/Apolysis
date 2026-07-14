@@ -77,8 +77,8 @@ Gateway, coverage, and Query/Console wire types, compatibility fixtures, and
 normative contract documents. The current `pre-release` implementation builds
 on that input with an authenticated application core, a non-durable in-memory
 reference adapter, an initial migration-managed PostgreSQL write adapter for
-the four canonical Gateway operations, and the first direct-mTLS `open_run`
-transport slice backed by current PostgreSQL credential authority. These
+the four canonical Gateway operations, and a direct-mTLS full-lifecycle
+transport tracer backed by current PostgreSQL credential authority. These
 prototypes exercise
 server-side grant/policy joins, RFC 8785 golden digest vectors, atomic
 record-append/outbox semantics, encrypted exact-operation replay, one-update
@@ -101,14 +101,15 @@ before a dedicated client acknowledgement is emitted. This qualifies a
 repository/application-process seam, not recovery of the HTTPS Gateway server.
 The broader multiprocess race matrix, load, replication, failover,
 backup/restore, and high availability remain unqualified, as do production KMS
-integration, database row-level-security deployment, transport coverage for
-`bind_runtime`, `ingest`, and `finish_run`, atomic authority revalidation with
-ledger commit, lease/credential rotation, an authorized object-read resolver,
+integration, database row-level-security deployment, HTTPS post-commit/pre-ack
+Gateway-server crash qualification, atomic authority revalidation with ledger
+commit, lease/credential rotation, an authorized object-read resolver,
 evidence-object projection/read views, continuous background reaper operation,
 and capacity-qualified resource limits. The projection does not provide public
 Query authorization, cursor/SSE, Console, coverage, findings, source health, or
 evidence-object lifecycle views; its RLS GUC is defense in depth, not
-authorization. HTTPS trace and error-body secret surfaces also remain open.
+authorization. JWT/workload-identity transport profiles, production admission,
+and broader transport load and race qualification also remain open.
 The external exit gate remains open until three qualified
 design partners approve their deployment and data boundaries. The protected
 pre-release line now contains an Action candidate that pins
@@ -188,7 +189,7 @@ Core crates:
   migration-managed ledger/outbox storage and encrypted replay records.
 - `apolysis-evidence-objects`: authorized encrypted evidence-object write
   lifecycle with bounded admission, retention, deletion, and provider cleanup.
-- `apolysis-gateway-server`: first direct-mTLS Gateway listener, current
+- `apolysis-gateway-server`: direct-mTLS full-lifecycle Gateway tracer, current
   PostgreSQL source authority, and bounded authority-administration tools.
 - `apolysis-projection-postgres`: generation-scoped PostgreSQL lifecycle
   projector with durable checkpoints, rebuild/cutover, and an internal bounded
