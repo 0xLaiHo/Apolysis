@@ -57,7 +57,7 @@ assert_no_store() {
     fi
 }
 
-for command in cargo curl date docker grep head jq mktemp od openssl stat timeout tr; do
+for command in awk cargo cmp curl date docker grep head jq mktemp od openssl stat tail timeout tr; do
     require_command "$command"
 done
 
@@ -90,22 +90,83 @@ readonly container_name="apolysis-gateway-transport-${random_suffix}"
 readonly database_name="apolysis_transport_${random_suffix}"
 readonly database_user="apolysis_transport_${random_suffix}"
 readonly database_password="$(random_hex 24)"
+readonly schema_owner_login="apolysis_transport_schema_${random_suffix}"
+readonly schema_owner_password="$(random_hex 24)"
+readonly gateway_control_login="apolysis_transport_control_${random_suffix}"
+readonly gateway_control_password="$(random_hex 24)"
+readonly gateway_runtime_login="apolysis_transport_runtime_${random_suffix}"
+readonly gateway_runtime_password="$(random_hex 24)"
 readonly secret_directory="$(mktemp -d "${TMPDIR:-/tmp}/apolysis-gateway-transport.XXXXXXXX")"
 readonly container_env_file="${secret_directory}/postgres.env"
 readonly database_url_file="${secret_directory}/database.url"
+readonly schema_owner_database_url_file="${secret_directory}/schema-owner.database.url"
+readonly gateway_control_database_url_file="${secret_directory}/gateway-control.database.url"
+readonly role_provisioning_sql="${secret_directory}/provision-roles.sql"
 readonly server_log="${secret_directory}/gateway.log"
 readonly ready_file="${secret_directory}/gateway.ready"
 
 gateway_pid=""
+gateway_base_url=""
+workload_pid=""
+
+stop_gateway() {
+    if [[ -n "$gateway_pid" ]] && kill -0 "$gateway_pid" >/dev/null 2>&1; then
+        kill -TERM "$gateway_pid" >/dev/null 2>&1 || true
+        timeout 10s tail --pid="$gateway_pid" -f /dev/null >/dev/null 2>&1 || \
+            kill -KILL "$gateway_pid" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$gateway_pid" ]]; then
+        wait "$gateway_pid" 2>/dev/null || true
+    fi
+    gateway_pid=""
+}
+
+start_gateway() {
+    rm -f -- "$ready_file"
+    "$gateway_bin" \
+            --listen 127.0.0.1:0 \
+            --database-url-file "$database_url_file" \
+            --tls-certificate "$server_cert" \
+            --tls-private-key "$server_key" \
+            --client-ca "$ca_cert" \
+            --replay-key "$replay_key_file" \
+            --ready-file "$ready_file" \
+            >>"$server_log" 2>&1 &
+    gateway_pid=$!
+
+    local gateway_deadline=$((SECONDS + start_timeout_seconds))
+    while [[ ! -s "$ready_file" ]]; do
+        if ! kill -0 "$gateway_pid" >/dev/null 2>&1; then
+            printf 'error: Gateway exited before becoming ready\n' >&2
+            exit 1
+        fi
+        if ((SECONDS >= gateway_deadline)); then
+            printf 'error: Gateway did not become ready within %s seconds\n' \
+                "$start_timeout_seconds" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+
+    gateway_base_url="$(<"$ready_file")"
+    if [[ ! "$gateway_base_url" =~ ^https://127\.0\.0\.1:[0-9]+$ ]]; then
+        printf 'error: Gateway ready file did not contain a loopback HTTPS URL\n' >&2
+        exit 1
+    fi
+    if [[ "$(stat -c '%a' "$ready_file")" != "600" ]]; then
+        printf 'error: Gateway ready file is not mode 0600\n' >&2
+        exit 1
+    fi
+}
 
 cleanup() {
     local exit_status=$?
 
     trap - EXIT INT TERM
-    if [[ -n "$gateway_pid" ]] && kill -0 "$gateway_pid" >/dev/null 2>&1; then
-        kill -TERM "$gateway_pid" >/dev/null 2>&1 || true
-        timeout 10s tail --pid="$gateway_pid" -f /dev/null >/dev/null 2>&1 || \
-            kill -KILL "$gateway_pid" >/dev/null 2>&1 || true
+    stop_gateway
+    if [[ -n "$workload_pid" ]] && kill -0 "$workload_pid" >/dev/null 2>&1; then
+        kill -TERM "$workload_pid" >/dev/null 2>&1 || true
+        wait "$workload_pid" 2>/dev/null || true
     fi
     timeout 15s docker rm --force "$container_name" >/dev/null 2>&1 || true
     rm -rf -- "$secret_directory"
@@ -139,8 +200,12 @@ timeout --foreground 30s docker run \
 rm -f -- "$container_env_file"
 
 readiness_deadline=$((SECONDS + start_timeout_seconds))
-until timeout 5s docker exec "$container_name" \
-    pg_isready --quiet --username "$database_user" --dbname "$database_name"; do
+until [[ "$(timeout 5s docker exec "$container_name" cat /proc/1/comm 2>/dev/null)" == "postgres" ]] && \
+    timeout 5s docker exec "$container_name" \
+        pg_isready --quiet --username "$database_user" --dbname "$database_name" && \
+    [[ "$(timeout 5s docker exec "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --command 'SELECT 1' 2>/dev/null)" == "1" ]]; do
     if ((SECONDS >= readiness_deadline)); then
         printf 'error: PostgreSQL did not become ready within %s seconds\n' \
             "$start_timeout_seconds" >&2
@@ -155,9 +220,27 @@ if [[ ! "$published_binding" =~ ^127\.0\.0\.1:([0-9]+)$ ]]; then
     exit 1
 fi
 readonly published_port="${BASH_REMATCH[1]}"
-readonly database_url="postgresql://${database_user}:${database_password}@127.0.0.1:${published_port}/${database_name}"
-printf '%s\n' "$database_url" >"$database_url_file"
-chmod 600 "$database_url_file"
+
+host_readiness_deadline=$((SECONDS + start_timeout_seconds))
+until (exec 9<>"/dev/tcp/127.0.0.1/${published_port}") 2>/dev/null; do
+    if ((SECONDS >= host_readiness_deadline)); then
+        printf 'error: PostgreSQL loopback port did not become reachable within %s seconds\n' \
+            "$start_timeout_seconds" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+
+readonly schema_owner_database_url="postgresql://${schema_owner_login}:${schema_owner_password}@127.0.0.1:${published_port}/${database_name}"
+readonly gateway_control_database_url="postgresql://${gateway_control_login}:${gateway_control_password}@127.0.0.1:${published_port}/${database_name}"
+readonly gateway_runtime_database_url="postgresql://${gateway_runtime_login}:${gateway_runtime_password}@127.0.0.1:${published_port}/${database_name}"
+printf '%s\n' "$schema_owner_database_url" >"$schema_owner_database_url_file"
+printf '%s\n' "$gateway_control_database_url" >"$gateway_control_database_url_file"
+printf '%s\n' "$gateway_runtime_database_url" >"$database_url_file"
+chmod 600 \
+    "$schema_owner_database_url_file" \
+    "$gateway_control_database_url_file" \
+    "$database_url_file"
 
 readonly ca_key="${secret_directory}/ca.key.pem"
 readonly ca_cert="${secret_directory}/ca.cert.pem"
@@ -254,6 +337,12 @@ readonly registration_id="registration_live_${random_suffix}"
 readonly source_id="source_live_${random_suffix}"
 readonly authority_id="authority_live_${random_suffix}"
 readonly policy_file="${secret_directory}/source-registration.json"
+readonly attacker_organization_id="org_attacker_${random_suffix}"
+readonly attacker_principal_id="principal_attacker_${random_suffix}"
+readonly attacker_registration_id="registration_attacker_${random_suffix}"
+readonly attacker_source_id="source_attacker_${random_suffix}"
+readonly attacker_authority_id="authority_attacker_${random_suffix}"
+readonly attacker_policy_file="${secret_directory}/source-registration.attacker.json"
 
 jq -n \
     --arg organization_id "$organization_id" \
@@ -277,7 +366,7 @@ jq -n \
         allowed_environments: ["local_cli_or_ide"],
         allowed_operations: ["bind_runtime", "ingest", "finish_run"],
         effective_trust_profile: "harness_observed",
-        allowed_capabilities: ["semantic_lifecycle", "tool_calls", "claimed_outcome"],
+        allowed_capabilities: ["semantic_lifecycle", "tool_calls", "process", "claimed_outcome"],
         allowed_privacy_capabilities: ["structure_only"],
         allowed_redaction_profile_refs: ["redaction_structure_only_v1"],
         allowed_run_authorities: [{kind: "service", id: $authority_id}],
@@ -289,11 +378,76 @@ jq -n \
         may_finalize_runs: true
     }' >"$policy_file"
 
-printf 'Migrating and provisioning the current mTLS authority state...\n'
+jq \
+    --arg organization_id "$attacker_organization_id" \
+    --arg principal_id "$attacker_principal_id" \
+    --arg registration_id "$attacker_registration_id" \
+    --arg source_id "$attacker_source_id" \
+    --arg authority_id "$attacker_authority_id" \
+    '.organization_id = $organization_id
+     | .source_registration_id = $registration_id
+     | .source_id = $source_id
+     | .principal.id = $principal_id
+     | .allowed_run_authorities = [{kind: "service", id: $authority_id}]' \
+    "$policy_file" >"$attacker_policy_file"
+
+printf 'Bootstrapping the reviewed PostgreSQL role model...\n'
+timeout 30s docker exec -i "$container_name" \
+    psql --username "$database_user" --dbname "$database_name" \
+        --set=ON_ERROR_STOP=1 \
+    <crates/apolysis-gateway-postgres/deploy/bootstrap_roles.sql
+
+{
+    printf 'BEGIN;\n'
+    printf "CREATE ROLE %s WITH LOGIN NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '%s';\n" \
+        "$schema_owner_login" "$schema_owner_password"
+    printf 'GRANT apolysis_schema_owner TO %s;\n' "$schema_owner_login"
+    printf 'COMMIT;\n'
+} >"$role_provisioning_sql"
+chmod 600 "$role_provisioning_sql"
+timeout 30s docker exec -i "$container_name" \
+    psql --username "$database_user" --dbname "$database_name" \
+        --set=ON_ERROR_STOP=1 \
+    <"$role_provisioning_sql"
+rm -f -- "$role_provisioning_sql"
+
+printf 'Migrating under the dedicated schema-owner login...\n'
 "$authority_bin" migrate \
-    --database-url-file "$database_url_file"
+    --database-url-file "$schema_owner_database_url_file"
+
+printf 'Sealing post-migration ownership and application privileges...\n'
+timeout 30s docker exec -i "$container_name" \
+    psql --username "$schema_owner_login" --dbname "$database_name" \
+        --set=ON_ERROR_STOP=1 \
+    <crates/apolysis-gateway-postgres/deploy/privileges.sql
+
+{
+    printf 'BEGIN;\n'
+    printf "CREATE ROLE %s WITH LOGIN NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '%s';\n" \
+        "$gateway_control_login" "$gateway_control_password"
+    printf 'GRANT apolysis_gateway_control TO %s;\n' "$gateway_control_login"
+    printf "CREATE ROLE %s WITH LOGIN NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '%s';\n" \
+        "$gateway_runtime_login" "$gateway_runtime_password"
+    printf 'GRANT apolysis_gateway_runtime TO %s;\n' "$gateway_runtime_login"
+    printf 'COMMIT;\n'
+} >"$role_provisioning_sql"
+chmod 600 "$role_provisioning_sql"
+timeout 30s docker exec -i "$container_name" \
+    psql --username "$database_user" --dbname "$database_name" \
+        --set=ON_ERROR_STOP=1 \
+    <"$role_provisioning_sql"
+rm -f -- "$role_provisioning_sql"
+
+# The final bootstrap audit runs only after migration, privilege sealing, and
+# every served login membership are complete.
+timeout 30s docker exec -i "$container_name" \
+    psql --username "$database_user" --dbname "$database_name" \
+        --set=ON_ERROR_STOP=1 \
+    <crates/apolysis-gateway-postgres/deploy/bootstrap_roles.sql
+
+printf 'Provisioning current mTLS authority through the control-plane login...\n'
 "$authority_bin" register-source \
-        --database-url-file "$database_url_file" \
+        --database-url-file "$gateway_control_database_url_file" \
         --registration "$policy_file" \
         --client-certificate "$client_cert"
 
@@ -301,7 +455,7 @@ readonly rotation_registration="${secret_directory}/source-registration.rotation
 jq '.policy_revision = 2 | .credential_epoch = 2' \
     "$policy_file" >"$rotation_registration"
 if "$authority_bin" register-source \
-    --database-url-file "$database_url_file" \
+    --database-url-file "$gateway_control_database_url_file" \
     --registration "$rotation_registration" \
     --client-certificate "$unknown_client_cert" \
     >/dev/null 2>&1; then
@@ -310,39 +464,30 @@ if "$authority_bin" register-source \
 fi
 
 printf 'Starting the production mTLS Gateway on an ephemeral loopback port...\n'
-"$gateway_bin" \
-        --listen 127.0.0.1:0 \
-        --database-url-file "$database_url_file" \
-        --tls-certificate "$server_cert" \
-        --tls-private-key "$server_key" \
-        --client-ca "$ca_cert" \
-        --replay-key "$replay_key_file" \
-        --ready-file "$ready_file" \
-        >"$server_log" 2>&1 &
-gateway_pid=$!
+start_gateway
 
-gateway_deadline=$((SECONDS + start_timeout_seconds))
-while [[ ! -s "$ready_file" ]]; do
-    if ! kill -0 "$gateway_pid" >/dev/null 2>&1; then
-        printf 'error: Gateway exited before becoming ready\n' >&2
-        exit 1
-    fi
-    if ((SECONDS >= gateway_deadline)); then
-        printf 'error: Gateway did not become ready within %s seconds\n' \
-            "$start_timeout_seconds" >&2
-        exit 1
-    fi
-    sleep 0.1
-done
-
-gateway_base_url="$(<"$ready_file")"
-if [[ ! "$gateway_base_url" =~ ^https://127\.0\.0\.1:[0-9]+$ ]]; then
-    printf 'error: Gateway ready file did not contain a loopback HTTPS URL\n' >&2
-    exit 1
-fi
-readonly gateway_base_url
-if [[ "$(stat -c '%a' "$ready_file")" != "600" ]]; then
-    printf 'error: Gateway ready file is not mode 0600\n' >&2
+served_role_sessions="$(timeout 15s docker exec -i "$container_name" \
+    psql --username "$database_user" --dbname "$database_name" \
+        --no-align --tuples-only \
+        --set=gateway_runtime_login="$gateway_runtime_login" \
+        --set=gateway_control_login="$gateway_control_login" \
+        --set=schema_owner_login="$schema_owner_login" <<'SQL'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM pg_catalog.pg_stat_activity
+      WHERE usename=:'gateway_runtime_login'),
+    (SELECT count(*) FROM pg_catalog.pg_stat_activity
+      WHERE usename=:'gateway_control_login'),
+    (SELECT count(*) FROM pg_catalog.pg_stat_activity
+      WHERE usename=:'schema_owner_login')
+);
+SQL
+)"
+IFS='|' read -r runtime_session_count control_session_count schema_session_count \
+    <<<"$served_role_sessions"
+if [[ ! "$runtime_session_count" =~ ^[0-9]+$ ]] || \
+    ((runtime_session_count < 2)) || \
+    [[ "$control_session_count" != "0" || "$schema_session_count" != "0" ]]; then
+    printf 'error: Gateway did not isolate served sessions to the runtime login\n' >&2
     exit 1
 fi
 
@@ -387,6 +532,12 @@ if ! jq -e '.code == "unauthenticated" and .retryable == false' \
     exit 1
 fi
 
+printf 'Registering an independent attacker organization for isolation checks...\n'
+"$authority_bin" register-source \
+        --database-url-file "$gateway_control_database_url_file" \
+        --registration "$attacker_policy_file" \
+        --client-certificate "$unknown_client_cert"
+
 printf 'Checking that TLS rejects a certificate outside the configured CA...\n'
 if curl --silent --show-error \
     --connect-timeout 5 \
@@ -406,12 +557,12 @@ fi
 readonly unsigned_request="${secret_directory}/open-run.unsigned.json"
 readonly signed_request="${secret_directory}/open-run.json"
 readonly first_response="${secret_directory}/open-run.response.json"
-readonly revoked_response="${secret_directory}/open-run.revoked.json"
+readonly open_replay_response="${secret_directory}/open-run.replay.response.json"
 readonly injected_response="${secret_directory}/open-run.injected.json"
 readonly oversized_request="${secret_directory}/open-run.oversized.json"
 readonly oversized_response="${secret_directory}/open-run.oversized.response.json"
 readonly first_headers="${secret_directory}/open-run.response.headers"
-readonly revoked_headers="${secret_directory}/open-run.revoked.headers"
+readonly open_replay_headers="${secret_directory}/open-run.replay.response.headers"
 readonly injected_headers="${secret_directory}/open-run.injected.headers"
 readonly oversized_headers="${secret_directory}/open-run.oversized.response.headers"
 readonly not_found_response="${secret_directory}/not-found.response.json"
@@ -446,7 +597,7 @@ jq -n \
             adapter_name: "apolysis_live_transport",
             adapter_version: "0.1.0",
             environment: "local_cli_or_ide",
-            capabilities: ["semantic_lifecycle", "tool_calls", "claimed_outcome"],
+            capabilities: ["semantic_lifecycle", "tool_calls", "process", "claimed_outcome"],
             expected_lifecycle: ["started", "finished"],
             ordering: "strict_per_stream",
             samples: false,
@@ -573,39 +724,14 @@ jq -e \
     "$first_response" >/dev/null
 
 readonly issued_lease="$(jq -r '.lease.lease_id' "$first_response")"
+readonly issued_run_id="$(jq -r '.run_id' "$first_response")"
+readonly issued_stream_id="$(jq -r '.source_stream_id' "$first_response")"
 
-readonly database_dump="${secret_directory}/database.dump.sql"
-if ! timeout 30s docker exec "$container_name" \
-    pg_dump --username "$database_user" --dbname "$database_name" \
-        --no-owner --no-privileges >"$database_dump"; then
-    printf 'error: failed to inspect PostgreSQL secret persistence\n' >&2
-    exit 1
-fi
-if grep -Fq -- "$issued_lease" "$database_dump"; then
-    printf 'error: plaintext run lease was persisted in PostgreSQL\n' >&2
-    exit 1
-fi
-rm -f -- "$database_dump"
+printf 'Restarting the Gateway after open_run to prove durable continuation...\n'
+stop_gateway
+start_gateway
 
-printf 'Revoking the current transport credential in PostgreSQL...\n'
-"$authority_bin" revoke-credential \
-        --database-url-file "$database_url_file" \
-        --client-certificate "$client_cert" \
-        --reason "live_transport_gate_${random_suffix}"
-
-readonly revoked_registration="${secret_directory}/source-registration.revoked.json"
-jq '.policy_revision = 3 | .credential_epoch = 3' \
-    "$policy_file" >"$revoked_registration"
-if "$authority_bin" register-source \
-    --database-url-file "$database_url_file" \
-    --registration "$revoked_registration" \
-    --client-certificate "$client_cert" \
-    >/dev/null 2>&1; then
-    printf 'error: a revoked client certificate was registered again\n' >&2
-    exit 1
-fi
-
-revoked_status="$(curl --silent --show-error \
+open_replay_status="$(curl --silent --show-error \
     --connect-timeout 5 \
     --max-time 30 \
     --cacert "$ca_cert" \
@@ -613,34 +739,748 @@ revoked_status="$(curl --silent --show-error \
     --key "$client_key" \
     --header 'Accept: application/json' \
     --header 'Content-Type: application/json' \
-    --header 'X-Organization-Id: attacker_controlled' \
     --data-binary "@${signed_request}" \
-    --dump-header "$revoked_headers" \
-    --output "$revoked_response" \
+    --dump-header "$open_replay_headers" \
+    --output "$open_replay_response" \
     --write-out '%{http_code}' \
     "${gateway_base_url}/gateway/v0.1/open-run")"
-
-if [[ "$revoked_status" != "401" ]]; then
-    printf 'error: revoked transport credential returned HTTP %s instead of 401\n' \
-        "$revoked_status" >&2
+if [[ "$open_replay_status" != "200" ]] || ! jq -e \
+    --arg run_id "$issued_run_id" \
+    --arg source_stream_id "$issued_stream_id" \
+    --arg lease_id "$issued_lease" \
+    '.schema_version == "0.1"
+     and .outcome == "idempotent_retry"
+     and .run_id == $run_id
+     and .source_stream_id == $source_stream_id
+     and .lease.lease_id == $lease_id' \
+    "$open_replay_response" >/dev/null; then
+    printf 'error: open_run exact retry did not survive Gateway restart\n' >&2
     exit 1
 fi
-assert_no_store "$revoked_headers" 'revoked credential'
+assert_no_store "$open_replay_headers" 'open_run exact replay'
 
-jq -e \
+printf 'Binding a real local process through the mTLS lifecycle seam...\n'
+sleep 300 &
+workload_pid=$!
+if [[ ! -r "/proc/${workload_pid}/stat" ]]; then
+    printf 'error: real transport workload did not expose procfs identity\n' >&2
+    exit 1
+fi
+readonly workload_start_ticks="$(awk '{print $22}' "/proc/${workload_pid}/stat")"
+if [[ ! "$workload_start_ticks" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'error: real transport workload start time was invalid\n' >&2
+    exit 1
+fi
+readonly binding_valid_from_unix_ms="$(date +%s%3N)"
+readonly binding_valid_until_unix_ms="$((binding_valid_from_unix_ms + 300000))"
+readonly workload_identity="process_${workload_pid}_${workload_start_ticks}"
+readonly bind_unsigned_request="${secret_directory}/bind-runtime.unsigned.json"
+readonly bind_signed_request="${secret_directory}/bind-runtime.json"
+readonly bind_response="${secret_directory}/bind-runtime.response.json"
+readonly bind_replay_response="${secret_directory}/bind-runtime.replay.response.json"
+readonly bind_headers="${secret_directory}/bind-runtime.response.headers"
+readonly bind_replay_headers="${secret_directory}/bind-runtime.replay.response.headers"
+readonly binding_id="binding_live_${random_suffix}"
+
+jq -n \
+    --arg operation_id "operation_bind_live_${random_suffix}" \
+    --arg run_id "$issued_run_id" \
+    --arg lease_id "$issued_lease" \
+    --arg binding_id "$binding_id" \
+    --arg source_id "$source_id" \
+    --arg identity_ref "$workload_identity" \
+    --arg evidence_basis_ref "proc_start_${workload_pid}_${workload_start_ticks}" \
+    --argjson valid_from_unix_ms "$binding_valid_from_unix_ms" \
+    --argjson valid_until_unix_ms "$binding_valid_until_unix_ms" \
+    '{
+        schema_version: "0.1",
+        client_operation_id: $operation_id,
+        request_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+        run_id: $run_id,
+        lease_id: $lease_id,
+        binding: {
+            binding_id: $binding_id,
+            asserting_source_id: $source_id,
+            identity_kind: "process",
+            identity_ref: $identity_ref,
+            valid_from_unix_ms: $valid_from_unix_ms,
+            valid_until_unix_ms: $valid_until_unix_ms,
+            evidence_basis: "heuristic_match",
+            evidence_basis_ref: $evidence_basis_ref,
+            attribution: "inferred",
+            reason_codes: ["pid_start_time_match"],
+            confidence_bps: 9000,
+            alternative_runtime_candidates: []
+        }
+    }' >"$bind_unsigned_request"
+
+"$request_bin" bind-runtime \
+    --input "$bind_unsigned_request" \
+    --output "$bind_signed_request"
+
+bind_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${bind_signed_request}" \
+    --dump-header "$bind_headers" \
+    --output "$bind_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/bind-runtime")"
+if [[ "$bind_status" != "200" ]] || ! jq -e \
+    --arg run_id "$issued_run_id" \
+    --arg binding_id "$binding_id" \
     '.schema_version == "0.1"
-     and .code == "unauthenticated"
+     and .run_id == $run_id
+     and .binding_id == $binding_id
+     and .accepted == true
+     and .idempotent_replay == false' \
+    "$bind_response" >/dev/null; then
+    printf 'error: authenticated bind_runtime returned HTTP %s\n' "$bind_status" >&2
+    jq -c '{schema_version,code,message,retryable,retry_after_ms}' \
+        "$bind_response" >&2 || true
+    exit 1
+fi
+assert_no_store "$bind_headers" 'authenticated bind_runtime'
+
+bind_replay_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${bind_signed_request}" \
+    --dump-header "$bind_replay_headers" \
+    --output "$bind_replay_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/bind-runtime")"
+if [[ "$bind_replay_status" != "200" ]] || ! jq -e \
+    --arg binding_id "$binding_id" \
+    '.binding_id == $binding_id and .idempotent_replay == true' \
+    "$bind_replay_response" >/dev/null; then
+    printf 'error: bind_runtime exact retry did not return its durable replay\n' >&2
+    exit 1
+fi
+assert_no_store "$bind_replay_headers" 'bind_runtime exact replay'
+
+printf 'Ingesting structure-only evidence from the real local execution...\n'
+readonly ingest_unsigned_request="${secret_directory}/ingest.unsigned.json"
+readonly ingest_signed_request="${secret_directory}/ingest.json"
+readonly ingest_response="${secret_directory}/ingest.response.json"
+readonly ingest_replay_response="${secret_directory}/ingest.replay.response.json"
+readonly ingest_headers="${secret_directory}/ingest.response.headers"
+readonly ingest_replay_headers="${secret_directory}/ingest.replay.response.headers"
+readonly source_event_id="event_tool_live_${random_suffix}"
+readonly observed_at_unix_ms="$(( $(date +%s) * 1000 ))"
+
+jq -n \
+    --arg operation_id "operation_ingest_live_${random_suffix}" \
+    --arg run_id "$issued_run_id" \
+    --arg lease_id "$issued_lease" \
+    --arg source_id "$source_id" \
+    --arg source_stream_id "$issued_stream_id" \
+    --arg source_event_id "$source_event_id" \
+    --arg runtime_ref "$workload_identity" \
+    --argjson observed_at_unix_ms "$observed_at_unix_ms" \
+    '{
+        schema_version: "0.1",
+        client_operation_id: $operation_id,
+        request_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+        run_id: $run_id,
+        lease_id: $lease_id,
+        envelopes: [{
+            schema_version: "0.1",
+            run_id: $run_id,
+            source_id: $source_id,
+            source_stream_id: $source_stream_id,
+            source_event_id: $source_event_id,
+            source_sequence: 1,
+            observed_at: {
+                unix_ms: $observed_at_unix_ms,
+                clock_basis: "wall_clock",
+                uncertainty_ms: 25
+            },
+            correlation: {
+                trace_ref: "trace_live_transport",
+                agent_ref: "agent_primary",
+                tool_ref: "tool_call_01",
+                runtime_ref: $runtime_ref
+            },
+            flags: {
+                loss_detected: false,
+                redacted: true,
+                contains_content: false
+            },
+            payload_type: "tool_interaction",
+            payload_version: "0.1",
+            payload_digest: "dcae611e067b1506f6b64620c942a2b9d11811fac310c2c0c94df468d0f02bf2",
+            inline_payload: {
+                evidence_type: "tool_interaction",
+                body: {
+                    interaction_ref: "tool_call_01",
+                    agent_ref: "agent_primary",
+                    tool_ref: "exec_command",
+                    capability: "process",
+                    event: "completed",
+                    request_ref: "request_digest_01",
+                    response_ref: null,
+                    outcome: "succeeded"
+                }
+            },
+            object_ref: null
+        }]
+    }' >"$ingest_unsigned_request"
+
+"$request_bin" ingest \
+    --input "$ingest_unsigned_request" \
+    --output "$ingest_signed_request"
+
+ingest_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${ingest_signed_request}" \
+    --dump-header "$ingest_headers" \
+    --output "$ingest_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/ingest")"
+if [[ "$ingest_status" != "200" ]] || ! jq -e \
+    --arg run_id "$issued_run_id" \
+    --arg source_event_id "$source_event_id" \
+    '.schema_version == "0.1"
+     and .run_id == $run_id
+     and .committed_count == 1
+     and .duplicate_count == 0
+     and .durable_ingest_watermark == 5
+     and .source_watermark == 1
+     and .known_gaps == []
+     and (.acknowledgements | length == 1)
+     and .acknowledgements[0].source_event_id == $source_event_id
+     and .acknowledgements[0].disposition == "committed"
+     and .acknowledgements[0].ingest_sequence == 5' \
+    "$ingest_response" >/dev/null; then
+    printf 'error: authenticated ingest returned HTTP %s\n' "$ingest_status" >&2
+    jq -c '{schema_version,code,message,retryable,retry_after_ms}' \
+        "$ingest_response" >&2 || true
+    exit 1
+fi
+assert_no_store "$ingest_headers" 'authenticated ingest'
+
+printf 'Restarting the Gateway after ingest to prove durable replay...\n'
+stop_gateway
+start_gateway
+
+ingest_replay_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${ingest_signed_request}" \
+    --dump-header "$ingest_replay_headers" \
+    --output "$ingest_replay_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/ingest")"
+if [[ "$ingest_replay_status" != "200" ]] || \
+    ! cmp -s "$ingest_response" "$ingest_replay_response"; then
+    printf 'error: ingest exact retry did not return its durable replay\n' >&2
+    exit 1
+fi
+assert_no_store "$ingest_replay_headers" 'ingest exact replay'
+
+readonly ingest_duplicate_unsigned_request="${secret_directory}/ingest.duplicate.unsigned.json"
+readonly ingest_duplicate_signed_request="${secret_directory}/ingest.duplicate.json"
+readonly ingest_duplicate_response="${secret_directory}/ingest.duplicate.response.json"
+readonly ingest_duplicate_headers="${secret_directory}/ingest.duplicate.response.headers"
+jq \
+    --arg operation_id "operation_ingest_duplicate_${random_suffix}" \
+    '.client_operation_id = $operation_id
+     | .request_digest = "0000000000000000000000000000000000000000000000000000000000000000"' \
+    "$ingest_unsigned_request" >"$ingest_duplicate_unsigned_request"
+"$request_bin" ingest \
+    --input "$ingest_duplicate_unsigned_request" \
+    --output "$ingest_duplicate_signed_request"
+
+ingest_duplicate_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${ingest_duplicate_signed_request}" \
+    --dump-header "$ingest_duplicate_headers" \
+    --output "$ingest_duplicate_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/ingest")"
+if [[ "$ingest_duplicate_status" != "200" ]] || ! jq -e \
+    --arg source_event_id "$source_event_id" \
+    '.committed_count == 0
+     and .duplicate_count == 1
+     and .durable_ingest_watermark == 5
+     and .source_watermark == 1
+     and .known_gaps == []
+     and (.acknowledgements | length == 1)
+     and .acknowledgements[0].source_event_id == $source_event_id
+     and .acknowledgements[0].disposition == "duplicate"
+     and .acknowledgements[0].ingest_sequence == 5' \
+    "$ingest_duplicate_response" >/dev/null; then
+    printf 'error: new ingest operation did not report the existing event as duplicate\n' >&2
+    exit 1
+fi
+assert_no_store "$ingest_duplicate_headers" 'ingest event duplicate'
+
+readonly ingest_conflict_unsigned_request="${secret_directory}/ingest.conflict.unsigned.json"
+readonly ingest_conflict_signed_request="${secret_directory}/ingest.conflict.json"
+readonly ingest_conflict_response="${secret_directory}/ingest.conflict.response.json"
+readonly ingest_conflict_headers="${secret_directory}/ingest.conflict.response.headers"
+jq \
+    '.request_digest = "0000000000000000000000000000000000000000000000000000000000000000"
+     | .envelopes[0].observed_at.uncertainty_ms = 50' \
+    "$ingest_unsigned_request" >"$ingest_conflict_unsigned_request"
+"$request_bin" ingest \
+    --input "$ingest_conflict_unsigned_request" \
+    --output "$ingest_conflict_signed_request"
+
+ingest_conflict_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${ingest_conflict_signed_request}" \
+    --dump-header "$ingest_conflict_headers" \
+    --output "$ingest_conflict_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/ingest")"
+if [[ "$ingest_conflict_status" != "409" ]] || ! jq -e \
+    '.schema_version == "0.1"
+     and .code == "idempotency_conflict"
      and .retryable == false
      and .retry_after_ms == null' \
-    "$revoked_response" >/dev/null
+    "$ingest_conflict_response" >/dev/null; then
+    printf 'error: changed ingest content reused an operation identity without conflict\n' >&2
+    exit 1
+fi
+assert_no_store "$ingest_conflict_headers" 'ingest idempotency conflict'
+
+printf 'Finishing the real Agent Run through the mTLS lifecycle seam...\n'
+readonly finish_unsigned_request="${secret_directory}/finish-run.unsigned.json"
+readonly finish_signed_request="${secret_directory}/finish-run.json"
+readonly finish_response="${secret_directory}/finish-run.response.json"
+readonly finish_replay_response="${secret_directory}/finish-run.replay.response.json"
+readonly finish_headers="${secret_directory}/finish-run.response.headers"
+readonly finish_replay_headers="${secret_directory}/finish-run.replay.response.headers"
+
+jq -n \
+    --arg operation_id "operation_finish_live_${random_suffix}" \
+    --arg run_id "$issued_run_id" \
+    --arg lease_id "$issued_lease" \
+    --arg source_id "$source_id" \
+    --arg source_stream_id "$issued_stream_id" \
+    '{
+        schema_version: "0.1",
+        client_operation_id: $operation_id,
+        request_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+        run_id: $run_id,
+        lease_id: $lease_id,
+        terminal_positions: [{
+            source_id: $source_id,
+            source_stream_id: $source_stream_id,
+            final_source_sequence: 1
+        }],
+        outcome_claim_refs: [],
+        requested_finalization_deadline_unix_ms: null
+    }' >"$finish_unsigned_request"
+
+"$request_bin" finish-run \
+    --input "$finish_unsigned_request" \
+    --output "$finish_signed_request"
+for private_request in \
+    "$signed_request" "$bind_signed_request" "$ingest_signed_request" "$finish_signed_request"; do
+    if [[ "$(stat -c '%a' "$private_request")" != "600" ]]; then
+        printf 'error: signed Gateway request was not created with mode 0600\n' >&2
+        exit 1
+    fi
+done
+if "$request_bin" finish-run \
+    --input "$finish_unsigned_request" \
+    --output "$finish_signed_request" \
+    >/dev/null 2>&1; then
+    printf 'error: request signer overwrote an existing private output\n' >&2
+    exit 1
+fi
+
+finish_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${finish_signed_request}" \
+    --dump-header "$finish_headers" \
+    --output "$finish_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/finish-run")"
+if [[ "$finish_status" != "200" ]] || ! jq -e \
+    --arg run_id "$issued_run_id" \
+    '.schema_version == "0.1"
+     and .run_id == $run_id
+     and .state == "finished"
+     and .finalization_deadline_unix_ms == null
+     and .idempotent_replay == false' \
+    "$finish_response" >/dev/null; then
+    printf 'error: authenticated finish_run returned HTTP %s\n' "$finish_status" >&2
+    jq -c '{schema_version,code,message,retryable,retry_after_ms}' \
+        "$finish_response" >&2 || true
+    exit 1
+fi
+assert_no_store "$finish_headers" 'authenticated finish_run'
+
+finish_replay_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${finish_signed_request}" \
+    --dump-header "$finish_replay_headers" \
+    --output "$finish_replay_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/finish-run")"
+if [[ "$finish_replay_status" != "200" ]] || ! jq -e \
+    --arg run_id "$issued_run_id" \
+    '.run_id == $run_id
+     and .state == "finished"
+     and .finalization_deadline_unix_ms == null
+     and .idempotent_replay == true' \
+    "$finish_replay_response" >/dev/null; then
+    printf 'error: finish_run exact retry did not return its durable replay\n' >&2
+    exit 1
+fi
+assert_no_store "$finish_replay_headers" 'finish_run exact replay'
+
+printf 'Checking durable full-lifecycle PostgreSQL invariants...\n'
+database_invariants="$(timeout 30s docker exec -i "$container_name" \
+    psql --username "$gateway_runtime_login" --dbname "$database_name" \
+        --no-align --tuples-only --set=organization_id="$organization_id" \
+        --set=run_id="$issued_run_id" \
+        --set=binding_valid_from_unix_ms="$binding_valid_from_unix_ms" \
+        --set=binding_valid_until_unix_ms="$binding_valid_until_unix_ms" <<'SQL'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM apolysis_gateway.runs
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND state='finished' AND finalization_deadline_unix_ms IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.client_runs
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.run_expected_source_kinds
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.source_streams
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.lease_operations AS operation
+      JOIN apolysis_gateway.leases AS lease
+        ON lease.organization_id=operation.organization_id
+       AND lease.lease_digest=operation.lease_digest
+      WHERE lease.organization_id=:'organization_id' AND lease.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.runtime_bindings
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND attribution='inferred'
+        AND valid_from_unix_ms=:'binding_valid_from_unix_ms'::bigint
+        AND valid_until_unix_ms=:'binding_valid_until_unix_ms'::bigint
+        AND accepted_binding_json #>> '{binding,evidence_basis}'='heuristic_match'
+        AND accepted_binding_json #>> '{binding,reason_codes,0}'='pid_start_time_match'
+        AND accepted_binding_json #>> '{binding,confidence_bps}'='9000'
+        AND accepted_binding_json #> '{binding,alternative_runtime_candidates}'='[]'::jsonb),
+    (SELECT count(*) FROM apolysis_gateway.active_runtime_identities
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.evidence_events
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_sequence=1 AND ledger_ingest_sequence=5),
+    (SELECT count(*) FROM apolysis_gateway.finalization_declarations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND resulting_run_state='finished' AND ledger_ingest_sequence=6),
+    (SELECT count(*) FROM apolysis_gateway.finalization_terminal_positions
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND final_source_sequence=1),
+    (SELECT count(*) FROM apolysis_gateway.finalization_outcome_claims
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.projection_outbox
+      WHERE organization_id=:'organization_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items AS record
+      LEFT JOIN apolysis_gateway.projection_outbox AS outbox
+        ON outbox.organization_id=record.organization_id
+       AND outbox.ingest_sequence=record.ingest_sequence
+      WHERE record.organization_id=:'organization_id' AND outbox.ingest_sequence IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.projection_outbox AS outbox
+      LEFT JOIN apolysis_gateway.record_items AS record
+        ON record.organization_id=outbox.organization_id
+       AND record.ingest_sequence=outbox.ingest_sequence
+      WHERE outbox.organization_id=:'organization_id' AND record.ingest_sequence IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id' AND operation.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.organization_sequences
+      WHERE organization_id=:'organization_id' AND next_ingest_sequence=9),
+    (SELECT count(*) FROM (
+        SELECT min(ingest_sequence)=1
+               AND max(ingest_sequence)=8
+               AND count(*)=8
+               AND bool_and(outbox_ingest_sequence=ingest_sequence) AS valid
+          FROM apolysis_gateway.record_items
+         WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+    ) AS ledger WHERE valid),
+    (SELECT count(*) FROM (
+        SELECT array_agg(fact_kind ORDER BY ingest_sequence) AS facts
+          FROM apolysis_gateway.record_items
+         WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+    ) AS ordered
+     WHERE facts=ARRAY[
+        'run_opened', 'run_state_changed', 'source_registered', 'runtime_bound',
+        'evidence_accepted', 'run_finalization_declared', 'run_state_changed',
+        'run_state_changed'
+     ]::text[]),
+    (SELECT count(*) FROM apolysis_gateway.runtime_bindings AS binding
+      JOIN apolysis_gateway.evidence_events AS event
+        ON event.organization_id=binding.organization_id
+       AND event.run_id=binding.run_id
+       AND event.source_registration_id=binding.source_registration_id
+       AND event.source_stream_id=binding.source_stream_id
+      WHERE binding.organization_id=:'organization_id' AND binding.run_id=:'run_id'
+        AND binding.identity_ref=
+            event.accepted_envelope_json #>> '{envelope,correlation,runtime_ref}')
+);
+SQL
+)"
+readonly expected_database_invariants='1|1|1|1|1|3|1|0|1|1|1|0|8|8|0|0|5|5|1|1|1|1'
+if [[ "$database_invariants" != "$expected_database_invariants" ]]; then
+    printf 'error: durable lifecycle invariants did not match the reviewed vector: %s\n' \
+        "$database_invariants" >&2
+    exit 1
+fi
+
+printf 'Checking cross-organization lifecycle isolation with an independent certificate...\n'
+for attack_route in open-run bind-runtime ingest finish-run; do
+    case "$attack_route" in
+        open-run)
+            attack_request="$signed_request"
+            expected_attack_status=403
+            expected_attack_code=forbidden
+            ;;
+        bind-runtime)
+            attack_request="$bind_signed_request"
+            expected_attack_status=403
+            expected_attack_code=forbidden
+            ;;
+        ingest)
+            attack_request="$ingest_signed_request"
+            expected_attack_status=403
+            expected_attack_code=forbidden
+            ;;
+        finish-run)
+            attack_request="$finish_signed_request"
+            expected_attack_status=404
+            expected_attack_code=not_found
+            ;;
+        *) exit 1 ;;
+    esac
+    attack_response="${secret_directory}/${attack_route}.cross-org.json"
+    attack_headers="${secret_directory}/${attack_route}.cross-org.headers"
+    attack_status="$(curl --silent --show-error \
+        --connect-timeout 5 \
+        --max-time 30 \
+        --cacert "$ca_cert" \
+        --cert "$unknown_client_cert" \
+        --key "$unknown_client_key" \
+        --header 'Accept: application/json' \
+        --header 'Content-Type: application/json' \
+        --data-binary "@${attack_request}" \
+        --dump-header "$attack_headers" \
+        --output "$attack_response" \
+        --write-out '%{http_code}' \
+        "${gateway_base_url}/gateway/v0.1/${attack_route}")"
+    if [[ "$attack_status" != "$expected_attack_status" ]] || ! jq -e \
+        --arg code "$expected_attack_code" \
+        '.schema_version == "0.1"
+         and .code == $code
+         and .retryable == false
+         and .retry_after_ms == null' \
+        "$attack_response" >/dev/null; then
+        printf 'error: cross-organization %s request did not fail closed\n' \
+            "$attack_route" >&2
+        exit 1
+    fi
+    assert_no_store "$attack_headers" "cross-organization ${attack_route}"
+    if grep -Fq -- "$issued_run_id" "$attack_response" || \
+        grep -Fq -- "$issued_stream_id" "$attack_response" || \
+        grep -Fq -- "$issued_lease" "$attack_response"; then
+        printf 'error: cross-organization %s response disclosed victim scope\n' \
+            "$attack_route" >&2
+        exit 1
+    fi
+done
+
+post_isolation_state="$(timeout 15s docker exec -i "$container_name" \
+    psql --username "$gateway_runtime_login" --dbname "$database_name" \
+        --no-align --tuples-only --set=organization_id="$organization_id" \
+        --set=run_id="$issued_run_id" \
+        --set=attacker_organization_id="$attacker_organization_id" <<'SQL'
+SELECT concat_ws('|',
+    (SELECT next_ingest_sequence FROM apolysis_gateway.organization_sequences
+      WHERE organization_id=:'organization_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.runs
+      WHERE organization_id=:'attacker_organization_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'attacker_organization_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'attacker_organization_id')
+);
+SQL
+)"
+if [[ "$post_isolation_state" != '9|5|8|0|0|0' ]]; then
+    printf 'error: cross-organization requests changed durable state\n' >&2
+    exit 1
+fi
+
+readonly database_dump="${secret_directory}/database.dump.sql"
+readonly replay_key_value="$(<"$replay_key_file")"
+if ! timeout 30s docker exec "$container_name" \
+    pg_dump --username "$database_user" --dbname "$database_name" \
+        --no-owner --no-privileges >"$database_dump"; then
+    printf 'error: failed to inspect PostgreSQL secret persistence\n' >&2
+    exit 1
+fi
+if grep -Fq -- "$issued_lease" "$database_dump" || \
+    grep -Fq -- "$database_password" "$database_dump" || \
+    grep -Fq -- "$schema_owner_password" "$database_dump" || \
+    grep -Fq -- "$gateway_control_password" "$database_dump" || \
+    grep -Fq -- "$gateway_runtime_password" "$database_dump" || \
+    grep -Fq -- "$replay_key_value" "$database_dump" || \
+    grep -Fq -- 'BEGIN PRIVATE KEY' "$database_dump"; then
+    printf 'error: generated secret material was persisted in PostgreSQL\n' >&2
+    exit 1
+fi
+rm -f -- "$database_dump"
+
+printf 'Revoking the current transport credential in PostgreSQL...\n'
+"$authority_bin" revoke-credential \
+        --database-url-file "$gateway_control_database_url_file" \
+        --client-certificate "$client_cert" \
+        --reason "live_transport_gate_${random_suffix}"
+
+readonly revoked_registration="${secret_directory}/source-registration.revoked.json"
+jq '.policy_revision = 3 | .credential_epoch = 3' \
+    "$policy_file" >"$revoked_registration"
+if "$authority_bin" register-source \
+    --database-url-file "$gateway_control_database_url_file" \
+    --registration "$revoked_registration" \
+    --client-certificate "$client_cert" \
+    >/dev/null 2>&1; then
+    printf 'error: a revoked client certificate was registered again\n' >&2
+    exit 1
+fi
+
+for revoked_route in open-run bind-runtime ingest finish-run; do
+    case "$revoked_route" in
+        open-run) revoked_request="$signed_request" ;;
+        bind-runtime) revoked_request="$bind_signed_request" ;;
+        ingest) revoked_request="$ingest_signed_request" ;;
+        finish-run) revoked_request="$finish_signed_request" ;;
+        *) exit 1 ;;
+    esac
+    revoked_response="${secret_directory}/${revoked_route}.revoked.json"
+    revoked_headers="${secret_directory}/${revoked_route}.revoked.headers"
+    revoked_status="$(curl --silent --show-error \
+        --connect-timeout 5 \
+        --max-time 30 \
+        --cacert "$ca_cert" \
+        --cert "$client_cert" \
+        --key "$client_key" \
+        --header 'Accept: application/json' \
+        --header 'Content-Type: application/json' \
+        --header 'X-Organization-Id: attacker_controlled' \
+        --data-binary "@${revoked_request}" \
+        --dump-header "$revoked_headers" \
+        --output "$revoked_response" \
+        --write-out '%{http_code}' \
+        "${gateway_base_url}/gateway/v0.1/${revoked_route}")"
+
+    if [[ "$revoked_status" != "401" ]]; then
+        printf 'error: revoked credential reached %s with HTTP %s instead of 401\n' \
+            "$revoked_route" "$revoked_status" >&2
+        exit 1
+    fi
+    assert_no_store "$revoked_headers" "revoked credential on ${revoked_route}"
+    if ! jq -e \
+        '.schema_version == "0.1"
+         and .code == "unauthenticated"
+         and .retryable == false
+         and .retry_after_ms == null' \
+        "$revoked_response" >/dev/null; then
+        printf 'error: revoked credential response on %s was not content-free\n' \
+            "$revoked_route" >&2
+        exit 1
+    fi
+done
+
+post_revocation_state="$(timeout 15s docker exec -i "$container_name" \
+    psql --username "$gateway_runtime_login" --dbname "$database_name" \
+        --no-align --tuples-only --set=organization_id="$organization_id" \
+        --set=run_id="$issued_run_id" <<'SQL'
+SELECT concat_ws('|',
+    (SELECT next_ingest_sequence FROM apolysis_gateway.organization_sequences
+      WHERE organization_id=:'organization_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id')
+);
+SQL
+)"
+if [[ "$post_revocation_state" != '9|5|8' ]]; then
+    printf 'error: rejected credential changed durable lifecycle state\n' >&2
+    exit 1
+fi
 
 printf 'Checking that bearer and database secrets were absent from Gateway logs...\n'
-readonly replay_key_value="$(<"$replay_key_file")"
 if grep -Fq -- "$issued_lease" "$server_log"; then
     printf 'error: plaintext run lease was written to the Gateway log\n' >&2
     exit 1
 fi
-if grep -Fq -- "$database_password" "$server_log"; then
+if grep -Fq -- "$database_password" "$server_log" || \
+    grep -Fq -- "$schema_owner_password" "$server_log" || \
+    grep -Fq -- "$gateway_control_password" "$server_log" || \
+    grep -Fq -- "$gateway_runtime_password" "$server_log"; then
     printf 'error: PostgreSQL password was written to the Gateway log\n' >&2
     exit 1
 fi

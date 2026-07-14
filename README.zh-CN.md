@@ -67,8 +67,8 @@ W1–W2 现已建立独立的 `apolysis-contracts` 边界、版本化 record、G
 Query/Console wire type、兼容性 fixture 和规范契约文档。当前 `pre-release`
 实现线在该输入之上实现了带认证上下文的 application core、非耐久内存
 reference adapter、一个覆盖四个标准 Gateway 操作且由 migration 管理的初始 PostgreSQL
-write adapter，以及首个由 PostgreSQL current credential authority 支撑的 direct-mTLS
-`open_run` transport 切片。这些原型验证了服务器端 grant/policy join、RFC 8785
+write adapter，以及由 PostgreSQL current credential authority 支撑的 direct-mTLS
+完整 lifecycle transport tracer。这些原型验证了服务器端 grant/policy join、RFC 8785
 摘要黄金向量、record append 与 outbox 的原子语义、加密的精确 operation replay，
 每个 novel ingest batch 只更新一次的 sequence-range allocation，以及有界的 finishing
 lifecycle。
@@ -86,13 +86,13 @@ rollback 或精确收敛，且整个过程都发生在独立 client acknowledgem
 repository/application-process seam，不代表 HTTPS Gateway server
 recovery 已通过资格验证。更广的多进程 race matrix、load、replication、failover、
 backup/restore 与高可用仍未验证；production KMS integration、database RLS
-deployment、`bind_runtime`、`ingest` 与 `finish_run` 的 transport、current authority 与
+deployment、HTTPS commit 后/ack 前的 Gateway-server 崩溃资格验证、current authority 与
 ledger commit 的原子复核、lease/credential rotation、授权 object-read resolver、
 evidence-object projection/read view、持续后台 reaper 运行与通过容量验证的 resource limit
 也仍待完成。Projection 尚不提供 public Query authorization、cursor/SSE、
 Console、coverage、finding、source health 或 evidence-object lifecycle view；其 RLS GUC
-只是 defense-in-depth，不是 authorization。HTTPS trace 与 error-body secret surface
-也仍待完成。
+只是 defense-in-depth，不是 authorization。JWT/workload-identity transport profile、
+production admission 以及更广的 transport load/race 资格验证也仍待完成。
 外部退出门禁也会保持开启，直到三个合格设计伙伴实际确认其部署和数据边界。受保护的
 `pre-release` 现包含 Action candidate：固定特权 release bundle，
 拒绝调用方选择
@@ -161,7 +161,7 @@ Apolysis 关联层
   管理的 ledger/outbox 存储与加密 replay record。
 - `apolysis-evidence-objects`：授权加密 evidence-object 写入 lifecycle，提供有界 admission、
   retention、deletion 与 provider cleanup。
-- `apolysis-gateway-server`：首个 direct-mTLS Gateway listener、PostgreSQL current source
+- `apolysis-gateway-server`：direct-mTLS 完整 lifecycle Gateway tracer、PostgreSQL current source
   authority 与有界 authority 管理工具。
 - `apolysis-projection-postgres`：generation-scoped PostgreSQL lifecycle projector，提供耐久
   checkpoint、rebuild/cutover 与内部有界 read model。
