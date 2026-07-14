@@ -7,7 +7,7 @@ use std::{
 
 use apolysis_contracts::{AuthenticatedSourceContext, RunId, SourceKind, TrustProfile};
 use apolysis_gateway_postgres::{
-    Aes256GcmReplayProtector, PostgresGatewayConfig, PostgresGatewayRepository,
+    Aes256GcmReplayProtector, PostgresGatewayConfig, PostgresGatewayRepository, MIGRATOR,
 };
 use apolysis_gateway_testkit::{
     gateway_repository_conformance_tests, GatewayConformanceHarness, GatewayConformanceSnapshot,
@@ -40,19 +40,20 @@ impl GatewayConformanceHarness for PostgresGatewayHarness {
                 "integration-test-key",
                 [("integration-test-key".to_string(), [41_u8; 32])],
             )?);
-            let repository = PostgresGatewayRepository::connect_and_migrate(
+            let inspection_pool = sqlx::PgPool::connect(&database_url).await?;
+            MIGRATOR.run(&inspection_pool).await?;
+            let repository = PostgresGatewayRepository::connect(
                 &database_url,
                 protector,
                 PostgresGatewayConfig::default(),
             )
             .await?;
-            let cleanup_pool = sqlx::PgPool::connect(&database_url).await?;
             sqlx::query("TRUNCATE TABLE apolysis_gateway.organization_sequences CASCADE")
-                .execute(&cleanup_pool)
+                .execute(&inspection_pool)
                 .await?;
             Ok(Self {
                 repository,
-                inspection_pool: cleanup_pool,
+                inspection_pool,
                 _guard: guard,
             })
         })

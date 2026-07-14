@@ -18,8 +18,7 @@ pub async fn run_authority_command() -> Result<(), GatewayServerError> {
     match AuthorityCommand::from_args(std::env::args_os())? {
         AuthorityCommand::Migrate { database_url_file } => {
             let database_url = read_database_url(&database_url_file)?;
-            let _store = AuthorityStore::connect_and_migrate(&database_url).await?;
-            Ok(())
+            AuthorityStore::migrate(&database_url).await
         }
         AuthorityCommand::RegisterSource {
             database_url_file,
@@ -29,7 +28,7 @@ pub async fn run_authority_command() -> Result<(), GatewayServerError> {
             let database_url = read_database_url(&database_url_file)?;
             let document = read_registration(&registration)?;
             let certificate = read_client_certificate(&client_certificate)?;
-            let store = AuthorityStore::connect_and_migrate(&database_url).await?;
+            let store = AuthorityStore::connect(&database_url).await?;
             store.register_source(document, certificate).await
         }
         AuthorityCommand::RevokeCredential {
@@ -39,7 +38,7 @@ pub async fn run_authority_command() -> Result<(), GatewayServerError> {
         } => {
             let database_url = read_database_url(&database_url_file)?;
             let certificate = read_client_certificate(&client_certificate)?;
-            let store = AuthorityStore::connect_and_migrate(&database_url).await?;
+            let store = AuthorityStore::connect(&database_url).await?;
             store
                 .revoke_credential(certificate.fingerprint, &reason)
                 .await

@@ -3,6 +3,7 @@ members = [
     "crates/apolysis-accountability",
     "crates/apolysis-contracts",
     "crates/apolysis-gateway",
+    "crates/apolysis-evidence-objects",
     "crates/apolysis-gateway-postgres",
     "crates/apolysis-gateway-server",
     "crates/apolysis-gateway-testkit",

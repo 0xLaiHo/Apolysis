@@ -12,20 +12,19 @@ use apolysis_gateway::{
     LedgerOperation, LedgerOutcome, RepositoryFuture,
 };
 use serde_json::Value;
-use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Row, Transaction};
+use sqlx::{postgres::PgPoolOptions, PgConnection, PgPool, Postgres, Row, Transaction};
 use zeroize::Zeroizing;
 
 use crate::{
     error::{
-        database_failure, idempotency_conflict, migration_failure, not_found, policy_failure,
-        report_database_retry, repository_failure,
+        database_failure, idempotency_conflict, not_found, policy_failure, report_database_retry,
+        repository_failure,
     },
     model::{
         enum_name, hex_digest, join_proof_digest, json_decode, json_value, principal_kind_name,
         sha256_bytes, sql_i64, sql_u64, OperationIdentity, ReplayOutcome, MAX_SQL_INTEGER,
     },
     replay::{Aes256GcmReplayProtector, ReplayProtector, SealedReplay},
-    MIGRATOR,
 };
 
 const DEFAULT_REPLAY_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
@@ -35,6 +34,19 @@ const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 15_000;
 const MAX_TRANSACTION_RETRIES: u32 = 10;
 const MAX_DATABASE_TIMEOUT_MS: u64 = 5 * 60 * 1_000;
 const AES_GCM_TAG_BYTES: usize = 16;
+
+async fn qualify_served_connection(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
+    let has_origin_replication_role: bool =
+        sqlx::query_scalar("SELECT current_setting('session_replication_role', false) = 'origin'")
+            .fetch_one(connection)
+            .await?;
+    if !has_origin_replication_role {
+        return Err(sqlx::Error::Protocol(
+            "served PostgreSQL session failed qualification".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PostgresGatewayConfig {
@@ -139,7 +151,12 @@ impl PostgresGatewayRepository {
         }
     }
 
-    pub async fn connect_and_migrate(
+    /// Connect to an already-migrated Gateway database.
+    ///
+    /// Production runtimes must use this constructor so their database role
+    /// does not need schema-owner or migration privileges. Every physical
+    /// connection is qualified for normal trigger execution before pool use.
+    pub async fn connect(
         database_url: &str,
         replay_protector: Arc<Aes256GcmReplayProtector>,
         config: PostgresGatewayConfig,
@@ -147,19 +164,13 @@ impl PostgresGatewayRepository {
         let pool = PgPoolOptions::new()
             .max_connections(config.max_connections())
             .acquire_timeout(Duration::from_secs(10))
+            .after_connect(|connection, _metadata| {
+                Box::pin(async move { qualify_served_connection(connection).await })
+            })
             .connect(database_url)
             .await
             .map_err(|error| database_failure("connect", &error))?;
-        let repository = Self::from_pool(pool, replay_protector, config);
-        repository.migrate().await?;
-        Ok(repository)
-    }
-
-    pub async fn migrate(&self) -> Result<(), GatewayFailure> {
-        MIGRATOR
-            .run(&self.pool)
-            .await
-            .map_err(|error| migration_failure(&error))
+        Ok(Self::from_pool(pool, replay_protector, config))
     }
 
     pub async fn register_join_grant(
@@ -487,6 +498,15 @@ impl PostgresGatewayRepository {
         &self,
         transaction: &mut Transaction<'_, Postgres>,
     ) -> TxResult<()> {
+        let has_origin_replication_role: bool = sqlx::query_scalar(
+            "SELECT current_setting('session_replication_role', false) = 'origin'",
+        )
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| TxFailure::from_sqlx_at("qualify_served_session", error))?;
+        if !has_origin_replication_role {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
         let lock_timeout = format!("{}ms", self.config.lock_timeout_ms());
         let statement_timeout = format!("{}ms", self.config.statement_timeout_ms());
         sqlx::query(
@@ -513,6 +533,18 @@ impl PostgresGatewayRepository {
             .execute(&mut **transaction)
             .await
             .map_err(|error| TxFailure::from_sqlx_at("operation_lock", error))?;
+        sqlx::query_scalar::<_, bool>(
+            "SELECT apolysis_gateway.lock_gateway_operation($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(&identity.organization_id)
+        .bind(&identity.source_registration_id)
+        .bind(&identity.principal_kind)
+        .bind(&identity.principal_id)
+        .bind(identity.operation_kind)
+        .bind(&identity.client_operation_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| TxFailure::from_sqlx_at("operation_row_lock", error))?;
         let existing = sqlx::query(
             "SELECT operation.operation_id, operation.request_digest, operation.outcome_kind, \
                     replay.encryption_algorithm, replay.cipher_version, replay.encryption_key_ref, \
@@ -527,8 +559,7 @@ impl PostgresGatewayRepository {
                AND operation.principal_kind=$3 \
                AND operation.principal_id=$4 \
                AND operation.operation_kind=$5 \
-               AND operation.client_operation_id=$6 \
-             FOR UPDATE OF operation",
+               AND operation.client_operation_id=$6",
         )
         .bind(&identity.organization_id)
         .bind(&identity.source_registration_id)

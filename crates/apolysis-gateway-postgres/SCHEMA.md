@@ -7,10 +7,40 @@ repeat-execution guard, and unexpected pre-existing objects must surface as
 drift.
 
 The migration creates only the dedicated `apolysis_gateway` schema. Every
-tenant-owned key and foreign key carries `organization_id`; callers must also
-set database roles and row-level access policy before claiming tenant
-isolation. `organization_sequences.next_ingest_sequence` is the row-lock seam
-for assigning the per-organization append order.
+tenant-owned key and foreign key carries `organization_id`.
+`deploy/bootstrap_roles.sql` and `deploy/privileges.sql` provide the reviewed
+owner/runtime/control role split, but they do not provide row-level security;
+organization isolation still depends on the authenticated application scope
+and therefore is not a database-enforced tenant boundary.
+`organization_sequences.next_ingest_sequence` is the row-lock seam for
+assigning the per-organization append order.
+
+Use a dedicated Apolysis PostgreSQL cluster and apply schema changes in this
+order:
+
+1. run `deploy/bootstrap_roles.sql` as a PostgreSQL superuser;
+2. grant the migration login membership in the NOLOGIN
+   `apolysis_schema_owner` role through deployment secret automation;
+3. run the explicit Gateway authority `migrate` command, which uses one
+   connection and `SET ROLE apolysis_schema_owner`;
+4. run `deploy/privileges.sql` before starting or restarting any served
+   process; and
+5. grant each application login only its required NOLOGIN capability role.
+
+Re-run `deploy/bootstrap_roles.sql` after assigning login memberships. Its
+audit rejects capability combinations or delegation, indirect distribution
+groups, unrelated memberships, direct or out-of-surface object authority,
+served database/schema owners or DDL authority, non-origin replication-role
+defaults or parameter grants, and served roles with role-management,
+replication, or RLS-bypass authority. Both deployment artifacts pin their
+catalog search path; served connections and transactions independently require
+`session_replication_role = origin` before mutable work.
+
+The role names are deliberately fixed. Bootstrap records the owning database
+in each cluster-global role comment and rejects reuse from another database,
+rather than silently sharing authority. Re-run `deploy/privileges.sql` after
+every migration. The runtime repository and server connection paths never run
+migrations.
 
 Security invariants:
 
@@ -52,6 +82,32 @@ the record/outbox commit boundary. The application adapter also caps a run at
 statement deadlines. Other child-table cardinalities and production admission
 limits remain application responsibilities rather than trigger logic.
 
+`migrations/0003_evidence_object_lifecycle.sql` adds the separately bounded
+evidence-object write registry. It binds every object to the complete
+organization/run/profile/source-stream/capability/payload scope and binds an
+event reference back to both the exact event and the exact object metadata.
+Object integrity and lifecycle facts are separate from the S3 locator and
+encrypted-key material so a completed deletion can retain a non-sensitive
+tombstone without retaining recovery material. Deferred reverse foreign keys
+require every lifecycle revision to commit with exactly one current outbox and
+audit fact.
+
+Database triggers use PostgreSQL wall time to enforce the active policy's
+upload deadline and retention ceiling, serialize organization quota and rate
+reservations, reject metadata rewrites and illegal lifecycle transitions,
+snapshot registered deletion consumers, require storage-material absence and
+consumer acknowledgements before deletion, and release quota only at the
+terminal transition. These invariants do not replace least-privilege database
+roles: a schema owner or superuser can disable enforcement and is outside the
+application trust boundary.
+
+The runtime reaper helper skips locked organizations before its bounded limit
+and returns them in oldest-attempt order. The application takes one eligible
+object per returned organization, preserving organization-before-object lock
+order and preventing one tenant from consuming every claim slot. Failed
+provider attempts remain fenced by their database-stamped attempt time; fully
+purged objects with outstanding deletion acknowledgements are not candidates.
+
 Current ingest gap discovery runs a window over the full event history for the
 source stream; `LIMIT 257` bounds returned ranges but not scanned history. Novel
 events reserve one contiguous organization sequence range with one row update,
@@ -90,9 +146,16 @@ Catalog-discovered plaintext scanning, `pg_amcheck`, `pg_dump`, generated-secret
 scanning, private-file mode checks, and cleanup of the dedicated container,
 volume, and control directory are part of the gate.
 
+The separate evidence-object provider gate additionally proves schema-owner
+separation with distinct SCRAM logins, no startup migration,
+migration-history ownership, runtime/control allowlists, and denial of owner
+assumption, trigger disabling, credential reads, and direct deletion
+acknowledgements. This qualifies the evidence-object served paths' process-plane
+roles; it does not establish database-enforced tenant isolation.
+
 This is not HTTPS Gateway-server recovery and does not qualify trace or HTTP
 error-body secret handling. The full multiprocess/lifecycle race
-matrix, sustained or capacity load, replication/failover, backup/restore, HA
-behavior, production KMS integration, database roles, and RLS remain
-unqualified. A successful migration or recovery-gate run is therefore still
-not a production claim.
+matrix, sustained or capacity load, replication/failover, backup/restore or
+point-in-time recovery, HA behavior, production KMS integration, and tenant RLS
+remain unqualified. A successful migration or gate run is therefore still not
+a production claim.

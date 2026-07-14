@@ -115,7 +115,7 @@ impl TestDatabase {
     }
 
     pub async fn repository(&self) -> TestResult<PostgresGatewayRepository> {
-        PostgresGatewayRepository::connect_and_migrate(
+        PostgresGatewayRepository::connect(
             &self.database_url,
             replay_protector()?,
             PostgresGatewayConfig::default(),

@@ -59,38 +59,6 @@ pub(crate) fn report_database_retry(
     );
 }
 
-#[allow(deprecated)]
-pub(crate) fn migration_failure(error: &sqlx::migrate::MigrateError) -> GatewayFailure {
-    let error_kind = match error {
-        sqlx::migrate::MigrateError::Execute(error) => {
-            return database_failure("migrate_execute", error);
-        }
-        sqlx::migrate::MigrateError::ExecuteMigration(error, _) => {
-            return database_failure("migrate_execute_migration", error);
-        }
-        sqlx::migrate::MigrateError::Source(_) => "source",
-        sqlx::migrate::MigrateError::VersionMissing(_) => "version_missing",
-        sqlx::migrate::MigrateError::VersionMismatch(_) => "version_mismatch",
-        sqlx::migrate::MigrateError::VersionNotPresent(_) => "version_not_present",
-        sqlx::migrate::MigrateError::VersionTooOld(_, _) => "version_too_old",
-        sqlx::migrate::MigrateError::VersionTooNew(_, _) => "version_too_new",
-        sqlx::migrate::MigrateError::ForceNotSupported => "force_not_supported",
-        sqlx::migrate::MigrateError::InvalidMixReversibleAndSimple => {
-            "invalid_mix_reversible_and_simple"
-        }
-        sqlx::migrate::MigrateError::Dirty(_) => "dirty",
-        _ => "unknown",
-    };
-    tracing::error!(
-        target: "apolysis_gateway_postgres",
-        stage = "migrate",
-        error_kind,
-        transient = false,
-        "PostgreSQL Gateway migration failed"
-    );
-    repository_failure()
-}
-
 fn is_transient_database_error(error: &sqlx::Error) -> bool {
     if let Some(code) = error.as_database_error().and_then(|error| error.code()) {
         return code.starts_with("08")
@@ -211,34 +179,6 @@ mod tests {
     fn tls_failures_preserve_v0_1_bounded_backpressure() {
         let tls_error = sqlx::Error::Tls(Box::new(std::io::Error::other("sensitive detail")));
         let failure = database_failure("test_tls", &tls_error);
-        let response = failure.response().expect("safe response");
-        assert!(response.retryable());
-        assert_eq!(response.retry_after_ms(), Some(250));
-    }
-
-    #[test]
-    fn migration_execute_reuses_transient_database_classification() {
-        let error = sqlx::migrate::MigrateError::Execute(sqlx::Error::PoolTimedOut);
-        let failure = migration_failure(&error);
-        let response = failure.response().expect("safe response");
-        assert!(response.retryable());
-        assert_eq!(response.retry_after_ms(), Some(250));
-    }
-
-    #[test]
-    fn migration_execute_tls_preserves_v0_1_bounded_backpressure() {
-        let tls_error = sqlx::Error::Tls(Box::new(std::io::Error::other("sensitive detail")));
-        let error = sqlx::migrate::MigrateError::ExecuteMigration(tls_error, 42);
-        let failure = migration_failure(&error);
-        let response = failure.response().expect("safe response");
-        assert!(response.retryable());
-        assert_eq!(response.retry_after_ms(), Some(250));
-    }
-
-    #[test]
-    fn migration_metadata_failures_preserve_v0_1_bounded_backpressure() {
-        let error = sqlx::migrate::MigrateError::VersionMismatch(42);
-        let failure = migration_failure(&error);
         let response = failure.response().expect("safe response");
         assert!(response.retryable());
         assert_eq!(response.retry_after_ms(), Some(250));

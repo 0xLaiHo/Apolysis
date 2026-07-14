@@ -28,7 +28,7 @@ use apolysis_gateway::{
     SystemClock,
 };
 use apolysis_gateway_postgres::{
-    Aes256GcmReplayProtector, PostgresGatewayConfig, PostgresGatewayRepository,
+    Aes256GcmReplayProtector, PostgresGatewayConfig, PostgresGatewayRepository, MIGRATOR,
 };
 use apolysis_projection_postgres::{
     ComputationVersion, GenerationId, GenerationKey, PostgresRunProjection, ProjectionBatchOutcome,
@@ -262,7 +262,7 @@ fn replay_protector() -> DriverResult<Arc<Aes256GcmReplayProtector>> {
 }
 
 async fn gateway_repository(database_url: &str) -> DriverResult<PostgresGatewayRepository> {
-    PostgresGatewayRepository::connect_and_migrate(
+    PostgresGatewayRepository::connect(
         database_url,
         replay_protector()?,
         PostgresGatewayConfig::default(),
@@ -293,9 +293,13 @@ async fn seed(
     if fs::symlink_metadata(state_path).is_ok() {
         return Err(DriverError::at("seed_state_exists"));
     }
+    let pool = database_pool(database_url).await?;
+    MIGRATOR
+        .run(&pool)
+        .await
+        .map_err(|_| DriverError::at("gateway_migrate"))?;
     let gateway = gateway_repository(database_url).await?;
     let projection = projection_repository(database_url).await?;
-    let pool = database_pool(database_url).await?;
     verify_seed_scope_empty(&pool).await?;
 
     for ordinal in 1..=SEED_RUN_COUNT {

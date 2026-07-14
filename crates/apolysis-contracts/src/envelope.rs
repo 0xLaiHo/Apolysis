@@ -7,6 +7,8 @@ use crate::{
     ContractError, RunId, SchemaVersion, SourceId, TrustProfile, TypedEvidencePayload,
 };
 
+const MAX_IJSON_INTEGER: u64 = 9_007_199_254_740_991;
+
 /// Time basis supplied by an Evidence Source.
 #[derive(schemars::JsonSchema, Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -161,10 +163,27 @@ pub struct EvidenceObjectRef {
     object_id: String,
     #[schemars(length(equal = 64), regex(pattern = r"^[0-9a-f]{64}$"))]
     sha256: String,
+    #[schemars(range(min = 1, max = 9_007_199_254_740_991_u64))]
     size_bytes: u64,
 }
 
 impl EvidenceObjectRef {
+    /// Construct an immutable object reference after validating its opaque
+    /// identity, digest, and I-JSON-safe positive size.
+    pub fn new(
+        object_id: impl Into<String>,
+        sha256: impl Into<String>,
+        size_bytes: u64,
+    ) -> Result<Self, ContractError> {
+        let value = Self {
+            object_id: object_id.into(),
+            sha256: sha256.into(),
+            size_bytes,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
     /// Borrow the opaque object identity. Possession does not authorize access.
     pub fn object_id(&self) -> &str {
         &self.object_id
@@ -182,7 +201,14 @@ impl EvidenceObjectRef {
 
     fn validate(&self) -> Result<(), ContractError> {
         validate_contract_identifier(&self.object_id, "object_ref.object_id")?;
-        validate_sha256(&self.sha256, "object_ref.sha256")
+        validate_sha256(&self.sha256, "object_ref.sha256")?;
+        if self.size_bytes == 0 || self.size_bytes > MAX_IJSON_INTEGER {
+            return Err(ContractError::InvalidField {
+                field: "object_ref.size_bytes",
+                reason: "must be a positive I-JSON-safe integer",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -357,6 +383,12 @@ impl SourceEnvelope {
             }
             (None, Some(object_ref)) => {
                 object_ref.validate()?;
+                if !self.flags.contains_content {
+                    return Err(ContractError::InvalidField {
+                        field: "flags.contains_content",
+                        reason: "object references identify explicitly authorized content",
+                    });
+                }
                 if self.payload_digest != object_ref.sha256 {
                     return Err(ContractError::InvalidField {
                         field: "payload_digest",
