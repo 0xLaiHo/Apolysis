@@ -85,6 +85,12 @@ record-append/outbox semantics, encrypted exact-operation replay, one-update
 sequence-range allocation for novel ingest batches, and a bounded finishing
 lifecycle.
 
+A focused durable lifecycle projection foundation adds organization-qualified
+generations, strict Gateway-ingest-order projection, exact durable watermarks,
+active outbox publication, and from-zero rebuild with atomic cutover. Its read
+surface is a lifecycle-only internal model with a bounded membership cursor,
+not a public Query or Console contract.
+
 That slice is not production-ready and does not complete W3–W6. A separate real
 PostgreSQL recovery gate now covers graceful database restart, PostgreSQL
 SIGKILL/WAL recovery, and Gateway application-process death before commit,
@@ -96,9 +102,11 @@ backup/restore, and high availability remain unqualified, as do production KMS
 integration, database row-level-security deployment, transport coverage for
 `bind_runtime`, `ingest`, and `finish_run`, atomic authority revalidation with
 ledger commit, lease/credential rotation, the object plane, and background
-reapers and resource limits. HTTPS trace and error-body secret surfaces,
-durable projectors, the Query service, and the Web Console remain roadmap
-targets. The external exit gate also remains open until three qualified
+reapers and resource limits. The projection does not provide public Query
+authorization, cursor/SSE, Console, coverage, findings, source health, or
+evidence-object lifecycle views; its RLS GUC is defense in depth, not
+authorization. HTTPS trace and error-body secret surfaces also remain open.
+The external exit gate remains open until three qualified
 design partners approve their deployment and data boundaries. The protected
 pre-release line now contains an Action candidate that pins
 its privileged release bundle, rejects caller-selected executable/BPF/output paths, root-seals
@@ -177,6 +185,9 @@ Core crates:
   migration-managed ledger/outbox storage and encrypted replay records.
 - `apolysis-gateway-server`: first direct-mTLS Gateway listener, current
   PostgreSQL source authority, and bounded authority-administration tools.
+- `apolysis-projection-postgres`: generation-scoped PostgreSQL lifecycle
+  projector with durable checkpoints, rebuild/cutover, and an internal bounded
+  read model.
 - `apolysis-runtime`: local, Docker, and runtime metadata adapters.
 - `apolysis-policy`: policy parser and decision logic.
 - `apolysis-store`: append-only JSONL and hash-chain storage.

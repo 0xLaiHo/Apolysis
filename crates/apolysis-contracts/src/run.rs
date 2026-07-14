@@ -325,6 +325,26 @@ impl RunDescriptor {
         &self.run_id
     }
 
+    /// Return the immutable Authority boundary that admitted the run.
+    pub fn authority(&self) -> &AuthorityRef {
+        &self.authority
+    }
+
+    /// Return the immutable initiating Principal reference.
+    pub fn principal(&self) -> &PrincipalRef {
+        &self.principal
+    }
+
+    /// Return the content-free objective reference.
+    pub fn objective_ref(&self) -> &str {
+        &self.objective_ref
+    }
+
+    /// Return the environment profile fixed when the run opened.
+    pub fn environment(&self) -> EnvironmentKind {
+        self.environment
+    }
+
     /// Return the immutable server-approved run policy selection.
     pub fn policy(&self) -> &RunPolicySelection {
         &self.policy
@@ -452,6 +472,11 @@ impl RunStateTransition {
     /// Return the state after the transition.
     pub fn to(&self) -> RunState {
         self.to
+    }
+
+    /// Return the server-recorded transition time.
+    pub fn recorded_at_unix_ms(&self) -> u64 {
+        self.recorded_at_unix_ms
     }
 
     /// Validate this fact against the v0.1 lifecycle.

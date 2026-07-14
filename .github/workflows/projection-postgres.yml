@@ -1,0 +1,39 @@
+name: Projection PostgreSQL Qualification
+
+on:
+  pull_request:
+    branches:
+      - pre-release
+    paths:
+      - .github/workflows/projection-postgres.yml
+      - scripts/test-projection-postgres.sh
+      - Makefile
+      - Cargo.toml
+      - Cargo.lock
+      - crates/apolysis-contracts/**
+      - crates/apolysis-gateway/**
+      - crates/apolysis-gateway-postgres/**
+      - crates/apolysis-gateway-testkit/**
+      - crates/apolysis-projection-postgres/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: projection-postgres-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  projection-postgres:
+    name: projection postgres qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Run isolated PostgreSQL qualification gate
+        run: make test-projection-postgres
