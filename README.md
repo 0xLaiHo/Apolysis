@@ -91,7 +91,9 @@ active outbox publication, and from-zero rebuild with atomic cutover. Its read
 surface is a lifecycle-only internal model with a bounded membership cursor,
 not a public Query or Console contract.
 
-That slice is not production-ready and does not complete W3–W6. A separate real
+Active W3 delivery also includes an authorized encrypted evidence-object write
+lifecycle with bounded admission, retention, deletion propagation, and cleanup.
+These slices are not production-ready and do not complete W3–W6. A separate real
 PostgreSQL recovery gate now covers graceful database restart, PostgreSQL
 SIGKILL/WAL recovery, and Gateway application-process death before commit,
 after commit, and during replay while preserving rollback or exact convergence
@@ -101,9 +103,10 @@ The broader multiprocess race matrix, load, replication, failover,
 backup/restore, and high availability remain unqualified, as do production KMS
 integration, database row-level-security deployment, transport coverage for
 `bind_runtime`, `ingest`, and `finish_run`, atomic authority revalidation with
-ledger commit, lease/credential rotation, the object plane, and background
-reapers and resource limits. The projection does not provide public Query
-authorization, cursor/SSE, Console, coverage, findings, source health, or
+ledger commit, lease/credential rotation, an authorized object-read resolver,
+evidence-object projection/read views, continuous background reaper operation,
+and capacity-qualified resource limits. The projection does not provide public
+Query authorization, cursor/SSE, Console, coverage, findings, source health, or
 evidence-object lifecycle views; its RLS GUC is defense in depth, not
 authorization. HTTPS trace and error-body secret surfaces also remain open.
 The external exit gate remains open until three qualified
@@ -183,6 +186,8 @@ Core crates:
   conformance adapter.
 - `apolysis-gateway-postgres`: initial PostgreSQL Gateway write adapter with
   migration-managed ledger/outbox storage and encrypted replay records.
+- `apolysis-evidence-objects`: authorized encrypted evidence-object write
+  lifecycle with bounded admission, retention, deletion, and provider cleanup.
 - `apolysis-gateway-server`: first direct-mTLS Gateway listener, current
   PostgreSQL source authority, and bounded authority-administration tools.
 - `apolysis-projection-postgres`: generation-scoped PostgreSQL lifecycle

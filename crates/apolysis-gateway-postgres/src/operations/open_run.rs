@@ -72,10 +72,20 @@ impl PostgresGatewayRepository {
                     .map_err(|error| {
                         TxFailure::from_sqlx_at("open_run_lock_client_run_key", error)
                     })?;
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT apolysis_gateway.lock_gateway_client_run($1,$2,$3,$4)",
+                )
+                .bind(context.organization_id().as_str())
+                .bind(&principal_kind)
+                .bind(context.principal().id())
+                .bind(client_run_key)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(|error| TxFailure::from_sqlx_at("open_run_lock_client_run_row", error))?;
                 let existing: Option<i32> = sqlx::query_scalar(
                     "SELECT 1 FROM apolysis_gateway.client_runs \
                      WHERE organization_id=$1 AND principal_kind=$2 AND principal_id=$3 \
-                       AND client_run_key=$4 FOR UPDATE",
+                       AND client_run_key=$4",
                 )
                 .bind(context.organization_id().as_str())
                 .bind(&principal_kind)

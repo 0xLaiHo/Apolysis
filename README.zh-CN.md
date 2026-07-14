@@ -78,7 +78,8 @@ lifecycle。
 以及 from-zero rebuild 与原子 cutover。其 read surface 只是带有界 membership cursor 的
 lifecycle-only 内部模型，不是 public Query 或 Console contract。
 
-该切片尚不能投入生产，也不代表 W3–W6 已完成。独立的真实
+当前 W3 交付还包含带有界 admission、retention、deletion propagation 与 cleanup 的授权加密
+evidence-object 写入 lifecycle。这些切片尚不能投入生产，也不代表 W3–W6 已完成。独立的真实
 PostgreSQL recovery gate 现已覆盖数据库优雅重启、PostgreSQL SIGKILL/WAL
 recovery，以及 Gateway application process 在 commit 前、commit 后和 replay 期间死亡时的
 rollback 或精确收敛，且整个过程都发生在独立 client acknowledgement 发出之前。这只验证
@@ -86,8 +87,9 @@ repository/application-process seam，不代表 HTTPS Gateway server
 recovery 已通过资格验证。更广的多进程 race matrix、load、replication、failover、
 backup/restore 与高可用仍未验证；production KMS integration、database RLS
 deployment、`bind_runtime`、`ingest` 与 `finish_run` 的 transport、current authority 与
-ledger commit 的原子复核、lease/credential rotation、object plane、后台 reaper 与
-resource limit 也仍待完成。Projection 尚不提供 public Query authorization、cursor/SSE、
+ledger commit 的原子复核、lease/credential rotation、授权 object-read resolver、
+evidence-object projection/read view、持续后台 reaper 运行与通过容量验证的 resource limit
+也仍待完成。Projection 尚不提供 public Query authorization、cursor/SSE、
 Console、coverage、finding、source health 或 evidence-object lifecycle view；其 RLS GUC
 只是 defense-in-depth，不是 authorization。HTTPS trace 与 error-body secret surface
 也仍待完成。
@@ -157,6 +159,8 @@ Apolysis 关联层
   adapter。
 - `apolysis-gateway-postgres`：初始 PostgreSQL Gateway write adapter，提供由 migration
   管理的 ledger/outbox 存储与加密 replay record。
+- `apolysis-evidence-objects`：授权加密 evidence-object 写入 lifecycle，提供有界 admission、
+  retention、deletion 与 provider cleanup。
 - `apolysis-gateway-server`：首个 direct-mTLS Gateway listener、PostgreSQL current source
   authority 与有界 authority 管理工具。
 - `apolysis-projection-postgres`：generation-scoped PostgreSQL lifecycle projector，提供耐久

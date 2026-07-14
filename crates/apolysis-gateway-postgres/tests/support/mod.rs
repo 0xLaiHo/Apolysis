@@ -77,15 +77,11 @@ impl TestDatabase {
         &self,
         config: PostgresGatewayConfig,
     ) -> TestResult<PostgresGatewayRepository> {
-        PostgresGatewayRepository::connect_and_migrate(
-            &self.database_url,
-            replay_protector()?,
-            config,
-        )
-        .await
-        .map_err(|_| {
-            io::Error::other("failed to construct the PostgreSQL Gateway repository").into()
-        })
+        PostgresGatewayRepository::connect(&self.database_url, replay_protector()?, config)
+            .await
+            .map_err(|_| {
+                io::Error::other("failed to construct the PostgreSQL Gateway repository").into()
+            })
     }
 
     pub fn pool(&self) -> &PgPool {
