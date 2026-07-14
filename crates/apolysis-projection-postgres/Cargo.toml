@@ -1,0 +1,36 @@
+[package]
+name = "apolysis-projection-postgres"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+apolysis-contracts = { path = "../apolysis-contracts" }
+serde.workspace = true
+serde_json.workspace = true
+serde_json_canonicalizer.workspace = true
+sha2.workspace = true
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "json",
+    "postgres",
+    "runtime-tokio-rustls",
+] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+apolysis-gateway = { path = "../apolysis-gateway" }
+apolysis-gateway-postgres = { path = "../apolysis-gateway-postgres" }
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+
+[lib]
+path = "src/lib.rs"

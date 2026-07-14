@@ -11,6 +11,7 @@ members = [
     "crates/apolysis-feedback",
     "crates/apolysis-kubernetes",
     "crates/apolysis-policy",
+    "crates/apolysis-projection-postgres",
     "crates/apolysis-store",
     "crates/apolysis-observer",
     "crates/apolysis-runtime",
