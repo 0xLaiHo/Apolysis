@@ -76,8 +76,9 @@ the four canonical Gateway operations, and the first direct-mTLS `open_run`
 transport slice backed by current PostgreSQL credential authority. These
 prototypes exercise
 server-side grant/policy joins, RFC 8785 golden digest vectors, atomic
-record-append/outbox semantics, encrypted exact-operation replay, and a bounded
-finishing lifecycle.
+record-append/outbox semantics, encrypted exact-operation replay, one-update
+sequence-range allocation for novel ingest batches, and a bounded finishing
+lifecycle.
 
 That slice is not production-ready and does not complete W3–W6. A separate real
 PostgreSQL recovery gate now covers graceful database restart, PostgreSQL
