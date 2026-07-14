@@ -1,5 +1,6 @@
 .PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
 	test-gateway-postgres \
+	test-gateway-postgres-crash-recovery \
 	test-gateway-transport-mtls \
 	test-local-agent-command-attribution \
 	test-policy-guardrails test-policy-guardrails-bpf-lsm-live test-runtime-guardrails \
@@ -52,6 +53,11 @@ test-quickstart:
 # the default workspace suite never requires Docker or a database.
 test-gateway-postgres:
 	./scripts/test-gateway-postgres.sh
+
+# Opt-in destructive fault-injection gate. It owns one random PostgreSQL
+# container and volume and never targets an operator-provided database.
+test-gateway-postgres-crash-recovery:
+	./scripts/test-gateway-postgres-crash-recovery.sh
 
 # Opt-in production-transport gate. This starts a real PostgreSQL server,
 # creates a real CA and leaf certificates, and exercises the Gateway through

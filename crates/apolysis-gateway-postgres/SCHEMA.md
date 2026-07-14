@@ -67,8 +67,26 @@ operation IDs racing on the same client run key with one winner and one
 idempotency conflict, plaintext lease scanning, and contiguous organization
 sequence plus 1:1 outbox state, and replay expiry that remains a durable
 idempotency tombstone after reconstruction. The concurrency checks use
-independent repositories and connection pools. They do not restart the
-PostgreSQL server or validate WAL/crash recovery,
-the full multiprocess/lifecycle race matrix, HA behavior, production KMS
-integration, database roles, or RLS. A successful migration or test run is
-therefore not a production claim.
+independent repositories and connection pools.
+
+The separate real crash-recovery gate uses the production repository with
+`SystemClock` and `OsRandomIdGenerator` against the pinned PostgreSQL 16 image
+on one persistent volume. Data checksums, `fsync`, synchronous commit, and
+full-page writes are required. The gate proves exact replay across graceful
+database restart and PostgreSQL `SIGKILL` with observed WAL redo. It also kills
+the application driver while a transaction is blocked before the outbox insert
+can commit and after an exact run/operation/replay/lease/three-record/
+three-outbox commit while a distinct client acknowledgement remains absent; the
+former leaves zero scenario rows and retries as novel. The first replay process
+is killed at the same pre-ack boundary, and a third process then converges on
+the one committed result.
+Catalog-discovered plaintext scanning, `pg_amcheck`, `pg_dump`, generated-secret
+scanning, private-file mode checks, and cleanup of the dedicated container,
+volume, and control directory are part of the gate.
+
+This is not HTTPS Gateway-server recovery and does not qualify trace or HTTP
+error-body secret handling. The full multiprocess/lifecycle race
+matrix, sustained or capacity load, replication/failover, backup/restore, HA
+behavior, production KMS integration, database roles, and RLS remain
+unqualified. A successful migration or recovery-gate run is therefore still
+not a production claim.

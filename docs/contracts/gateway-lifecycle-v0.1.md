@@ -55,6 +55,20 @@ connection pools. The distinct-operation race produces one deterministic
 winner and one idempotency conflict. State inspection for conformance is test-only; the
 PostgreSQL repository exposes no public snapshot/read API.
 
+A separate real recovery gate drives the production PostgreSQL repository
+through the application core with `SystemClock`, `OsRandomIdGenerator`, and
+runtime-generated operations. Against a pinned PostgreSQL 16 persistent volume
+with data checksums, `fsync`, synchronous commit, and full-page writes enabled,
+it proves exact replay after graceful database restart and PostgreSQL `SIGKILL`
+with WAL redo. Deterministic application-process `SIGKILL` before commit proves
+complete rollback followed by one novel retry; `SIGKILL` after the atomic
+commit while a distinct client-acknowledgement file remains absent proves one
+exact replay, then kills that retry at the same pre-ack boundary before a third
+process converges. The gate also runs
+catalog-discovered plaintext scanning, `pg_amcheck`, `pg_dump`, generated-secret
+scans, private-file checks, and dedicated-resource cleanup. It exercises an
+application/repository process seam, not recovery of an HTTPS Gateway server.
+
 Current PostgreSQL gap discovery evaluates a window over the full persisted
 history for one source stream; its SQL limit bounds returned gaps rather than
 scan work. Novel envelopes are assigned organization sequences and inserted
@@ -65,9 +79,13 @@ qualification are required before the W3–W6 storage exit gate.
 The slice is a conformance foundation, not a production service, and does not
 complete W3–W6. In particular, it has:
 
-- no PostgreSQL server-restart, WAL/crash, multiprocess, replication/failover,
-  backup/restore, full lifecycle race-matrix, or high-availability
-  qualification;
+- no HTTPS Gateway-server crash recovery, complete multiprocess/lifecycle race
+  matrix, sustained or capacity load, replication/failover, backup/restore, or
+  high-availability qualification; the narrower graceful PostgreSQL restart,
+  PostgreSQL SIGKILL/WAL redo, and application-process pre-commit,
+  post-commit/pre-ack, and replay/pre-ack crash slice is covered by the explicit
+  recovery gate, while HTTPS trace and error-body secret handling remains part
+  of the server gate;
 - no production KMS/envelope-data-key integration, database role model, or RLS
   deployment; the built-in AES-256-GCM protector is a direct-key in-process
   keyring;

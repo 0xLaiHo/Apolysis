@@ -62,6 +62,40 @@ tests single-threaded, and removes the container and temporary credential file
 on exit. It does not print the database URL or password. The pinned image is
 left in the normal Docker cache.
 
+A separate crash-recovery gate drives the production
+`PostgresGatewayRepository` through `ExecutionEvidenceGateway` with
+`SystemClock` and `OsRandomIdGenerator`; it does not substitute a fixed clock,
+fixed identifiers, an in-memory repository, or checked-in request data. It
+starts the pinned PostgreSQL 16 image on a dedicated persistent volume with data
+checksums, `fsync`, synchronous commit, and full-page writes enabled, then
+proves:
+
+- exact replay after a graceful PostgreSQL stop/start;
+- committed-state recovery after PostgreSQL receives `SIGKILL`, including an
+  advanced WAL position and PostgreSQL log evidence that WAL redo ran;
+- complete rollback and a successful novel retry after the application driver
+  receives `SIGKILL` while its transaction is deterministically blocked before
+  commit; and
+- one exact idempotent result after the application driver receives `SIGKILL`
+  after the atomic run/operation/replay/lease/three-record/three-outbox commit
+  while a distinct client-acknowledgement file is still absent; the first retry
+  process is killed at the same pre-ack boundary, and a third process converges
+  on the same exact result.
+
+The gate scans database catalog-discovered text, JSON, and byte columns, the
+database dump, process logs, and private control artifacts for plaintext bearer
+leases and generated secrets. It also runs `pg_amcheck` and `pg_dump`, verifies
+private files are mode `0600`, and removes its dedicated container, persistent
+volume, and control directory:
+
+```bash
+make test-gateway-postgres-crash-recovery
+```
+
+This is an application/repository process seam. It does not start or kill the
+HTTPS Gateway server and therefore does not qualify network-listener recovery,
+trace secret handling, or HTTP error-body secret handling.
+
 To compile and run only non-database tests:
 
 ```bash
@@ -81,14 +115,15 @@ bulk insertion, followed by load and capacity testing.
 ## Non-claims
 
 This crate is a write-path prototype, not a production Gateway service and not
-completion of W3–W6. The current tests reconstruct the repository and client
-pool; they do not restart the PostgreSQL server or prove WAL/crash recovery,
-multiprocess races, sustained load, replication, failover, backup/restore, or
-high availability. Production KMS/envelope-key integration, database roles and
-row-level-security deployment, network authentication/revocation, background
-reapers, object storage, admission controls beyond the 256-stream cap, durable
-projectors, Query API, and Console remain outside this crate. The seven targeted
-tests do not close the full multiprocess or lifecycle race matrix.
+completion of W3–W6. The dedicated gate qualifies graceful PostgreSQL restart,
+PostgreSQL SIGKILL/WAL redo, and application-process death on both sides of the
+commit boundary for one runtime-generated `open_run` shape. It does not qualify
+HTTPS Gateway-server recovery, the full multiprocess or lifecycle race matrix,
+sustained or capacity load, replication, failover, backup/restore, or high
+availability. Production KMS/envelope-key integration, database roles and
+row-level-security deployment, complete network authority/revocation, object
+storage, background reapers, admission controls beyond the 256-stream cap,
+durable projectors, Query API, and Console remain outside this crate.
 
 Conformance-state inspection is implemented by the test harness through a
 separate database pool. `PostgresGatewayRepository` exposes no public snapshot
