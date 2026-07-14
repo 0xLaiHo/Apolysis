@@ -5,6 +5,8 @@ on:
     paths:
       - action.yml
       - .github/workflows/action-self-test.yml
+      - scripts/github-action-boundary.sh
+      - scripts/test-github-action-boundary.sh
       - crates/**
       - ebpf/**
   workflow_dispatch:
@@ -18,68 +20,378 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Check the public Action privilege boundary
+        run: ./scripts/test-github-action-boundary.sh
 
       - name: Install BPF build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic
+          /usr/bin/sudo -n apt-get update
+          /usr/bin/sudo -n apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic
           if ! bpftool version >/dev/null 2>&1; then
             bpftool_path="$(find /usr/lib/linux-tools* -type f -name bpftool | sort -V | tail -n 1)"
             [[ -n "$bpftool_path" ]]
-            sudo ln -sf "$bpftool_path" /usr/local/bin/bpftool
+            /usr/bin/sudo -n ln -sf "$bpftool_path" /usr/local/bin/bpftool
           fi
 
-      - name: Build CLI and CO-RE object from source
+      - name: Build current CLI and CO-RE object separately
         run: |
           cargo build -p apolysis-cli
           APOLYSIS_REQUIRE_BPF=1 make build-ebpf
 
-      - name: Plant a fake credential outside the workspace
+      - name: Plant a fixture credential outside the workspace
         run: |
           mkdir -p /tmp/apolysis-selftest-home/.aws
-          echo "fake-selftest-credential" > /tmp/apolysis-selftest-home/.aws/credentials
+          echo 'fake-selftest-credential' > /tmp/apolysis-selftest-home/.aws/credentials
 
-      - name: Run the action against a workload that reads the credential
+      - name: Plant hostile paths and a root-owned sentinel
+        run: |
+          set -euo pipefail
+          if /usr/bin/sudo -n find /var/tmp -maxdepth 1 -type d \
+            \( -name "apolysis-action-stage.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.*" \
+            -o -name "apolysis-action-output.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.*" \) \
+            -print -quit | grep -q .; then
+            echo 'unexpected pre-existing Apolysis Action path' >&2
+            exit 1
+          fi
+          sentinel="/var/tmp/apolysis-action-sentinel-${GITHUB_RUN_ID}"
+          /usr/bin/sudo -n install -d -o root -g root -m 0700 "$sentinel"
+          printf 'root-owned-sentinel\n' \
+            | /usr/bin/sudo -n tee "$sentinel/unchanged.txt" >/dev/null
+          /usr/bin/sudo -n chmod 0600 "$sentinel/unchanged.txt"
+          ln -s "$sentinel" .apolysis-action
+          mkdir -p .action-hostile/curl-home
+          ln -s /tmp/apolysis-selftest-home/.aws/credentials \
+            .action-hostile/policy-link.yaml
+          cat >.action-hostile/sudo <<'EOF'
+          #!/usr/bin/bash
+          touch "$GITHUB_WORKSPACE/action-hostile-sudo-ran"
+          exec /usr/bin/sudo "$@"
+          EOF
+          cat >.action-hostile/bash-env.sh <<'EOF'
+          #!/usr/bin/bash
+          touch "$GITHUB_WORKSPACE/action-hostile-bash-env-ran"
+          EOF
+          cat >.action-hostile/gzip <<EOF
+          #!/usr/bin/bash
+          /usr/bin/touch "$GITHUB_WORKSPACE/action-hostile-gzip-ran"
+          exec /usr/bin/gzip "\$@"
+          EOF
+          cat >.action-hostile/tar-checkpoint <<EOF
+          #!/usr/bin/bash
+          /usr/bin/touch "$GITHUB_WORKSPACE/action-hostile-tar-options-ran"
+          EOF
+          /usr/bin/printf 'trace-ascii = "%s"\n' \
+            "$GITHUB_WORKSPACE/action-hostile-curlrc-ran" \
+            >.action-hostile/curl-home/.curlrc
+          cat >.action-hostile/sitecustomize.py <<'EOF'
+          import os
+          open(os.environ["APOLYSIS_SITECUSTOMIZE_MARKER"], "w").write("ran")
+          EOF
+          cat >.action-hostile/preload.c <<'EOF'
+          #include <fcntl.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+
+          __attribute__((constructor)) static void mark_preload(void) {
+            const char *path = getenv("APOLYSIS_PRELOAD_MARKER");
+            if (path == NULL) return;
+            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+            if (fd < 0) return;
+            static const char body[] = "ran\n";
+            (void)write(fd, body, sizeof(body) - 1);
+            (void)close(fd);
+          }
+          EOF
+          /usr/bin/cc -shared -fPIC -o .action-hostile/preload.so \
+            .action-hostile/preload.c
+          cat >.action-hostile/attempt-artifact-tamper.sh <<'EOF'
+          #!/usr/bin/env bash
+          for _ in $(seq 1 1500); do
+            for directory in /var/tmp/apolysis-action-output.*; do
+              [[ -d "$directory" ]] || continue
+              printf 'forged-background-timeline\n' \
+                >"$directory/timeline.jsonl" 2>/dev/null || true
+            done
+            sleep 0.02
+          done
+          EOF
+          chmod 0755 .action-hostile/sudo .action-hostile/bash-env.sh \
+            .action-hostile/gzip .action-hostile/tar-checkpoint \
+            .action-hostile/attempt-artifact-tamper.sh
+          collision_scope="${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.action-collision"
+          collision_stage="/var/tmp/apolysis-action-stage.${collision_scope}"
+          /usr/bin/sudo -n /usr/bin/mkdir --mode=0700 -- "$collision_stage"
+          printf '%s\n' "$collision_scope" \
+            | /usr/bin/sudo -n /usr/bin/tee \
+              "$collision_stage/.apolysis-action-scope" >/dev/null
+          printf 'collision-owned\n' \
+            | /usr/bin/sudo -n /usr/bin/tee "$collision_stage/keep.txt" >/dev/null
+          /usr/bin/sudo -n /usr/bin/chmod 0400 \
+            "$collision_stage/.apolysis-action-scope"
+          /usr/bin/sudo -n /usr/bin/chmod 0600 "$collision_stage/keep.txt"
+          echo "$GITHUB_WORKSPACE/.action-hostile" >>"$GITHUB_PATH"
+
+      - name: Record the runner environment behind the hostile PATH
+        run: |
+          printf '%s\n' "$HOME" > action-expected-home
+          printf '%s\n' "$PATH" > action-expected-path
+          /usr/bin/id -g > action-expected-gid
+
+      - name: Run the Action against a credential-reading workload
         id: audit
         uses: ./
+        env:
+          APOLYSIS_SELF_TEST_ENV: runner-environment
+          APOLYSIS_PRELOAD_MARKER: ${{ github.workspace }}/action-hostile-preload-ran
+          APOLYSIS_SITECUSTOMIZE_MARKER: ${{ github.workspace }}/action-hostile-sitecustomize-ran
+          APOLYSIS_BPF_LSM_AVAILABLE: '0'
+          BASH_ENV: ${{ github.workspace }}/.action-hostile/bash-env.sh
+          BASH_XTRACEFD: '2'
+          CURL_HOME: ${{ github.workspace }}/.action-hostile/curl-home
+          LD_PRELOAD: ${{ github.workspace }}/.action-hostile/preload.so
+          PS4: '$(/usr/bin/touch "$GITHUB_WORKSPACE/action-hostile-ps4-ran") '
+          PYTHONPATH: ${{ github.workspace }}/.action-hostile
+          SHELLOPTS: xtrace
+          TAR_OPTIONS: --checkpoint=1 --checkpoint-action=exec=${{ github.workspace }}/.action-hostile/tar-checkpoint
+          'BASH_FUNC_printf%%': '() { /usr/bin/touch "$GITHUB_WORKSPACE/action-hostile-function-ran"; builtin printf "$@"; }'
         with:
-          run: 'cat /tmp/apolysis-selftest-home/.aws/credentials && echo selftest-done'
+          run: >-
+            set -euo pipefail;
+            : action-run-input-content-canary;
+            test "$(id -u)" -ne 0;
+            test "$APOLYSIS_SELF_TEST_ENV" = runner-environment;
+            if [[ -n ${APOLYSIS_BPF_LSM_AVAILABLE+x} ]]; then exit 1; fi;
+            test "$HOME" = "$(cat action-expected-home)";
+            test "$PATH" = "$(cat action-expected-path)";
+            test "$(/usr/bin/awk '/NoNewPrivs/{print $2}' /proc/self/status)" = 1;
+            if /usr/bin/sudo -n /usr/bin/true 2>/dev/null; then exit 1; fi;
+            if /usr/bin/env | /usr/bin/grep '^BASH_FUNC_' >/dev/null; then exit 1; fi;
+            id -u > action-workload-uid;
+            id -g > action-workload-gid;
+            id -G > action-workload-groups;
+            /usr/bin/printf '%s\n' v030-argv-leak >/dev/null;
+            /usr/bin/bash .action-hostile/attempt-artifact-tamper.sh >/dev/null 2>&1 &
+            echo "$!" > action-background-pid;
+            cat /tmp/apolysis-selftest-home/.aws/credentials >/dev/null;
+            echo selftest-done
           session: action-self-test
-          binary: target/debug/apolysis
-          bpf-object: target/ebpf/apolysis_observer.bpf.o
+          policy: policies/local-dev.yaml
 
-      - name: Assert timeline evidence and redaction
+      - name: Prove and stop the detached tamper attempt
+        run: |
+          set -euo pipefail
+          pid="$(cat action-background-pid)"
+          kill -0 "$pid"
+          printf 'survived-action\n' > action-background-survived
+          kill "$pid"
+          for _ in $(seq 1 50); do
+            if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi
+            sleep 0.02
+          done
+          kill -KILL "$pid" 2>/dev/null || true
+
+      - name: Download the sealed timeline artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: apolysis-evidence-${{ github.run_id }}-${{ github.run_attempt }}-action-self-test
+          path: ${{ runner.temp }}/action-self-test-download
+
+      - name: Propagate a real managed-command failure and retain its evidence
+        id: reject-command
+        continue-on-error: true
+        uses: ./
+        with:
+          run: 'echo expected-command-failure; exit 23'
+          session: action-command-failure
+
+      - name: Download evidence from the failed managed command
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: apolysis-evidence-${{ github.run_id }}-${{ github.run_attempt }}-action-command-failure
+          path: ${{ runner.temp }}/action-failure-download
+
+      - name: Reject a colliding Action-owned scope without deleting it
+        id: reject-collision
+        continue-on-error: true
+        uses: ./
+        with:
+          run: 'touch action-collision-workload-ran'
+          session: action-collision
+
+      - name: Verify and remove the collision fixture
+        run: |
+          set -euo pipefail
+          scope="${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.action-collision"
+          stage="/var/tmp/apolysis-action-stage.${scope}"
+          [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%a' -- "$stage")" == \
+            '0:0:directory:700' ]]
+          [[ "$(/usr/bin/sudo -n /usr/bin/cat -- "$stage/.apolysis-action-scope")" == \
+            "$scope" ]]
+          [[ "$(/usr/bin/sudo -n /usr/bin/cat -- "$stage/keep.txt")" == \
+            'collision-owned' ]]
+          printf 'collision-preserved\n' > action-collision-preserved
+          /usr/bin/sudo -n /usr/bin/rm -f -- \
+            "$stage/.apolysis-action-scope" "$stage/keep.txt"
+          /usr/bin/sudo -n /usr/bin/rmdir -- "$stage"
+
+      - name: Reject an unsafe session before privileged setup
+        id: reject-session
+        continue-on-error: true
+        uses: ./
+        with:
+          run: 'touch action-rejected-session-ran'
+          session: '../../root-owned'
+
+      - name: Reject an empty managed command before privileged setup
+        id: reject-empty-command
+        continue-on-error: true
+        uses: ./
+        with:
+          run: ''
+          session: action-empty-command
+
+      - name: Reject a symlinked policy after privileged setup
+        id: reject-policy
+        continue-on-error: true
+        uses: ./
+        with:
+          run: 'touch action-rejected-policy-ran'
+          session: action-policy-rejection
+          policy: .action-hostile/policy-link.yaml
+
+      - name: Assert evidence, redaction, and privilege boundaries
         run: |
           set +e
-          timeline='${{ steps.audit.outputs.timeline }}'
-          echo "== diagnostics (fixture-grade fake data; safe to print) =="
+          timeline="$RUNNER_TEMP/action-self-test-download/timeline.jsonl"
+          failure_timeline="$RUNNER_TEMP/action-failure-download/timeline.jsonl"
+          echo '== diagnostics (fixture-grade data; safe to print) =='
           ls -la "$(dirname "$timeline")"
           wc -l "$timeline"
-          echo "-- record_type histogram --"
+          echo '-- record_type histogram --'
           grep -o '"record_type":"[a-z_]*"' "$timeline" | sort | uniq -c
-          echo "-- event_type histogram --"
+          echo '-- event_type histogram --'
           grep -o '"event_type":"[a-z_]*"' "$timeline" | sort | uniq -c
-          echo "-- observer diagnostics (loss/attach counters) --"
+          echo '-- observer diagnostics (loss/attach counters) --'
           grep 'diagnostic' "$timeline" | head -5
-          echo "-- first records --"
+          echo '-- first records --'
           head -8 "$timeline"
-          echo "== assertions =="
+          echo '== assertions =='
           fail=0
           check() {
             if eval "$2"; then echo "ok:   $1"; else echo "FAIL: $1"; fail=1; fi
           }
-          check "observed command exited 0" \
-            "[[ '${{ steps.audit.outputs.exit-code }}' == '0' ]]"
-          check "timeline exists and is non-empty" "test -s '$timeline'"
-          check "canonical event records present" \
+          check 'Action and observed command succeeded' \
+            "[[ '${{ steps.audit.outcome }}' == 'success' ]]"
+          check 'nonzero managed command failed the Action step' \
+            "[[ '${{ steps.reject-command.outcome }}' == 'failure' ]]"
+          check 'colliding scope failed closed' \
+            "[[ '${{ steps.reject-collision.outcome }}' == 'failure' ]]"
+          check 'unsafe session failed closed' \
+            "[[ '${{ steps.reject-session.outcome }}' == 'failure' ]]"
+          check 'empty managed command failed closed' \
+            "[[ '${{ steps.reject-empty-command.outcome }}' == 'failure' ]]"
+          check 'symlinked policy failed closed' \
+            "[[ '${{ steps.reject-policy.outcome }}' == 'failure' ]]"
+          check 'rejected session workload never ran' \
+            '[[ ! -e action-rejected-session-ran ]]'
+          check 'rejected policy workload never ran' \
+            '[[ ! -e action-rejected-policy-ran ]]'
+          check 'colliding scope workload never ran' \
+            '[[ ! -e action-collision-workload-ran ]]'
+          check 'colliding scope remained untouched by losing invocation' \
+            "[[ $(cat action-collision-preserved) == 'collision-preserved' ]]"
+          check 'managed workload ran as the invoking non-root user' \
+            '[[ $(cat action-workload-uid) == $(id -u) && $(id -u) != 0 ]]'
+          check 'managed workload retained only its non-root primary group' \
+            '[[ $(cat action-workload-gid) == $(cat action-expected-gid) \
+              && $(/usr/bin/tr " " "\n" < action-workload-groups \
+                | /usr/bin/sort -nu | /usr/bin/paste -sd, -) == $(cat action-expected-gid) \
+              && $(cat action-workload-gid) != 0 ]]'
+          check 'PATH-resolved sudo shim never ran' \
+            '[[ ! -e action-hostile-sudo-ran ]]'
+          check 'caller BASH_ENV never ran before observer attachment' \
+            '[[ ! -e action-hostile-bash-env-ran ]]'
+          check 'caller shell-option/PS4 hook never ran before attachment' \
+            '[[ ! -e action-hostile-ps4-ran ]]'
+          check 'caller exported Bash function never ran before attachment' \
+            '[[ ! -e action-hostile-function-ran ]]'
+          check 'caller dynamic-loader hook never ran before attachment' \
+            '[[ ! -e action-hostile-preload-ran ]]'
+          check 'caller curl configuration never affected the root download' \
+            '[[ ! -e action-hostile-curlrc-ran ]]'
+          check 'caller TAR_OPTIONS never affected root extraction' \
+            '[[ ! -e action-hostile-tar-options-ran ]]'
+          check 'caller PATH never selected a root decompressor' \
+            '[[ ! -e action-hostile-gzip-ran ]]'
+          check 'workspace Python startup hook never ran before attachment' \
+            '[[ ! -e action-hostile-sitecustomize-ran ]]'
+          check 'detached same-UID tamper process survived the observed command' \
+            "[[ $(cat action-background-survived) == 'survived-action' ]]"
+          check 'downloaded timeline exists and is non-empty' "test -s '$timeline'"
+          check 'failed command still produced a non-empty timeline artifact' \
+            "test -s '$failure_timeline'"
+          check 'detached process could not replace sealed evidence' \
+            "! grep -q 'forged-background-timeline' '$timeline'"
+          check 'canonical event records present' \
             "grep -q '\"record_type\":\"event\"' '$timeline'"
-          check "exec event captured" \
+          check 'exec event captured' \
             "grep -q '\"event_type\":\"exec\"' '$timeline'"
-          check "credential read captured" \
+          check 'credential read captured' \
             "grep -q '\"event_type\":\"credential_read\"' '$timeline'"
-          # The credential path is outside the workspace and must be persisted
-          # as a redacted token, never as the raw path.
-          check "raw credential path redacted" \
+          check 'raw credential path redacted' \
             "! grep -q 'apolysis-selftest-home' '$timeline'"
+          check 'raw credential value absent' \
+            "! grep -q 'fake-selftest-credential' '$timeline'"
+          check 'top-level run input is absent from pinned-v0.3 metadata' \
+            "! grep -q 'action-run-input-content-canary' '$timeline'"
+          check 'pinned v0.3 exec-argument privacy exception remains explicit' \
+            "grep -q 'v030-argv-leak' '$timeline'"
+          sentinel="/var/tmp/apolysis-action-sentinel-${GITHUB_RUN_ID}"
+          check 'legacy workspace output symlink remains untouched' \
+            "[[ -L .apolysis-action && $(readlink .apolysis-action) == '$sentinel' ]]"
+          check 'root-owned sentinel directory remains unchanged' \
+            '[[ $(/usr/bin/sudo -n /usr/bin/stat -c "%u:%g:%a" "$sentinel") == 0:0:700 ]]'
+          check 'root-owned sentinel file remains unchanged' \
+            '[[ $(/usr/bin/sudo -n /usr/bin/stat -c "%u:%g:%a" "$sentinel/unchanged.txt") == 0:0:600 \
+              && $(/usr/bin/sudo -n /usr/bin/cat "$sentinel/unchanged.txt") == root-owned-sentinel ]]'
+          check 'no root-owned Action path survives success or rejection' \
+            "! /usr/bin/sudo -n find /var/tmp -maxdepth 1 -type d \
+              \( -name 'apolysis-action-stage.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.*' \
+              -o -name 'apolysis-action-output.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.*' \) \
+              -print -quit | grep -q ."
           exit $fail
+
+      - name: Clean self-test-owned paths
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [[ -f action-background-pid ]]; then
+            kill "$(cat action-background-pid)" 2>/dev/null || true
+          fi
+          rm -f -- .apolysis-action action-workload-uid action-workload-gid \
+            action-workload-groups action-background-pid \
+            action-background-survived action-rejected-session-ran \
+            action-rejected-policy-ran action-collision-workload-ran \
+            action-collision-preserved action-expected-home action-expected-path \
+            action-expected-gid \
+            action-hostile-sudo-ran action-hostile-bash-env-ran \
+            action-hostile-sitecustomize-ran action-hostile-ps4-ran \
+            action-hostile-function-ran action-hostile-preload-ran
+          /usr/bin/sudo -n /usr/bin/rm -f -- action-hostile-curlrc-ran \
+            action-hostile-tar-options-ran action-hostile-gzip-ran
+          rm -rf -- .action-hostile "$RUNNER_TEMP/action-self-test-download" \
+            "$RUNNER_TEMP/action-failure-download" /tmp/apolysis-selftest-home
+          collision_scope="${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}.action-collision"
+          collision_stage="/var/tmp/apolysis-action-stage.${collision_scope}"
+          if /usr/bin/sudo -n /usr/bin/test -d "$collision_stage"; then
+            /usr/bin/sudo -n /usr/bin/rm -f -- \
+              "$collision_stage/.apolysis-action-scope" "$collision_stage/keep.txt"
+            /usr/bin/sudo -n /usr/bin/rmdir -- "$collision_stage"
+          fi
+          sentinel="/var/tmp/apolysis-action-sentinel-${GITHUB_RUN_ID}"
+          if /usr/bin/sudo -n /usr/bin/test -d "$sentinel"; then
+            /usr/bin/sudo -n /usr/bin/rm -f -- "$sentinel/unchanged.txt"
+            /usr/bin/sudo -n /usr/bin/rmdir -- "$sentinel"
+          fi

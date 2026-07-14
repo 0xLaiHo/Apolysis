@@ -37,10 +37,15 @@ OS events diverge. See [Quickstart](docs/quickstart.md).
 ## Audit An Agent In CI (GitHub Action)
 
 ```yaml
-- uses: 0xLaiHo/Apolysis@c00a84650e306d01b44e2fbd6b80f1395c852f74 # v0.3.0
+# Post-merge evaluation shape only; the current pre-release ref is still legacy.
+- uses: 0xLaiHo/Apolysis@pre-release
   with:
     run: 'codex exec --json "run the project tests"'
+    session: agent-task
 ```
+
+Do not use that ref until the open hardening Pull Request is reviewed and
+merged. Production use must pin the later immutable hardened release commit.
 
 One step records session-scoped kernel observations and syscall attempts for the
 command, prints a digest into the job summary, and uploads the JSONL timeline as
@@ -94,15 +99,28 @@ ledger commit, lease/credential rotation, the object plane, and background
 reapers and resource limits. HTTPS trace and error-body secret surfaces,
 durable projectors, the Query service, and the Web Console remain roadmap
 targets. The external exit gate also remains open until three qualified
-design partners approve their deployment and data boundaries. Do not treat the
-current Action as safe for untrusted repositories or Pull Requests until the
-public path is hardened.
+design partners approve their deployment and data boundaries. The protected
+pre-release line now contains an Action candidate that pins
+its privileged release bundle, rejects caller-selected executable/BPF/output paths, root-seals
+the evidence artifact, and removes security-critical workflow outputs. This is
+not yet an immutable public release: the v0.3.0 Action wrapper retains its legacy
+interface. Even after publication, use a sandbox—not this audit wrapper—when a
+workload may deliberately modify same-UID runner state. The candidate applies
+Linux `no_new_privs` and proves direct sudo is rejected, but it is not a process
+or CI control-plane isolation boundary. It stages the top-level `run` text out
+of observer launch metadata, but its pinned v0.3.0 executable predates the
+content-off persistence seam and may retain child-process argv or reconstructed
+process-command content. Do not put secrets in `run` or argv; immutable
+publication requires a post-content-off bundle and remains a release no-go
+until one exists.
 
 Production implementation now proceeds through the protected `pre-release`
-branch. Its first privacy gate makes every local observer persistence path
-content-off by default: exec argv and reconstructed process commands are not
-written to JSONL or daemon hash-chain records. Kernel-side capture is still a
-transient implementation detail until the later capture-off control is added.
+branch. In current source builds, its first privacy gate makes every local
+observer persistence path content-off by default: exec argv and reconstructed
+process commands are not written to JSONL or daemon hash-chain records. The
+Action exception above ends only when that source is published as an immutable
+bundle. Kernel-side capture is still a transient implementation detail until
+the later capture-off control is added.
 
 ## Core Capabilities
 
