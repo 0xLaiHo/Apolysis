@@ -2,8 +2,8 @@
 
 use apolysis_contracts::{
     AgentExecutionRecordFact, AgentExecutionRecordItem, CoverageSummary, EvidenceBoundary,
-    ExecutionCoverageState, OutcomeCoverageState, PrivacyCapability, RunDescriptor,
-    SemanticCoverageState, SourceEnvelope, SourceManifest,
+    EvidenceObjectRef, ExecutionCoverageState, OutcomeCoverageState, PrivacyCapability,
+    RunDescriptor, SemanticCoverageState, SourceEnvelope, SourceManifest,
 };
 
 #[test]
@@ -196,6 +196,54 @@ fn source_envelope_enforces_typed_content_off_payloads_and_integrity() {
             .expect_err("invalid source payload boundary must fail");
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+#[test]
+fn object_references_require_explicit_content_and_safe_nonzero_sizes() {
+    let source = include_str!("fixtures/positive/source_envelope_object_ref.json");
+    let fixture: serde_json::Value = serde_json::from_str(source).expect("object fixture JSON");
+
+    for (value, expected) in [
+        (
+            {
+                let mut value = fixture.clone();
+                value["flags"]["contains_content"] = serde_json::json!(false);
+                value
+            },
+            "contains_content",
+        ),
+        (
+            {
+                let mut value = fixture.clone();
+                value["object_ref"]["size_bytes"] = serde_json::json!(0);
+                value
+            },
+            "size_bytes",
+        ),
+        (
+            {
+                let mut value = fixture.clone();
+                value["object_ref"]["size_bytes"] = serde_json::json!(9_007_199_254_740_992_u64);
+                value
+            },
+            "size_bytes",
+        ),
+    ] {
+        let error = serde_json::from_value::<SourceEnvelope>(value)
+            .expect_err("unsafe object reference must fail");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn object_reference_constructor_preserves_validated_wire_values() {
+    let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let reference = EvidenceObjectRef::new("object_01", digest, 4_096)
+        .expect("valid immutable object reference");
+
+    assert_eq!(reference.object_id(), "object_01");
+    assert_eq!(reference.sha256(), digest);
+    assert_eq!(reference.size_bytes(), 4_096);
 }
 
 #[test]

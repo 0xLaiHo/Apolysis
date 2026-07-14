@@ -6,7 +6,7 @@ use apolysis_contracts::{
     AuthenticatedSourceContext, AuthenticationSnapshot, OrganizationId, PrincipalRef,
     SourceRegistrationPolicy,
 };
-use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Row, Transaction};
+use sqlx::{postgres::PgPoolOptions, Connection, PgConnection, PgPool, Postgres, Row, Transaction};
 
 use super::{
     certificate::{credential_id, mtls_leaf_fingerprint, ClientCertificate},
@@ -31,10 +31,27 @@ pub struct AuthorityStore {
     pool: PgPool,
 }
 
+async fn qualify_served_connection(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
+    let has_origin_replication_role: bool =
+        sqlx::query_scalar("SELECT current_setting('session_replication_role', false) = 'origin'")
+            .fetch_one(connection)
+            .await?;
+    if !has_origin_replication_role {
+        return Err(sqlx::Error::Protocol(
+            "served PostgreSQL session failed qualification".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl AuthorityStore {
-    /// Connect to the real Gateway database and apply the ledger and current-
-    /// authority migrations in their reviewed order.
-    pub async fn connect_and_migrate(database_url: &str) -> Result<Self, GatewayServerError> {
+    /// Connect to an already-migrated Gateway database.
+    ///
+    /// Request-serving and authority-administration runtimes use this path so
+    /// their database roles do not require schema-owner privileges. Every
+    /// physical connection is qualified for normal trigger execution before
+    /// pool use.
+    pub async fn connect(database_url: &str) -> Result<Self, GatewayServerError> {
         if database_url.is_empty() || database_url.len() > MAX_DATABASE_URL_BYTES {
             return Err(GatewayServerError::configuration(
                 "Gateway database URL is invalid",
@@ -44,15 +61,47 @@ impl AuthorityStore {
         let pool = PgPoolOptions::new()
             .max_connections(16)
             .acquire_timeout(Duration::from_secs(10))
+            .after_connect(|connection, _metadata| {
+                Box::pin(async move { qualify_served_connection(connection).await })
+            })
             .connect(database_url)
             .await
             .map_err(GatewayServerError::database)?;
 
-        apolysis_gateway_postgres::MIGRATOR
-            .run(&pool)
-            .await
-            .map_err(migration_error)?;
         Ok(Self { pool })
+    }
+
+    /// Apply the ledger and current-authority migrations in reviewed order.
+    ///
+    /// This is reserved for the explicit `migrate` administration command.
+    pub async fn migrate(database_url: &str) -> Result<(), GatewayServerError> {
+        if database_url.is_empty() || database_url.len() > MAX_DATABASE_URL_BYTES {
+            return Err(GatewayServerError::configuration(
+                "Gateway database URL is invalid",
+            ));
+        }
+
+        // Migration role changes must never escape into a serving pool. A
+        // dedicated connection is dropped on both success and failure.
+        let mut connection = PgConnection::connect(database_url)
+            .await
+            .map_err(GatewayServerError::database)?;
+        sqlx::query("SET ROLE apolysis_schema_owner")
+            .execute(&mut connection)
+            .await
+            .map_err(GatewayServerError::database)?;
+        // sqlx deliberately keeps its migration history in public. Pin that
+        // one explicit schema after role elevation: PostgreSQL searches the
+        // omitted pg_catalog first, and this fresh connection cannot contain
+        // caller-created temporary objects.
+        sqlx::query("SET search_path = public")
+            .execute(&mut connection)
+            .await
+            .map_err(GatewayServerError::database)?;
+        apolysis_gateway_postgres::MIGRATOR
+            .run(&mut connection)
+            .await
+            .map_err(migration_error)
     }
 
     /// Resolve the peer leaf certificate against current PostgreSQL authority.
@@ -79,6 +128,13 @@ impl AuthorityStore {
             .begin()
             .await
             .map_err(GatewayServerError::database)?;
+        sqlx::query_scalar::<_, bool>(
+            "SELECT apolysis_gateway.lock_gateway_authority_by_fingerprint($1)",
+        )
+        .bind(fingerprint.as_slice())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?;
         let row = sqlx::query(
             "SELECT credential.credential_id, credential.organization_id, \
                     credential.source_registration_id, \
@@ -100,8 +156,7 @@ impl AuthorityStore {
              JOIN apolysis_gateway.source_registrations AS registration \
                ON registration.organization_id=credential.organization_id \
               AND registration.source_registration_id=credential.source_registration_id \
-             WHERE credential.certificate_fingerprint=$1 \
-             FOR SHARE OF credential, organization, registration",
+             WHERE credential.certificate_fingerprint=$1",
         )
         .bind(fingerprint.as_slice())
         .fetch_optional(&mut *transaction)
@@ -377,6 +432,42 @@ impl AuthorityStore {
                 .map_err(GatewayServerError::database)?;
         }
 
+        // Every authority path that spans these rows takes locks in the same
+        // hierarchy. In particular, evidence admission resolves organization
+        // then registration then credential, so control-plane writes must not
+        // acquire a credential while they can still wait on either ancestor.
+        sqlx::query(
+            "SELECT organization_id \
+             FROM apolysis_gateway.organizations \
+             WHERE organization_id=$1 \
+             FOR UPDATE",
+        )
+        .bind(registration.organization_id.as_str())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?;
+
+        if let Some(existing) = sqlx::query(
+            "SELECT organization_id \
+             FROM apolysis_gateway.source_registrations \
+             WHERE source_registration_id=$1 \
+             FOR UPDATE",
+        )
+        .bind(&registration.source_registration_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?
+        {
+            let existing_organization: String = existing
+                .try_get("organization_id")
+                .map_err(GatewayServerError::database)?;
+            if existing_organization != registration.organization_id.as_str() {
+                return Err(GatewayServerError::configuration(
+                    "Source registration identity is immutable",
+                ));
+            }
+        }
+
         if let Some(existing) = sqlx::query(
             "SELECT organization_id, source_registration_id, revoked_at_unix_ms \
              FROM apolysis_gateway.transport_credentials \
@@ -421,8 +512,7 @@ impl AuthorityStore {
              FROM apolysis_gateway.source_registrations AS registration \
              JOIN apolysis_gateway.organizations AS organization \
                ON organization.organization_id=registration.organization_id \
-             WHERE registration.source_registration_id=$1 \
-             FOR UPDATE OF registration, organization",
+             WHERE registration.source_registration_id=$1",
         )
         .bind(&registration.source_registration_id)
         .fetch_optional(&mut *transaction)
@@ -435,6 +525,7 @@ impl AuthorityStore {
                 "SELECT certificate_fingerprint, revoked_at_unix_ms \
                  FROM apolysis_gateway.transport_credentials \
                  WHERE source_registration_id=$1 \
+                 ORDER BY certificate_fingerprint \
                  FOR UPDATE",
             )
             .bind(&registration.source_registration_id)
@@ -839,4 +930,202 @@ fn validate_resolution_input(
 
 fn migration_error(error: sqlx::migrate::MigrateError) -> GatewayServerError {
     GatewayServerError::database(sqlx::Error::Migrate(Box::new(error)))
+}
+
+#[cfg(test)]
+mod real_postgres_tests {
+    use std::{error::Error, time::Duration};
+
+    use serde_json::json;
+    use sqlx::postgres::PgPoolOptions;
+    use tokio::time::timeout;
+
+    use super::*;
+    use crate::authority::policy::RegistrationDocument;
+
+    type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
+
+    const BOOTSTRAP_ROLES_SQL: &str =
+        include_str!("../../../apolysis-gateway-postgres/deploy/bootstrap_roles.sql");
+    const PRIVILEGES_SQL: &str =
+        include_str!("../../../apolysis-gateway-postgres/deploy/privileges.sql");
+    const APPLICATION_NAME: &str = "apolysis_gateway_register_lock_order";
+    const ORGANIZATION_ID: &str = "org_gateway_register_lock_order";
+    const REGISTRATION_ID: &str = "registration_gateway_lock_order";
+
+    fn registration(now_unix_ms: u64) -> TestResult<RegistrationDocument> {
+        Ok(serde_json::from_value(json!({
+            "organization_id": ORGANIZATION_ID,
+            "organization_state": "active",
+            "source_registration_id": REGISTRATION_ID,
+            "source_id": "source_gateway_lock_order",
+            "principal": {"kind": "workload", "id": "principal_gateway_lock_order"},
+            "policy_revision": 1,
+            "credential_epoch": 1,
+            "effective_at_unix_ms": now_unix_ms - 60_000,
+            "expires_at_unix_ms": now_unix_ms + 3_600_000,
+            "allowed_source_kinds": ["semantic_hook"],
+            "allowed_environments": ["ci_runner_or_remote_workspace"],
+            "allowed_operations": ["bind_runtime", "ingest", "finish_run"],
+            "effective_trust_profile": "harness_observed",
+            "allowed_capabilities": ["tool_calls", "source_health"],
+            "allowed_privacy_capabilities": ["structure_only"],
+            "allowed_redaction_profile_refs": ["redaction_gateway_lock_order"],
+            "allowed_run_authorities": [
+                {"kind": "service", "id": "authority_gateway_lock_order"}
+            ],
+            "allowed_run_privacy_profile_refs": ["privacy_gateway_lock_order"],
+            "allowed_run_retention_profile_refs": ["retention_gateway_lock_order"],
+            "required_run_source_kinds": ["semantic_hook"],
+            "may_create_runs": true,
+            "may_join_runs": false,
+            "may_finalize_runs": true
+        }))?)
+    }
+
+    fn certificate(now_unix_ms: u64) -> ClientCertificate {
+        ClientCertificate {
+            fingerprint: [0x5a; 32],
+            not_before_unix_ms: now_unix_ms - 120_000,
+            not_after_unix_ms: now_unix_ms + 7_200_000,
+        }
+    }
+
+    async fn wait_until_register_is_blocked_by(
+        pool: &PgPool,
+        blocking_pid: i32,
+    ) -> TestResult<i32> {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let blocked_pid = sqlx::query_scalar::<_, i32>(
+                    "SELECT activity.pid \
+                     FROM pg_catalog.pg_stat_activity AS activity \
+                     WHERE activity.datname=current_database() \
+                       AND activity.application_name=$1 \
+                       AND activity.state='active' \
+                       AND activity.wait_event_type='Lock' \
+                       AND $2=ANY(pg_catalog.pg_blocking_pids(activity.pid)) \
+                       AND activity.query LIKE '%apolysis_gateway.organizations%'",
+                )
+                .bind(APPLICATION_NAME)
+                .bind(blocking_pid)
+                .fetch_optional(pool)
+                .await?;
+                if let Some(pid) = blocked_pid {
+                    return Ok::<i32, sqlx::Error>(pid);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| "register_source did not block on the organization row within the bound")?
+        .map_err(Into::into)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires APOLYSIS_TEST_DATABASE_URL and an explicit real PostgreSQL lock-order gate"]
+    async fn register_source_obeys_organization_registration_credential_lock_order() -> TestResult {
+        if std::env::var("APOLYSIS_TEST_ALLOW_DATABASE_RESET").as_deref() != Ok("1") {
+            return Err(
+                "real lock-order gate requires explicit ephemeral database reset opt-in".into(),
+            );
+        }
+        let database_url = std::env::var("APOLYSIS_TEST_DATABASE_URL")?;
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        sqlx::query("DROP SCHEMA IF EXISTS apolysis_gateway CASCADE")
+            .execute(&admin_pool)
+            .await?;
+        sqlx::query("DROP TABLE IF EXISTS public._sqlx_migrations")
+            .execute(&admin_pool)
+            .await?;
+        sqlx::raw_sql(BOOTSTRAP_ROLES_SQL)
+            .execute(&admin_pool)
+            .await?;
+        AuthorityStore::migrate(&database_url).await?;
+        sqlx::raw_sql(PRIVILEGES_SQL).execute(&admin_pool).await?;
+
+        // The ephemeral database owner remains the session identity, while
+        // startup SET ROLE makes every store query execute with the exact
+        // production Gateway-control grants.
+        let query_separator = if database_url.contains('?') { '&' } else { '?' };
+        let named_database_url = format!(
+            "{database_url}{query_separator}application_name={APPLICATION_NAME}\
+             &options=-c%20role%3Dapolysis_gateway_control"
+        );
+        let store = AuthorityStore::connect(&named_database_url).await?;
+        let current_role: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&store.pool)
+            .await?;
+        if current_role != "apolysis_gateway_control" {
+            return Err("register_source test did not use the Gateway-control role".into());
+        }
+        let now_unix_ms = current_unix_ms()?;
+        store
+            .register_source(registration(now_unix_ms)?, certificate(now_unix_ms))
+            .await?;
+
+        let mut evidence_transaction = admin_pool.begin().await?;
+        sqlx::query("SET LOCAL deadlock_timeout='100ms'")
+            .execute(&mut *evidence_transaction)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout='5s'")
+            .execute(&mut *evidence_transaction)
+            .await?;
+        let evidence_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+            .fetch_one(&mut *evidence_transaction)
+            .await?;
+        sqlx::query(
+            "SELECT organization_id \
+             FROM apolysis_gateway.organizations \
+             WHERE organization_id=$1 \
+             FOR SHARE",
+        )
+        .bind(ORGANIZATION_ID)
+        .fetch_one(&mut *evidence_transaction)
+        .await?;
+
+        let registering_store = store.clone();
+        let registering = tokio::spawn(async move {
+            registering_store
+                .register_source(registration(now_unix_ms)?, certificate(now_unix_ms))
+                .await?;
+            TestResult::Ok(())
+        });
+
+        let register_pid = wait_until_register_is_blocked_by(&admin_pool, evidence_pid).await?;
+        if register_pid == evidence_pid {
+            return Err("register_source lock observation returned the blocking backend".into());
+        }
+
+        sqlx::query(
+            "SELECT source_registration_id \
+             FROM apolysis_gateway.source_registrations \
+             WHERE source_registration_id=$1 \
+             FOR SHARE",
+        )
+        .bind(REGISTRATION_ID)
+        .fetch_one(&mut *evidence_transaction)
+        .await?;
+        sqlx::query(
+            "SELECT credential_id \
+             FROM apolysis_gateway.transport_credentials \
+             WHERE source_registration_id=$1 \
+             ORDER BY certificate_fingerprint \
+             FOR SHARE",
+        )
+        .bind(REGISTRATION_ID)
+        .fetch_all(&mut *evidence_transaction)
+        .await?;
+        evidence_transaction.commit().await?;
+
+        let register_result = timeout(Duration::from_secs(10), registering)
+            .await
+            .map_err(|_| "register_source did not finish within the bound")?
+            .map_err(|_| "register_source task did not complete")?;
+        register_result?;
+        Ok(())
+    }
 }

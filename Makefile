@@ -1,4 +1,5 @@
 .PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
+	test-evidence-objects-real \
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
 	test-projection-postgres \
@@ -59,6 +60,10 @@ test-gateway-postgres:
 # container and volume and never targets an operator-provided database.
 test-gateway-postgres-crash-recovery:
 	./scripts/test-gateway-postgres-crash-recovery.sh
+
+# Opt-in real-provider object lifecycle and crash-recovery qualification.
+test-evidence-objects-real:
+	./scripts/test-evidence-objects-real.sh
 
 # Opt-in production-transport gate. This starts a real PostgreSQL server,
 # creates a real CA and leaf certificates, and exercises the Gateway through

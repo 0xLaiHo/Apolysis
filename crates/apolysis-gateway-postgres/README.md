@@ -39,6 +39,15 @@ crate. The schema can hold an optional `wrapped_data_key` for a future
 envelope-encryption implementation, but the built-in protector has no KMS
 integration and does not generate or wrap data keys.
 
+The runtime repository connects only to an already-migrated schema and exposes
+no migration method. Production deployment first applies
+`deploy/bootstrap_roles.sql`, runs the explicit migration command under the
+NOLOGIN schema owner, and then applies `deploy/privileges.sql`. Gateway
+runtime/control, evidence runtime/control, and deletion acknowledgement use
+separate capability roles. This is process-plane least privilege, not tenant
+row-level security; see [SCHEMA.md](SCHEMA.md) for the exact order and trust
+boundary.
+
 ## Explicit PostgreSQL gate
 
 Unit tests and the PostgreSQL integration tests are intentionally separate.
@@ -126,10 +135,15 @@ PostgreSQL SIGKILL/WAL redo, and application-process death on both sides of the
 commit boundary for one runtime-generated `open_run` shape. It does not qualify
 HTTPS Gateway-server recovery, the full multiprocess or lifecycle race matrix,
 sustained or capacity load, replication, failover, backup/restore, or high
-availability. Production KMS/envelope-key integration, database roles and
-row-level-security deployment, complete network authority/revocation, object
-storage, background reapers, admission controls beyond the 256-stream cap,
-durable projectors, Query API, and Console remain outside this crate.
+availability. The evidence-object provider gate separately qualifies distinct
+SCRAM logins, schema-owner separation, migration-history ownership, served-path
+role allowlists, and denial of owner assumption, trigger disabling, credential
+reads, and direct deletion acknowledgements. That is process-plane least
+privilege, not tenant isolation. Production KMS/envelope-key integration,
+tenant row-level-security deployment, complete network authority/revocation,
+continuously operated background reapers, admission controls beyond the
+256-stream cap, authorized object reads, public projector-backed read surfaces,
+Query API, and Console remain outside this crate.
 The repository suite also qualifies one-update contiguous sequence reservation
 for maximum, mixed-duplicate, all-duplicate, concurrent, and rollback batches;
 those targeted tests do not close the broader race or capacity matrix.

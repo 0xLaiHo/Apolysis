@@ -90,12 +90,21 @@ impl PostgresGatewayRepository {
         let binding_digest = canonical_runtime_binding_digest(request.binding())
             .map_err(|_| TxFailure::rollback(repository_failure()))?;
         let binding_digest_bytes = hex_digest(&binding_digest).map_err(TxFailure::rollback)?;
+        sqlx::query_scalar::<_, bool>(
+            "SELECT apolysis_gateway.lock_gateway_runtime_binding($1,$2,$3)",
+        )
+        .bind(context.organization_id().as_str())
+        .bind(request.run_id().as_str())
+        .bind(request.binding().binding_id())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_lock_binding", error))?;
         if let Some(existing) = sqlx::query(
             "SELECT binding_digest, source_registration_id, source_stream_id, \
                     registration_policy_revision, effective_trust_profile, manifest_version, \
                     manifest_digest \
              FROM apolysis_gateway.runtime_bindings \
-             WHERE organization_id=$1 AND run_id=$2 AND binding_id=$3 FOR UPDATE",
+             WHERE organization_id=$1 AND run_id=$2 AND binding_id=$3",
         )
         .bind(context.organization_id().as_str())
         .bind(request.run_id().as_str())
@@ -351,11 +360,17 @@ async fn load_lease(
 ) -> TxResult<LeaseRow> {
     let lease_digest =
         hex_digest(&lease_id_digest(request.lease_id())).map_err(TxFailure::rollback)?;
+    sqlx::query_scalar::<_, bool>("SELECT apolysis_gateway.lock_gateway_lease($1,$2)")
+        .bind(context.organization_id().as_str())
+        .bind(&lease_digest)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_lock_lease", error))?;
     let row = sqlx::query(
         "SELECT run_id, source_registration_id, source_stream_id, source_id, principal_kind, \
                 principal_id, registration_policy_revision, expires_at_unix_ms, revoked_at_unix_ms \
          FROM apolysis_gateway.leases \
-         WHERE organization_id=$1 AND lease_digest=$2 FOR UPDATE",
+         WHERE organization_id=$1 AND lease_digest=$2",
     )
     .bind(context.organization_id().as_str())
     .bind(&lease_digest)

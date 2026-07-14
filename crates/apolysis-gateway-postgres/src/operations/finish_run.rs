@@ -480,10 +480,16 @@ async fn load_lease(
 ) -> TxResult<LeaseRow> {
     let lease_digest =
         hex_digest(&lease_id_digest(request.lease_id())).map_err(TxFailure::rollback)?;
+    sqlx::query_scalar::<_, bool>("SELECT apolysis_gateway.lock_gateway_lease($1,$2)")
+        .bind(context.organization_id().as_str())
+        .bind(&lease_digest)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| TxFailure::from_sqlx_at("finish_run_lock_lease", error))?;
     let row = sqlx::query(
         "SELECT run_id, source_registration_id, source_stream_id, source_id, principal_kind, \
                 principal_id, registration_policy_revision, expires_at_unix_ms, revoked_at_unix_ms \
-         FROM apolysis_gateway.leases WHERE organization_id=$1 AND lease_digest=$2 FOR UPDATE",
+         FROM apolysis_gateway.leases WHERE organization_id=$1 AND lease_digest=$2",
     )
     .bind(context.organization_id().as_str())
     .bind(&lease_digest)

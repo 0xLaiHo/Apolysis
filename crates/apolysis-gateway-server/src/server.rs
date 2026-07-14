@@ -51,14 +51,14 @@ pub async fn serve(config: GatewayServerConfig) -> Result<(), GatewayServerError
         )
         .map_err(GatewayServerError::gateway)?,
     );
-    let repository = PostgresGatewayRepository::connect_and_migrate(
+    let repository = PostgresGatewayRepository::connect(
         &database_url,
         replay_protector,
         PostgresGatewayConfig::default(),
     )
     .await
     .map_err(GatewayServerError::gateway)?;
-    let authority = AuthorityStore::connect_and_migrate(&database_url).await?;
+    let authority = AuthorityStore::connect(&database_url).await?;
     let gateway = ExecutionEvidenceGateway::new(repository, SystemClock, OsRandomIdGenerator);
     let application = router(GatewayHttpState::new(gateway, authority));
 

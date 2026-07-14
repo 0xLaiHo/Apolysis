@@ -21,7 +21,7 @@ use apolysis_gateway::{
     OsRandomIdGenerator, SystemClock,
 };
 use apolysis_gateway_postgres::{
-    Aes256GcmReplayProtector, PostgresGatewayConfig, PostgresGatewayRepository,
+    Aes256GcmReplayProtector, PostgresGatewayConfig, PostgresGatewayRepository, MIGRATOR,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -520,8 +520,8 @@ async fn production_gateway(
     let protector = protector.map_err(|_| DriverError("replay protector construction"))?;
     let repository =
         PostgresGatewayRepository::from_pool(pool.clone(), Arc::new(protector), config);
-    repository
-        .migrate()
+    MIGRATOR
+        .run(&pool)
         .await
         .map_err(|_| DriverError("database migration"))?;
     let gateway = ExecutionEvidenceGateway::new(repository, SystemClock, OsRandomIdGenerator);
