@@ -187,4 +187,34 @@ mod tests {
 
         assert_eq!(error.to_string(), "Gateway file paths must be absolute");
     }
+
+    #[test]
+    fn production_config_rejects_qualification_options_even_with_all_features() {
+        let error = GatewayServerConfig::from_args(
+            [
+                "gateway",
+                "--listen",
+                "127.0.0.1:0",
+                "--database-url-file",
+                "/run/apolysis/database.url",
+                "--tls-certificate",
+                "/run/apolysis/server.pem",
+                "--tls-private-key",
+                "/run/apolysis/server.key",
+                "--client-ca",
+                "/run/apolysis/ca.pem",
+                "--replay-key",
+                "/run/apolysis/replay.key",
+                "--ready-file",
+                "/run/apolysis/ready",
+                "--qualification-operation",
+                "open_run",
+            ]
+            .into_iter()
+            .map(Into::into),
+        )
+        .expect_err("production CLI must not expose the qualification barrier");
+
+        assert_eq!(error.to_string(), "Gateway received an unsupported option");
+    }
 }

@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = []
+qualification = []
+
 [dependencies]
 apolysis-contracts = { path = "../apolysis-contracts" }
 apolysis-gateway = { path = "../apolysis-gateway" }
@@ -54,3 +58,8 @@ path = "src/bin/apolysis-gateway-authority.rs"
 [[bin]]
 name = "apolysis-gateway-request"
 path = "src/bin/apolysis-gateway-request.rs"
+
+[[bin]]
+name = "apolysis-gateway-qualification-server"
+path = "src/bin/apolysis_gateway_qualification_server.rs"
+required-features = ["qualification"]

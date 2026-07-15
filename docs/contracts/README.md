@@ -109,8 +109,17 @@ third process to prove exact convergence. Catalog-discovered plaintext
 scanning, `pg_amcheck`, `pg_dump`, generated-secret scans, private-file checks,
 and dedicated-resource cleanup are part of the gate. This qualifies the
 application/repository process seam, not HTTPS Gateway-server recovery.
-HTTPS trace and error-body secret handling therefore remains part of the
-server-recovery gate.
+A sibling real direct-mTLS HTTPS gate now covers all four lifecycle routes at
+the post-commit/pre-ack server-death seam. For both the novel result and exact
+replay, a feature-gated qualification-only binary writes a static private
+mode-`0600` marker after commit and complete response construction but before
+returning the response to Axum; an external `SIGKILL` must leave loopback
+`curl` at HTTP `000` with no headers or body. The database must retain one
+operation/replay and the expected ledger/outbox effects without changing the
+encrypted replay fingerprint, after which a third normal production server
+returns the exact result. The qualification binary accepts only an ephemeral
+loopback listener; the production CLI and remote HTTP requests cannot arm the
+barrier.
 
 Current PostgreSQL ingest still uses a full per-stream history window for gap
 discovery—the SQL limit bounds returned gaps, not scan work. A novel batch now
@@ -120,11 +129,13 @@ sequencing. Incremental watermark/gap state, bulk insertion, and load/capacity
 qualification remain W3–W6 storage work.
 
 This is not a production Gateway and does not complete W3–W6. The broader
-multiprocess/lifecycle race matrix, sustained or capacity load,
-replication/failover, backup/restore, HA, and HTTPS Gateway-server recovery are
-not qualified; nor are production KMS/envelope-key integration or database RLS
-deployment; network transport or live credential revocation; object-store
-resolver; background deadline/replay cleanup; or production rate and
-request-size enforcement beyond the implemented stream cap. The
-organization-scoped Query API, versioned
-projectors, and Web Console specified here are also not implemented.
+multiprocess/lifecycle and network pre-commit race matrices, sustained or
+capacity load, replication/failover, backup/restore, and HA are not qualified;
+nor are production KMS/envelope-key integration or database RLS deployment,
+transaction-time authority revalidation, lease/credential rotation, the
+authorized object-read resolver and downstream deletion propagation,
+background deadline/replay cleanup, or production rate and request-size
+enforcement beyond the implemented stream cap. JWT/workload-identity transport
+profiles also remain open. The
+organization-scoped Query API, complete Console-v0 read-model projectors, and
+Web Console specified here are also not implemented.
