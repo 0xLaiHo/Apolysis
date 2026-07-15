@@ -83,6 +83,22 @@ catalog-discovered plaintext scanning, `pg_amcheck`, `pg_dump`, generated-secret
 scans, private-file checks, and dedicated-resource cleanup. It exercises an
 application/repository process seam, not recovery of an HTTPS Gateway server.
 
+A sibling real direct-mTLS HTTPS recovery gate reuses the production listener,
+application core, and PostgreSQL repository while adding one feature-gated
+response barrier through a separate qualification-only binary. For each of
+`open_run`, `bind_runtime`, `ingest`, and `finish_run`, it stops both the novel
+success and its exact replay after the database commit and complete response
+construction, but before the handler returns that response to Axum. A static
+mode-`0600` marker in a private local directory signals that boundary; the gate
+then sends external `SIGKILL` to the Gateway. The waiting loopback `curl` must
+observe HTTP `000` with no response header or body. PostgreSQL inspection proves
+one operation, one encrypted replay, and the route's expected ledger/outbox
+effects, while the encrypted replay fingerprint remains unchanged across the
+replay crash. A third, normal production server then returns the exact durable
+result and lets the lifecycle proceed. The barrier exists only in an explicit
+feature build, requires an ephemeral loopback listener, and cannot be armed by
+the production CLI or any remote request, header, or body.
+
 Current PostgreSQL gap discovery evaluates a window over the full persisted
 history for one source stream; its SQL limit bounds returned gaps rather than
 scan work. Novel envelopes reserve one contiguous organization sequence range
@@ -107,22 +123,21 @@ roles are process-plane separation, not tenant RLS.
 The slice is a conformance foundation, not a production service, and does not
 complete W3–W6. In particular, it has:
 
-- no HTTPS Gateway-server crash recovery, complete multiprocess/lifecycle race
-  matrix, sustained or capacity load, replication/failover, backup/restore, or
-  high-availability qualification; the narrower graceful PostgreSQL restart,
-  PostgreSQL SIGKILL/WAL redo, and application-process pre-commit,
-  post-commit/pre-ack, and replay/pre-ack crash slice is covered by the explicit
-  recovery gate; the transport gate covers bounded safe errors and generated-
-  secret log scans, but not the HTTPS post-commit/pre-ack crash seam;
+- the repository recovery gate remains a non-HTTPS application/repository seam;
+  the sibling HTTPS gate qualifies post-commit/pre-ack process death for novel
+  success and exact replay on all four routes, but not a network pre-commit
+  fault matrix, the complete multiprocess/lifecycle race matrix, sustained or
+  capacity load, replication/failover, backup/restore, or high availability;
 - no production KMS/envelope-data-key custody or tenant RLS deployment; the
   built-in replay protector and evidence-object wrapping key are direct-key
   in-process inputs, and the fixed database roles are not a shared-cluster
   tenant-isolation profile;
 - a real direct-mTLS HTTP tracer covers all four lifecycle routes, live
   credential revocation, cross-organization rejection, and graceful
-  Gateway-process restart, but transaction-time authority revalidation,
-  credential-epoch/lease rotation, post-commit/pre-ack crash qualification,
-  JWT/workload-identity profiles, and production admission remain open;
+  Gateway-process restart; the sibling gate also covers the bounded HTTPS
+  post-commit/pre-ack crash seam, but transaction-time authority revalidation,
+  credential-epoch/lease rotation, JWT/workload-identity profiles, production
+  admission, and the broader network fault/race matrix remain open;
 - no authorized Query/object-read resolver for referenced payloads;
 - no background deadline or encrypted-replay cleanup reaper—run expiration is
   reconciled only when a later novel lifecycle command reaches the application

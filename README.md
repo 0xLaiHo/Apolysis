@@ -99,13 +99,15 @@ SIGKILL/WAL recovery, and Gateway application-process death before commit,
 after commit, and during replay while preserving rollback or exact convergence
 before a dedicated client acknowledgement is emitted. This qualifies a
 repository/application-process seam, not recovery of the HTTPS Gateway server.
-The broader multiprocess race matrix, load, replication, failover,
-backup/restore, and high availability remain unqualified, as do production KMS
-integration, database row-level-security deployment, HTTPS post-commit/pre-ack
-Gateway-server crash qualification, atomic authority revalidation with ledger
-commit, lease/credential rotation, an authorized object-read resolver,
-evidence-object projection/read views, continuous background reaper operation,
-and capacity-qualified resource limits. The projection does not provide public
+A sibling real direct-mTLS HTTPS recovery gate now covers post-commit/pre-ack
+Gateway-server death and exact replay convergence for all four lifecycle routes.
+The broader multiprocess and network pre-commit race matrices, load,
+replication, failover, backup/restore, and high availability remain unqualified,
+as do production KMS integration, database row-level-security deployment,
+atomic authority revalidation with ledger commit, lease/credential rotation,
+an authorized object-read resolver, evidence-object projection/read views,
+continuous background reaper operation, and capacity-qualified resource
+limits. The projection does not provide public
 Query authorization, cursor/SSE, Console, coverage, findings, source health, or
 evidence-object lifecycle views; its RLS GUC is defense in depth, not
 authorization. JWT/workload-identity transport profiles, production admission,
