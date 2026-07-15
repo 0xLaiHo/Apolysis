@@ -110,6 +110,29 @@ This is an application/repository process seam. It does not start or kill the
 HTTPS Gateway server and therefore does not qualify network-listener recovery,
 trace secret handling, or HTTP error-body secret handling.
 
+## Sibling HTTPS crash-recovery gate
+
+The Gateway-server crate adds a separate real direct-mTLS qualification gate on
+top of this repository. For `open_run`, `bind_runtime`, `ingest`, and
+`finish_run`, it drives both a novel success and its exact replay through the
+production HTTPS listener. A feature-gated qualification-only binary writes a
+static mode-`0600` marker after the PostgreSQL commit and complete response
+construction but before the handler returns the response to Axum, then waits
+for an external `SIGKILL`. Loopback `curl` must report HTTP `000` with no header
+or body. Database inspection requires one durable operation, one encrypted
+replay, and the route's expected ledger/outbox effects; the encrypted replay
+fingerprint must remain unchanged across the replay crash. A third normal
+production server then returns the exact result and continues the lifecycle:
+
+```bash
+make test-gateway-https-crash-recovery
+```
+
+The qualification binary requires an ephemeral loopback listener and a private
+local marker. It is built only with the explicit `qualification` feature; the
+production CLI rejects its options, and no remote request, header, or body can
+arm the barrier.
+
 To compile and run only non-database tests:
 
 ```bash
@@ -133,17 +156,21 @@ This crate is a write-path prototype, not a production Gateway service and not
 completion of W3–W6. The dedicated gate qualifies graceful PostgreSQL restart,
 PostgreSQL SIGKILL/WAL redo, and application-process death on both sides of the
 commit boundary for one runtime-generated `open_run` shape. It does not qualify
-HTTPS Gateway-server recovery, the full multiprocess or lifecycle race matrix,
-sustained or capacity load, replication, failover, backup/restore, or high
-availability. The evidence-object provider gate separately qualifies distinct
+HTTPS Gateway-server recovery by itself. The sibling Gateway-server gate
+qualifies the bounded post-commit/pre-ack HTTPS seam for all four routes, but
+not a network pre-commit matrix, the full multiprocess or lifecycle race
+matrix, sustained or capacity load, replication, failover, backup/restore, or
+high availability.
+The evidence-object provider gate separately qualifies distinct
 SCRAM logins, schema-owner separation, migration-history ownership, served-path
 role allowlists, and denial of owner assumption, trigger disabling, credential
 reads, and direct deletion acknowledgements. That is process-plane least
-privilege, not tenant isolation. Production KMS/envelope-key integration,
-tenant row-level-security deployment, complete network authority/revocation,
+privilege, not tenant isolation. Transaction-time authority revalidation,
+authorized object-read resolution and downstream deletion propagation,
+production KMS/envelope-key integration, tenant row-level-security deployment,
 continuously operated background reapers, admission controls beyond the
-256-stream cap, authorized object reads, public projector-backed read surfaces,
-Query API, and Console remain outside this crate.
+256-stream cap, public projector-backed read surfaces, Query API, and Console
+remain outside this crate.
 The repository suite also qualifies one-update contiguous sequence reservation
 for maximum, mixed-duplicate, all-duplicate, concurrent, and rollback batches;
 those targeted tests do not close the broader race or capacity matrix.

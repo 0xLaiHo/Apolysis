@@ -57,6 +57,13 @@ enum IoContext {
     ReadyOpen,
     ReadyWrite,
     ReadySync,
+    QualificationParentOpen,
+    QualificationParentMetadata,
+    QualificationParentSync,
+    QualificationMarkerOpen,
+    QualificationMarkerMetadata,
+    QualificationMarkerWrite,
+    QualificationMarkerSync,
     Unspecified,
 }
 
@@ -286,6 +293,13 @@ fn safe_configuration_message(message: &'static str) -> &'static str {
         | "Gateway option names must be UTF-8"
         | "Gateway option values must be UTF-8"
         | "Gateway option was supplied more than once"
+        | "Gateway qualification listener must use 127.0.0.1:0"
+        | "Gateway qualification marker is not a private regular file"
+        | "Gateway qualification marker must differ from the ready file"
+        | "Gateway qualification marker parent is invalid"
+        | "Gateway qualification marker parent must be private"
+        | "Gateway qualification marker path must be absolute"
+        | "Gateway qualification operation is unsupported"
         | "Gateway received an unsupported option"
         | "Gateway replay key must be 32-byte lowercase hexadecimal"
         | "Gateway secret file is not UTF-8"
@@ -318,6 +332,13 @@ fn io_context(context: &'static str) -> IoContext {
         "ready-open" => IoContext::ReadyOpen,
         "ready-write" => IoContext::ReadyWrite,
         "ready-sync" => IoContext::ReadySync,
+        "qualification-parent-open" => IoContext::QualificationParentOpen,
+        "qualification-parent-metadata" => IoContext::QualificationParentMetadata,
+        "qualification-parent-sync" => IoContext::QualificationParentSync,
+        "qualification-marker-open" => IoContext::QualificationMarkerOpen,
+        "qualification-marker-metadata" => IoContext::QualificationMarkerMetadata,
+        "qualification-marker-write" => IoContext::QualificationMarkerWrite,
+        "qualification-marker-sync" => IoContext::QualificationMarkerSync,
         _ => IoContext::Unspecified,
     }
 }
@@ -331,6 +352,13 @@ fn io_context_name(context: IoContext) -> &'static str {
         IoContext::ReadyOpen => "ready-open",
         IoContext::ReadyWrite => "ready-write",
         IoContext::ReadySync => "ready-sync",
+        IoContext::QualificationParentOpen => "qualification-parent-open",
+        IoContext::QualificationParentMetadata => "qualification-parent-metadata",
+        IoContext::QualificationParentSync => "qualification-parent-sync",
+        IoContext::QualificationMarkerOpen => "qualification-marker-open",
+        IoContext::QualificationMarkerMetadata => "qualification-marker-metadata",
+        IoContext::QualificationMarkerWrite => "qualification-marker-write",
+        IoContext::QualificationMarkerSync => "qualification-marker-sync",
         IoContext::Unspecified => "unspecified",
     }
 }

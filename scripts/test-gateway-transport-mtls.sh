@@ -11,6 +11,7 @@ postgres_image="$DEFAULT_POSTGRES_IMAGE"
 pull_timeout_seconds="${APOLYSIS_POSTGRES_PULL_TIMEOUT_SECONDS:-300}"
 start_timeout_seconds="${APOLYSIS_POSTGRES_START_TIMEOUT_SECONDS:-60}"
 gate_timeout_seconds="${APOLYSIS_GATEWAY_TRANSPORT_TEST_TIMEOUT_SECONDS:-900}"
+crash_recovery_enabled="${APOLYSIS_GATEWAY_HTTPS_CRASH_RECOVERY:-0}"
 
 if [[ "${APOLYSIS_GATEWAY_TRANSPORT_INNER:-0}" != "1" ]]; then
     if ! command -v timeout >/dev/null 2>&1; then
@@ -22,7 +23,9 @@ if [[ "${APOLYSIS_GATEWAY_TRANSPORT_INNER:-0}" != "1" ]]; then
         exit 1
     fi
     export APOLYSIS_GATEWAY_TRANSPORT_INNER=1
-    exec timeout --foreground --kill-after=15s "${gate_timeout_seconds}s" "$0" "$@"
+    # The grace interval must cover the bounded EXIT cleanup path: Gateway and
+    # client termination, container removal/verification, and private files.
+    exec timeout --foreground --kill-after=60s "${gate_timeout_seconds}s" "$0" "$@"
 fi
 
 require_command() {
@@ -61,9 +64,20 @@ for command in awk cargo cmp curl date docker grep head jq mktemp od openssl sta
     require_command "$command"
 done
 
+# Every HTTP target in this gate is a loopback listener. Ignore ambient proxy
+# configuration so a CONNECT intermediary can neither observe nor satisfy the
+# mTLS qualification seam.
+curl() {
+    command curl --noproxy '*' "$@"
+}
+
 require_positive_integer APOLYSIS_POSTGRES_PULL_TIMEOUT_SECONDS "$pull_timeout_seconds"
 require_positive_integer APOLYSIS_POSTGRES_START_TIMEOUT_SECONDS "$start_timeout_seconds"
 require_positive_integer APOLYSIS_GATEWAY_TRANSPORT_TEST_TIMEOUT_SECONDS "$gate_timeout_seconds"
+if [[ "$crash_recovery_enabled" != "0" && "$crash_recovery_enabled" != "1" ]]; then
+    printf 'error: APOLYSIS_GATEWAY_HTTPS_CRASH_RECOVERY must be 0 or 1\n' >&2
+    exit 1
+fi
 
 if ! timeout 10s docker info >/dev/null 2>&1; then
     printf 'error: Docker daemon is unavailable or inaccessible\n' >&2
@@ -74,9 +88,17 @@ printf 'Building the production Gateway transport binaries...\n'
 timeout --foreground --kill-after=15s "${gate_timeout_seconds}s" \
     cargo build -p apolysis-gateway-server --bins
 
+if [[ "$crash_recovery_enabled" == "1" ]]; then
+    timeout --foreground --kill-after=15s "${gate_timeout_seconds}s" \
+        cargo build -p apolysis-gateway-server \
+            --features qualification \
+            --bin apolysis-gateway-qualification-server
+fi
+
 readonly gateway_bin="target/debug/apolysis-gateway-server"
 readonly authority_bin="target/debug/apolysis-gateway-authority"
 readonly request_bin="target/debug/apolysis-gateway-request"
+readonly qualification_gateway_bin="target/debug/apolysis-gateway-qualification-server"
 
 for binary in "$gateway_bin" "$authority_bin" "$request_bin"; do
     if [[ ! -x "$binary" ]]; then
@@ -84,6 +106,10 @@ for binary in "$gateway_bin" "$authority_bin" "$request_bin"; do
         exit 1
     fi
 done
+if [[ "$crash_recovery_enabled" == "1" && ! -x "$qualification_gateway_bin" ]]; then
+    printf 'error: expected qualification Gateway executable was not built\n' >&2
+    exit 1
+fi
 
 readonly random_suffix="$(random_hex 8)"
 readonly container_name="apolysis-gateway-transport-${random_suffix}"
@@ -108,6 +134,8 @@ readonly ready_file="${secret_directory}/gateway.ready"
 gateway_pid=""
 gateway_base_url=""
 workload_pid=""
+crash_client_pid=""
+qualification_private_artifacts=()
 
 stop_gateway() {
     if [[ -n "$gateway_pid" ]] && kill -0 "$gateway_pid" >/dev/null 2>&1; then
@@ -121,9 +149,24 @@ stop_gateway() {
     gateway_pid=""
 }
 
-start_gateway() {
+stop_owned_process() {
+    local process_pid="$1"
+    if [[ -n "$process_pid" ]] && kill -0 "$process_pid" >/dev/null 2>&1; then
+        kill -TERM "$process_pid" >/dev/null 2>&1 || true
+        timeout 5s tail --pid="$process_pid" -f /dev/null >/dev/null 2>&1 || \
+            kill -KILL "$process_pid" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$process_pid" ]]; then
+        wait "$process_pid" 2>/dev/null || true
+    fi
+}
+
+start_gateway_process() {
+    local gateway_executable="$1"
+    shift
     rm -f -- "$ready_file"
-    "$gateway_bin" \
+    "$gateway_executable" \
+            "$@" \
             --listen 127.0.0.1:0 \
             --database-url-file "$database_url_file" \
             --tls-certificate "$server_cert" \
@@ -159,17 +202,228 @@ start_gateway() {
     fi
 }
 
+start_gateway() {
+    start_gateway_process "$gateway_bin"
+}
+
+start_qualification_gateway() {
+    local operation="$1"
+    local marker="$2"
+    rm -f -- "$marker"
+    start_gateway_process "$qualification_gateway_bin" \
+        --qualification-operation "$operation" \
+        --qualification-marker "$marker"
+}
+
+wait_for_gateway_sessions_to_close() {
+    local deadline=$((SECONDS + 15))
+    local session_count=""
+    while true; do
+        session_count="$(timeout 10s docker exec -i "$container_name" \
+            psql --username "$database_user" --dbname "$database_name" \
+                --no-align --tuples-only \
+                --set=runtime_login="$gateway_runtime_login" <<'SQL' | tr -d '[:space:]'
+SELECT count(*) FROM pg_catalog.pg_stat_activity
+WHERE usename=:'runtime_login';
+SQL
+)"
+        if [[ "$session_count" == "0" ]]; then
+            return
+        fi
+        if ((SECONDS >= deadline)); then
+            printf 'error: killed Gateway runtime sessions did not close\n' >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+}
+
+qualify_post_commit_crash() {
+    local operation="$1"
+    local route="$2"
+    local request_file="$3"
+    local artifact_prefix="$4"
+    local operation_id=""
+    operation_id="$(jq -er '.client_operation_id' "$request_file")"
+    local expected_replay_fingerprint=""
+
+    printf 'Qualifying HTTPS post-commit/pre-ack recovery for %s...\n' "$operation"
+    local attempt=""
+    for attempt in committed replay; do
+        local marker="${secret_directory}/${artifact_prefix}.${attempt}.post-commit"
+        local response="${secret_directory}/${artifact_prefix}.${attempt}.response"
+        local headers="${secret_directory}/${artifact_prefix}.${attempt}.headers"
+        local http_status="${secret_directory}/${artifact_prefix}.${attempt}.http-status"
+        local curl_status="${secret_directory}/${artifact_prefix}.${attempt}.curl-status"
+        local curl_stderr="${secret_directory}/${artifact_prefix}.${attempt}.curl-stderr"
+        # curl may not create its body output when the connection dies before
+        # the first response byte, so establish the private empty artifact now.
+        : >"$response"
+        qualification_private_artifacts+=(
+            "$marker" "$response" "$headers" "$http_status" "$curl_status" "$curl_stderr"
+        )
+
+        stop_gateway
+        start_qualification_gateway "$operation" "$marker"
+        # Launch the real curl process directly so kill -0 below proves the
+        # network client itself—not a wrapper subshell—is still blocked.
+        command curl --noproxy '*' --silent --show-error --http1.1 \
+            --connect-timeout 5 \
+            --max-time 45 \
+            --cacert "$ca_cert" \
+            --cert "$client_cert" \
+            --key "$client_key" \
+            --header 'Accept: application/json' \
+            --header 'Content-Type: application/json' \
+            --data-binary "@${request_file}" \
+            --dump-header "$headers" \
+            --output "$response" \
+            --write-out '%{http_code}\n' \
+            "${gateway_base_url}/gateway/v0.1/${route}" \
+            >"$http_status" 2>"$curl_stderr" &
+        crash_client_pid=$!
+
+        local marker_deadline=$((SECONDS + 30))
+        while [[ ! -s "$marker" ]]; do
+            if ! kill -0 "$gateway_pid" >/dev/null 2>&1; then
+                printf 'error: qualification Gateway exited before the %s marker\n' \
+                    "$operation" >&2
+                exit 1
+            fi
+            if ! kill -0 "$crash_client_pid" >/dev/null 2>&1; then
+                printf 'error: %s client received a response before the post-commit marker\n' \
+                    "$operation" >&2
+                exit 1
+            fi
+            if ((SECONDS >= marker_deadline)); then
+                printf 'error: timed out waiting for the %s post-commit marker\n' \
+                    "$operation" >&2
+                exit 1
+            fi
+            sleep 0.1
+        done
+
+        if [[ "$(<"$marker")" != "committed" ]] || \
+            [[ "$(stat -c '%a' "$marker")" != "600" ]]; then
+            printf 'error: %s qualification marker violated its static private contract\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        if ! kill -0 "$crash_client_pid" >/dev/null 2>&1; then
+            printf 'error: %s HTTP client exited before process death\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        if [[ -s "$headers" || -s "$response" || -s "$http_status" ]]; then
+            printf 'error: %s HTTP acknowledgement escaped before process death (headers=%s body=%s status=%s)\n' \
+                "$operation" \
+                "$(stat -c '%s' "$headers" 2>/dev/null || printf '0')" \
+                "$(stat -c '%s' "$response" 2>/dev/null || printf '0')" \
+                "$(stat -c '%s' "$http_status" 2>/dev/null || printf '0')" >&2
+            exit 1
+        fi
+
+        local durable_operation_counts=""
+        durable_operation_counts="$(timeout 15s docker exec -i "$container_name" \
+            psql --username "$gateway_runtime_login" --dbname "$database_name" \
+                --no-align --tuples-only \
+                --set=organization_id="$organization_id" \
+                --set=operation_id="$operation_id" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND client_operation_id=:'operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.client_operation_id=:'operation_id'),
+    (SELECT md5(concat_ws('|',
+        replay.encryption_algorithm,
+        replay.cipher_version::text,
+        replay.encryption_key_ref,
+        coalesce(encode(replay.wrapped_data_key, 'hex'), ''),
+        encode(replay.nonce, 'hex'),
+        encode(replay.authentication_tag, 'hex'),
+        replay.aad_digest,
+        encode(replay.outcome_ciphertext, 'hex'),
+        replay.created_at_unix_ms::text,
+        replay.expires_at_unix_ms::text
+    )) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.client_operation_id=:'operation_id')
+);
+SQL
+)"
+        local current_replay_fingerprint=""
+        if [[ "$durable_operation_counts" =~ ^1\|1\|([0-9a-f]{32})$ ]]; then
+            current_replay_fingerprint="${BASH_REMATCH[1]}"
+        else
+            printf 'error: %s marker preceded its unique durable operation/replay\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        if [[ -z "$expected_replay_fingerprint" ]]; then
+            expected_replay_fingerprint="$current_replay_fingerprint"
+        elif [[ "$current_replay_fingerprint" != "$expected_replay_fingerprint" ]]; then
+            printf 'error: %s replay rewrote its encrypted durable result\n' \
+                "$operation" >&2
+            exit 1
+        fi
+
+        kill -KILL "$gateway_pid"
+        if wait "$gateway_pid" >/dev/null 2>&1; then
+            printf 'error: killed %s Gateway exited successfully\n' "$operation" >&2
+            exit 1
+        fi
+        gateway_pid=""
+        local observed_curl_status=""
+        if wait "$crash_client_pid" >/dev/null 2>&1; then
+            observed_curl_status=0
+        else
+            observed_curl_status=$?
+        fi
+        printf '%s\n' "$observed_curl_status" >"$curl_status"
+        crash_client_pid=""
+
+        if [[ "$observed_curl_status" == "0" ]] || \
+            [[ "$(<"$http_status")" != "000" ]] || \
+            [[ -s "$headers" || -s "$response" ]]; then
+            printf 'error: killed %s Gateway still acknowledged its response\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        wait_for_gateway_sessions_to_close
+    done
+
+    start_gateway
+}
+
 cleanup() {
     local exit_status=$?
 
     trap - EXIT INT TERM
     stop_gateway
-    if [[ -n "$workload_pid" ]] && kill -0 "$workload_pid" >/dev/null 2>&1; then
-        kill -TERM "$workload_pid" >/dev/null 2>&1 || true
-        wait "$workload_pid" 2>/dev/null || true
-    fi
+    stop_owned_process "$workload_pid"
+    stop_owned_process "$crash_client_pid"
     timeout 15s docker rm --force "$container_name" >/dev/null 2>&1 || true
+    local remaining_containers=""
+    if ! remaining_containers="$(timeout 5s docker container ls --all \
+        --filter "name=${container_name}" --format '{{.Names}}' 2>/dev/null)"; then
+        printf 'error: unable to verify Gateway transport container cleanup\n' >&2
+        exit_status=1
+    elif grep -Fxq -- "$container_name" <<<"$remaining_containers"; then
+        printf 'error: Gateway transport gate left its PostgreSQL container behind\n' >&2
+        exit_status=1
+    fi
     rm -rf -- "$secret_directory"
+    if [[ -e "$secret_directory" ]]; then
+        printf 'error: Gateway transport gate left its private control directory behind\n' >&2
+        exit_status=1
+    fi
     exit "$exit_status"
 }
 
@@ -691,6 +945,10 @@ fi
 assert_no_store "$method_headers" 'unsupported method'
 
 printf 'Opening a real Agent Run through the mTLS HTTP seam...\n'
+if [[ "$crash_recovery_enabled" == "1" ]]; then
+    qualify_post_commit_crash \
+        open_run open-run "$signed_request" open-run
+fi
 first_status="$(curl --silent --show-error \
     --connect-timeout 5 \
     --max-time 30 \
@@ -713,10 +971,15 @@ if [[ "$first_status" != "200" ]]; then
 fi
 assert_no_store "$first_headers" 'authenticated open_run'
 
+expected_open_outcome="created"
+if [[ "$crash_recovery_enabled" == "1" ]]; then
+    expected_open_outcome="idempotent_retry"
+fi
 jq -e \
     --arg source_id "$source_id" \
+    --arg expected_outcome "$expected_open_outcome" \
     '.schema_version == "0.1"
-     and .outcome == "created"
+     and .outcome == $expected_outcome
      and .source_id == $source_id
      and (.run_id | type == "string" and length > 0)
      and (.source_stream_id | type == "string" and length > 0)
@@ -818,6 +1081,14 @@ jq -n \
     --input "$bind_unsigned_request" \
     --output "$bind_signed_request"
 
+if [[ "$crash_recovery_enabled" == "1" ]]; then
+    qualify_post_commit_crash \
+        bind_runtime bind-runtime "$bind_signed_request" bind-runtime
+fi
+expected_bind_replay=false
+if [[ "$crash_recovery_enabled" == "1" ]]; then
+    expected_bind_replay=true
+fi
 bind_status="$(curl --silent --show-error \
     --connect-timeout 5 \
     --max-time 30 \
@@ -834,11 +1105,12 @@ bind_status="$(curl --silent --show-error \
 if [[ "$bind_status" != "200" ]] || ! jq -e \
     --arg run_id "$issued_run_id" \
     --arg binding_id "$binding_id" \
+    --argjson expected_replay "$expected_bind_replay" \
     '.schema_version == "0.1"
      and .run_id == $run_id
      and .binding_id == $binding_id
      and .accepted == true
-     and .idempotent_replay == false' \
+     and .idempotent_replay == $expected_replay' \
     "$bind_response" >/dev/null; then
     printf 'error: authenticated bind_runtime returned HTTP %s\n' "$bind_status" >&2
     jq -c '{schema_version,code,message,retryable,retry_after_ms}' \
@@ -941,6 +1213,10 @@ jq -n \
     --input "$ingest_unsigned_request" \
     --output "$ingest_signed_request"
 
+if [[ "$crash_recovery_enabled" == "1" ]]; then
+    qualify_post_commit_crash \
+        ingest ingest "$ingest_signed_request" ingest
+fi
 ingest_status="$(curl --silent --show-error \
     --connect-timeout 5 \
     --max-time 30 \
@@ -1126,6 +1402,14 @@ if "$request_bin" finish-run \
     exit 1
 fi
 
+if [[ "$crash_recovery_enabled" == "1" ]]; then
+    qualify_post_commit_crash \
+        finish_run finish-run "$finish_signed_request" finish-run
+fi
+expected_finish_replay=false
+if [[ "$crash_recovery_enabled" == "1" ]]; then
+    expected_finish_replay=true
+fi
 finish_status="$(curl --silent --show-error \
     --connect-timeout 5 \
     --max-time 30 \
@@ -1141,11 +1425,12 @@ finish_status="$(curl --silent --show-error \
     "${gateway_base_url}/gateway/v0.1/finish-run")"
 if [[ "$finish_status" != "200" ]] || ! jq -e \
     --arg run_id "$issued_run_id" \
+    --argjson expected_replay "$expected_finish_replay" \
     '.schema_version == "0.1"
      and .run_id == $run_id
      and .state == "finished"
      and .finalization_deadline_unix_ms == null
-     and .idempotent_replay == false' \
+     and .idempotent_replay == $expected_replay' \
     "$finish_response" >/dev/null; then
     printf 'error: authenticated finish_run returned HTTP %s\n' "$finish_status" >&2
     jq -c '{schema_version,code,message,retryable,retry_after_ms}' \
@@ -1337,9 +1622,10 @@ for attack_route in open-run bind-runtime ingest finish-run; do
         exit 1
     fi
     assert_no_store "$attack_headers" "cross-organization ${attack_route}"
-    if grep -Fq -- "$issued_run_id" "$attack_response" || \
-        grep -Fq -- "$issued_stream_id" "$attack_response" || \
-        grep -Fq -- "$issued_lease" "$attack_response"; then
+    attack_response_body="$(<"$attack_response")"
+    if [[ "$attack_response_body" == *"$issued_run_id"* || \
+        "$attack_response_body" == *"$issued_stream_id"* || \
+        "$attack_response_body" == *"$issued_lease"* ]]; then
         printf 'error: cross-organization %s response disclosed victim scope\n' \
             "$attack_route" >&2
         exit 1
@@ -1374,18 +1660,24 @@ fi
 
 readonly database_dump="${secret_directory}/database.dump.sql"
 readonly replay_key_value="$(<"$replay_key_file")"
+readonly secret_scan_patterns="${secret_directory}/secret-scan.patterns"
+{
+    printf '%s\n' \
+        "$issued_lease" \
+        "$database_password" \
+        "$schema_owner_password" \
+        "$gateway_control_password" \
+        "$gateway_runtime_password" \
+        "$replay_key_value"
+} >"$secret_scan_patterns"
+chmod 600 "$secret_scan_patterns"
 if ! timeout 30s docker exec "$container_name" \
     pg_dump --username "$database_user" --dbname "$database_name" \
         --no-owner --no-privileges >"$database_dump"; then
     printf 'error: failed to inspect PostgreSQL secret persistence\n' >&2
     exit 1
 fi
-if grep -Fq -- "$issued_lease" "$database_dump" || \
-    grep -Fq -- "$database_password" "$database_dump" || \
-    grep -Fq -- "$schema_owner_password" "$database_dump" || \
-    grep -Fq -- "$gateway_control_password" "$database_dump" || \
-    grep -Fq -- "$gateway_runtime_password" "$database_dump" || \
-    grep -Fq -- "$replay_key_value" "$database_dump" || \
+if grep -Fq -f "$secret_scan_patterns" "$database_dump" || \
     grep -Fq -- 'BEGIN PRIVATE KEY' "$database_dump"; then
     printf 'error: generated secret material was persisted in PostgreSQL\n' >&2
     exit 1
@@ -1473,24 +1765,29 @@ if [[ "$post_revocation_state" != '9|5|8' ]]; then
 fi
 
 printf 'Checking that bearer and database secrets were absent from Gateway logs...\n'
-if grep -Fq -- "$issued_lease" "$server_log"; then
-    printf 'error: plaintext run lease was written to the Gateway log\n' >&2
-    exit 1
-fi
-if grep -Fq -- "$database_password" "$server_log" || \
-    grep -Fq -- "$schema_owner_password" "$server_log" || \
-    grep -Fq -- "$gateway_control_password" "$server_log" || \
-    grep -Fq -- "$gateway_runtime_password" "$server_log"; then
-    printf 'error: PostgreSQL password was written to the Gateway log\n' >&2
-    exit 1
-fi
-if grep -Fq -- "$replay_key_value" "$server_log"; then
-    printf 'error: replay protection key was written to the Gateway log\n' >&2
+if grep -Fq -f "$secret_scan_patterns" "$server_log"; then
+    printf 'error: protected test secret was written to the Gateway log\n' >&2
     exit 1
 fi
 if grep -Fq -- 'BEGIN PRIVATE KEY' "$server_log"; then
     printf 'error: TLS private-key material was written to the Gateway log\n' >&2
     exit 1
+fi
+if [[ "$crash_recovery_enabled" == "1" ]]; then
+    for qualification_artifact in "${qualification_private_artifacts[@]}"; do
+        if [[ "$(stat -c '%a' "$qualification_artifact")" != "600" ]]; then
+            printf 'error: HTTPS crash qualification artifact is not mode 0600\n' >&2
+            exit 1
+        fi
+    done
+    if grep -Fq -f "$secret_scan_patterns" "${qualification_private_artifacts[@]}"; then
+        printf 'error: secret material entered an HTTPS crash qualification artifact\n' >&2
+        exit 1
+    fi
+    if grep -Fq -- 'BEGIN PRIVATE KEY' "${qualification_private_artifacts[@]}"; then
+        printf 'error: TLS private-key material entered an HTTPS crash qualification artifact\n' >&2
+        exit 1
+    fi
 fi
 
 printf 'Real mTLS Gateway authority gate passed.\n'

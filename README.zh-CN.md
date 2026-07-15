@@ -84,11 +84,13 @@ PostgreSQL recovery gate 现已覆盖数据库优雅重启、PostgreSQL SIGKILL/
 recovery，以及 Gateway application process 在 commit 前、commit 后和 replay 期间死亡时的
 rollback 或精确收敛，且整个过程都发生在独立 client acknowledgement 发出之前。这只验证
 repository/application-process seam，不代表 HTTPS Gateway server
-recovery 已通过资格验证。更广的多进程 race matrix、load、replication、failover、
+recovery 已通过资格验证。与之并行的真实 direct-mTLS HTTPS recovery gate 现已覆盖
+四个 lifecycle route 在 commit 后/ack 前的 Gateway-server 死亡与精确 replay 收敛。
+更广的多进程与 network pre-commit race matrix、load、replication、failover、
 backup/restore 与高可用仍未验证；production KMS integration、database RLS
-deployment、HTTPS commit 后/ack 前的 Gateway-server 崩溃资格验证、current authority 与
-ledger commit 的原子复核、lease/credential rotation、授权 object-read resolver、
-evidence-object projection/read view、持续后台 reaper 运行与通过容量验证的 resource limit
+deployment、current authority 与 ledger commit 的原子复核、lease/credential rotation、
+授权 object-read resolver、evidence-object projection/read view、持续后台 reaper
+运行与通过容量验证的 resource limit
 也仍待完成。Projection 尚不提供 public Query authorization、cursor/SSE、
 Console、coverage、finding、source health 或 evidence-object lifecycle view；其 RLS GUC
 只是 defense-in-depth，不是 authorization。JWT/workload-identity transport profile、

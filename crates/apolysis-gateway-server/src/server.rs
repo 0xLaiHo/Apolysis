@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(feature = "qualification")]
+use std::path::PathBuf;
 use std::{
     fs::OpenOptions,
     io::{BufReader, Write},
@@ -24,9 +26,11 @@ use zeroize::Zeroizing;
 
 use crate::{
     file_input::read_bounded_file,
-    http::{router, GatewayHttpState},
+    http::{router, GatewayHttpState, GatewayResponseBarrier},
     AuthorityStore, GatewayServerConfig, GatewayServerError,
 };
+#[cfg(feature = "qualification")]
+use crate::{qualification::QualificationBarrier, QualificationOperation};
 
 const MAX_DATABASE_URL_BYTES: u64 = 4096;
 const MAX_REPLAY_KEY_BYTES: u64 = 256;
@@ -35,6 +39,45 @@ const ACTIVE_REPLAY_KEY_ID: &str = "gateway-live-v1";
 
 /// Run the direct-mTLS production Gateway until it receives a shutdown signal.
 pub async fn serve(config: GatewayServerConfig) -> Result<(), GatewayServerError> {
+    serve_inner(config, GatewayResponseBarrier::Disabled).await
+}
+
+/// Run the real mTLS Gateway with a local-only post-commit response barrier.
+///
+/// This entry point exists only in explicit qualification builds. The normal
+/// production binary has no argument, environment, header, or body surface
+/// capable of arming the barrier.
+#[cfg(feature = "qualification")]
+pub async fn serve_with_post_commit_response_barrier(
+    config: GatewayServerConfig,
+    operation: QualificationOperation,
+    marker: PathBuf,
+) -> Result<(), GatewayServerError> {
+    require_qualification_listener(config.listen())?;
+    let barrier = QualificationBarrier::new(operation, marker)?;
+    if barrier.marker() == config.ready_file() {
+        return Err(GatewayServerError::configuration(
+            "Gateway qualification marker must differ from the ready file",
+        ));
+    }
+    serve_inner(config, GatewayResponseBarrier::qualification(barrier)).await
+}
+
+#[cfg(feature = "qualification")]
+fn require_qualification_listener(listen: SocketAddr) -> Result<(), GatewayServerError> {
+    if listen.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) && listen.port() == 0 {
+        Ok(())
+    } else {
+        Err(GatewayServerError::configuration(
+            "Gateway qualification listener must use 127.0.0.1:0",
+        ))
+    }
+}
+
+async fn serve_inner(
+    config: GatewayServerConfig,
+    response_barrier: GatewayResponseBarrier,
+) -> Result<(), GatewayServerError> {
     let database_url = read_secret_text(config.database_url_file(), MAX_DATABASE_URL_BYTES)?;
     if !(database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")) {
         return Err(GatewayServerError::configuration(
@@ -60,7 +103,11 @@ pub async fn serve(config: GatewayServerConfig) -> Result<(), GatewayServerError
     .map_err(GatewayServerError::gateway)?;
     let authority = AuthorityStore::connect(&database_url).await?;
     let gateway = ExecutionEvidenceGateway::new(repository, SystemClock, OsRandomIdGenerator);
-    let application = router(GatewayHttpState::new(gateway, authority));
+    let application = router(GatewayHttpState::with_response_barrier(
+        gateway,
+        authority,
+        response_barrier,
+    ));
 
     let tls_config = build_tls_config(
         config.tls_certificate(),
@@ -242,11 +289,22 @@ async fn wait_for_shutdown() {
 #[cfg(test)]
 mod tests {
     use super::decode_replay_key;
+    #[cfg(feature = "qualification")]
+    use super::require_qualification_listener;
 
     #[test]
     fn replay_key_requires_lowercase_hex() {
         assert!(decode_replay_key(&"ab".repeat(32)).is_ok());
         assert!(decode_replay_key(&"AB".repeat(32)).is_err());
         assert!(decode_replay_key("00").is_err());
+    }
+
+    #[cfg(feature = "qualification")]
+    #[test]
+    fn qualification_listener_requires_exact_ipv4_localhost_and_ephemeral_port() {
+        assert!(require_qualification_listener("127.0.0.1:0".parse().unwrap()).is_ok());
+        for rejected in ["127.0.0.2:0", "[::1]:0", "127.0.0.1:443"] {
+            assert!(require_qualification_listener(rejected.parse().unwrap()).is_err());
+        }
     }
 }

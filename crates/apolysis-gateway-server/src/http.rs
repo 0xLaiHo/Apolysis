@@ -25,6 +25,8 @@ use axum::{
 use axum_server_mtls::PeerCertificates;
 use serde::{de::DeserializeOwned, Serialize};
 
+#[cfg(feature = "qualification")]
+use crate::qualification::QualificationBarrier;
 use crate::{error::GatewayServerErrorKind, AuthorityStore, GatewayServerError};
 
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
@@ -46,17 +48,68 @@ const ALLOWED_REQUEST_HEADERS: [&str; 12] = [
 type GatewayApplication =
     ExecutionEvidenceGateway<PostgresGatewayRepository, SystemClock, OsRandomIdGenerator>;
 
+/// A frozen Gateway lifecycle route shared by authority and response handling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GatewayRouteOperation {
+    OpenRun,
+    BindRuntime,
+    Ingest,
+    FinishRun,
+}
+
+impl GatewayRouteOperation {
+    fn authority_name(self) -> &'static str {
+        match self {
+            Self::OpenRun => "open_run",
+            Self::BindRuntime => "bind_runtime",
+            Self::Ingest => "ingest",
+            Self::FinishRun => "finish_run",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct GatewayHttpState {
     gateway: Arc<GatewayApplication>,
     authority: Arc<AuthorityStore>,
+    response_barrier: GatewayResponseBarrier,
 }
 
 impl GatewayHttpState {
-    pub(crate) fn new(gateway: GatewayApplication, authority: AuthorityStore) -> Self {
+    pub(crate) fn with_response_barrier(
+        gateway: GatewayApplication,
+        authority: AuthorityStore,
+        response_barrier: GatewayResponseBarrier,
+    ) -> Self {
         Self {
             gateway: Arc::new(gateway),
             authority: Arc::new(authority),
+            response_barrier,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) enum GatewayResponseBarrier {
+    #[default]
+    Disabled,
+    #[cfg(feature = "qualification")]
+    Qualification(Arc<QualificationBarrier>),
+}
+
+impl GatewayResponseBarrier {
+    #[cfg(feature = "qualification")]
+    pub(crate) fn qualification(barrier: QualificationBarrier) -> Self {
+        Self::Qualification(Arc::new(barrier))
+    }
+
+    async fn reach(&self, operation: GatewayRouteOperation) -> Result<(), GatewayServerError> {
+        #[cfg(not(feature = "qualification"))]
+        let _ = operation;
+        match self {
+            Self::Disabled => Ok(()),
+            #[cfg(feature = "qualification")]
+            Self::Qualification(barrier) => barrier.reach(operation).await,
         }
     }
 }
@@ -74,66 +127,83 @@ pub(crate) fn router(state: GatewayHttpState) -> Router {
 }
 
 async fn finish_run(State(state): State<GatewayHttpState>, request: Request) -> Response {
+    let operation = GatewayRouteOperation::FinishRun;
     let (context, request) =
-        match authenticate_and_decode::<FinishRunRequest>(&state, request, "finish_run").await {
+        match authenticate_and_decode::<FinishRunRequest>(&state, request, operation).await {
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
 
     match state.gateway.finish_run(&context, request).await {
-        Ok(response) => success(response),
+        Ok(response) => committed_success(&state, operation, response).await,
         Err(failure) => gateway_error(failure),
     }
 }
 
 async fn ingest(State(state): State<GatewayHttpState>, request: Request) -> Response {
+    let operation = GatewayRouteOperation::Ingest;
     let (context, request) =
-        match authenticate_and_decode::<IngestRequest>(&state, request, "ingest").await {
+        match authenticate_and_decode::<IngestRequest>(&state, request, operation).await {
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
 
     match state.gateway.ingest(&context, request).await {
-        Ok(response) => success(response),
+        Ok(response) => committed_success(&state, operation, response).await,
         Err(failure) => gateway_error(failure),
     }
 }
 
 async fn bind_runtime(State(state): State<GatewayHttpState>, request: Request) -> Response {
-    let (context, request) = match authenticate_and_decode::<BindRuntimeRequest>(
-        &state,
-        request,
-        "bind_runtime",
-    )
-    .await
-    {
-        Ok(authenticated) => authenticated,
-        Err(response) => return response,
-    };
+    let operation = GatewayRouteOperation::BindRuntime;
+    let (context, request) =
+        match authenticate_and_decode::<BindRuntimeRequest>(&state, request, operation).await {
+            Ok(authenticated) => authenticated,
+            Err(response) => return response,
+        };
 
     match state.gateway.bind_runtime(&context, request).await {
-        Ok(response) => success(response),
+        Ok(response) => committed_success(&state, operation, response).await,
         Err(failure) => gateway_error(failure),
     }
 }
 
 async fn open_run(State(state): State<GatewayHttpState>, request: Request) -> Response {
+    let operation = GatewayRouteOperation::OpenRun;
     let (context, request) =
-        match authenticate_and_decode::<OpenRunRequest>(&state, request, "open_run").await {
+        match authenticate_and_decode::<OpenRunRequest>(&state, request, operation).await {
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
 
     match state.gateway.open_run(&context, request).await {
-        Ok(response) => success(response),
+        Ok(response) => committed_success(&state, operation, response).await,
         Err(failure) => gateway_error(failure),
     }
+}
+
+async fn committed_success<T: Serialize>(
+    state: &GatewayHttpState,
+    operation: GatewayRouteOperation,
+    value: T,
+) -> Response {
+    // Construct the complete response before the qualification barrier. A
+    // reached marker therefore proves that commit completed and serialization
+    // succeeded, while the handler still has not returned the response to Axum.
+    let response = success(value);
+    if let Err(error) = state.response_barrier.reach(operation).await {
+        // The error type retains closed labels only; no request or response
+        // content is admitted to this diagnostic seam.
+        eprintln!("Gateway post-commit response barrier failed: {error}");
+        return internal_response();
+    }
+    response
 }
 
 async fn authenticate_and_decode<T>(
     state: &GatewayHttpState,
     request: Request,
-    operation: &'static str,
+    operation: GatewayRouteOperation,
 ) -> Result<(AuthenticatedSourceContext, T), Response>
 where
     T: DeserializeOwned,
@@ -149,7 +219,11 @@ where
     let now_unix_ms = SystemClock.now_unix_ms();
     let context = match state
         .authority
-        .resolve_mtls(leaf_certificate.as_ref(), operation, now_unix_ms)
+        .resolve_mtls(
+            leaf_certificate.as_ref(),
+            operation.authority_name(),
+            now_unix_ms,
+        )
         .await
     {
         Ok(context) => context,
