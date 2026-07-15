@@ -86,7 +86,9 @@ rollback 或精确收敛，且整个过程都发生在独立 client acknowledgem
 repository/application-process seam，不代表 HTTPS Gateway server
 recovery 已通过资格验证。与之并行的真实 direct-mTLS HTTPS recovery gate 现已覆盖
 四个 lifecycle route 在 commit 后/ack 前的 Gateway-server 死亡与精确 replay 收敛。
-更广的多进程与 network pre-commit race matrix、load、replication、failover、
+另一个有界双进程 mTLS 门禁现已验证 run 创建、one-use join、exact runtime binding、
+event 去重与跨 run organization sequencing、finalization 及终态不可逆等协调 writer/lifecycle
+竞态。更广的进程死亡与 network pre-commit matrix、load、replication、failover、
 backup/restore 与高可用仍未验证；production KMS integration、database RLS
 deployment、current authority 与 ledger commit 的原子复核、lease/credential rotation、
 授权 object-read resolver、evidence-object projection/read view、持续后台 reaper

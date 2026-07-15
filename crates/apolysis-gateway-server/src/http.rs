@@ -72,38 +72,54 @@ impl GatewayRouteOperation {
 pub(crate) struct GatewayHttpState {
     gateway: Arc<GatewayApplication>,
     authority: Arc<AuthorityStore>,
-    response_barrier: GatewayResponseBarrier,
+    qualification_hook: GatewayQualificationHook,
 }
 
 impl GatewayHttpState {
-    pub(crate) fn with_response_barrier(
+    pub(crate) fn with_qualification_hook(
         gateway: GatewayApplication,
         authority: AuthorityStore,
-        response_barrier: GatewayResponseBarrier,
+        qualification_hook: GatewayQualificationHook,
     ) -> Self {
         Self {
             gateway: Arc::new(gateway),
             authority: Arc::new(authority),
-            response_barrier,
+            qualification_hook,
         }
     }
 }
 
 #[derive(Clone, Default)]
-pub(crate) enum GatewayResponseBarrier {
+pub(crate) enum GatewayQualificationHook {
     #[default]
     Disabled,
     #[cfg(feature = "qualification")]
     Qualification(Arc<QualificationBarrier>),
 }
 
-impl GatewayResponseBarrier {
+impl GatewayQualificationHook {
     #[cfg(feature = "qualification")]
     pub(crate) fn qualification(barrier: QualificationBarrier) -> Self {
         Self::Qualification(Arc::new(barrier))
     }
 
-    async fn reach(&self, operation: GatewayRouteOperation) -> Result<(), GatewayServerError> {
+    async fn before_operation(
+        &self,
+        operation: GatewayRouteOperation,
+    ) -> Result<(), GatewayServerError> {
+        #[cfg(not(feature = "qualification"))]
+        let _ = operation;
+        match self {
+            Self::Disabled => Ok(()),
+            #[cfg(feature = "qualification")]
+            Self::Qualification(barrier) => barrier.before_operation(operation).await,
+        }
+    }
+
+    async fn after_commit(
+        &self,
+        operation: GatewayRouteOperation,
+    ) -> Result<(), GatewayServerError> {
         #[cfg(not(feature = "qualification"))]
         let _ = operation;
         match self {
@@ -134,6 +150,10 @@ async fn finish_run(State(state): State<GatewayHttpState>, request: Request) -> 
             Err(response) => return response,
         };
 
+    if let Err(response) = reach_pre_operation_qualification(&state, operation).await {
+        return response;
+    }
+
     match state.gateway.finish_run(&context, request).await {
         Ok(response) => committed_success(&state, operation, response).await,
         Err(failure) => gateway_error(failure),
@@ -147,6 +167,10 @@ async fn ingest(State(state): State<GatewayHttpState>, request: Request) -> Resp
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
+
+    if let Err(response) = reach_pre_operation_qualification(&state, operation).await {
+        return response;
+    }
 
     match state.gateway.ingest(&context, request).await {
         Ok(response) => committed_success(&state, operation, response).await,
@@ -162,6 +186,10 @@ async fn bind_runtime(State(state): State<GatewayHttpState>, request: Request) -
             Err(response) => return response,
         };
 
+    if let Err(response) = reach_pre_operation_qualification(&state, operation).await {
+        return response;
+    }
+
     match state.gateway.bind_runtime(&context, request).await {
         Ok(response) => committed_success(&state, operation, response).await,
         Err(failure) => gateway_error(failure),
@@ -176,10 +204,28 @@ async fn open_run(State(state): State<GatewayHttpState>, request: Request) -> Re
             Err(response) => return response,
         };
 
+    if let Err(response) = reach_pre_operation_qualification(&state, operation).await {
+        return response;
+    }
+
     match state.gateway.open_run(&context, request).await {
         Ok(response) => committed_success(&state, operation, response).await,
         Err(failure) => gateway_error(failure),
     }
+}
+
+async fn reach_pre_operation_qualification(
+    state: &GatewayHttpState,
+    operation: GatewayRouteOperation,
+) -> Result<(), Response> {
+    state
+        .qualification_hook
+        .before_operation(operation)
+        .await
+        .map_err(|error| {
+            eprintln!("Gateway pre-operation qualification barrier failed: {error}");
+            internal_response()
+        })
 }
 
 async fn committed_success<T: Serialize>(
@@ -191,7 +237,7 @@ async fn committed_success<T: Serialize>(
     // reached marker therefore proves that commit completed and serialization
     // succeeded, while the handler still has not returned the response to Axum.
     let response = success(value);
-    if let Err(error) = state.response_barrier.reach(operation).await {
+    if let Err(error) = state.qualification_hook.after_commit(operation).await {
         // The error type retains closed labels only; no request or response
         // content is admitted to this diagnostic seam.
         eprintln!("Gateway post-commit response barrier failed: {error}");

@@ -3,8 +3,8 @@
 use std::{env, ffi::OsString, fmt, path::PathBuf};
 
 use apolysis_gateway_server::{
-    serve_with_post_commit_response_barrier, GatewayServerConfig, GatewayServerError,
-    QualificationOperation,
+    serve_with_post_commit_response_barrier, serve_with_pre_operation_barrier, GatewayServerConfig,
+    GatewayServerError, QualificationOperation,
 };
 
 #[tokio::main]
@@ -19,15 +19,52 @@ async fn run() -> Result<(), QualificationServerError> {
     let arguments = QualificationArguments::parse(env::args_os())?;
     let server_config = GatewayServerConfig::from_args(arguments.server_arguments)
         .map_err(QualificationServerError::Server)?;
-    serve_with_post_commit_response_barrier(server_config, arguments.operation, arguments.marker)
-        .await
-        .map_err(QualificationServerError::Server)
+    match arguments.phase {
+        QualificationPhase::PostCommit => {
+            serve_with_post_commit_response_barrier(
+                server_config,
+                arguments.operation,
+                arguments.marker,
+            )
+            .await
+        }
+        QualificationPhase::PreOperation => {
+            serve_with_pre_operation_barrier(
+                server_config,
+                arguments.operation,
+                arguments.marker,
+                arguments
+                    .release
+                    .ok_or(QualificationServerError::Arguments)?,
+            )
+            .await
+        }
+    }
+    .map_err(QualificationServerError::Server)
 }
 
 struct QualificationArguments {
     server_arguments: Vec<OsString>,
     operation: QualificationOperation,
     marker: PathBuf,
+    phase: QualificationPhase,
+    release: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QualificationPhase {
+    PostCommit,
+    PreOperation,
+}
+
+impl QualificationPhase {
+    fn parse(value: &str) -> Result<Self, QualificationServerError> {
+        match value {
+            "post_commit" => Ok(Self::PostCommit),
+            "pre_operation" => Ok(Self::PreOperation),
+            _ => Err(QualificationServerError::Arguments),
+        }
+    }
 }
 
 impl QualificationArguments {
@@ -41,6 +78,8 @@ impl QualificationArguments {
         let mut server_arguments = vec![program];
         let mut operation = None;
         let mut marker = None;
+        let mut phase = None;
+        let mut release = None;
 
         while let Some(option) = arguments.next() {
             let value = arguments
@@ -57,7 +96,19 @@ impl QualificationArguments {
                 Some("--qualification-marker") if marker.is_none() => {
                     marker = Some(PathBuf::from(value));
                 }
-                Some("--qualification-operation" | "--qualification-marker") => {
+                Some("--qualification-phase") if phase.is_none() => {
+                    let value = value.to_str().ok_or(QualificationServerError::Arguments)?;
+                    phase = Some(QualificationPhase::parse(value)?);
+                }
+                Some("--qualification-release") if release.is_none() => {
+                    release = Some(PathBuf::from(value));
+                }
+                Some(
+                    "--qualification-operation"
+                    | "--qualification-marker"
+                    | "--qualification-phase"
+                    | "--qualification-release",
+                ) => {
                     return Err(QualificationServerError::Arguments);
                 }
                 _ => {
@@ -67,10 +118,17 @@ impl QualificationArguments {
             }
         }
 
+        let phase = phase.unwrap_or(QualificationPhase::PostCommit);
+        if (phase == QualificationPhase::PreOperation) != release.is_some() {
+            return Err(QualificationServerError::Arguments);
+        }
+
         Ok(Self {
             server_arguments,
             operation: operation.ok_or(QualificationServerError::Arguments)?,
             marker: marker.ok_or(QualificationServerError::Arguments)?,
+            phase,
+            release,
         })
     }
 }
@@ -117,6 +175,8 @@ mod tests {
 
         assert_eq!(arguments.operation, QualificationOperation::Ingest);
         assert_eq!(arguments.marker, PathBuf::from("/tmp/private/reached"));
+        assert_eq!(arguments.phase, QualificationPhase::PostCommit);
+        assert_eq!(arguments.release, None);
         assert_eq!(
             arguments.server_arguments,
             ["qualification-server", "--listen", "127.0.0.1:0"]
@@ -145,5 +205,40 @@ mod tests {
             "open_run",
         ];
         assert!(QualificationArguments::parse(missing.into_iter().map(OsString::from)).is_err());
+    }
+
+    #[test]
+    fn keeps_pre_operation_release_options_out_of_the_production_cli() {
+        let arguments = QualificationArguments::parse(
+            [
+                "qualification-server",
+                "--listen",
+                "127.0.0.1:0",
+                "--qualification-operation",
+                "open_run",
+                "--qualification-marker",
+                "/tmp/private/reached",
+                "--qualification-phase",
+                "pre_operation",
+                "--qualification-release",
+                "/tmp/private/release",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .unwrap();
+
+        assert_eq!(
+            arguments.server_arguments,
+            ["qualification-server", "--listen", "127.0.0.1:0"]
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(arguments.phase, QualificationPhase::PreOperation);
+        assert_eq!(
+            arguments.release,
+            Some(PathBuf::from("/tmp/private/release"))
+        );
     }
 }
