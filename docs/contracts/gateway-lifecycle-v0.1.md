@@ -99,6 +99,26 @@ result and lets the lifecycle proceed. The barrier exists only in an explicit
 feature build, requires an ephemeral loopback listener, and cannot be armed by
 the production CLI or any remote request, header, or body.
 
+A separate bounded multiprocess gate starts two qualification-only Gateway
+processes with independent loopback mTLS listeners and PostgreSQL pools. After
+current-authority resolution and request decoding, both requests create static
+private `ready` markers and remain response-silent and free of lifecycle
+mutations until the driver atomically publishes one static private `release`
+file. Current-authority audit writes may precede the marker; the oracle requires
+both client operation identities to remain absent from lifecycle state. The
+driver next holds an exclusive qualification lock on the operation table,
+releases the HTTP barrier, proves both runtime transactions are waiting on
+database locks, and then releases the blocker. It qualifies identical-operation
+replay, competing client-run identities, one-use join-grant consumption,
+cross-run exact runtime identity exclusion, concurrent event deduplication and
+cross-run organization sequencing, identical and competing finalization, and
+rejection of novel bind/ingest/finish operations after the terminal state. The
+join grant is seeded by a feature-gated local helper through
+`PostgresGatewayRepository::register_join_grant`; this adds no remote control
+endpoint. Database evidence requires one encrypted replay per accepted
+operation, record/outbox 1:1, contiguous organization sequences, one consumed
+grant, one active-identity winner, and no terminal-state resurrection.
+
 Current PostgreSQL gap discovery evaluates a window over the full persisted
 history for one source stream; its SQL limit bounds returned gaps rather than
 scan work. Novel envelopes reserve one contiguous organization sequence range
@@ -125,9 +145,11 @@ complete W3–W6. In particular, it has:
 
 - the repository recovery gate remains a non-HTTPS application/repository seam;
   the sibling HTTPS gate qualifies post-commit/pre-ack process death for novel
-  success and exact replay on all four routes, but not a network pre-commit
-  fault matrix, the complete multiprocess/lifecycle race matrix, sustained or
-  capacity load, replication/failover, backup/restore, or high availability;
+  success and exact replay on all four routes, and the two-process gate
+  qualifies the bounded writer/lifecycle matrix above, but not a network
+  pre-commit/process-death fault matrix, mixed lifecycle/deadline races,
+  sustained or capacity load, replication/failover, backup/restore, or high
+  availability;
 - no production KMS/envelope-data-key custody or tenant RLS deployment; the
   built-in replay protector and evidence-object wrapping key are direct-key
   in-process inputs, and the fixed database roles are not a shared-cluster

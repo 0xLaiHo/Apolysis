@@ -63,3 +63,8 @@ path = "src/bin/apolysis-gateway-request.rs"
 name = "apolysis-gateway-qualification-server"
 path = "src/bin/apolysis_gateway_qualification_server.rs"
 required-features = ["qualification"]
+
+[[bin]]
+name = "apolysis-gateway-qualification-join-grant"
+path = "src/bin/apolysis_gateway_qualification_join_grant.rs"
+required-features = ["qualification"]

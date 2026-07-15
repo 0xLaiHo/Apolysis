@@ -133,6 +133,30 @@ local marker. It is built only with the explicit `qualification` feature; the
 production CLI rejects its options, and no remote request, header, or body can
 arm the barrier.
 
+## Sibling multiprocess lifecycle-race gate
+
+A second explicit Gateway-server gate starts two independent qualification
+processes, loopback mTLS listeners, and PostgreSQL pools. Each request stops
+after current-authority resolution and decoding but before the application
+call. Both private `ready` markers must exist, both HTTP clients must remain
+response-silent, and both operation identities must remain absent from
+PostgreSQL before one private `release` file is atomically published. The gate
+then holds an exclusive qualification lock on the operation table, releases
+both HTTP barriers, observes two runtime transactions waiting concurrently,
+and only then releases the database lock. It qualifies identical and competing
+run creation, one-use join-grant consumption, cross-run exact runtime-identity
+exclusion, duplicate and cross-run ingest sequencing, identical and competing
+finalization, and terminal irreversibility:
+
+```bash
+make test-gateway-multiprocess-lifecycle-races
+```
+
+The join grant is seeded only by a feature-gated local helper that calls the
+production repository validation path. Stale, symlinked, non-private,
+modified, or missing release files fail closed. The production binary exposes
+neither the barrier nor the grant helper.
+
 To compile and run only non-database tests:
 
 ```bash
@@ -158,9 +182,10 @@ PostgreSQL SIGKILL/WAL redo, and application-process death on both sides of the
 commit boundary for one runtime-generated `open_run` shape. It does not qualify
 HTTPS Gateway-server recovery by itself. The sibling Gateway-server gate
 qualifies the bounded post-commit/pre-ack HTTPS seam for all four routes, but
-not a network pre-commit matrix, the full multiprocess or lifecycle race
-matrix, sustained or capacity load, replication, failover, backup/restore, or
-high availability.
+the additional two-process gate qualifies the bounded writer/lifecycle matrix
+described above. Neither gate qualifies the broader network
+pre-commit/process-death matrix, mixed lifecycle/deadline races, sustained or
+capacity load, replication, failover, backup/restore, or high availability.
 The evidence-object provider gate separately qualifies distinct
 SCRAM logins, schema-owner separation, migration-history ownership, served-path
 role allowlists, and denial of owner assumption, trigger disabling, credential

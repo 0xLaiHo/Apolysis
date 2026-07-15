@@ -64,6 +64,9 @@ enum IoContext {
     QualificationMarkerMetadata,
     QualificationMarkerWrite,
     QualificationMarkerSync,
+    QualificationReleaseOpen,
+    QualificationReleaseMetadata,
+    QualificationReleaseRead,
     Unspecified,
 }
 
@@ -294,12 +297,20 @@ fn safe_configuration_message(message: &'static str) -> &'static str {
         | "Gateway option values must be UTF-8"
         | "Gateway option was supplied more than once"
         | "Gateway qualification listener must use 127.0.0.1:0"
+        | "Gateway qualification join grant run is invalid"
+        | "Gateway qualification control files must differ from the ready file"
         | "Gateway qualification marker is not a private regular file"
         | "Gateway qualification marker must differ from the ready file"
         | "Gateway qualification marker parent is invalid"
         | "Gateway qualification marker parent must be private"
         | "Gateway qualification marker path must be absolute"
         | "Gateway qualification operation is unsupported"
+        | "Gateway qualification release content is invalid"
+        | "Gateway qualification release is not a private regular file"
+        | "Gateway qualification release path must be absolute"
+        | "Gateway qualification release must be a distinct sibling of the marker"
+        | "Gateway qualification release must not exist before the barrier"
+        | "Gateway qualification release timed out"
         | "Gateway received an unsupported option"
         | "Gateway replay key must be 32-byte lowercase hexadecimal"
         | "Gateway secret file is not UTF-8"
@@ -339,6 +350,9 @@ fn io_context(context: &'static str) -> IoContext {
         "qualification-marker-metadata" => IoContext::QualificationMarkerMetadata,
         "qualification-marker-write" => IoContext::QualificationMarkerWrite,
         "qualification-marker-sync" => IoContext::QualificationMarkerSync,
+        "qualification-release-open" => IoContext::QualificationReleaseOpen,
+        "qualification-release-metadata" => IoContext::QualificationReleaseMetadata,
+        "qualification-release-read" => IoContext::QualificationReleaseRead,
         _ => IoContext::Unspecified,
     }
 }
@@ -359,6 +373,9 @@ fn io_context_name(context: IoContext) -> &'static str {
         IoContext::QualificationMarkerMetadata => "qualification-marker-metadata",
         IoContext::QualificationMarkerWrite => "qualification-marker-write",
         IoContext::QualificationMarkerSync => "qualification-marker-sync",
+        IoContext::QualificationReleaseOpen => "qualification-release-open",
+        IoContext::QualificationReleaseMetadata => "qualification-release-metadata",
+        IoContext::QualificationReleaseRead => "qualification-release-read",
         IoContext::Unspecified => "unspecified",
     }
 }

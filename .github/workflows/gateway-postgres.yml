@@ -10,6 +10,7 @@ on:
       - scripts/test-gateway-postgres-crash-recovery.sh
       - scripts/test-gateway-transport-mtls.sh
       - scripts/test-gateway-https-crash-recovery.sh
+      - scripts/test-gateway-multiprocess-lifecycle-races.sh
       - Makefile
       - Cargo.toml
       - Cargo.lock
@@ -60,3 +61,14 @@ jobs:
 
       - name: Run real mTLS server post-commit recovery gate
         run: make test-gateway-https-crash-recovery
+
+  gateway-multiprocess-lifecycle-races:
+    name: gateway multiprocess lifecycle races
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run two-process mTLS lifecycle race gate
+        run: make test-gateway-multiprocess-lifecycle-races
