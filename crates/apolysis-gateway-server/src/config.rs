@@ -158,6 +158,8 @@ fn require_absolute(path: &Path) -> Result<(), GatewayServerError> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::GatewayServerConfig;
 
     #[test]
@@ -190,8 +192,13 @@ mod tests {
 
     #[test]
     fn production_config_rejects_qualification_options_even_with_all_features() {
-        let error = GatewayServerConfig::from_args(
-            [
+        for (option, value) in [
+            ("--qualification-operation", "open_run"),
+            ("--qualification-marker", "/run/apolysis/reached"),
+            ("--qualification-phase", "pre_operation"),
+            ("--qualification-release", "/run/apolysis/release"),
+        ] {
+            let mut arguments = [
                 "gateway",
                 "--listen",
                 "127.0.0.1:0",
@@ -207,14 +214,15 @@ mod tests {
                 "/run/apolysis/replay.key",
                 "--ready-file",
                 "/run/apolysis/ready",
-                "--qualification-operation",
-                "open_run",
             ]
             .into_iter()
-            .map(Into::into),
-        )
-        .expect_err("production CLI must not expose the qualification barrier");
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+            arguments.extend([OsString::from(option), OsString::from(value)]);
+            let error = GatewayServerConfig::from_args(arguments)
+                .expect_err("production CLI must not expose the qualification barrier");
 
-        assert_eq!(error.to_string(), "Gateway received an unsupported option");
+            assert_eq!(error.to_string(), "Gateway received an unsupported option");
+        }
     }
 }

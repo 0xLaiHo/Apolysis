@@ -3,6 +3,7 @@
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
 	test-gateway-https-crash-recovery \
+	test-gateway-multiprocess-lifecycle-races \
 	test-projection-postgres \
 	test-gateway-transport-mtls \
 	test-local-agent-command-attribution \
@@ -67,6 +68,12 @@ test-gateway-postgres-crash-recovery:
 # HTTP acknowledgement can be handed to the network stack.
 test-gateway-https-crash-recovery:
 	./scripts/test-gateway-https-crash-recovery.sh
+
+# Opt-in two-process lifecycle race qualification. Two independent Gateway
+# listeners and pools wait behind a private pre-operation barrier before each
+# coordinated mTLS request pair enters PostgreSQL.
+test-gateway-multiprocess-lifecycle-races:
+	./scripts/test-gateway-multiprocess-lifecycle-races.sh
 
 # Opt-in real-provider object lifecycle and crash-recovery qualification.
 test-evidence-objects-real:

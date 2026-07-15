@@ -52,10 +52,30 @@ listener and a private local marker, and has no request, header, environment, or
 normal production-CLI input capable of arming it. The production CLI rejects
 the qualification options.
 
+A second qualification-only mode places a bounded barrier after mTLS authority
+resolution and request decoding but before the application call. Two
+independent Gateway processes, listeners, and PostgreSQL pools each write a
+private static marker, remain response-silent and free of lifecycle mutations,
+and proceed only after the driver atomically publishes one private static
+release file. Current-authority audit writes may already have committed before
+the marker; the pre-release oracle is specifically the absence of both client
+operation identities from lifecycle state.
+
+The driver then holds a qualification-owned exclusive operation-table lock,
+releases both HTTP barriers, observes both runtime transactions waiting on
+database locks, and only then releases the blocker. The real gate qualifies
+identical and competing run creation, one-use join-grant consumption,
+cross-run exact runtime-identity exclusion, duplicate and cross-run ingest
+sequencing, identical and competing finalization, and terminal irreversibility.
+A separate feature-gated local helper seeds the join grant through the
+production repository validation path; no remote management endpoint is added.
+Stale, symlinked, non-private, modified, or missing release files fail closed,
+and the normal production binary rejects every qualification option.
+
 This still does not close the W3–W6 transport gate. Transaction-time authority
 revalidation, credential-epoch binding in leases and replay records,
-policy/credential rotation, the broader network pre-commit and multiprocess
-lifecycle race matrices, load/capacity qualification, authorized object-read
-resolution and downstream deletion propagation, production KMS and tenant RLS
-integration, replication/failover/recovery, HA, quotas, and rate limits remain
-required.
+policy/credential rotation, the broader network pre-commit/process-death fault
+matrix, mixed lifecycle/deadline races, load/capacity qualification, authorized
+object-read resolution and downstream deletion propagation, production KMS and
+tenant RLS integration, replication/failover/recovery, HA, quotas, and rate
+limits remain required.

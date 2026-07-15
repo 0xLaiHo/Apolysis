@@ -146,6 +146,19 @@ Catalog-discovered plaintext scanning, `pg_amcheck`, `pg_dump`, generated-secret
 scanning, private-file mode checks, and cleanup of the dedicated container,
 volume, and control directory are part of the gate.
 
+The separate two-process mTLS lifecycle-race gate now drives independent
+Gateway processes and pools through a qualification-only pre-operation
+barrier. It proves identical-operation replay, one winner for a shared client
+run key and one-use join grant, exact runtime-identity exclusion, duplicate
+event convergence, contiguous cross-run organization sequencing, finalization
+convergence, terminal irreversibility, operation/replay alignment, and
+record/outbox 1:1. A qualification-owned exclusive table lock is held across
+the HTTP release until both runtime transactions are observed in concurrent
+lock waits, so the gate does not rely only on scheduler timing. The join-grant
+fixture is created through the production repository validation path rather
+than direct SQL. This qualifies the bounded writer/lifecycle matrix, not
+arbitrary process death or network timing.
+
 The separate evidence-object provider gate additionally proves schema-owner
 separation with distinct SCRAM logins, no startup migration,
 migration-history ownership, runtime/control allowlists, and denial of owner
@@ -153,9 +166,11 @@ assumption, trigger disabling, credential reads, and direct deletion
 acknowledgements. This qualifies the evidence-object served paths' process-plane
 roles; it does not establish database-enforced tenant isolation.
 
-This is not HTTPS Gateway-server recovery and does not qualify trace or HTTP
-error-body secret handling. The full multiprocess/lifecycle race
-matrix, sustained or capacity load, replication/failover, backup/restore or
-point-in-time recovery, HA behavior, production KMS integration, and tenant RLS
-remain unqualified. A successful migration or gate run is therefore still not
-a production claim.
+The repository crash gate alone is not HTTPS Gateway-server recovery and does
+not qualify trace or HTTP error-body secret handling. The sibling HTTPS gates
+cover bounded post-commit death and two-process writer/lifecycle races, but the
+broader network pre-commit/process-death matrix, mixed lifecycle/deadline
+races, sustained or capacity load, replication/failover, backup/restore or
+point-in-time recovery, HA behavior, production KMS integration, and tenant
+RLS remain unqualified. A successful migration or gate run is therefore still
+not a production claim.

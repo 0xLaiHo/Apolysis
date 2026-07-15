@@ -26,7 +26,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     file_input::read_bounded_file,
-    http::{router, GatewayHttpState, GatewayResponseBarrier},
+    http::{router, GatewayHttpState, GatewayQualificationHook},
     AuthorityStore, GatewayServerConfig, GatewayServerError,
 };
 #[cfg(feature = "qualification")]
@@ -35,11 +35,11 @@ use crate::{qualification::QualificationBarrier, QualificationOperation};
 const MAX_DATABASE_URL_BYTES: u64 = 4096;
 const MAX_REPLAY_KEY_BYTES: u64 = 256;
 const MAX_TLS_FILE_BYTES: u64 = 1024 * 1024;
-const ACTIVE_REPLAY_KEY_ID: &str = "gateway-live-v1";
+pub(crate) const ACTIVE_REPLAY_KEY_ID: &str = "gateway-live-v1";
 
 /// Run the direct-mTLS production Gateway until it receives a shutdown signal.
 pub async fn serve(config: GatewayServerConfig) -> Result<(), GatewayServerError> {
-    serve_inner(config, GatewayResponseBarrier::Disabled).await
+    serve_inner(config, GatewayQualificationHook::Disabled).await
 }
 
 /// Run the real mTLS Gateway with a local-only post-commit response barrier.
@@ -60,7 +60,29 @@ pub async fn serve_with_post_commit_response_barrier(
             "Gateway qualification marker must differ from the ready file",
         ));
     }
-    serve_inner(config, GatewayResponseBarrier::qualification(barrier)).await
+    serve_inner(config, GatewayQualificationHook::qualification(barrier)).await
+}
+
+/// Run the real mTLS Gateway with a local-only pre-operation race barrier.
+///
+/// The marker is written only after mTLS authority and request decoding
+/// succeed. The request then waits for a static private release file before it
+/// enters the application/repository transaction.
+#[cfg(feature = "qualification")]
+pub async fn serve_with_pre_operation_barrier(
+    config: GatewayServerConfig,
+    operation: QualificationOperation,
+    marker: PathBuf,
+    release: PathBuf,
+) -> Result<(), GatewayServerError> {
+    require_qualification_listener(config.listen())?;
+    let barrier = QualificationBarrier::pre_operation(operation, marker, release)?;
+    if barrier.marker() == config.ready_file() || barrier.release() == Some(config.ready_file()) {
+        return Err(GatewayServerError::configuration(
+            "Gateway qualification control files must differ from the ready file",
+        ));
+    }
+    serve_inner(config, GatewayQualificationHook::qualification(barrier)).await
 }
 
 #[cfg(feature = "qualification")]
@@ -76,7 +98,7 @@ fn require_qualification_listener(listen: SocketAddr) -> Result<(), GatewayServe
 
 async fn serve_inner(
     config: GatewayServerConfig,
-    response_barrier: GatewayResponseBarrier,
+    qualification_hook: GatewayQualificationHook,
 ) -> Result<(), GatewayServerError> {
     let database_url = read_secret_text(config.database_url_file(), MAX_DATABASE_URL_BYTES)?;
     if !(database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")) {
@@ -103,10 +125,10 @@ async fn serve_inner(
     .map_err(GatewayServerError::gateway)?;
     let authority = AuthorityStore::connect(&database_url).await?;
     let gateway = ExecutionEvidenceGateway::new(repository, SystemClock, OsRandomIdGenerator);
-    let application = router(GatewayHttpState::with_response_barrier(
+    let application = router(GatewayHttpState::with_qualification_hook(
         gateway,
         authority,
-        response_barrier,
+        qualification_hook,
     ));
 
     let tls_config = build_tls_config(
@@ -201,7 +223,7 @@ fn build_tls_config(
     Ok(RustlsConfig::from_config(Arc::new(server_config)))
 }
 
-fn read_secret_text(
+pub(crate) fn read_secret_text(
     path: &Path,
     maximum_bytes: u64,
 ) -> Result<Zeroizing<String>, GatewayServerError> {
@@ -217,7 +239,7 @@ fn read_secret_text(
     Ok(Zeroizing::new(trimmed.to_string()))
 }
 
-fn decode_replay_key(value: &str) -> Result<[u8; 32], GatewayServerError> {
+pub(crate) fn decode_replay_key(value: &str) -> Result<[u8; 32], GatewayServerError> {
     let bytes = value.as_bytes();
     if bytes.len() != 64 {
         return Err(GatewayServerError::configuration(

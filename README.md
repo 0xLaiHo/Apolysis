@@ -101,7 +101,10 @@ before a dedicated client acknowledgement is emitted. This qualifies a
 repository/application-process seam, not recovery of the HTTPS Gateway server.
 A sibling real direct-mTLS HTTPS recovery gate now covers post-commit/pre-ack
 Gateway-server death and exact replay convergence for all four lifecycle routes.
-The broader multiprocess and network pre-commit race matrices, load,
+An additional bounded two-process mTLS gate now qualifies coordinated
+writer/lifecycle races across run creation, one-use join, exact runtime binding,
+event deduplication and cross-run organization sequencing, finalization, and terminal
+irreversibility. The broader process-death and network pre-commit matrices, load,
 replication, failover, backup/restore, and high availability remain unqualified,
 as do production KMS integration, database row-level-security deployment,
 atomic authority revalidation with ledger commit, lease/credential rotation,

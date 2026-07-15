@@ -17,6 +17,10 @@ pub use config::GatewayServerConfig;
 pub use error::GatewayServerError;
 #[cfg(feature = "qualification")]
 pub use http::GatewayRouteOperation as QualificationOperation;
+#[cfg(feature = "qualification")]
+pub use qualification::register_qualification_join_grant;
 pub use server::serve;
 #[cfg(feature = "qualification")]
 pub use server::serve_with_post_commit_response_barrier;
+#[cfg(feature = "qualification")]
+pub use server::serve_with_pre_operation_barrier;
