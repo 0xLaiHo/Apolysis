@@ -12,7 +12,6 @@ use std::{
     time::Duration,
 };
 
-use apolysis_gateway::{ExecutionEvidenceGateway, OsRandomIdGenerator, SystemClock};
 use apolysis_gateway_postgres::{
     Aes256GcmReplayProtector, PostgresGatewayConfig, PostgresGatewayRepository,
 };
@@ -26,7 +25,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     file_input::read_bounded_file,
-    http::{router, GatewayHttpState, GatewayQualificationHook},
+    http::{router, GatewayHttpState, GatewayQualificationHook, GatewayServerClock},
     AuthorityStore, GatewayServerConfig, GatewayServerError,
 };
 #[cfg(feature = "qualification")]
@@ -35,11 +34,18 @@ use crate::{qualification::QualificationBarrier, QualificationOperation};
 const MAX_DATABASE_URL_BYTES: u64 = 4096;
 const MAX_REPLAY_KEY_BYTES: u64 = 256;
 const MAX_TLS_FILE_BYTES: u64 = 1024 * 1024;
+#[cfg(feature = "qualification")]
+const MAX_IJSON_INTEGER: u64 = 9_007_199_254_740_991;
 pub(crate) const ACTIVE_REPLAY_KEY_ID: &str = "gateway-live-v1";
 
 /// Run the direct-mTLS production Gateway until it receives a shutdown signal.
 pub async fn serve(config: GatewayServerConfig) -> Result<(), GatewayServerError> {
-    serve_inner(config, GatewayQualificationHook::Disabled).await
+    serve_inner(
+        config,
+        GatewayServerClock::System,
+        GatewayQualificationHook::Disabled,
+    )
+    .await
 }
 
 /// Run the real mTLS Gateway with a local-only post-commit response barrier.
@@ -60,7 +66,12 @@ pub async fn serve_with_post_commit_response_barrier(
             "Gateway qualification marker must differ from the ready file",
         ));
     }
-    serve_inner(config, GatewayQualificationHook::qualification(barrier)).await
+    serve_inner(
+        config,
+        GatewayServerClock::System,
+        GatewayQualificationHook::qualification(barrier),
+    )
+    .await
 }
 
 /// Run the real mTLS Gateway with a local-only pre-operation race barrier.
@@ -74,6 +85,7 @@ pub async fn serve_with_pre_operation_barrier(
     operation: QualificationOperation,
     marker: PathBuf,
     release: PathBuf,
+    fixed_now_unix_ms: Option<u64>,
 ) -> Result<(), GatewayServerError> {
     require_qualification_listener(config.listen())?;
     let barrier = QualificationBarrier::pre_operation(operation, marker, release)?;
@@ -82,7 +94,23 @@ pub async fn serve_with_pre_operation_barrier(
             "Gateway qualification control files must differ from the ready file",
         ));
     }
-    serve_inner(config, GatewayQualificationHook::qualification(barrier)).await
+    let clock = match fixed_now_unix_ms {
+        Some(now_unix_ms) if (1..=MAX_IJSON_INTEGER).contains(&now_unix_ms) => {
+            GatewayServerClock::Fixed(now_unix_ms)
+        }
+        Some(_) => {
+            return Err(GatewayServerError::configuration(
+                "Gateway qualification time is invalid",
+            ))
+        }
+        None => GatewayServerClock::System,
+    };
+    serve_inner(
+        config,
+        clock,
+        GatewayQualificationHook::qualification(barrier),
+    )
+    .await
 }
 
 #[cfg(feature = "qualification")]
@@ -98,6 +126,7 @@ fn require_qualification_listener(listen: SocketAddr) -> Result<(), GatewayServe
 
 async fn serve_inner(
     config: GatewayServerConfig,
+    clock: GatewayServerClock,
     qualification_hook: GatewayQualificationHook,
 ) -> Result<(), GatewayServerError> {
     let database_url = read_secret_text(config.database_url_file(), MAX_DATABASE_URL_BYTES)?;
@@ -124,10 +153,10 @@ async fn serve_inner(
     .await
     .map_err(GatewayServerError::gateway)?;
     let authority = AuthorityStore::connect(&database_url).await?;
-    let gateway = ExecutionEvidenceGateway::new(repository, SystemClock, OsRandomIdGenerator);
     let application = router(GatewayHttpState::with_qualification_hook(
-        gateway,
+        repository,
         authority,
+        clock,
         qualification_hook,
     ));
 

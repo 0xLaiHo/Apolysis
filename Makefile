@@ -3,6 +3,7 @@
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
 	test-gateway-https-crash-recovery \
+	test-gateway-mixed-lifecycle-deadline-races \
 	test-gateway-multiprocess-lifecycle-races \
 	test-projection-postgres \
 	test-gateway-transport-mtls \
@@ -74,6 +75,12 @@ test-gateway-https-crash-recovery:
 # coordinated mTLS request pair enters PostgreSQL.
 test-gateway-multiprocess-lifecycle-races:
 	./scripts/test-gateway-multiprocess-lifecycle-races.sh
+
+# Opt-in fixed-time lifecycle qualification. Independent organizations drive
+# exact replay against novel ingest at finalization-deadline and lease-expiry
+# boundaries through two real mTLS Gateway processes and PostgreSQL.
+test-gateway-mixed-lifecycle-deadline-races:
+	./scripts/test-gateway-mixed-lifecycle-deadline-races.sh
 
 # Opt-in real-provider object lifecycle and crash-recovery qualification.
 test-evidence-objects-real:

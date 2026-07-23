@@ -7,6 +7,8 @@ use apolysis_gateway_server::{
     GatewayServerError, QualificationOperation,
 };
 
+const MAX_IJSON_INTEGER: u64 = 9_007_199_254_740_991;
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -36,6 +38,7 @@ async fn run() -> Result<(), QualificationServerError> {
                 arguments
                     .release
                     .ok_or(QualificationServerError::Arguments)?,
+                arguments.fixed_now_unix_ms,
             )
             .await
         }
@@ -49,6 +52,7 @@ struct QualificationArguments {
     marker: PathBuf,
     phase: QualificationPhase,
     release: Option<PathBuf>,
+    fixed_now_unix_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +84,7 @@ impl QualificationArguments {
         let mut marker = None;
         let mut phase = None;
         let mut release = None;
+        let mut fixed_now_unix_ms = None;
 
         while let Some(option) = arguments.next() {
             let value = arguments
@@ -103,11 +108,23 @@ impl QualificationArguments {
                 Some("--qualification-release") if release.is_none() => {
                     release = Some(PathBuf::from(value));
                 }
+                Some("--qualification-now-unix-ms") if fixed_now_unix_ms.is_none() => {
+                    let value = value
+                        .to_str()
+                        .ok_or(QualificationServerError::Arguments)?
+                        .parse::<u64>()
+                        .map_err(|_| QualificationServerError::Arguments)?;
+                    if !(1..=MAX_IJSON_INTEGER).contains(&value) {
+                        return Err(QualificationServerError::Arguments);
+                    }
+                    fixed_now_unix_ms = Some(value);
+                }
                 Some(
                     "--qualification-operation"
                     | "--qualification-marker"
                     | "--qualification-phase"
-                    | "--qualification-release",
+                    | "--qualification-release"
+                    | "--qualification-now-unix-ms",
                 ) => {
                     return Err(QualificationServerError::Arguments);
                 }
@@ -122,6 +139,9 @@ impl QualificationArguments {
         if (phase == QualificationPhase::PreOperation) != release.is_some() {
             return Err(QualificationServerError::Arguments);
         }
+        if fixed_now_unix_ms.is_some() && phase != QualificationPhase::PreOperation {
+            return Err(QualificationServerError::Arguments);
+        }
 
         Ok(Self {
             server_arguments,
@@ -129,6 +149,7 @@ impl QualificationArguments {
             marker: marker.ok_or(QualificationServerError::Arguments)?,
             phase,
             release,
+            fixed_now_unix_ms,
         })
     }
 }
@@ -155,6 +176,25 @@ impl std::error::Error for QualificationServerError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pre_operation_arguments_with_fixed_time(value: &str) -> Vec<OsString> {
+        [
+            "qualification-server",
+            "--qualification-operation",
+            "ingest",
+            "--qualification-marker",
+            "/tmp/private/reached",
+            "--qualification-phase",
+            "pre_operation",
+            "--qualification-release",
+            "/tmp/private/release",
+            "--qualification-now-unix-ms",
+            value,
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+    }
 
     #[test]
     fn separates_local_qualification_options_from_the_production_cli() {
@@ -240,5 +280,82 @@ mod tests {
             arguments.release,
             Some(PathBuf::from("/tmp/private/release"))
         );
+    }
+
+    #[test]
+    fn keeps_fixed_qualification_time_out_of_the_production_cli() {
+        let arguments = QualificationArguments::parse(
+            [
+                "qualification-server",
+                "--listen",
+                "127.0.0.1:0",
+                "--qualification-operation",
+                "ingest",
+                "--qualification-marker",
+                "/tmp/private/reached",
+                "--qualification-phase",
+                "pre_operation",
+                "--qualification-release",
+                "/tmp/private/release",
+                "--qualification-now-unix-ms",
+                "123456789",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .unwrap();
+
+        assert_eq!(
+            arguments.server_arguments,
+            ["qualification-server", "--listen", "127.0.0.1:0"]
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(arguments.fixed_now_unix_ms, Some(123_456_789));
+    }
+
+    #[test]
+    fn accepts_the_maximum_persistable_fixed_qualification_time() {
+        let arguments = QualificationArguments::parse(pre_operation_arguments_with_fixed_time(
+            "9007199254740991",
+        ))
+        .unwrap();
+
+        assert_eq!(arguments.fixed_now_unix_ms, Some(9_007_199_254_740_991));
+    }
+
+    #[test]
+    fn rejects_invalid_fixed_qualification_times() {
+        for value in ["0", "9007199254740992", "-1", "not-a-time"] {
+            assert!(
+                QualificationArguments::parse(pre_operation_arguments_with_fixed_time(value))
+                    .is_err(),
+                "expected fixed qualification time {value:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_fixed_time_outside_one_pre_operation_configuration() {
+        let post_commit = [
+            "qualification-server",
+            "--qualification-operation",
+            "ingest",
+            "--qualification-marker",
+            "/tmp/private/reached",
+            "--qualification-now-unix-ms",
+            "123456789",
+        ];
+        assert!(
+            QualificationArguments::parse(post_commit.into_iter().map(OsString::from)).is_err()
+        );
+
+        let mut duplicate = pre_operation_arguments_with_fixed_time("123456789");
+        duplicate.extend([
+            OsString::from("--qualification-now-unix-ms"),
+            OsString::from("123456790"),
+        ]);
+        assert!(QualificationArguments::parse(duplicate).is_err());
     }
 }
