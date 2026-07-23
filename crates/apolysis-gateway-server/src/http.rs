@@ -46,7 +46,24 @@ const ALLOWED_REQUEST_HEADERS: [&str; 12] = [
 ];
 
 type GatewayApplication =
-    ExecutionEvidenceGateway<PostgresGatewayRepository, SystemClock, OsRandomIdGenerator>;
+    ExecutionEvidenceGateway<PostgresGatewayRepository, GatewayServerClock, OsRandomIdGenerator>;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GatewayServerClock {
+    System,
+    #[cfg(feature = "qualification")]
+    Fixed(u64),
+}
+
+impl GatewayClock for GatewayServerClock {
+    fn now_unix_ms(&self) -> u64 {
+        match self {
+            Self::System => SystemClock.now_unix_ms(),
+            #[cfg(feature = "qualification")]
+            Self::Fixed(now_unix_ms) => *now_unix_ms,
+        }
+    }
+}
 
 /// A frozen Gateway lifecycle route shared by authority and response handling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,18 +89,25 @@ impl GatewayRouteOperation {
 pub(crate) struct GatewayHttpState {
     gateway: Arc<GatewayApplication>,
     authority: Arc<AuthorityStore>,
+    clock: GatewayServerClock,
     qualification_hook: GatewayQualificationHook,
 }
 
 impl GatewayHttpState {
     pub(crate) fn with_qualification_hook(
-        gateway: GatewayApplication,
+        repository: PostgresGatewayRepository,
         authority: AuthorityStore,
+        clock: GatewayServerClock,
         qualification_hook: GatewayQualificationHook,
     ) -> Self {
         Self {
-            gateway: Arc::new(gateway),
+            gateway: Arc::new(ExecutionEvidenceGateway::new(
+                repository,
+                clock,
+                OsRandomIdGenerator,
+            )),
             authority: Arc::new(authority),
+            clock,
             qualification_hook,
         }
     }
@@ -262,7 +286,7 @@ where
         return Err(unauthenticated_response());
     };
 
-    let now_unix_ms = SystemClock.now_unix_ms();
+    let now_unix_ms = state.clock.now_unix_ms();
     let context = match state
         .authority
         .resolve_mtls(
@@ -516,6 +540,15 @@ fn content_length_exceeds_limit(headers: &HeaderMap) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "qualification")]
+    #[test]
+    fn fixed_qualification_clock_returns_one_process_time() {
+        let clock = GatewayServerClock::Fixed(1_234_567_890);
+
+        assert_eq!(clock.now_unix_ms(), 1_234_567_890);
+        assert_eq!(clock.now_unix_ms(), 1_234_567_890);
+    }
+
     #[test]
     fn rejects_authority_and_proxy_header_variants() {
         for header_name in [
@@ -542,6 +575,19 @@ mod tests {
                 "expected {header_name} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn rejects_remote_qualification_control_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-apolysis-qualification-now-unix-ms"
+                .parse::<axum::http::HeaderName>()
+                .unwrap(),
+            HeaderValue::from_static("123456789"),
+        );
+
+        assert!(contains_disallowed_headers(&headers));
     }
 
     #[test]
