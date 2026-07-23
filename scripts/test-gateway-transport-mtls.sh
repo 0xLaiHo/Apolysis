@@ -13,6 +13,7 @@ start_timeout_seconds="${APOLYSIS_POSTGRES_START_TIMEOUT_SECONDS:-60}"
 gate_timeout_seconds="${APOLYSIS_GATEWAY_TRANSPORT_TEST_TIMEOUT_SECONDS:-900}"
 crash_recovery_enabled="${APOLYSIS_GATEWAY_HTTPS_CRASH_RECOVERY:-0}"
 multiprocess_races_enabled="${APOLYSIS_GATEWAY_MULTIPROCESS_LIFECYCLE_RACES:-0}"
+deadline_races_enabled="${APOLYSIS_GATEWAY_MIXED_LIFECYCLE_DEADLINE_RACES:-0}"
 
 if [[ "${APOLYSIS_GATEWAY_TRANSPORT_INNER:-0}" != "1" ]]; then
     if ! command -v timeout >/dev/null 2>&1; then
@@ -83,6 +84,19 @@ if [[ "$multiprocess_races_enabled" != "0" && "$multiprocess_races_enabled" != "
     printf 'error: APOLYSIS_GATEWAY_MULTIPROCESS_LIFECYCLE_RACES must be 0 or 1\n' >&2
     exit 1
 fi
+if [[ "$deadline_races_enabled" != "0" && "$deadline_races_enabled" != "1" ]]; then
+    printf 'error: APOLYSIS_GATEWAY_MIXED_LIFECYCLE_DEADLINE_RACES must be 0 or 1\n' >&2
+    exit 1
+fi
+
+lifecycle_races_enabled=0
+if [[ "$multiprocess_races_enabled" == "1" || "$deadline_races_enabled" == "1" ]]; then
+    lifecycle_races_enabled=1
+fi
+qualification_enabled=0
+if [[ "$crash_recovery_enabled" == "1" || "$lifecycle_races_enabled" == "1" ]]; then
+    qualification_enabled=1
+fi
 
 if ! timeout 10s docker info >/dev/null 2>&1; then
     printf 'error: Docker daemon is unavailable or inaccessible\n' >&2
@@ -93,7 +107,7 @@ printf 'Building the production Gateway transport binaries...\n'
 timeout --foreground --kill-after=15s "${gate_timeout_seconds}s" \
     cargo build -p apolysis-gateway-server --bins
 
-if [[ "$crash_recovery_enabled" == "1" || "$multiprocess_races_enabled" == "1" ]]; then
+if [[ "$qualification_enabled" == "1" ]]; then
     timeout --foreground --kill-after=15s "${gate_timeout_seconds}s" \
         cargo build -p apolysis-gateway-server \
             --features qualification \
@@ -113,7 +127,7 @@ for binary in "$gateway_bin" "$authority_bin" "$request_bin"; do
         exit 1
     fi
 done
-if [[ ("$crash_recovery_enabled" == "1" || "$multiprocess_races_enabled" == "1") && \
+if [[ "$qualification_enabled" == "1" && \
     (! -x "$qualification_gateway_bin" || ! -x "$qualification_join_grant_bin") ]]; then
     printf 'error: expected qualification executables were not built\n' >&2
     exit 1
@@ -152,6 +166,8 @@ race_blocker_application_name=""
 race_overlap_watcher_pid=""
 race_overlap_watcher_application_name=""
 race_overlap_watcher_log=""
+race_fixed_now_unix_ms=""
+race_expected_premature_operation_count=0
 race_secret_values=()
 race_forbidden_response_values=()
 race_lease_files=()
@@ -490,6 +506,12 @@ start_pre_operation_race_gateways() {
         local marker="${secret_directory}/${artifact_prefix}.${side}.ready"
         local instance_ready="${secret_directory}/${artifact_prefix}.${side}.listener"
         local instance_log="${secret_directory}/${artifact_prefix}.${side}.log"
+        local qualification_time_arguments=()
+        if [[ -n "$race_fixed_now_unix_ms" ]]; then
+            qualification_time_arguments=(
+                --qualification-now-unix-ms "$race_fixed_now_unix_ms"
+            )
+        fi
         rm -f -- "$marker" "$instance_ready" "$instance_log"
         qualification_private_artifacts+=("$marker" "$instance_ready" "$instance_log")
 
@@ -498,6 +520,7 @@ start_pre_operation_race_gateways() {
             --qualification-marker "$marker" \
             --qualification-phase pre_operation \
             --qualification-release "$release_file" \
+            "${qualification_time_arguments[@]}" \
             --listen 127.0.0.1:0 \
             --database-url-file "$database_url_file" \
             --tls-certificate "$server_cert" \
@@ -810,7 +833,7 @@ SELECT count(*) FROM apolysis_gateway.gateway_operations
    AND client_operation_id IN (:'left_operation_id', :'right_operation_id');
 SQL
 )"
-    if [[ "$premature_operation_count" != "0" ]]; then
+    if [[ "$premature_operation_count" != "$race_expected_premature_operation_count" ]]; then
         printf 'error: %s reached durable state before release\n' "$artifact_prefix" >&2
         exit 1
     fi
@@ -871,6 +894,56 @@ SQL
     done
     stop_race_processes
     start_gateway
+}
+
+run_timed_pre_operation_race() {
+    local scenario_variable="$1"
+    local -n timed_scenario="$scenario_variable"
+    local required_field=""
+    for required_field in \
+        operation route organization_id \
+        left_request left_certificate left_key \
+        right_request right_certificate right_key \
+        artifact_prefix now_unix_ms preexisting_operation_count; do
+        if [[ -z "${timed_scenario[$required_field]:-}" ]]; then
+            printf 'error: timed race scenario omitted required field: %s\n' \
+                "$required_field" >&2
+            exit 1
+        fi
+    done
+    require_positive_integer \
+        "${scenario_variable}[now_unix_ms]" \
+        "${timed_scenario[now_unix_ms]}"
+    if [[ -n "$race_fixed_now_unix_ms" ]]; then
+        printf 'error: timed race clock context was already armed\n' >&2
+        exit 1
+    fi
+    require_positive_integer \
+        "${scenario_variable}[preexisting_operation_count]" \
+        "${timed_scenario[preexisting_operation_count]}"
+
+    race_fixed_now_unix_ms="${timed_scenario[now_unix_ms]}"
+    race_expected_premature_operation_count="${timed_scenario[preexisting_operation_count]}"
+    run_pre_operation_race \
+        "${timed_scenario[operation]}" \
+        "${timed_scenario[route]}" \
+        "${timed_scenario[organization_id]}" \
+        "${timed_scenario[left_request]}" \
+        "${timed_scenario[left_certificate]}" \
+        "${timed_scenario[left_key]}" \
+        "${timed_scenario[right_request]}" \
+        "${timed_scenario[right_certificate]}" \
+        "${timed_scenario[right_key]}" \
+        "${timed_scenario[artifact_prefix]}"
+    race_fixed_now_unix_ms=""
+    race_expected_premature_operation_count=0
+
+    timed_scenario[left_response]="$race_left_response"
+    timed_scenario[right_response]="$race_right_response"
+    timed_scenario[left_headers]="$race_left_headers"
+    timed_scenario[right_headers]="$race_right_headers"
+    timed_scenario[left_status]="$race_left_status"
+    timed_scenario[right_status]="$race_right_status"
 }
 
 build_race_open_request() {
@@ -1741,6 +1814,543 @@ SQL
     printf 'Two-process Gateway lifecycle race matrix passed.\n'
 }
 
+send_deadline_setup_request() {
+    local request_variable="$1"
+    local -n private_request="$request_variable"
+    local required_field=""
+    for required_field in route request certificate key artifact_prefix; do
+        if [[ -z "${private_request[$required_field]:-}" ]]; then
+            printf 'error: deadline setup request omitted required field: %s\n' \
+                "$required_field" >&2
+            exit 1
+        fi
+    done
+
+    private_request[response]="${secret_directory}/${private_request[artifact_prefix]}.response.json"
+    private_request[headers]="${secret_directory}/${private_request[artifact_prefix]}.headers"
+    : >"${private_request[response]}"
+    : >"${private_request[headers]}"
+    race_private_artifacts+=("${private_request[response]}")
+    qualification_private_artifacts+=("${private_request[headers]}")
+
+    private_request[status]="$(curl --silent --show-error \
+        --connect-timeout 5 \
+        --max-time 30 \
+        --cacert "$ca_cert" \
+        --cert "${private_request[certificate]}" \
+        --key "${private_request[key]}" \
+        --header 'Accept: application/json' \
+        --header 'Content-Type: application/json' \
+        --data-binary "@${private_request[request]}" \
+        --dump-header "${private_request[headers]}" \
+        --output "${private_request[response]}" \
+        --write-out '%{http_code}' \
+        "${gateway_base_url}/gateway/v0.1/${private_request[route]}")"
+    assert_no_store \
+        "${private_request[headers]}" \
+        "${private_request[artifact_prefix]}"
+}
+
+build_deadline_open_request() {
+    local case_variable="$1"
+    local -n deadline_case="$case_variable"
+    local operation_id="$2"
+    local unsigned_file="$3"
+    local signed_file="$4"
+
+    jq -n \
+        --arg operation_id "$operation_id" \
+        --arg client_run_key "client_${operation_id}" \
+        --arg authority_id "${deadline_case[authority_id]}" \
+        --arg principal_id "${deadline_case[principal_id]}" \
+        --arg source_id "${deadline_case[source_id]}" \
+        '{
+            schema_version: "0.1",
+            mode: "create",
+            client_operation_id: $operation_id,
+            request_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+            client_run_key: $client_run_key,
+            environment: "local_cli_or_ide",
+            authority: {kind: "service", id: $authority_id},
+            principal: {kind: "workload", id: $principal_id},
+            objective_ref: "objective_mixed_lifecycle_deadline_race",
+            privacy_profile_ref: "privacy_structure_only_v1",
+            retention_profile_ref: "retention_30d_v1",
+            expected_source_kinds: ["semantic_hook"],
+            source_manifest: {
+                schema_version: "0.1",
+                source_id: $source_id,
+                source_kind: "semantic_hook",
+                declared_boundary: "agent_harness",
+                adapter_name: "apolysis_deadline_qualification",
+                adapter_version: "0.1.0",
+                environment: "local_cli_or_ide",
+                capabilities: [
+                    "semantic_lifecycle",
+                    "tool_calls",
+                    "process",
+                    "claimed_outcome"
+                ],
+                expected_lifecycle: ["started", "finished"],
+                ordering: "strict_per_stream",
+                samples: false,
+                redaction_profile_ref: "redaction_structure_only_v1",
+                redacted_fields: ["payload.command", "payload.arguments"],
+                privacy_capabilities: ["structure_only"]
+            }
+        }' >"$unsigned_file"
+    "$request_bin" open-run --input "$unsigned_file" --output "$signed_file"
+}
+
+prepare_deadline_case() {
+    local case_variable="$1"
+    local -n deadline_case="$case_variable"
+    local prefix="${deadline_case[prefix]}"
+    local open_unsigned="${secret_directory}/${prefix}.open.unsigned.json"
+    local open_signed="${secret_directory}/${prefix}.open.json"
+    local open_operation_id="operation_${prefix}_open_${random_suffix}"
+    build_deadline_open_request \
+        "$case_variable" "$open_operation_id" "$open_unsigned" "$open_signed"
+
+    local -A open_request=(
+        [route]="open-run"
+        [request]="$open_signed"
+        [certificate]="${deadline_case[certificate]}"
+        [key]="${deadline_case[key]}"
+        [artifact_prefix]="${prefix}.open"
+    )
+    send_deadline_setup_request open_request
+    if [[ "${open_request[status]}" != "200" ]] || \
+        ! jq -e '.outcome == "created"' "${open_request[response]}" >/dev/null; then
+        printf 'error: %s could not create its isolated deadline run\n' "$prefix" >&2
+        exit 1
+    fi
+
+    deadline_case[run_id]="$(jq -er '.run_id' "${open_request[response]}")"
+    deadline_case[stream_id]="$(jq -er '.source_stream_id' "${open_request[response]}")"
+    deadline_case[lease_expires_at_unix_ms]="$(jq -er '.lease.expires_at_unix_ms' \
+        "${open_request[response]}")"
+    local lease_value=""
+    lease_value="$(jq -er '.lease.lease_id' "${open_request[response]}")"
+    deadline_case[lease_file]="${secret_directory}/${prefix}.lease"
+    write_private_race_secret "$lease_value" "${deadline_case[lease_file]}"
+    race_lease_files+=("${deadline_case[lease_file]}")
+    race_expected_lease_file_by_response["${open_request[response]}"]="${deadline_case[lease_file]}"
+    race_secret_values+=("$lease_value")
+    deadline_case[open_operation_id]="$open_operation_id"
+    deadline_case[open_response]="${open_request[response]}"
+
+    local ingest_unsigned="${secret_directory}/${prefix}.ingest.unsigned.json"
+    local ingest_signed="${secret_directory}/${prefix}.ingest.json"
+    local ingest_operation_id="operation_${prefix}_ingest_${random_suffix}"
+    local original_event_id="event_${prefix}_original_${random_suffix}"
+    build_race_ingest_request \
+        "$ingest_operation_id" \
+        "${deadline_case[run_id]}" \
+        "${deadline_case[lease_file]}" \
+        "${deadline_case[source_id]}" \
+        "${deadline_case[stream_id]}" \
+        "$original_event_id" 1 \
+        "$ingest_unsigned" "$ingest_signed"
+    local -A ingest_request=(
+        [route]="ingest"
+        [request]="$ingest_signed"
+        [certificate]="${deadline_case[certificate]}"
+        [key]="${deadline_case[key]}"
+        [artifact_prefix]="${prefix}.ingest"
+    )
+    send_deadline_setup_request ingest_request
+    if [[ "${ingest_request[status]}" != "200" ]] || \
+        ! jq -e \
+            '.committed_count == 1
+             and .duplicate_count == 0
+             and (.acknowledgements | length) == 1' \
+            "${ingest_request[response]}" >/dev/null; then
+        printf 'error: %s could not establish its replayable ingest\n' "$prefix" >&2
+        exit 1
+    fi
+
+    deadline_case[ingest_operation_id]="$ingest_operation_id"
+    deadline_case[ingest_request]="$ingest_signed"
+    deadline_case[ingest_response]="${ingest_request[response]}"
+    deadline_case[original_event_id]="$original_event_id"
+}
+
+build_deadline_finish_request() {
+    local case_variable="$1"
+    local -n deadline_case="$case_variable"
+    local operation_id="$2"
+    local requested_deadline_unix_ms="$3"
+    local unsigned_file="$4"
+    local signed_file="$5"
+
+    jq -n \
+        --arg operation_id "$operation_id" \
+        --arg run_id "${deadline_case[run_id]}" \
+        --rawfile lease_id "${deadline_case[lease_file]}" \
+        --arg source_id "${deadline_case[source_id]}" \
+        --arg stream_id "${deadline_case[stream_id]}" \
+        --argjson requested_deadline_unix_ms "$requested_deadline_unix_ms" \
+        '{
+            schema_version: "0.1",
+            client_operation_id: $operation_id,
+            request_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+            run_id: $run_id,
+            lease_id: $lease_id,
+            terminal_positions: [{
+                source_id: $source_id,
+                source_stream_id: $stream_id,
+                final_source_sequence: 2
+            }],
+            outcome_claim_refs: [],
+            requested_finalization_deadline_unix_ms: $requested_deadline_unix_ms
+        }' >"$unsigned_file"
+    "$request_bin" finish-run --input "$unsigned_file" --output "$signed_file"
+}
+
+assert_deadline_case_database_oracle() {
+    local case_variable="$1"
+    local -n deadline_case="$case_variable"
+    local authority_audit_count=""
+    authority_audit_count="$(timeout 15s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only \
+            --set=organization_id="${deadline_case[organization_id]}" \
+            --set=source_registration_id="${deadline_case[registration_id]}" \
+            --set=fixed_now_unix_ms="${deadline_case[fixed_now_unix_ms]}" <<'SQL' | tr -d '[:space:]'
+SELECT count(*) FROM apolysis_gateway.gateway_authority_audit
+ WHERE organization_id=:'organization_id'
+   AND source_registration_id=:'source_registration_id'
+   AND operation='ingest'
+   AND decision='authorized'
+   AND requested_at_unix_ms=:'fixed_now_unix_ms'::bigint;
+SQL
+)"
+    local database_vector=""
+    database_vector="$(timeout 30s docker exec -i "$container_name" \
+        psql --username "$gateway_runtime_login" --dbname "$database_name" \
+            --no-align --tuples-only \
+            --set=organization_id="${deadline_case[organization_id]}" \
+            --set=run_id="${deadline_case[run_id]}" \
+            --set=lease_expires_at_unix_ms="${deadline_case[lease_expires_at_unix_ms]}" \
+            --set=original_event_id="${deadline_case[original_event_id]}" \
+            --set=novel_event_id="${deadline_case[novel_event_id]}" \
+            --set=accepted_operation_ids="${deadline_case[accepted_operation_ids]}" \
+            --set=rejected_operation_id="${deadline_case[rejected_operation_id]}" \
+            --set=fixed_now_unix_ms="${deadline_case[fixed_now_unix_ms]}" \
+            --set=prior_state="${deadline_case[prior_state]}" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM apolysis_gateway.runs
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND state='incomplete' AND finalization_deadline_unix_ms IS NULL
+        AND state_changed_at_unix_ms=:'fixed_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND expires_at_unix_ms=:'lease_expires_at_unix_ms'::bigint
+        AND revoked_at_unix_ms IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.evidence_events
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_event_id=:'original_event_id' AND source_sequence=1),
+    (SELECT count(*) FROM apolysis_gateway.evidence_events
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_event_id=:'novel_event_id'),
+    (SELECT count(*) FROM apolysis_gateway.finalization_declarations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.finalization_declarations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND resulting_run_state='finishing'
+        AND accepted_deadline_unix_ms=:'fixed_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.run_id=:'run_id'
+        AND replay.encryption_algorithm='aes-256-gcm'
+        AND octet_length(replay.nonce)=12
+        AND octet_length(replay.authentication_tag)=16
+        AND octet_length(replay.outcome_ciphertext)>0),
+    (SELECT count(*)
+       FROM unnest(string_to_array(:'accepted_operation_ids', ','))
+            AS expected(client_operation_id)
+      WHERE (SELECT count(*) FROM apolysis_gateway.gateway_operations AS operation
+              WHERE operation.organization_id=:'organization_id'
+                AND operation.run_id=:'run_id'
+                AND operation.client_operation_id=expected.client_operation_id) <> 1),
+    (SELECT count(*)
+       FROM unnest(string_to_array(:'accepted_operation_ids', ','))
+            AS expected(client_operation_id)
+      WHERE (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+              JOIN apolysis_gateway.gateway_operations AS operation
+                ON operation.organization_id=replay.organization_id
+               AND operation.operation_id=replay.operation_id
+              WHERE operation.organization_id=:'organization_id'
+                AND operation.run_id=:'run_id'
+                AND operation.client_operation_id=expected.client_operation_id) <> 1),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id=:'rejected_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND NOT client_operation_id = ANY(
+            string_to_array(:'accepted_operation_ids', ','))),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND fact_kind='run_state_changed'
+        AND fact_json #>> '{fact,fact,from}'=:'prior_state'
+        AND fact_json #>> '{fact,fact,to}'='incomplete'
+        AND (fact_json #>> '{fact,fact,recorded_at_unix_ms}')::bigint=
+            :'fixed_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND fact_kind='run_state_changed'
+        AND fact_json #>> '{fact,fact,to}'='incomplete'),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.projection_outbox AS outbox
+      JOIN apolysis_gateway.record_items AS record
+        ON record.organization_id=outbox.organization_id
+       AND record.ingest_sequence=outbox.ingest_sequence
+      WHERE record.organization_id=:'organization_id'
+        AND record.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items AS record
+      LEFT JOIN apolysis_gateway.projection_outbox AS outbox
+        ON outbox.organization_id=record.organization_id
+       AND outbox.ingest_sequence=record.ingest_sequence
+      WHERE record.organization_id=:'organization_id'
+        AND record.run_id=:'run_id' AND outbox.ingest_sequence IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.projection_outbox AS outbox
+      LEFT JOIN apolysis_gateway.record_items AS record
+        ON record.organization_id=outbox.organization_id
+       AND record.ingest_sequence=outbox.ingest_sequence
+      WHERE outbox.organization_id=:'organization_id'
+        AND record.ingest_sequence IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.organization_sequences
+      WHERE organization_id=:'organization_id'
+        AND next_ingest_sequence=(
+            SELECT count(*) + 1 FROM apolysis_gateway.record_items
+             WHERE organization_id=:'organization_id')),
+    (SELECT count(*) FROM (
+        SELECT min(ingest_sequence)=1
+               AND max(ingest_sequence)=count(*)
+               AND bool_and(outbox_ingest_sequence=ingest_sequence) AS valid
+          FROM apolysis_gateway.record_items
+         WHERE organization_id=:'organization_id'
+    ) AS contiguous WHERE valid),
+    (SELECT array_to_string(array_agg(fact_kind ORDER BY ingest_sequence), ',')
+       FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id')
+);
+SQL
+)"
+    database_vector="${authority_audit_count}|${database_vector}"
+    local expected_vector=""
+    expected_vector="2|1|1|1|0|${deadline_case[expected_finalization_count]}"
+    expected_vector+="|${deadline_case[expected_finalization_count]}"
+    expected_vector+="|${deadline_case[expected_operation_count]}"
+    expected_vector+="|${deadline_case[expected_operation_count]}"
+    expected_vector+="|${deadline_case[expected_operation_count]}"
+    expected_vector+="|0|0|0|0|1|1"
+    expected_vector+="|${deadline_case[expected_record_count]}"
+    expected_vector+="|${deadline_case[expected_record_count]}"
+    expected_vector+="|0|0|1|1|${deadline_case[expected_fact_kinds]}"
+    if [[ "$database_vector" != "$expected_vector" ]]; then
+        printf 'error: %s database oracle did not match the reviewed vector: %s\n' \
+            "${deadline_case[prefix]}" "$database_vector" >&2
+        exit 1
+    fi
+}
+
+run_finalization_deadline_race() {
+    local -A finalization_case=(
+        [prefix]="deadline-finalization"
+        [organization_id]="$deadline_finalization_organization_id"
+        [registration_id]="$deadline_finalization_registration_id"
+        [principal_id]="$deadline_finalization_principal_id"
+        [source_id]="$deadline_finalization_source_id"
+        [authority_id]="$deadline_finalization_authority_id"
+        [certificate]="$deadline_finalization_client_cert"
+        [key]="$deadline_finalization_client_key"
+    )
+    prepare_deadline_case finalization_case
+
+    local requested_deadline_unix_ms=""
+    requested_deadline_unix_ms="$(( $(date +%s%3N) + 60000 ))"
+    if ((requested_deadline_unix_ms >= finalization_case[lease_expires_at_unix_ms])) || \
+        ((requested_deadline_unix_ms >= expires_at_unix_ms)); then
+        printf 'error: finalization race time escaped its lease or authority window\n' >&2
+        exit 1
+    fi
+    finalization_case[fixed_now_unix_ms]="$requested_deadline_unix_ms"
+
+    local finish_unsigned="${secret_directory}/deadline-finalization.finish.unsigned.json"
+    local finish_signed="${secret_directory}/deadline-finalization.finish.json"
+    local finish_operation_id="operation_deadline_finalization_finish_${random_suffix}"
+    build_deadline_finish_request \
+        finalization_case "$finish_operation_id" "$requested_deadline_unix_ms" \
+        "$finish_unsigned" "$finish_signed"
+    local -A finish_request=(
+        [route]="finish-run"
+        [request]="$finish_signed"
+        [certificate]="$deadline_finalization_client_cert"
+        [key]="$deadline_finalization_client_key"
+        [artifact_prefix]="deadline-finalization.finish"
+    )
+    send_deadline_setup_request finish_request
+    if [[ "${finish_request[status]}" != "200" ]] || \
+        ! jq -e \
+            --argjson deadline "$requested_deadline_unix_ms" \
+            '.state == "finishing"
+             and .finalization_deadline_unix_ms == $deadline
+             and .idempotent_replay == false' \
+            "${finish_request[response]}" >/dev/null; then
+        printf 'error: finalization race did not establish its bounded finishing state\n' >&2
+        exit 1
+    fi
+
+    local novel_unsigned="${secret_directory}/deadline-finalization.novel.unsigned.json"
+    local novel_signed="${secret_directory}/deadline-finalization.novel.json"
+    local novel_operation_id="operation_deadline_finalization_novel_${random_suffix}"
+    local novel_event_id="event_deadline_finalization_novel_${random_suffix}"
+    build_race_ingest_request \
+        "$novel_operation_id" \
+        "${finalization_case[run_id]}" \
+        "${finalization_case[lease_file]}" \
+        "$deadline_finalization_source_id" \
+        "${finalization_case[stream_id]}" \
+        "$novel_event_id" 2 \
+        "$novel_unsigned" "$novel_signed"
+
+    local -A timed_race=(
+        [operation]="ingest"
+        [route]="ingest"
+        [organization_id]="$deadline_finalization_organization_id"
+        [left_request]="${finalization_case[ingest_request]}"
+        [left_certificate]="$deadline_finalization_client_cert"
+        [left_key]="$deadline_finalization_client_key"
+        [right_request]="$novel_signed"
+        [right_certificate]="$deadline_finalization_client_cert"
+        [right_key]="$deadline_finalization_client_key"
+        [artifact_prefix]="deadline-finalization-boundary"
+        [now_unix_ms]="$requested_deadline_unix_ms"
+        [preexisting_operation_count]="1"
+    )
+    run_timed_pre_operation_race timed_race
+    if [[ "${timed_race[left_status]}" != "200" ]] || \
+        ! cmp -s \
+            "${finalization_case[ingest_response]}" \
+            "${timed_race[left_response]}"; then
+        printf 'error: exact ingest replay changed at the finalization deadline\n' >&2
+        exit 1
+    fi
+    if [[ "${timed_race[right_status]}" != "409" ]] || \
+        ! jq -e \
+            '.code == "invalid_lifecycle_transition" and .retryable == false' \
+            "${timed_race[right_response]}" >/dev/null; then
+        printf 'error: novel ingest crossed the finalization deadline\n' >&2
+        exit 1
+    fi
+
+    finalization_case[novel_event_id]="$novel_event_id"
+    finalization_case[accepted_operation_ids]="${finalization_case[open_operation_id]},${finalization_case[ingest_operation_id]},${finish_operation_id}"
+    finalization_case[rejected_operation_id]="$novel_operation_id"
+    finalization_case[prior_state]="finishing"
+    finalization_case[expected_finalization_count]="1"
+    finalization_case[expected_operation_count]="3"
+    finalization_case[expected_record_count]="7"
+    finalization_case[expected_fact_kinds]="run_opened,run_state_changed,source_registered,evidence_accepted,run_finalization_declared,run_state_changed,run_state_changed"
+    assert_deadline_case_database_oracle finalization_case
+    printf 'Finalization-deadline replay/novel race passed.\n'
+}
+
+run_lease_expiry_race() {
+    local -A lease_case=(
+        [prefix]="deadline-lease"
+        [organization_id]="$deadline_lease_organization_id"
+        [registration_id]="$deadline_lease_registration_id"
+        [principal_id]="$deadline_lease_principal_id"
+        [source_id]="$deadline_lease_source_id"
+        [authority_id]="$deadline_lease_authority_id"
+        [certificate]="$deadline_lease_client_cert"
+        [key]="$deadline_lease_client_key"
+    )
+    prepare_deadline_case lease_case
+
+    local lease_expiry_unix_ms="${lease_case[lease_expires_at_unix_ms]}"
+    if ((lease_expiry_unix_ms <= now_unix_ms)) || \
+        ((lease_expiry_unix_ms >= expires_at_unix_ms)); then
+        printf 'error: lease race time escaped its authority window\n' >&2
+        exit 1
+    fi
+    lease_case[fixed_now_unix_ms]="$lease_expiry_unix_ms"
+
+    local novel_unsigned="${secret_directory}/deadline-lease.novel.unsigned.json"
+    local novel_signed="${secret_directory}/deadline-lease.novel.json"
+    local novel_operation_id="operation_deadline_lease_novel_${random_suffix}"
+    local novel_event_id="event_deadline_lease_novel_${random_suffix}"
+    build_race_ingest_request \
+        "$novel_operation_id" \
+        "${lease_case[run_id]}" \
+        "${lease_case[lease_file]}" \
+        "$deadline_lease_source_id" \
+        "${lease_case[stream_id]}" \
+        "$novel_event_id" 2 \
+        "$novel_unsigned" "$novel_signed"
+
+    local -A timed_race=(
+        [operation]="ingest"
+        [route]="ingest"
+        [organization_id]="$deadline_lease_organization_id"
+        [left_request]="${lease_case[ingest_request]}"
+        [left_certificate]="$deadline_lease_client_cert"
+        [left_key]="$deadline_lease_client_key"
+        [right_request]="$novel_signed"
+        [right_certificate]="$deadline_lease_client_cert"
+        [right_key]="$deadline_lease_client_key"
+        [artifact_prefix]="deadline-lease-boundary"
+        [now_unix_ms]="$lease_expiry_unix_ms"
+        [preexisting_operation_count]="1"
+    )
+    run_timed_pre_operation_race timed_race
+    if [[ "${timed_race[left_status]}" != "200" ]] || \
+        ! cmp -s "${lease_case[ingest_response]}" "${timed_race[left_response]}"; then
+        printf 'error: exact ingest replay changed at lease expiry\n' >&2
+        exit 1
+    fi
+    if [[ "${timed_race[right_status]}" != "401" ]] || \
+        ! jq -e '.code == "lease_expired" and .retryable == false' \
+            "${timed_race[right_response]}" >/dev/null; then
+        printf 'error: novel ingest crossed lease expiry\n' >&2
+        exit 1
+    fi
+
+    lease_case[novel_event_id]="$novel_event_id"
+    lease_case[accepted_operation_ids]="${lease_case[open_operation_id]},${lease_case[ingest_operation_id]}"
+    lease_case[rejected_operation_id]="$novel_operation_id"
+    lease_case[prior_state]="active"
+    lease_case[expected_finalization_count]="0"
+    lease_case[expected_operation_count]="2"
+    lease_case[expected_record_count]="5"
+    lease_case[expected_fact_kinds]="run_opened,run_state_changed,source_registered,evidence_accepted,run_state_changed"
+    assert_deadline_case_database_oracle lease_case
+    printf 'Lease-expiry replay/novel race passed.\n'
+}
+
+run_mixed_lifecycle_deadline_races() {
+    printf 'Qualifying the bounded mixed lifecycle/deadline matrix...\n'
+    run_finalization_deadline_race
+    run_lease_expiry_race
+    printf 'Mixed lifecycle/deadline matrix passed (finalization deadline and last-lease expiry).\n'
+}
+
 cleanup() {
     local exit_status=$?
 
@@ -1857,6 +2467,12 @@ readonly race_client_cert="${secret_directory}/race-client.cert.pem"
 readonly race_join_client_key="${secret_directory}/race-join-client.key.pem"
 readonly race_join_client_csr="${secret_directory}/race-join-client.csr.pem"
 readonly race_join_client_cert="${secret_directory}/race-join-client.cert.pem"
+readonly deadline_finalization_client_key="${secret_directory}/deadline-finalization-client.key.pem"
+readonly deadline_finalization_client_csr="${secret_directory}/deadline-finalization-client.csr.pem"
+readonly deadline_finalization_client_cert="${secret_directory}/deadline-finalization-client.cert.pem"
+readonly deadline_lease_client_key="${secret_directory}/deadline-lease-client.key.pem"
+readonly deadline_lease_client_csr="${secret_directory}/deadline-lease-client.csr.pem"
+readonly deadline_lease_client_cert="${secret_directory}/deadline-lease-client.cert.pem"
 readonly replay_key_file="${secret_directory}/replay.key"
 
 printf 'Generating a real ephemeral CA and mTLS leaf certificates...\n'
@@ -1933,6 +2549,34 @@ if [[ "$multiprocess_races_enabled" == "1" ]]; then
         -extfile "$client_extensions" >/dev/null 2>&1
 fi
 
+if [[ "$deadline_races_enabled" == "1" ]]; then
+    openssl req -newkey ed25519 -nodes \
+        -keyout "$deadline_finalization_client_key" \
+        -out "$deadline_finalization_client_csr" \
+        -subj "/CN=apolysis-deadline-finalization-${random_suffix}" >/dev/null 2>&1
+    openssl x509 -req \
+        -in "$deadline_finalization_client_csr" \
+        -CA "$ca_cert" \
+        -CAkey "$ca_key" \
+        -CAcreateserial \
+        -out "$deadline_finalization_client_cert" \
+        -days 1 \
+        -extfile "$client_extensions" >/dev/null 2>&1
+
+    openssl req -newkey ed25519 -nodes \
+        -keyout "$deadline_lease_client_key" \
+        -out "$deadline_lease_client_csr" \
+        -subj "/CN=apolysis-deadline-lease-${random_suffix}" >/dev/null 2>&1
+    openssl x509 -req \
+        -in "$deadline_lease_client_csr" \
+        -CA "$ca_cert" \
+        -CAkey "$ca_key" \
+        -CAcreateserial \
+        -out "$deadline_lease_client_cert" \
+        -days 1 \
+        -extfile "$client_extensions" >/dev/null 2>&1
+fi
+
 openssl req -x509 -newkey ed25519 -nodes \
     -keyout "$untrusted_client_key" \
     -out "$untrusted_client_cert" \
@@ -1981,6 +2625,18 @@ readonly race_join_principal_id="principal_race_join_${random_suffix}"
 readonly race_join_registration_id="registration_race_join_${random_suffix}"
 readonly race_join_source_id="source_race_join_${random_suffix}"
 readonly race_join_policy_file="${secret_directory}/source-registration.race-join.json"
+readonly deadline_finalization_organization_id="org_deadline_finalization_${random_suffix}"
+readonly deadline_finalization_principal_id="principal_deadline_finalization_${random_suffix}"
+readonly deadline_finalization_registration_id="registration_deadline_finalization_${random_suffix}"
+readonly deadline_finalization_source_id="source_deadline_finalization_${random_suffix}"
+readonly deadline_finalization_authority_id="authority_deadline_finalization_${random_suffix}"
+readonly deadline_finalization_policy_file="${secret_directory}/source-registration.deadline-finalization.json"
+readonly deadline_lease_organization_id="org_deadline_lease_${random_suffix}"
+readonly deadline_lease_principal_id="principal_deadline_lease_${random_suffix}"
+readonly deadline_lease_registration_id="registration_deadline_lease_${random_suffix}"
+readonly deadline_lease_source_id="source_deadline_lease_${random_suffix}"
+readonly deadline_lease_authority_id="authority_deadline_lease_${random_suffix}"
+readonly deadline_lease_policy_file="${secret_directory}/source-registration.deadline-lease.json"
 
 jq -n \
     --arg organization_id "$organization_id" \
@@ -2060,6 +2716,33 @@ if [[ "$multiprocess_races_enabled" == "1" ]]; then
         "$race_policy_file" >"$race_join_policy_file"
 fi
 
+if [[ "$deadline_races_enabled" == "1" ]]; then
+    jq \
+        --arg organization_id "$deadline_finalization_organization_id" \
+        --arg principal_id "$deadline_finalization_principal_id" \
+        --arg registration_id "$deadline_finalization_registration_id" \
+        --arg source_id "$deadline_finalization_source_id" \
+        --arg authority_id "$deadline_finalization_authority_id" \
+        '.organization_id = $organization_id
+         | .source_registration_id = $registration_id
+         | .source_id = $source_id
+         | .principal.id = $principal_id
+         | .allowed_run_authorities = [{kind: "service", id: $authority_id}]' \
+        "$policy_file" >"$deadline_finalization_policy_file"
+    jq \
+        --arg organization_id "$deadline_lease_organization_id" \
+        --arg principal_id "$deadline_lease_principal_id" \
+        --arg registration_id "$deadline_lease_registration_id" \
+        --arg source_id "$deadline_lease_source_id" \
+        --arg authority_id "$deadline_lease_authority_id" \
+        '.organization_id = $organization_id
+         | .source_registration_id = $registration_id
+         | .source_id = $source_id
+         | .principal.id = $principal_id
+         | .allowed_run_authorities = [{kind: "service", id: $authority_id}]' \
+        "$policy_file" >"$deadline_lease_policy_file"
+fi
+
 printf 'Bootstrapping the reviewed PostgreSQL role model...\n'
 timeout 30s docker exec -i "$container_name" \
     psql --username "$database_user" --dbname "$database_name" \
@@ -2130,6 +2813,18 @@ if [[ "$multiprocess_races_enabled" == "1" ]]; then
         --database-url-file "$gateway_control_database_url_file" \
         --registration "$race_join_policy_file" \
         --client-certificate "$race_join_client_cert"
+fi
+
+if [[ "$deadline_races_enabled" == "1" ]]; then
+    printf 'Provisioning isolated deadline-race mTLS authorities...\n'
+    "$authority_bin" register-source \
+        --database-url-file "$gateway_control_database_url_file" \
+        --registration "$deadline_finalization_policy_file" \
+        --client-certificate "$deadline_finalization_client_cert"
+    "$authority_bin" register-source \
+        --database-url-file "$gateway_control_database_url_file" \
+        --registration "$deadline_lease_policy_file" \
+        --client-certificate "$deadline_lease_client_cert"
 fi
 
 readonly rotation_registration="${secret_directory}/source-registration.rotation.json"
@@ -3000,6 +3695,9 @@ fi
 if [[ "$multiprocess_races_enabled" == "1" ]]; then
     run_multiprocess_lifecycle_races
 fi
+if [[ "$deadline_races_enabled" == "1" ]]; then
+    run_mixed_lifecycle_deadline_races
+fi
 
 printf 'Checking cross-organization lifecycle isolation with an independent certificate...\n'
 for attack_route in open-run bind-runtime ingest finish-run; do
@@ -3101,7 +3799,7 @@ readonly response_forbidden_patterns="${secret_directory}/response-forbidden.pat
         "$gateway_control_password" \
         "$gateway_runtime_password" \
         "$replay_key_value"
-    if [[ "$multiprocess_races_enabled" == "1" ]]; then
+    if ((${#race_secret_values[@]} > 0)); then
         printf '%s\n' "${race_secret_values[@]}"
     fi
 } >"$secret_scan_patterns"
@@ -3114,7 +3812,7 @@ chmod 600 "$secret_scan_patterns"
         "$gateway_control_password" \
         "$gateway_runtime_password" \
         "$replay_key_value"
-    if [[ "$multiprocess_races_enabled" == "1" ]]; then
+    if ((${#race_forbidden_response_values[@]} > 0)); then
         printf '%s\n' "${race_forbidden_response_values[@]}"
     fi
 } >"$response_forbidden_patterns"
@@ -3221,7 +3919,7 @@ if grep -Fq -- 'BEGIN PRIVATE KEY' "$server_log"; then
     printf 'error: TLS private-key material was written to the Gateway log\n' >&2
     exit 1
 fi
-if [[ "$crash_recovery_enabled" == "1" || "$multiprocess_races_enabled" == "1" ]]; then
+if [[ "$qualification_enabled" == "1" ]]; then
     for qualification_artifact in "${qualification_private_artifacts[@]}"; do
         if [[ "$(stat -c '%a' "$qualification_artifact")" != "600" ]]; then
             printf 'error: HTTPS crash qualification artifact is not mode 0600\n' >&2
@@ -3237,7 +3935,7 @@ if [[ "$crash_recovery_enabled" == "1" || "$multiprocess_races_enabled" == "1" ]
         exit 1
     fi
 fi
-if [[ "$multiprocess_races_enabled" == "1" ]]; then
+if [[ "$lifecycle_races_enabled" == "1" ]]; then
     for race_lease_file in "${race_lease_files[@]}"; do
         if [[ "$(stat -c '%a' "$race_lease_file")" != "600" ]]; then
             printf 'error: multiprocess race lease input is not mode 0600\n' >&2

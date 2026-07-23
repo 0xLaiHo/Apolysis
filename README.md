@@ -104,9 +104,13 @@ Gateway-server death and exact replay convergence for all four lifecycle routes.
 An additional bounded two-process mTLS gate now qualifies coordinated
 writer/lifecycle races across run creation, one-use join, exact runtime binding,
 event deduplication and cross-run organization sequencing, finalization, and terminal
-irreversibility. The broader process-death and network pre-commit matrices, load,
-replication, failover, backup/restore, and high availability remain unqualified,
-as do production KMS integration, database row-level-security deployment,
+irreversibility. A sibling bounded two-scenario gate now covers exact-replay
+versus novel-ingest races at a finalization deadline and at last-lease expiry;
+it does not claim the complete mixed lifecycle/retry matrix. The broader
+process-death and network pre-commit matrices, remaining mixed lifecycle/retry
+cases, load, replication, failover, backup/restore, and high availability
+remain unqualified, as do production KMS integration, database
+row-level-security deployment,
 atomic authority revalidation with ledger commit, lease/credential rotation,
 an authorized object-read resolver, evidence-object projection/read views,
 continuous background reaper operation, and capacity-qualified resource

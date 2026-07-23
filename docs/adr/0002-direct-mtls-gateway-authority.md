@@ -72,10 +72,42 @@ production repository validation path; no remote management endpoint is added.
 Stale, symlinked, non-private, modified, or missing release files fail closed,
 and the normal production binary rejects every qualification option.
 
+The bounded mixed lifecycle/deadline qualification composes that pre-operation
+barrier with one feature-gated fixed clock shared by the Gateway application
+and its current-authority lookup. The driver-selected, I-JSON-safe instant is
+accepted only by the qualification binary on an ephemeral
+`127.0.0.1:0` listener. The production CLI rejects the option, and no remote
+request, header, or body can arm the barrier or select the clock. This is a
+qualification determinism seam, not a production clock override.
+
+`make test-gateway-mixed-lifecycle-deadline-races` starts two independent
+Gateway processes, listeners, and PostgreSQL pools for each scenario. It holds
+the same qualification-owned exclusive operation-table lock while releasing
+both private barriers, and uses `pg_stat_activity` to prove both transactions
+overlap in database lock waits before releasing the blocker. The database
+oracle covers exactly two boundary cases:
+
+1. At an accepted finalization deadline, an exact replay of an ingest accepted
+   before the deadline returns its unchanged stored result, while a novel
+   ingest returns `409 invalid_lifecycle_transition` and lazily commits the
+   single `finishing -> incomplete` transition.
+2. At the last lease's expiry, an exact replay of an ingest accepted before
+   expiry returns its unchanged stored result, while a novel ingest returns
+   `401 lease_expired` and lazily commits the single
+   `active -> incomplete` transition.
+
+For each case, the accepted operation and encrypted replay remain exactly once
+and unchanged; the rejected novel operation creates no operation, replay, or
+novel evidence-event effect; the lifecycle transition and its outbox effect
+occur exactly once; and neither competing request can revive the run.
+
 This still does not close the W3–W6 transport gate. Transaction-time authority
 revalidation, credential-epoch binding in leases and replay records,
 policy/credential rotation, the broader network pre-commit/process-death fault
-matrix, mixed lifecycle/deadline races, load/capacity qualification, authorized
+matrix, requests admitted before a deadline or expiry whose transaction or
+retry crosses it, internal retry fault injection, broader join/bind and
+staggered multi-lease combinations, the remaining mixed lifecycle/retry
+matrix, load/capacity qualification, authorized
 object-read resolution and downstream deletion propagation, production KMS and
 tenant RLS integration, replication/failover/recovery, HA, quotas, and rate
 limits remain required.
