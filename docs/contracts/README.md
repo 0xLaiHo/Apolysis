@@ -138,21 +138,27 @@ neither the production CLI nor remote HTTP input can install or configure the
 late-precommit objects or arm the response barrier.
 
 A bounded two-process gate additionally qualifies the reviewed writer and
-lifecycle races. Its split-clock sibling qualifies five operation/boundary
+lifecycle races. Its split-clock sibling qualifies seven operation/boundary
 scenarios through both a transaction wait and one qualification-injected, real
-SQLSTATE `40001` internal retry, for ten cells: join at the finalization
+SQLSTATE `40001` internal retry, for fourteen cells: one-use join-grant expiry,
+join with a valid one-use grant at last-lease expiry, join at the finalization
 deadline, bind at last-lease expiry, ingest at the finalization deadline,
 ingest at last-lease expiry, and finish at last-lease expiry. A focused
-eleventh cell repeats finish at last-lease expiry with a one-shot SQLSTATE
-`40P01` fault, proving retry parity when PostgreSQL returns that code without
-claiming a naturally detected multi-session deadlock. The
+fifteenth cell repeats finish at last-lease expiry with a one-shot SQLSTATE
+`40P01` fault. The resulting matrix contains seven transaction waits, seven
+one-shot `40001` retries, and one focused finish `40P01` retry. The focused
+cell proves retry parity when PostgreSQL returns that code without claiming a
+naturally detected multi-session deadlock. The
 transaction-boundary implementation orders each covered lifecycle attempt as
 operation-identity lock, current organization/registration/credential locks
 and revalidation, exact stored replay, applicable run/lease/client-run/join
 locks, fresh transaction time, final revalidation of the same locked authority,
 expiry reconciliation, then novel mutation. The final check includes
-registration/credential and authentication-snapshot expiry after the dynamic
-lock wait. Exact replay performs only the initial current-authority check.
+registration/credential and authentication-snapshot expiry after acquiring the
+applicable dynamic locks. The transaction-wait cells prove overlap behind the
+qualification-owned operation-table blocker; they do not claim a wait on a
+specific run or join-authorization row. Exact replay performs only the initial
+current-authority check.
 Every internal serialization or deadlock retry repeats that order and both
 authority checks for novel work.
 Object-reference ingest uses
@@ -195,17 +201,28 @@ that time as the grant issue time. The live direct-mTLS gate also exercises
 old/new certificate, policy, lease, replay, and new-stream behavior across both
 cutovers.
 
-For the covered novel join/bind/ingest cases, deadline crossing returns
-non-retryable `409 invalid_lifecycle_transition` and last-lease crossing
-returns non-retryable `401 lease_expired`. A rejected novel request creates no
-operation, encrypted replay, or evidence event. Finish at last-lease expiry
-instead durably returns HTTP `200` with state `incomplete`, accepts no
-finalization declaration, records exactly one `active -> incomplete`
-transition, and retains a stable exact replay. Across competing requests, lazy
-reconciliation creates exactly one `incomplete` transition and its matching
-record/outbox pair. A retained exact operation replay remains unchanged and is
-resolved after current-authority revalidation but before dynamic lifecycle
-reconciliation.
+At inclusive one-use join-grant expiry, the novel join returns non-retryable
+`404 not_found` before lifecycle reconciliation, consumes neither its grant nor
+its operation identity, and leaves lifecycle state unchanged. The
+qualification recovery reruns that identical request with the qualification
+clock at `T−1`, where `T` is the inclusive grant-expiry instant, and succeeds,
+proving that the rejected attempt rolled back rather than tombstoning the
+grant or operation. At an accepted finalization deadline, novel join, bind, and ingest
+return non-retryable `409 invalid_lifecycle_transition`. At inclusive
+last-lease expiry without a deadline, a join carrying a still-valid one-use
+grant also returns `409 invalid_lifecycle_transition` and commits exactly one
+`active -> incomplete` transition; bind and ingest instead return
+non-retryable `401 lease_expired`. Rejected novel requests create no operation,
+encrypted replay, stream, lease, runtime binding, or evidence event. Finish at
+last-lease expiry instead durably returns HTTP `200` with state `incomplete`,
+accepts no finalization declaration, records exactly one
+`active -> incomplete` transition, and retains a stable exact replay. Across
+the lifecycle-reconciling cases, lazy reconciliation creates exactly one
+`incomplete` transition and its matching record/outbox pair. The accepted join
+exact replay remains byte-stable across every new boundary cell and is resolved
+after current-authority revalidation but before dynamic lifecycle
+reconciliation. The two new live join cells use one-use grants; they do not
+qualify equivalent registration-policy joins.
 
 Current PostgreSQL ingest still uses a full per-stream history window for gap
 discovery—the SQL limit bounds returned gaps, not scan work. A novel batch now
@@ -220,10 +237,11 @@ exact-replay or rejection branches, completion of the final `INSERT` statement,
 entry into `COMMIT`, physical or WAL commit timing, and the remaining mixed
 lifecycle/retry matrices, sustained or capacity load, replication/failover,
 backup/restore, and HA are not qualified. The bounded lifecycle decision is not
-a claim about the database commit's wall-clock instant. Live join-grant expiry,
-live join at last-lease expiry, remaining novel join/bind cases, broader
-staggered multi-lease combinations, and additional retry depths and operations
-beyond the focused one-shot `40P01` finish parity cell also remain open.
+a claim about the database commit's wall-clock instant. Registration-policy
+parity for the two new one-use-grant join cells, remaining novel join/bind
+cases, broader staggered combinations beyond the current focused two-lease
+shape, and additional retry depths and operations beyond the focused one-shot
+`40P01` finish parity cell also remain open.
 Production KMS/envelope-key integration,
 database RLS deployment, the authorized object-read resolver and downstream
 deletion propagation, background deadline/replay cleanup, and production rate and
