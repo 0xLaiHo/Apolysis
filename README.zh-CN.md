@@ -93,8 +93,9 @@ commit 后/ack 前的 Gateway-server 死亡与精确 replay 收敛。
 event 去重与跨 run organization sequencing、finalization 及终态不可逆等协调 writer/lifecycle
 竞态。同级的有界 direct-mTLS/PostgreSQL 门禁现已覆盖额外的
 transaction-boundary join/bind/ingest/finish 切片，并保持 exact replay 稳定，同时让 novel
-work 失败关闭或确定性收敛为 `incomplete`。独立的 repository qualification 现已覆盖四条
-exact lifecycle route 的 replay-TTL 边界；该证据不经过 live HTTPS。它不代表完整 mixed
+work 失败关闭或确定性收敛为 `incomplete`。direct-mTLS HTTPS qualification 及其 repository
+sibling 现已覆盖四条 exact lifecycle route 在精确 operation-row lock wait 后跨过 replay-TTL
+expiry 的竞态。它不代表完整 mixed
 lifecycle/retry matrix 已通过。其余进程死亡与 network pre-commit 时序、
 staggered multi-lease、load、replication、failover、backup/restore
 与高可用工作仍未验证；production KMS integration、database RLS

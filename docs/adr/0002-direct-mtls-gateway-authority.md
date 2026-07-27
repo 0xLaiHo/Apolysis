@@ -224,24 +224,31 @@ cutover, rejection of old leases and replay, rejection of the old certificate,
 admission of the replacement certificate at the new epoch, and creation of a
 new stream.
 
-A separate real-PostgreSQL repository test, outside the live HTTPS path,
-qualifies all four lifecycle routes when exact replay waits for its exact
-operation row lock across replay-TTL expiry. Each route first proves two stable
-positive controls at expiry minus one millisecond. With that operation row
-locked, the test proves the replay transaction is waiting on the holder,
-advances transaction time to the inclusive expiry, and releases the lock.
-Deliberately corrupted ciphertext proves expiry is evaluated before
-decryption: every route produces non-retryable `idempotency_conflict`, which
-the v0.1 HTTP adapter maps to `409`, samples time once after the lock wait, and
-leaves the full captured Gateway-state fingerprint unchanged.
+A real-PostgreSQL repository test and a sibling direct-mTLS HTTPS qualification
+cover all four lifecycle routes when exact replay waits for its exact operation
+row lock across replay-TTL expiry. Each live route first proves two byte-stable
+positive controls at expiry minus one millisecond while the replay remains
+inside current registration and credential validity. The qualification corrupts
+only retained replay ciphertext, proves the runtime transaction is waiting on
+the exact holder, advances a private transaction clock only after that waiter
+exists, and releases the holder at inclusive expiry. Expiry is therefore
+evaluated before decryption: every route produces a non-retryable `409`
+`idempotency_conflict`, `Cache-Control: no-store`, no retry hint, and no
+response bytes before release. The 20-table lifecycle fingerprint and
+operation/replay cardinality remain unchanged; the accepted transport attempt
+adds exactly one admission-audit row. The v0.1 adapter samples time once after
+the lock wait. The loopback, same-UID, `0600` time control exists only in the
+qualification build; production configuration rejects it.
+The monotonic interval from pre-operation release through confirmed holder
+termination must remain below 1.2 seconds, preserving explicit margin under the
+production two-second lock timeout.
 
 This still does not close the W3–W6 transport gate. Sender-bound JWT/workload
 identity profiles, the remaining earlier or arbitrary network
 pre-commit/process-death fault timings, pre-commit exact-replay or rejection
 branches, completion of the final `INSERT` statement, entry into `COMMIT`,
-physical or WAL commit timing,
-commit-wall-clock boundary enforcement, the same replay-TTL operation-lock race
-through live HTTPS, live join-grant-expiry and join-at-last-lease-expiry cases,
+physical or WAL commit timing, commit-wall-clock boundary enforcement, live
+join-grant-expiry and join-at-last-lease-expiry cases,
 broader staggered multi-lease combinations, additional retry depths and live
 SQLSTATE `40P01` fault coverage, the remaining mixed lifecycle/retry matrix,
 load/capacity qualification, authorized object-read resolution and downstream

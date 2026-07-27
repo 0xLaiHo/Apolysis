@@ -6,12 +6,14 @@ set -Eeuo pipefail
 # as the repository gate. The digest is intentionally duplicated so a change
 # to either gate remains visible in review.
 readonly DEFAULT_POSTGRES_IMAGE="postgres:16.14-alpine3.23@sha256:42b8b8b29c8a4e933d88943e5b03001a78794905cf786e6e7634e9f2abd5a0d3"
+readonly REPLAY_TTL_LOCK_PHASE_MAX_MS=1200
 
 postgres_image="$DEFAULT_POSTGRES_IMAGE"
 pull_timeout_seconds="${APOLYSIS_POSTGRES_PULL_TIMEOUT_SECONDS:-300}"
 start_timeout_seconds="${APOLYSIS_POSTGRES_START_TIMEOUT_SECONDS:-60}"
 gate_timeout_seconds="${APOLYSIS_GATEWAY_TRANSPORT_TEST_TIMEOUT_SECONDS:-900}"
 crash_recovery_enabled="${APOLYSIS_GATEWAY_HTTPS_CRASH_RECOVERY:-0}"
+replay_ttl_lock_wait_enabled="${APOLYSIS_GATEWAY_HTTPS_REPLAY_TTL_LOCK_WAIT:-0}"
 multiprocess_races_enabled="${APOLYSIS_GATEWAY_MULTIPROCESS_LIFECYCLE_RACES:-0}"
 deadline_races_enabled="${APOLYSIS_GATEWAY_MIXED_LIFECYCLE_DEADLINE_RACES:-0}"
 
@@ -52,6 +54,10 @@ random_hex() {
     od -An -N "$byte_count" -tx1 /dev/urandom | tr -d '[:space:]'
 }
 
+monotonic_milliseconds() {
+    awk '{ printf "%.0f\n", $1 * 1000 }' /proc/uptime
+}
+
 assert_no_store() {
     local header_file="$1"
     local context="$2"
@@ -80,6 +86,11 @@ if [[ "$crash_recovery_enabled" != "0" && "$crash_recovery_enabled" != "1" ]]; t
     printf 'error: APOLYSIS_GATEWAY_HTTPS_CRASH_RECOVERY must be 0 or 1\n' >&2
     exit 1
 fi
+if [[ "$replay_ttl_lock_wait_enabled" != "0" && \
+    "$replay_ttl_lock_wait_enabled" != "1" ]]; then
+    printf 'error: APOLYSIS_GATEWAY_HTTPS_REPLAY_TTL_LOCK_WAIT must be 0 or 1\n' >&2
+    exit 1
+fi
 if [[ "$multiprocess_races_enabled" != "0" && "$multiprocess_races_enabled" != "1" ]]; then
     printf 'error: APOLYSIS_GATEWAY_MULTIPROCESS_LIFECYCLE_RACES must be 0 or 1\n' >&2
     exit 1
@@ -89,12 +100,26 @@ if [[ "$deadline_races_enabled" != "0" && "$deadline_races_enabled" != "1" ]]; t
     exit 1
 fi
 
+certificate_validity_days=1
+authority_validity_ms=3600000
+if [[ "$replay_ttl_lock_wait_enabled" == "1" ]]; then
+    # The production replay TTL is 24 hours. Keep the ephemeral qualification
+    # authority current beyond that boundary without changing repository
+    # configuration or mutating the AAD-bound replay expiry.
+    certificate_validity_days=3
+    authority_validity_ms=172800000
+fi
+readonly certificate_validity_days
+readonly authority_validity_ms
+
 lifecycle_races_enabled=0
 if [[ "$multiprocess_races_enabled" == "1" || "$deadline_races_enabled" == "1" ]]; then
     lifecycle_races_enabled=1
 fi
 qualification_enabled=0
-if [[ "$crash_recovery_enabled" == "1" || "$lifecycle_races_enabled" == "1" ]]; then
+if [[ "$crash_recovery_enabled" == "1" || \
+    "$replay_ttl_lock_wait_enabled" == "1" || \
+    "$lifecycle_races_enabled" == "1" ]]; then
     qualification_enabled=1
 fi
 
@@ -179,6 +204,19 @@ race_private_artifacts=()
 race_accepted_operation_ids=()
 race_rejected_operation_ids=()
 declare -A race_expected_lease_file_by_response=()
+replay_ttl_blocker_pid=""
+replay_ttl_blocker_application_name=""
+replay_ttl_blocker_backend_pid=""
+replay_ttl_marker=""
+replay_ttl_release_file=""
+replay_ttl_advance_file=""
+replay_ttl_response=""
+replay_ttl_headers=""
+replay_ttl_status_file=""
+replay_ttl_curl_stderr=""
+replay_ttl_status=""
+replay_ttl_response_artifacts=()
+declare -A replay_ttl_response_allows_issued_lease=()
 
 stop_gateway() {
     if [[ -n "$gateway_pid" ]] && kill -0 "$gateway_pid" >/dev/null 2>&1; then
@@ -259,6 +297,28 @@ stop_race_processes() {
     race_client_pids=()
     race_gateway_pids=()
     race_gateway_urls=()
+}
+
+stop_replay_ttl_database_blocker() {
+    if [[ -n "$replay_ttl_blocker_application_name" ]] && \
+        timeout 5s docker container inspect "$container_name" >/dev/null 2>&1; then
+        timeout 5s docker exec -i "$container_name" \
+            psql --username "$database_user" --dbname "$database_name" \
+                --no-align --tuples-only \
+                --set=application_name="$replay_ttl_blocker_application_name" <<'SQL' \
+                >/dev/null 2>&1 || true
+WITH blocker AS MATERIALIZED (
+    SELECT pid FROM pg_catalog.pg_stat_activity
+     WHERE application_name=:'application_name'
+       AND pid <> pg_backend_pid()
+)
+SELECT pg_terminate_backend(pid) FROM blocker;
+SQL
+    fi
+    stop_owned_process "$replay_ttl_blocker_pid"
+    replay_ttl_blocker_pid=""
+    replay_ttl_blocker_application_name=""
+    replay_ttl_blocker_backend_pid=""
 }
 
 record_accepted_race_operation() {
@@ -423,6 +483,27 @@ SELECT count(*) FROM apolysis_gateway.gateway_authority_audit
    AND operation=:'operation'
    AND decision='authorized'
    AND reason_code='current_authority';
+SQL
+}
+
+gateway_authority_audit_counts() {
+    local operation="$1"
+    timeout 15s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+            --set=organization_id="$organization_id" \
+            --set=operation="$operation" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws(
+    '|',
+    count(*),
+    count(*) FILTER (
+        WHERE decision='authorized'
+          AND reason_code='current_authority'
+    )
+)
+  FROM apolysis_gateway.gateway_authority_audit
+ WHERE organization_id=:'organization_id'
+   AND operation=:'operation';
 SQL
 }
 
@@ -1640,6 +1721,664 @@ SQL
 
     stop_gateway
     start_gateway
+}
+
+start_replay_ttl_http_request() {
+    local operation="$1"
+    local route="$2"
+    local request_file="$3"
+    local artifact_prefix="$4"
+    local admission_now_unix_ms="$5"
+    local transaction_now_unix_ms="${6:-}"
+    local advance_after_wait="${7:-0}"
+
+    require_positive_integer \
+        "${artifact_prefix}[admission_now_unix_ms]" "$admission_now_unix_ms"
+    if [[ -n "$transaction_now_unix_ms" ]]; then
+        require_positive_integer \
+            "${artifact_prefix}[transaction_now_unix_ms]" \
+            "$transaction_now_unix_ms"
+        if ((transaction_now_unix_ms <= admission_now_unix_ms)); then
+            printf 'error: %s transaction time did not advance admission time\n' \
+                "$artifact_prefix" >&2
+            exit 1
+        fi
+    fi
+    if [[ "$advance_after_wait" != "0" && "$advance_after_wait" != "1" ]]; then
+        printf 'error: %s time-advance mode must be 0 or 1\n' \
+            "$artifact_prefix" >&2
+        exit 1
+    fi
+    if [[ "$advance_after_wait" == "1" && -z "$transaction_now_unix_ms" ]]; then
+        printf 'error: %s time advance omitted its final transaction time\n' \
+            "$artifact_prefix" >&2
+        exit 1
+    fi
+
+    stop_gateway
+    replay_ttl_marker="${secret_directory}/${artifact_prefix}.ready"
+    replay_ttl_release_file="${secret_directory}/${artifact_prefix}.release"
+    replay_ttl_advance_file="${secret_directory}/${artifact_prefix}.advance"
+    replay_ttl_response="${secret_directory}/${artifact_prefix}.response.json"
+    replay_ttl_headers="${secret_directory}/${artifact_prefix}.headers"
+    replay_ttl_status_file="${secret_directory}/${artifact_prefix}.http-status"
+    replay_ttl_curl_stderr="${secret_directory}/${artifact_prefix}.curl-stderr"
+    rm -f -- \
+        "$replay_ttl_marker" "$replay_ttl_release_file" \
+        "$replay_ttl_advance_file" \
+        "${replay_ttl_release_file}.tmp" "${replay_ttl_advance_file}.tmp"
+    : >"$replay_ttl_response"
+    : >"$replay_ttl_headers"
+    : >"$replay_ttl_status_file"
+    : >"$replay_ttl_curl_stderr"
+    replay_ttl_response_artifacts+=("$replay_ttl_response")
+    qualification_private_artifacts+=(
+        "$replay_ttl_marker"
+        "$replay_ttl_headers"
+        "$replay_ttl_status_file"
+        "$replay_ttl_curl_stderr"
+    )
+
+    local qualification_time_arguments=(
+        --qualification-now-unix-ms "$admission_now_unix_ms"
+    )
+    if [[ -n "$transaction_now_unix_ms" ]]; then
+        qualification_time_arguments+=(
+            --qualification-transaction-now-unix-ms \
+                "$transaction_now_unix_ms"
+        )
+    fi
+    if [[ "$advance_after_wait" == "1" ]]; then
+        qualification_time_arguments+=(
+            --qualification-transaction-time-advance-file \
+                "$replay_ttl_advance_file"
+        )
+    fi
+    start_gateway_process "$qualification_gateway_bin" \
+        --qualification-operation "$operation" \
+        --qualification-marker "$replay_ttl_marker" \
+        --qualification-phase pre_operation \
+        --qualification-release "$replay_ttl_release_file" \
+        "${qualification_time_arguments[@]}"
+
+    command curl --noproxy '*' --silent --show-error --http1.1 \
+        --connect-timeout 5 \
+        --max-time 20 \
+        --cacert "$ca_cert" \
+        --cert "$client_cert" \
+        --key "$client_key" \
+        --header 'Accept: application/json' \
+        --header 'Content-Type: application/json' \
+        --data-binary "@${request_file}" \
+        --dump-header "$replay_ttl_headers" \
+        --output "$replay_ttl_response" \
+        --write-out '%{http_code}\n' \
+        "${gateway_base_url}/gateway/v0.1/${route}" \
+        >"$replay_ttl_status_file" 2>"$replay_ttl_curl_stderr" &
+    crash_client_pid=$!
+
+    local marker_deadline=$((SECONDS + 10))
+    while [[ ! -s "$replay_ttl_marker" ]]; do
+        if ! kill -0 "$gateway_pid" >/dev/null 2>&1 || \
+            ! kill -0 "$crash_client_pid" >/dev/null 2>&1; then
+            printf 'error: %s participant exited before the admission barrier\n' \
+                "$artifact_prefix" >&2
+            exit 1
+        fi
+        if ((SECONDS >= marker_deadline)); then
+            printf 'error: timed out waiting for %s admission barrier\n' \
+                "$artifact_prefix" >&2
+            exit 1
+        fi
+        sleep 0.05
+    done
+    if [[ "$(<"$replay_ttl_marker")" != "ready" ]] || \
+        [[ "$(stat -c '%a' "$replay_ttl_marker")" != "600" ]] || \
+        [[ -s "$replay_ttl_headers" || -s "$replay_ttl_response" || \
+            -s "$replay_ttl_status_file" ]]; then
+        printf 'error: %s escaped its private admission barrier\n' \
+            "$artifact_prefix" >&2
+        exit 1
+    fi
+}
+
+release_replay_ttl_pre_operation_barrier() {
+    local release_temp="${replay_ttl_release_file}.tmp"
+    printf 'release\n' >"$release_temp"
+    chmod 600 "$release_temp"
+    mv -- "$release_temp" "$replay_ttl_release_file"
+    qualification_private_artifacts+=("$replay_ttl_release_file")
+}
+
+advance_replay_ttl_transaction_time() {
+    local advance_temp="${replay_ttl_advance_file}.tmp"
+    printf 'advance\n' >"$advance_temp"
+    chmod 600 "$advance_temp"
+    mv -- "$advance_temp" "$replay_ttl_advance_file"
+    qualification_private_artifacts+=("$replay_ttl_advance_file")
+}
+
+finish_replay_ttl_http_request() {
+    local artifact_prefix="$1"
+    if ! wait "$crash_client_pid"; then
+        printf 'error: %s HTTPS client failed after controlled release\n' \
+            "$artifact_prefix" >&2
+        crash_client_pid=""
+        exit 1
+    fi
+    crash_client_pid=""
+    replay_ttl_status="$(tr -d '[:space:]' <"$replay_ttl_status_file")"
+    assert_no_store "$replay_ttl_headers" "$artifact_prefix"
+    if ! kill -0 "$gateway_pid" >/dev/null 2>&1; then
+        printf 'error: %s Gateway exited after the request\n' \
+            "$artifact_prefix" >&2
+        exit 1
+    fi
+}
+
+replay_ttl_operation_vector() {
+    local operation="$1"
+    local operation_id="$2"
+    timeout 10s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+            --set=organization_id="$organization_id" \
+            --set=registration_id="$registration_id" \
+            --set=principal_id="$principal_id" \
+            --set=operation="$operation" \
+            --set=operation_id="$operation_id" <<'SQL' | tr -d '[:space:]'
+WITH target AS MATERIALIZED (
+    SELECT operation.operation_id,
+           replay.created_at_unix_ms,
+           replay.expires_at_unix_ms,
+           md5(concat_ws('|',
+               replay.encryption_algorithm,
+               replay.cipher_version::text,
+               replay.encryption_key_ref,
+               coalesce(encode(replay.wrapped_data_key, 'hex'), ''),
+               encode(replay.nonce, 'hex'),
+               encode(replay.authentication_tag, 'hex'),
+               replay.aad_digest,
+               encode(replay.outcome_ciphertext, 'hex'),
+               replay.created_at_unix_ms::text,
+               replay.expires_at_unix_ms::text
+           )) AS replay_fingerprint
+      FROM apolysis_gateway.gateway_operations AS operation
+      JOIN apolysis_gateway.operation_replays AS replay
+        ON replay.organization_id=operation.organization_id
+       AND replay.operation_id=operation.operation_id
+     WHERE operation.organization_id=:'organization_id'
+       AND operation.source_registration_id=:'registration_id'
+       AND operation.principal_kind='workload'
+       AND operation.principal_id=:'principal_id'
+       AND operation.operation_kind=:'operation'
+       AND operation.client_operation_id=:'operation_id'
+),
+current_authority AS MATERIALIZED (
+    SELECT least(registration.expires_at_unix_ms, credential.expires_at_unix_ms)
+               AS expires_at_unix_ms
+      FROM apolysis_gateway.source_registrations AS registration
+      JOIN apolysis_gateway.transport_credentials AS credential
+        ON credential.organization_id=registration.organization_id
+       AND credential.source_registration_id=registration.source_registration_id
+       AND credential.credential_epoch=registration.credential_epoch
+     WHERE registration.organization_id=:'organization_id'
+       AND registration.source_registration_id=:'registration_id'
+       AND registration.registration_state='active'
+       AND credential.revoked_at_unix_ms IS NULL
+)
+SELECT concat_ws('|',
+    (SELECT count(*) FROM target),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'registration_id'
+        AND principal_kind='workload'
+        AND principal_id=:'principal_id'
+        AND operation_kind=:'operation'
+        AND client_operation_id=:'operation_id'),
+    (SELECT created_at_unix_ms FROM target),
+    (SELECT expires_at_unix_ms FROM target),
+    (SELECT expires_at_unix_ms FROM current_authority),
+    (SELECT replay_fingerprint FROM target)
+);
+SQL
+}
+
+corrupt_replay_ttl_ciphertext() {
+    local operation="$1"
+    local operation_id="$2"
+    local rows_affected=""
+    rows_affected="$(timeout 10s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+            --set=organization_id="$organization_id" \
+            --set=registration_id="$registration_id" \
+            --set=principal_id="$principal_id" \
+            --set=operation="$operation" \
+            --set=operation_id="$operation_id" <<'SQL' | tr -d '[:space:]'
+WITH changed AS (
+    UPDATE apolysis_gateway.operation_replays AS replay
+       SET outcome_ciphertext=set_byte(
+           replay.outcome_ciphertext,
+           0,
+           (get_byte(replay.outcome_ciphertext, 0) + 1) % 256
+       )
+      FROM apolysis_gateway.gateway_operations AS operation
+     WHERE operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+       AND operation.organization_id=:'organization_id'
+       AND operation.source_registration_id=:'registration_id'
+       AND operation.principal_kind='workload'
+       AND operation.principal_id=:'principal_id'
+       AND operation.operation_kind=:'operation'
+       AND operation.client_operation_id=:'operation_id'
+    RETURNING 1
+)
+SELECT count(*) FROM changed;
+SQL
+)"
+    if [[ "$rows_affected" != "1" ]]; then
+        printf 'error: %s replay corruption did not target one ciphertext\n' \
+            "$operation" >&2
+        exit 1
+    fi
+}
+
+start_replay_ttl_database_blocker() {
+    local operation="$1"
+    local operation_id="$2"
+    local artifact_prefix="$3"
+    local blocker_log="${secret_directory}/${artifact_prefix}.database-blocker.log"
+
+    stop_replay_ttl_database_blocker
+    replay_ttl_blocker_application_name="apolysis-replay-ttl-${random_suffix}"
+    : >"$blocker_log"
+    qualification_private_artifacts+=("$blocker_log")
+    timeout --foreground --kill-after=5s 120s \
+        docker exec --env "PGAPPNAME=${replay_ttl_blocker_application_name}" \
+            -i "$container_name" \
+            psql --username "$database_user" --dbname "$database_name" \
+                --set=ON_ERROR_STOP=1 \
+                --set=organization_id="$organization_id" \
+                --set=registration_id="$registration_id" \
+                --set=principal_id="$principal_id" \
+                --set=operation="$operation" \
+                --set=operation_id="$operation_id" \
+                >"$blocker_log" 2>&1 <<'SQL' &
+BEGIN;
+SET LOCAL lock_timeout='5s';
+SELECT operation_id
+  FROM apolysis_gateway.gateway_operations
+ WHERE organization_id=:'organization_id'
+   AND source_registration_id=:'registration_id'
+   AND principal_kind='workload'
+   AND principal_id=:'principal_id'
+   AND operation_kind=:'operation'
+   AND client_operation_id=:'operation_id'
+ FOR UPDATE
+\gset
+SELECT pg_sleep(110);
+ROLLBACK;
+SQL
+    replay_ttl_blocker_pid=$!
+
+    local blocker_deadline=$((SECONDS + 5))
+    replay_ttl_blocker_backend_pid=""
+    while [[ ! "$replay_ttl_blocker_backend_pid" =~ ^[1-9][0-9]*$ ]]; do
+        if ! kill -0 "$replay_ttl_blocker_pid" >/dev/null 2>&1; then
+            printf 'error: %s row blocker exited before acquiring its lock\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        replay_ttl_blocker_backend_pid="$(timeout 2s docker exec -i "$container_name" \
+            psql --username "$database_user" --dbname "$database_name" \
+                --no-align --tuples-only \
+                --set=application_name="$replay_ttl_blocker_application_name" <<'SQL' \
+                | tr -d '[:space:]'
+SELECT pid FROM pg_catalog.pg_stat_activity
+ WHERE application_name=:'application_name'
+   AND state='active'
+   AND wait_event_type='Timeout'
+   AND wait_event='PgSleep';
+SQL
+)"
+        if ((SECONDS >= blocker_deadline)); then
+            printf 'error: %s row blocker did not acquire its exact operation lock\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        sleep 0.02
+    done
+}
+
+wait_for_replay_ttl_row_waiter() {
+    local operation="$1"
+    local observed=""
+    observed="$(timeout 1.2s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+            --set=runtime_login="$gateway_runtime_login" \
+            --set=blocker_pid="$replay_ttl_blocker_backend_pid" <<'SQL' \
+            | tr -d '[:space:]'
+SELECT set_config('apolysis.runtime_login', :'runtime_login', false) \gset
+SELECT set_config('apolysis.blocker_pid', :'blocker_pid', false) \gset
+DO $watcher$
+DECLARE
+    deadline timestamptz := clock_timestamp() + interval '750 milliseconds';
+    waiter_count bigint;
+BEGIN
+    LOOP
+        PERFORM pg_stat_clear_snapshot();
+        SELECT count(DISTINCT activity.pid) INTO waiter_count
+          FROM pg_catalog.pg_stat_activity AS activity
+          JOIN pg_catalog.pg_locks AS waiting_lock
+            ON waiting_lock.pid=activity.pid
+           AND waiting_lock.locktype='transactionid'
+           AND NOT waiting_lock.granted
+          JOIN pg_catalog.pg_locks AS held_lock
+            ON held_lock.pid=current_setting('apolysis.blocker_pid')::integer
+           AND held_lock.locktype=waiting_lock.locktype
+           AND held_lock.transactionid=waiting_lock.transactionid
+           AND held_lock.granted
+         WHERE activity.usename=current_setting('apolysis.runtime_login')
+           AND activity.state='active'
+           AND activity.wait_event_type='Lock'
+           AND lower(activity.wait_event)='transactionid'
+           AND position(
+               'apolysis_gateway.lock_gateway_operation' IN activity.query
+           ) > 0
+           AND current_setting('apolysis.blocker_pid')::integer=ANY(
+               pg_catalog.pg_blocking_pids(activity.pid)
+           );
+        IF waiter_count = 1 THEN
+            RETURN;
+        END IF;
+        IF waiter_count > 1 THEN
+            RAISE EXCEPTION 'multiple Gateway replay waiters reached one operation row';
+        END IF;
+        IF clock_timestamp() >= deadline THEN
+            RAISE EXCEPTION 'Gateway replay did not reach the exact operation row wait';
+        END IF;
+        PERFORM pg_sleep(0.005);
+    END LOOP;
+END
+$watcher$;
+SELECT 'waiter-observed';
+SQL
+)"
+    if [[ "$observed" != "DOwaiter-observed" && "$observed" != "waiter-observed" ]]; then
+        printf 'error: %s did not establish its exact operation-row waiter\n' \
+            "$operation" >&2
+        exit 1
+    fi
+}
+
+release_replay_ttl_database_blocker() {
+    local operation="$1"
+    local terminated=""
+    terminated="$(timeout 1s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+            --set=blocker_pid="$replay_ttl_blocker_backend_pid" <<'SQL' \
+            | tr -d '[:space:]'
+SELECT pg_terminate_backend(:'blocker_pid'::integer);
+SQL
+)"
+    if [[ "$terminated" != "t" ]]; then
+        printf 'error: %s exact row blocker could not be released\n' \
+            "$operation" >&2
+        exit 1
+    fi
+    if wait "$replay_ttl_blocker_pid" >/dev/null 2>&1; then
+        printf 'error: %s row blocker completed without controlled termination\n' \
+            "$operation" >&2
+        exit 1
+    fi
+    replay_ttl_blocker_pid=""
+    replay_ttl_blocker_application_name=""
+    replay_ttl_blocker_backend_pid=""
+}
+
+assert_replay_ttl_positive_response() {
+    local operation="$1"
+    local response="$2"
+    case "$operation" in
+        open_run)
+            if ! jq -e --arg lease "$issued_lease" \
+                '.schema_version == "0.1"
+                 and .outcome == "idempotent_retry"
+                 and .lease.lease_id == $lease' \
+                "$response" >/dev/null; then
+                printf 'error: open_run replay-TTL positive control was not exact replay\n' >&2
+                exit 1
+            fi
+            replay_ttl_response_allows_issued_lease["$response"]=1
+            ;;
+        bind_runtime)
+            if ! jq -e \
+                '.schema_version == "0.1"
+                 and .accepted == true
+                 and .idempotent_replay == true' \
+                "$response" >/dev/null; then
+                printf 'error: bind_runtime replay-TTL positive control was not exact replay\n' >&2
+                exit 1
+            fi
+            ;;
+        ingest)
+            if ! jq -e \
+                '.schema_version == "0.1"
+                 and .committed_count == 1
+                 and .duplicate_count == 0' \
+                "$response" >/dev/null; then
+                printf 'error: ingest replay-TTL positive control was not exact replay\n' >&2
+                exit 1
+            fi
+            ;;
+        finish_run)
+            if ! jq -e \
+                '.schema_version == "0.1"
+                 and .state == "finished"
+                 and .idempotent_replay == true' \
+                "$response" >/dev/null; then
+                printf 'error: finish_run replay-TTL positive control was not exact replay\n' >&2
+                exit 1
+            fi
+            ;;
+        *)
+            printf 'error: unsupported replay-TTL operation: %s\n' "$operation" >&2
+            exit 1
+            ;;
+    esac
+}
+
+qualify_live_replay_ttl_lock_wait() {
+    local operation="$1"
+    local route="$2"
+    local request_file="$3"
+    local artifact_prefix="$4"
+    local operation_id=""
+    operation_id="$(jq -er '.client_operation_id' "$request_file")"
+
+    printf 'Qualifying live HTTPS replay-TTL operation-lock boundary for %s...\n' \
+        "$operation"
+    local initial_vector=""
+    initial_vector="$(replay_ttl_operation_vector "$operation" "$operation_id")"
+    local replay_count=""
+    local operation_count=""
+    local replay_created_at=""
+    local replay_expires_at=""
+    local authority_expires_at=""
+    local initial_replay_fingerprint=""
+    IFS='|' read -r \
+        replay_count operation_count replay_created_at replay_expires_at \
+        authority_expires_at initial_replay_fingerprint <<<"$initial_vector"
+    if [[ "$replay_count" != "1" || "$operation_count" != "1" ]] || \
+        [[ ! "$replay_created_at" =~ ^[1-9][0-9]*$ ]] || \
+        [[ ! "$replay_expires_at" =~ ^[1-9][0-9]*$ ]] || \
+        [[ ! "$authority_expires_at" =~ ^[1-9][0-9]*$ ]] || \
+        [[ ! "$initial_replay_fingerprint" =~ ^[0-9a-f]{32}$ ]] || \
+        ((replay_expires_at <= replay_created_at)) || \
+        ((replay_expires_at >= authority_expires_at)); then
+        printf 'error: %s replay TTL did not fit inside current authority\n' \
+            "$operation" >&2
+        exit 1
+    fi
+    local positive_now_unix_ms="$((replay_expires_at - 1))"
+
+    start_replay_ttl_http_request \
+        "$operation" "$route" "$request_file" \
+        "${artifact_prefix}.positive-one" "$positive_now_unix_ms"
+    release_replay_ttl_pre_operation_barrier
+    finish_replay_ttl_http_request "${artifact_prefix} positive control one"
+    if [[ "$replay_ttl_status" != "200" ]]; then
+        printf 'error: %s first positive replay returned HTTP %s\n' \
+            "$operation" "$replay_ttl_status" >&2
+        exit 1
+    fi
+    assert_replay_ttl_positive_response "$operation" "$replay_ttl_response"
+    local first_positive_response="$replay_ttl_response"
+
+    start_replay_ttl_http_request \
+        "$operation" "$route" "$request_file" \
+        "${artifact_prefix}.positive-two" "$positive_now_unix_ms"
+    release_replay_ttl_pre_operation_barrier
+    finish_replay_ttl_http_request "${artifact_prefix} positive control two"
+    if [[ "$replay_ttl_status" != "200" ]]; then
+        printf 'error: %s second positive replay returned HTTP %s\n' \
+            "$operation" "$replay_ttl_status" >&2
+        exit 1
+    fi
+    assert_replay_ttl_positive_response "$operation" "$replay_ttl_response"
+    if ! cmp -s "$first_positive_response" "$replay_ttl_response"; then
+        printf 'error: %s expiry-minus-one exact replay was not stable\n' \
+            "$operation" >&2
+        exit 1
+    fi
+
+    stop_gateway
+    corrupt_replay_ttl_ciphertext "$operation" "$operation_id"
+    local corrupted_vector=""
+    corrupted_vector="$(replay_ttl_operation_vector "$operation" "$operation_id")"
+    local corrupted_replay_count=""
+    local corrupted_operation_count=""
+    local corrupted_created_at=""
+    local corrupted_expires_at=""
+    local corrupted_authority_expires_at=""
+    local corrupted_replay_fingerprint=""
+    IFS='|' read -r \
+        corrupted_replay_count corrupted_operation_count corrupted_created_at \
+        corrupted_expires_at corrupted_authority_expires_at \
+        corrupted_replay_fingerprint <<<"$corrupted_vector"
+    if [[ "$corrupted_replay_count" != "1" || \
+        "$corrupted_operation_count" != "1" ]] || \
+        [[ "$corrupted_created_at" != "$replay_created_at" ]] || \
+        [[ "$corrupted_expires_at" != "$replay_expires_at" ]] || \
+        [[ "$corrupted_authority_expires_at" != "$authority_expires_at" ]] || \
+        [[ ! "$corrupted_replay_fingerprint" =~ ^[0-9a-f]{32}$ ]] || \
+        [[ "$corrupted_replay_fingerprint" == "$initial_replay_fingerprint" ]]; then
+        printf 'error: %s ciphertext fault did not preserve its TTL identity\n' \
+            "$operation" >&2
+        exit 1
+    fi
+
+    local baseline_fingerprint=""
+    baseline_fingerprint="$(gateway_repository_fingerprint)"
+    local baseline_authority_audit_counts=""
+    baseline_authority_audit_counts="$(gateway_authority_audit_counts "$operation")"
+    local baseline_total_authority_audits=""
+    local baseline_authorized_authority_audits=""
+    IFS='|' read -r \
+        baseline_total_authority_audits baseline_authorized_authority_audits \
+        <<<"$baseline_authority_audit_counts"
+    if [[ ! "$baseline_total_authority_audits" =~ ^[0-9]+$ ]] || \
+        [[ ! "$baseline_authorized_authority_audits" =~ ^[0-9]+$ ]]; then
+        printf 'error: %s replay-TTL admission-audit baseline was invalid\n' \
+            "$operation" >&2
+        exit 1
+    fi
+
+    start_replay_ttl_database_blocker \
+        "$operation" "$operation_id" "${artifact_prefix}.expired"
+    start_replay_ttl_http_request \
+        "$operation" "$route" "$request_file" \
+        "${artifact_prefix}.expired" "$positive_now_unix_ms" \
+        "$replay_expires_at" 1
+    release_replay_ttl_pre_operation_barrier
+    local lock_phase_started_at_ms=""
+    lock_phase_started_at_ms="$(monotonic_milliseconds)"
+    wait_for_replay_ttl_row_waiter "$operation"
+    if ! kill -0 "$gateway_pid" >/dev/null 2>&1 || \
+        ! kill -0 "$crash_client_pid" >/dev/null 2>&1 || \
+        ! kill -0 "$replay_ttl_blocker_pid" >/dev/null 2>&1 || \
+        [[ -s "$replay_ttl_headers" || -s "$replay_ttl_response" || \
+            -s "$replay_ttl_status_file" ]]; then
+        printf 'error: %s response escaped before replay-TTL time advance\n' \
+            "$operation" >&2
+        exit 1
+    fi
+    advance_replay_ttl_transaction_time
+    release_replay_ttl_database_blocker "$operation"
+    local lock_phase_finished_at_ms=""
+    lock_phase_finished_at_ms="$(monotonic_milliseconds)"
+    local lock_phase_duration_ms="$((lock_phase_finished_at_ms - lock_phase_started_at_ms))"
+    if ((lock_phase_duration_ms < 0 || \
+        lock_phase_duration_ms >= REPLAY_TTL_LOCK_PHASE_MAX_MS)); then
+        printf 'error: %s replay-TTL lock phase used %sms (limit %sms)\n' \
+            "$operation" "$lock_phase_duration_ms" \
+            "$REPLAY_TTL_LOCK_PHASE_MAX_MS" >&2
+        exit 1
+    fi
+    finish_replay_ttl_http_request "${artifact_prefix} inclusive expiry"
+
+    if [[ "$replay_ttl_status" != "409" ]] || \
+        ! jq -e \
+            '.schema_version == "0.1"
+             and .code == "idempotency_conflict"
+             and .retryable == false
+             and .retry_after_ms == null' \
+            "$replay_ttl_response" >/dev/null || \
+        grep -Eiq '^retry-after:' "$replay_ttl_headers"; then
+        printf 'error: %s inclusive replay expiry did not return exact HTTP 409\n' \
+            "$operation" >&2
+        exit 1
+    fi
+
+    stop_gateway
+    wait_for_gateway_sessions_to_close
+    local final_vector=""
+    final_vector="$(replay_ttl_operation_vector "$operation" "$operation_id")"
+    local final_authority_audit_counts=""
+    final_authority_audit_counts="$(gateway_authority_audit_counts "$operation")"
+    local final_total_authority_audits=""
+    local final_authorized_authority_audits=""
+    IFS='|' read -r \
+        final_total_authority_audits final_authorized_authority_audits \
+        <<<"$final_authority_audit_counts"
+    local expected_total_authority_audits="$((baseline_total_authority_audits + 1))"
+    local expected_authorized_authority_audits="$((baseline_authorized_authority_audits + 1))"
+    if [[ "$final_vector" != "$corrupted_vector" ]] || \
+        [[ "$(gateway_repository_fingerprint)" != "$baseline_fingerprint" ]] || \
+        [[ "$final_total_authority_audits" != "$expected_total_authority_audits" ]] || \
+        [[ "$final_authorized_authority_audits" != \
+            "$expected_authorized_authority_audits" ]]; then
+        printf 'error: %s replay-TTL rejection changed durable state or audit count\n' \
+            "$operation" >&2
+        exit 1
+    fi
+}
+
+run_live_replay_ttl_lock_wait_matrix() {
+    stop_gateway
+    qualify_live_replay_ttl_lock_wait \
+        open_run open-run "$signed_request" replay-ttl-open-run
+    qualify_live_replay_ttl_lock_wait \
+        bind_runtime bind-runtime "$bind_signed_request" replay-ttl-bind-runtime
+    qualify_live_replay_ttl_lock_wait \
+        ingest ingest "$ingest_signed_request" replay-ttl-ingest
+    qualify_live_replay_ttl_lock_wait \
+        finish_run finish-run "$finish_signed_request" replay-ttl-finish-run
+    start_gateway
+    printf 'Live HTTPS replay-TTL operation-lock matrix passed (open_run, bind_runtime, ingest, and finish_run).\n'
 }
 
 build_race_open_request() {
@@ -4347,6 +5086,7 @@ cleanup() {
     stop_gateway
     stop_precommit_database_blocker
     stop_race_processes
+    stop_replay_ttl_database_blocker
     stop_owned_process "$workload_pid"
     stop_owned_process "$crash_client_pid"
     timeout 15s docker rm --force "$container_name" >/dev/null 2>&1 || true
@@ -4475,7 +5215,7 @@ printf 'Generating a real ephemeral CA and mTLS leaf certificates...\n'
 openssl req -x509 -newkey ed25519 -nodes \
     -keyout "$ca_key" \
     -out "$ca_cert" \
-    -days 1 \
+    -days "$certificate_validity_days" \
     -addext 'basicConstraints=critical,CA:TRUE' \
     -addext 'keyUsage=critical,keyCertSign,cRLSign' \
     -subj "/CN=Apolysis transport gate CA ${random_suffix}" >/dev/null 2>&1
@@ -4496,7 +5236,7 @@ openssl x509 -req \
     -CAkey "$ca_key" \
     -CAcreateserial \
     -out "$server_cert" \
-    -days 1 \
+    -days "$certificate_validity_days" \
     -extfile "$server_extensions" >/dev/null 2>&1
 
 openssl req -newkey ed25519 -nodes \
@@ -4514,7 +5254,7 @@ openssl x509 -req \
     -CAkey "$ca_key" \
     -CAcreateserial \
     -out "$client_cert" \
-    -days 1 \
+    -days "$certificate_validity_days" \
     -extfile "$client_extensions" >/dev/null 2>&1
 
 openssl req -newkey ed25519 -nodes \
@@ -4527,7 +5267,7 @@ openssl x509 -req \
     -CAkey "$ca_key" \
     -CAcreateserial \
     -out "$rotation_client_cert" \
-    -days 1 \
+    -days "$certificate_validity_days" \
     -extfile "$client_extensions" >/dev/null 2>&1
 
 if [[ "$multiprocess_races_enabled" == "1" ]]; then
@@ -4541,7 +5281,7 @@ if [[ "$multiprocess_races_enabled" == "1" ]]; then
         -CAkey "$ca_key" \
         -CAcreateserial \
         -out "$race_client_cert" \
-        -days 1 \
+        -days "$certificate_validity_days" \
         -extfile "$client_extensions" >/dev/null 2>&1
 
     openssl req -newkey ed25519 -nodes \
@@ -4554,7 +5294,7 @@ if [[ "$multiprocess_races_enabled" == "1" ]]; then
         -CAkey "$ca_key" \
         -CAcreateserial \
         -out "$race_join_client_cert" \
-        -days 1 \
+        -days "$certificate_validity_days" \
         -extfile "$client_extensions" >/dev/null 2>&1
 fi
 
@@ -4569,7 +5309,7 @@ if [[ "$deadline_races_enabled" == "1" ]]; then
         -CAkey "$ca_key" \
         -CAcreateserial \
         -out "$deadline_finalization_client_cert" \
-        -days 1 \
+        -days "$certificate_validity_days" \
         -extfile "$client_extensions" >/dev/null 2>&1
 
     openssl req -newkey ed25519 -nodes \
@@ -4582,7 +5322,7 @@ if [[ "$deadline_races_enabled" == "1" ]]; then
         -CAkey "$ca_key" \
         -CAcreateserial \
         -out "$deadline_join_client_cert" \
-        -days 1 \
+        -days "$certificate_validity_days" \
         -extfile "$client_extensions" >/dev/null 2>&1
 
     openssl req -newkey ed25519 -nodes \
@@ -4595,14 +5335,14 @@ if [[ "$deadline_races_enabled" == "1" ]]; then
         -CAkey "$ca_key" \
         -CAcreateserial \
         -out "$deadline_lease_client_cert" \
-        -days 1 \
+        -days "$certificate_validity_days" \
         -extfile "$client_extensions" >/dev/null 2>&1
 fi
 
 openssl req -x509 -newkey ed25519 -nodes \
     -keyout "$untrusted_client_key" \
     -out "$untrusted_client_cert" \
-    -days 1 \
+    -days "$certificate_validity_days" \
     -addext 'basicConstraints=critical,CA:FALSE' \
     -addext 'keyUsage=critical,digitalSignature' \
     -addext 'extendedKeyUsage=clientAuth' \
@@ -4618,13 +5358,13 @@ openssl x509 -req \
     -CAkey "$ca_key" \
     -CAcreateserial \
     -out "$unknown_client_cert" \
-    -days 1 \
+    -days "$certificate_validity_days" \
     -extfile "$client_extensions" >/dev/null 2>&1
 
 random_hex 32 >"$replay_key_file"
 
 readonly now_unix_ms="$(( $(date +%s) * 1000 ))"
-readonly expires_at_unix_ms="$((now_unix_ms + 3600000))"
+readonly expires_at_unix_ms="$((now_unix_ms + authority_validity_ms))"
 readonly organization_id="org_live_${random_suffix}"
 readonly principal_id="principal_live_${random_suffix}"
 readonly registration_id="registration_live_${random_suffix}"
@@ -5844,6 +6584,9 @@ fi
 if [[ "$deadline_races_enabled" == "1" ]]; then
     run_mixed_lifecycle_deadline_races
 fi
+if [[ "$replay_ttl_lock_wait_enabled" == "1" ]]; then
+    run_live_replay_ttl_lock_wait_matrix
+fi
 
 printf 'Checking cross-organization lifecycle isolation with an independent certificate...\n'
 for attack_route in open-run bind-runtime ingest finish-run; do
@@ -6409,6 +7152,60 @@ if [[ "$qualification_enabled" == "1" ]]; then
         printf 'error: TLS private-key material entered a Gateway qualification artifact\n' >&2
         exit 1
     fi
+fi
+if [[ "$replay_ttl_lock_wait_enabled" == "1" ]]; then
+    if ((${#replay_ttl_response_artifacts[@]} != 12)) || \
+        ((${#replay_ttl_response_allows_issued_lease[@]} != 2)); then
+        printf 'error: replay-TTL response artifact inventory was incomplete\n' >&2
+        exit 1
+    fi
+    replay_ttl_forbidden_response_secrets=(
+        "$rotation_baseline_lease"
+        "$policy_current_lease"
+        "$credential_current_lease"
+        "$database_password"
+        "$schema_owner_password"
+        "$gateway_control_password"
+        "$gateway_runtime_password"
+        "$replay_key_value"
+    )
+    for replay_ttl_artifact in "${replay_ttl_response_artifacts[@]}"; do
+        if [[ "$(stat -c '%a' "$replay_ttl_artifact")" != "600" ]]; then
+            printf 'error: replay-TTL response artifact is not mode 0600\n' >&2
+            exit 1
+        fi
+        if [[ -n "${replay_ttl_response_allows_issued_lease[$replay_ttl_artifact]:-}" ]]; then
+            if ! jq -e --arg lease "$issued_lease" \
+                '[paths(scalars) as $path
+                  | getpath($path) as $value
+                  | select(($value | type) == "string" and ($value | contains($lease)))
+                  | {path: $path, exact: ($value == $lease)}] as $matches
+                 | (($matches | length) == 1
+                    and ($matches
+                         | all(.path == ["lease", "lease_id"] and .exact)))' \
+                "$replay_ttl_artifact" >/dev/null; then
+                printf 'error: replay-TTL open response exposed its bearer outside the lease field\n' >&2
+                exit 1
+            fi
+        elif ! jq -e --arg lease "$issued_lease" \
+            '[paths(scalars) as $path
+              | getpath($path) as $value
+              | select(($value | type) == "string" and ($value | contains($lease)))]
+             | length == 0' "$replay_ttl_artifact" >/dev/null; then
+            printf 'error: bearer lease entered an unexpected replay-TTL response\n' >&2
+            exit 1
+        fi
+        for replay_ttl_secret in "${replay_ttl_forbidden_response_secrets[@]}"; do
+            if grep -Fq -- "$replay_ttl_secret" "$replay_ttl_artifact"; then
+                printf 'error: protected secret entered a replay-TTL response\n' >&2
+                exit 1
+            fi
+        done
+        if grep -Fq -- 'BEGIN PRIVATE KEY' "$replay_ttl_artifact"; then
+            printf 'error: TLS private-key material entered a replay-TTL response\n' >&2
+            exit 1
+        fi
+    done
 fi
 if [[ "$lifecycle_races_enabled" == "1" ]]; then
     for race_lease_file in "${race_lease_files[@]}"; do

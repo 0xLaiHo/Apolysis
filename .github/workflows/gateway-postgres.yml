@@ -10,6 +10,7 @@ on:
       - scripts/test-gateway-postgres-crash-recovery.sh
       - scripts/test-gateway-transport-mtls.sh
       - scripts/test-gateway-https-crash-recovery.sh
+      - scripts/test-gateway-https-replay-ttl-lock-wait.sh
       - scripts/test-gateway-mixed-lifecycle-deadline-races.sh
       - scripts/test-gateway-multiprocess-lifecycle-races.sh
       - Makefile
@@ -62,6 +63,17 @@ jobs:
 
       - name: Run real mTLS server late-precommit and post-commit recovery gate
         run: make test-gateway-https-crash-recovery
+
+  gateway-https-replay-ttl-lock-wait:
+    name: gateway HTTPS replay TTL lock wait
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run real mTLS replay TTL operation-lock gate
+        run: make test-gateway-https-replay-ttl-lock-wait
 
   gateway-multiprocess-lifecycle-races:
     name: gateway multiprocess lifecycle races

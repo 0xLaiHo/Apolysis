@@ -287,8 +287,15 @@ post-commit/pre-ack novel/replay seam for all four routes, but the additional
 two-process gate qualifies the bounded writer/lifecycle matrix described above.
 The split-clock transaction-boundary sibling qualifies
 only the listed join/bind/ingest/finish deadline/expiry cases. The real
-PostgreSQL suite separately qualifies all four exact replay routes at replay
-TTL after an operation-row lock wait, but not that race through live HTTPS.
+PostgreSQL suite and a direct-mTLS HTTPS sibling qualify all four exact replay
+routes at replay TTL after an operation-row lock wait. The live gate proves two
+expiry-minus-one controls, an exact holder/waiter, time advancement only after
+the waiter exists, expiry before deliberately corrupted ciphertext decryption,
+non-retryable `409` without retry hints, unchanged 20-table lifecycle state,
+and exactly one additional admission-audit row. Its private time control is
+qualification-only and production configuration rejects it. The measured lock
+phase must finish in less than 1.2 seconds against the production two-second
+lock timeout.
 These gates do not qualify the
 remaining earlier or arbitrary network pre-commit/process-death timings,
 pre-commit exact-replay or rejection branches, completion of the final

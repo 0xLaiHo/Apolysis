@@ -4,7 +4,7 @@ use std::{env, ffi::OsString, fmt, path::PathBuf};
 
 use apolysis_gateway_server::{
     serve_with_post_commit_response_barrier, serve_with_pre_operation_barrier, GatewayServerConfig,
-    GatewayServerError, QualificationOperation,
+    GatewayServerError, QualificationClockConfiguration, QualificationOperation,
 };
 
 const MAX_IJSON_INTEGER: u64 = 9_007_199_254_740_991;
@@ -38,9 +38,12 @@ async fn run() -> Result<(), QualificationServerError> {
                 arguments
                     .release
                     .ok_or(QualificationServerError::Arguments)?,
-                arguments.fixed_now_unix_ms,
-                arguments.transaction_now_unix_ms,
-                arguments.first_transaction_now_unix_ms,
+                QualificationClockConfiguration::new(
+                    arguments.fixed_now_unix_ms,
+                    arguments.transaction_now_unix_ms,
+                    arguments.first_transaction_now_unix_ms,
+                    arguments.transaction_time_advance_file,
+                ),
             )
             .await
         }
@@ -57,6 +60,7 @@ struct QualificationArguments {
     fixed_now_unix_ms: Option<u64>,
     transaction_now_unix_ms: Option<u64>,
     first_transaction_now_unix_ms: Option<u64>,
+    transaction_time_advance_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +95,7 @@ impl QualificationArguments {
         let mut fixed_now_unix_ms = None;
         let mut transaction_now_unix_ms = None;
         let mut first_transaction_now_unix_ms = None;
+        let mut transaction_time_advance_file = None;
 
         while let Some(option) = arguments.next() {
             let value = arguments
@@ -151,6 +156,11 @@ impl QualificationArguments {
                     }
                     first_transaction_now_unix_ms = Some(value);
                 }
+                Some("--qualification-transaction-time-advance-file")
+                    if transaction_time_advance_file.is_none() =>
+                {
+                    transaction_time_advance_file = Some(PathBuf::from(value));
+                }
                 Some(
                     "--qualification-operation"
                     | "--qualification-marker"
@@ -158,7 +168,8 @@ impl QualificationArguments {
                     | "--qualification-release"
                     | "--qualification-now-unix-ms"
                     | "--qualification-transaction-now-unix-ms"
-                    | "--qualification-first-transaction-now-unix-ms",
+                    | "--qualification-first-transaction-now-unix-ms"
+                    | "--qualification-transaction-time-advance-file",
                 ) => {
                     return Err(QualificationServerError::Arguments);
                 }
@@ -195,6 +206,14 @@ impl QualificationArguments {
         }) {
             return Err(QualificationServerError::Arguments);
         }
+        if transaction_time_advance_file.is_some()
+            && (phase != QualificationPhase::PreOperation
+                || fixed_now_unix_ms.is_none()
+                || transaction_now_unix_ms.is_none()
+                || first_transaction_now_unix_ms.is_some())
+        {
+            return Err(QualificationServerError::Arguments);
+        }
 
         Ok(Self {
             server_arguments,
@@ -205,6 +224,7 @@ impl QualificationArguments {
             fixed_now_unix_ms,
             transaction_now_unix_ms,
             first_transaction_now_unix_ms,
+            transaction_time_advance_file,
         })
     }
 }
@@ -474,5 +494,46 @@ mod tests {
         ]);
 
         assert!(QualificationArguments::parse(arguments).is_err());
+    }
+
+    #[test]
+    fn keeps_private_transaction_time_advance_out_of_the_production_cli() {
+        let mut arguments = pre_operation_arguments_with_fixed_time("123456789");
+        arguments.extend([
+            OsString::from("--qualification-transaction-now-unix-ms"),
+            OsString::from("123456790"),
+            OsString::from("--qualification-transaction-time-advance-file"),
+            OsString::from("/tmp/private/advance"),
+        ]);
+
+        let parsed = QualificationArguments::parse(arguments).unwrap();
+        assert_eq!(
+            parsed.transaction_time_advance_file,
+            Some(PathBuf::from("/tmp/private/advance"))
+        );
+        assert!(!parsed.server_arguments.contains(&OsString::from(
+            "--qualification-transaction-time-advance-file"
+        )));
+    }
+
+    #[test]
+    fn rejects_incomplete_private_transaction_time_advance() {
+        let mut without_transaction_time = pre_operation_arguments_with_fixed_time("123456789");
+        without_transaction_time.extend([
+            OsString::from("--qualification-transaction-time-advance-file"),
+            OsString::from("/tmp/private/advance"),
+        ]);
+        assert!(QualificationArguments::parse(without_transaction_time).is_err());
+
+        let mut with_retry_clock = pre_operation_arguments_with_fixed_time("123456789");
+        with_retry_clock.extend([
+            OsString::from("--qualification-transaction-now-unix-ms"),
+            OsString::from("123456790"),
+            OsString::from("--qualification-first-transaction-now-unix-ms"),
+            OsString::from("123456789"),
+            OsString::from("--qualification-transaction-time-advance-file"),
+            OsString::from("/tmp/private/advance"),
+        ]);
+        assert!(QualificationArguments::parse(with_retry_clock).is_err());
     }
 }
