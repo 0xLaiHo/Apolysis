@@ -94,9 +94,9 @@ the same qualification-owned exclusive operation-table lock while releasing
 both private barriers, and uses `pg_stat_activity` to prove both transactions
 overlap in database lock waits before releasing the blocker. A
 qualification-owned late write trigger raises SQLSTATE `40001` exactly once
-for the internal-retry variants. The database oracle covers four
+for the internal-retry variants. The database oracle covers five
 operation/boundary cases, each through a transaction wait and one real
-internal retry:
+internal retry, for ten matrix cells:
 
 1. At an accepted finalization deadline, an exact replay of a join accepted
    before the deadline returns its unchanged stored result, while a novel join
@@ -115,12 +115,21 @@ internal retry:
    before expiry returns its unchanged stored result, while a novel ingest
    returns `401 lease_expired` and lazily commits the single
    `active -> incomplete` transition.
+5. At the requested last lease's expiry, finish converges on a durable HTTP
+   `200` result with state `incomplete`, no finalization declaration, and one
+   `active -> incomplete` transition. Two identical waiting requests produce
+   one novel result and one exact replay. The retry variant raises one late
+   SQLSTATE `40001`, restarts at the inclusive expiry, returns the novel
+   durable result, and preserves a stable exact replay.
 
-For each case, the accepted operation and encrypted replay remain exactly once
-and unchanged; the rejected novel operation creates no operation, replay,
-stream, lease, binding, or evidence-event effect; the lifecycle transition and
-its outbox effect occur exactly once; and neither competing request can revive
-the run.
+For the first four cases, the accepted operation and encrypted replay remain
+exactly once and unchanged, while the rejected novel operation creates no
+operation, replay, stream, lease, binding, or evidence-event effect. In the
+finish case, the novel result creates exactly one operation and encrypted
+replay, and the exact retry returns that stored result. Across all five cases,
+the lifecycle transition and its outbox effect occur exactly once, and neither
+competing request can revive the run. Finish additionally leaves finalization
+terminal positions and outcome claims absent.
 
 The transaction-boundary extension makes request arrival and transaction begin
 explicitly non-authoritative for every lifecycle operation. Each transaction
@@ -150,16 +159,19 @@ use the trusted Gateway clock passed to the repository.
 
 Join-authorization freshness is evaluated before lifecycle reconciliation; an
 authorization that expires at the fresh decision time returns
-`404 not_found` without being consumed. For otherwise eligible work, crossing
-an accepted finalization deadline returns
-`409 invalid_lifecycle_transition`; crossing the requested lease's expiry
-without an elapsed deadline returns `401 lease_expired`. Both lifecycle errors
-are non-retryable. Once deadline reconciliation seals a run, later novel
-lifecycle work remains a `409` lifecycle rejection rather than degrading to a
-lease error after the deadline field is cleared. The first last-lease
-reconciliation of an active run without an elapsed deadline remains `401`.
-Neither path creates a novel operation, encrypted replay, stream, lease,
-binding, or evidence event. The only durable rejection effect is exactly one
+`404 not_found` without being consumed. For otherwise eligible novel
+join/bind/ingest work, crossing an accepted finalization deadline returns
+`409 invalid_lifecycle_transition`; novel bind or ingest crossing the requested
+lease's expiry without an elapsed deadline returns `401 lease_expired`. Both
+lifecycle errors are non-retryable. Finish at last-lease expiry instead follows
+the durable `200`/`incomplete` convergence described above. Once deadline
+reconciliation seals a run, later novel lifecycle work remains a `409`
+lifecycle rejection rather than degrading to a lease error after the deadline
+field is cleared. The first last-lease reconciliation of an active run without
+an elapsed deadline remains `401` for bind or ingest. Those rejection paths
+create no novel operation, encrypted replay, stream, lease, binding, or
+evidence event. Finish creates one operation and replay but no finalization
+declaration. The only durable lifecycle-reconciliation effect is exactly one
 transition to `incomplete` and its matching record/outbox pair across competing
 requests. Exact stored-operation replay remains prior to dynamic reconciliation
 but after initial current-authority revalidation, and returns the unchanged
@@ -195,12 +207,23 @@ cutover, rejection of old leases and replay, rejection of the old certificate,
 admission of the replacement certificate at the new epoch, and creation of a
 new stream.
 
+A separate real-PostgreSQL repository test, outside the live HTTPS path,
+qualifies all four lifecycle routes when exact replay waits for its exact
+operation row lock across replay-TTL expiry. Each route first proves two stable
+positive controls at expiry minus one millisecond. With that operation row
+locked, the test proves the replay transaction is waiting on the holder,
+advances transaction time to the inclusive expiry, and releases the lock.
+Deliberately corrupted ciphertext proves expiry is evaluated before
+decryption: every route produces non-retryable `idempotency_conflict`, which
+the v0.1 HTTP adapter maps to `409`, samples time once after the lock wait, and
+leaves the full captured Gateway-state fingerprint unchanged.
+
 This still does not close the W3–W6 transport gate. Sender-bound JWT/workload
 identity profiles, the broader network pre-commit/process-death fault matrix,
-commit-wall-clock boundary enforcement, replay-TTL expiry during an
-operation-lock wait, live join-grant-expiry and join-at-last-lease-expiry
-cases, broader staggered multi-lease combinations and retry depths, the
-remaining mixed lifecycle/retry matrix, load/capacity qualification, authorized
-object-read resolution and downstream deletion propagation, production KMS and
-tenant RLS integration, replication/failover/recovery, HA, quotas, and rate
-limits remain required.
+commit-wall-clock boundary enforcement, the same replay-TTL operation-lock race
+through live HTTPS, live join-grant-expiry and join-at-last-lease-expiry cases,
+broader staggered multi-lease combinations, additional retry depths and live
+SQLSTATE `40P01` fault coverage, the remaining mixed lifecycle/retry matrix,
+load/capacity qualification, authorized object-read resolution and downstream
+deletion propagation, production KMS and tenant RLS integration,
+replication/failover/recovery, HA, quotas, and rate limits remain required.
