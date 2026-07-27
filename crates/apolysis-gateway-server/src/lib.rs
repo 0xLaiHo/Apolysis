@@ -23,4 +23,4 @@ pub use server::serve;
 #[cfg(feature = "qualification")]
 pub use server::serve_with_post_commit_response_barrier;
 #[cfg(feature = "qualification")]
-pub use server::serve_with_pre_operation_barrier;
+pub use server::{serve_with_pre_operation_barrier, QualificationClockConfiguration};

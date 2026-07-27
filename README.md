@@ -111,9 +111,9 @@ event deduplication and cross-run organization sequencing, finalization, and ter
 irreversibility. A sibling bounded direct-mTLS/PostgreSQL gate now covers
 an additional transaction-boundary join/bind/ingest/finish slice with stable
 exact replay and fail-closed or deterministically incomplete novel work. A
-separate repository qualification now covers all four exact lifecycle routes
-at the replay-TTL boundary; it is not live HTTPS evidence. This does not claim
-the complete mixed
+direct-mTLS HTTPS qualification and its repository sibling now cover all four
+exact lifecycle routes across replay-TTL expiry after an exact operation-row
+lock wait. This does not claim the complete mixed
 lifecycle/retry matrix. The remaining process-death and network pre-commit
 timings,
 staggered multi-lease, load, replication, failover, backup/restore, and high

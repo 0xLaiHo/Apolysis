@@ -22,6 +22,7 @@ use crate::{http::GatewayRouteOperation, GatewayServerError};
 const MARKER_CONTENTS: &[u8] = b"committed\n";
 const PRE_OPERATION_MARKER_CONTENTS: &[u8] = b"ready\n";
 const RELEASE_CONTENTS: &[u8] = b"release\n";
+const TIME_ADVANCE_CONTENTS: &[u8] = b"advance\n";
 const PRE_OPERATION_RELEASE_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_CERTIFICATE_PEM_BYTES: u64 = 1024 * 1024;
 const MAX_DATABASE_URL_BYTES: u64 = 4096;
@@ -135,6 +136,53 @@ pub(crate) struct QualificationBarrier {
     release: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct QualificationTimeAdvance {
+    path: PathBuf,
+}
+
+impl QualificationTimeAdvance {
+    pub(crate) fn new(
+        path: PathBuf,
+        marker: &Path,
+        release: &Path,
+    ) -> Result<Self, GatewayServerError> {
+        if !path.is_absolute() {
+            return Err(GatewayServerError::configuration(
+                "Gateway qualification time-advance path must be absolute",
+            ));
+        }
+        if path == marker || path == release || path.parent() != marker.parent() {
+            return Err(GatewayServerError::configuration(
+                "Gateway qualification time advance must be a distinct sibling of the controls",
+            ));
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                return Err(GatewayServerError::configuration(
+                    "Gateway qualification time advance must not exist at startup",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(GatewayServerError::io_at(
+                    "qualification-time-advance-metadata",
+                    error,
+                ));
+            }
+        }
+        Ok(Self { path })
+    }
+
+    pub(crate) fn has_advanced(&self) -> bool {
+        read_private_control(&self.path, TIME_ADVANCE_CONTENTS).unwrap_or(false)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 impl QualificationBarrier {
     pub(crate) fn new(
         operation: GatewayRouteOperation,
@@ -233,6 +281,50 @@ impl QualificationBarrier {
     }
 }
 
+fn read_private_control(path: &Path, expected_contents: &[u8]) -> Result<bool, GatewayServerError> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(GatewayServerError::io_at(
+                "qualification-control-open",
+                error,
+            ));
+        }
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| GatewayServerError::io_at("qualification-control-metadata", error))?;
+    // SAFETY: geteuid has no preconditions and does not retain pointers.
+    let effective_uid = unsafe { libc::geteuid() };
+    if !metadata.is_file()
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+        || metadata.uid() != effective_uid
+    {
+        return Err(GatewayServerError::configuration(
+            "Gateway qualification control is not a private regular file",
+        ));
+    }
+    let mut contents = vec![0_u8; expected_contents.len()];
+    file.read_exact(&mut contents)
+        .map_err(|error| GatewayServerError::io_at("qualification-control-read", error))?;
+    let mut extra = [0_u8; 1];
+    let extra_bytes = file
+        .read(&mut extra)
+        .map_err(|error| GatewayServerError::io_at("qualification-control-read", error))?;
+    if contents != expected_contents || extra_bytes != 0 {
+        return Err(GatewayServerError::configuration(
+            "Gateway qualification control content is invalid",
+        ));
+    }
+    Ok(true)
+}
+
 async fn wait_for_private_release(
     path: &Path,
     timeout: Duration,
@@ -244,51 +336,10 @@ async fn wait_for_private_release(
                 "Gateway qualification release timed out",
             ));
         }
-        let mut release_options = OpenOptions::new();
-        release_options
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        let mut release = match release_options.open(path) {
-            Ok(release) => release,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-            Err(error) => {
-                return Err(GatewayServerError::io_at(
-                    "qualification-release-open",
-                    error,
-                ));
-            }
-        };
-        let metadata = release
-            .metadata()
-            .map_err(|error| GatewayServerError::io_at("qualification-release-metadata", error))?;
-        // SAFETY: geteuid has no preconditions and does not retain pointers.
-        let effective_uid = unsafe { libc::geteuid() };
-        if !metadata.is_file()
-            || metadata.mode() & 0o777 != 0o600
-            || metadata.nlink() != 1
-            || metadata.uid() != effective_uid
-        {
-            return Err(GatewayServerError::configuration(
-                "Gateway qualification release is not a private regular file",
-            ));
+        if read_private_control(path, RELEASE_CONTENTS)? {
+            return Ok(());
         }
-        let mut contents = [0_u8; RELEASE_CONTENTS.len()];
-        release
-            .read_exact(&mut contents)
-            .map_err(|error| GatewayServerError::io_at("qualification-release-read", error))?;
-        let mut extra = [0_u8; 1];
-        let extra_bytes = release
-            .read(&mut extra)
-            .map_err(|error| GatewayServerError::io_at("qualification-release-read", error))?;
-        if contents != RELEASE_CONTENTS || extra_bytes != 0 {
-            return Err(GatewayServerError::configuration(
-                "Gateway qualification release content is invalid",
-            ));
-        }
-        return Ok(());
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -478,6 +529,64 @@ mod tests {
             release,
         )
         .is_err());
+    }
+
+    #[test]
+    fn time_advance_changes_only_for_one_private_static_control() {
+        let directory = TestDirectory::private();
+        let marker = directory.path().join("reached");
+        let release = directory.path().join("release");
+        let advance_path = directory.path().join("advance");
+        let advance =
+            QualificationTimeAdvance::new(advance_path.clone(), &marker, &release).unwrap();
+
+        assert!(!advance.has_advanced());
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        options
+            .open(&advance_path)
+            .and_then(|mut file| file.write_all(TIME_ADVANCE_CONTENTS))
+            .unwrap();
+
+        assert!(advance.has_advanced());
+    }
+
+    #[test]
+    fn time_advance_fails_closed_for_stale_or_unsafe_controls() {
+        for (mode, contents) in [(0o644, TIME_ADVANCE_CONTENTS), (0o600, b"changed\n")] {
+            let directory = TestDirectory::private();
+            let marker = directory.path().join("reached");
+            let release = directory.path().join("release");
+            let advance_path = directory.path().join("advance");
+            let advance =
+                QualificationTimeAdvance::new(advance_path.clone(), &marker, &release).unwrap();
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true).mode(mode);
+            options
+                .open(&advance_path)
+                .and_then(|mut file| file.write_all(contents))
+                .unwrap();
+
+            assert!(!advance.has_advanced());
+        }
+
+        let directory = TestDirectory::private();
+        let marker = directory.path().join("reached");
+        let release = directory.path().join("release");
+        let target = directory.path().join("target");
+        let advance_path = directory.path().join("advance");
+        let advance =
+            QualificationTimeAdvance::new(advance_path.clone(), &marker, &release).unwrap();
+        fs::write(&target, TIME_ADVANCE_CONTENTS).unwrap();
+        symlink(&target, &advance_path).unwrap();
+        assert!(!advance.has_advanced());
+
+        let directory = TestDirectory::private();
+        let marker = directory.path().join("reached");
+        let release = directory.path().join("release");
+        let advance_path = directory.path().join("advance");
+        fs::write(&advance_path, TIME_ADVANCE_CONTENTS).unwrap();
+        assert!(QualificationTimeAdvance::new(advance_path, &marker, &release).is_err());
     }
 
     #[tokio::test]

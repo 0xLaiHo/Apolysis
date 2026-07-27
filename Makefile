@@ -4,6 +4,7 @@
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
 	test-gateway-https-crash-recovery \
+	test-gateway-https-replay-ttl-lock-wait \
 	test-gateway-mixed-lifecycle-deadline-races \
 	test-gateway-multiprocess-lifecycle-races \
 	test-projection-postgres \
@@ -78,6 +79,11 @@ test-gateway-postgres-crash-recovery:
 # acknowledgement can be handed to the network stack.
 test-gateway-https-crash-recovery:
 	./scripts/test-gateway-https-crash-recovery.sh
+
+# Opt-in real HTTPS/mTLS replay-TTL qualification. Each exact lifecycle replay
+# crosses the inclusive TTL boundary while its precise operation row is locked.
+test-gateway-https-replay-ttl-lock-wait:
+	./scripts/test-gateway-https-replay-ttl-lock-wait.sh
 
 # Opt-in two-process lifecycle race qualification. Two independent Gateway
 # listeners and pools wait behind a private pre-operation barrier before each

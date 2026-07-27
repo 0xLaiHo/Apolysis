@@ -255,17 +255,25 @@ Exact replay performs the initial authority check only; novel work revalidates
 the same locked authority at final transaction time after its dynamic lock
 wait.
 
-A separate non-HTTPS real-PostgreSQL repository test qualifies exact replay for
-`open_run`, `bind_runtime`, `ingest`, and `finish_run` across replay-TTL expiry
-while waiting for the exact operation row lock. Each route first has two stable
-positive controls at expiry minus one millisecond. The test then holds that
-route's operation row, proves the replay transaction is blocked by the holder,
-advances the transaction clock to the inclusive TTL expiry, and releases the
-lock. Deliberately corrupted ciphertext proves the adapter evaluates expiry
-before decryption: every route produces non-retryable `idempotency_conflict`,
-which the v0.1 HTTP adapter maps to `409`, samples transaction time once after
-the lock wait, and leaves the full captured Gateway-state fingerprint
-unchanged.
+A real-PostgreSQL repository test and a sibling direct-mTLS HTTPS qualification
+cover exact replay for `open_run`, `bind_runtime`, `ingest`, and `finish_run`
+across replay-TTL expiry while waiting for the exact operation row lock. Each
+live route first has two byte-stable positive controls at expiry minus one
+millisecond, with replay expiry inside current registration and credential
+validity. The qualification then corrupts only retained replay ciphertext,
+holds that route's exact operation row, proves the runtime transaction is
+blocked by the exact holder, advances its private transaction clock only after
+the waiter exists, and releases the holder at inclusive TTL expiry. Expiry is
+therefore evaluated before decryption: every route produces a non-retryable
+`409` `idempotency_conflict`, with `Cache-Control: no-store`, no retry hint, and
+no response bytes before release. The 20-table lifecycle fingerprint and
+operation/replay cardinality remain unchanged; the transport attempt adds
+exactly one admission-audit row. The v0.1 adapter samples transaction time once
+after the wait. The loopback, same-UID, `0600` time-advance file is
+qualification-only and production configuration rejects it.
+The monotonic interval from pre-operation release through confirmed holder
+termination must remain below 1.2 seconds against the production two-second
+lock timeout.
 
 The separate evidence-object provider gate additionally proves schema-owner
 separation with distinct SCRAM logins, no startup migration,
@@ -278,10 +286,10 @@ The repository crash gate alone is not HTTPS Gateway-server recovery and does
 not qualify trace or HTTP error-body secret handling. The sibling HTTPS
 qualifications cover one accepted-novel late-precommit rollback seam, bounded
 post-commit death, two-process writer/lifecycle races, and the listed
-join/bind/ingest/finish deadline/expiry transaction decisions. The replay-TTL
-operation-lock test above does not qualify that race through live HTTPS. These
-gates also do not qualify the remaining earlier or arbitrary network
-pre-commit/process-death timings, pre-commit exact-replay or rejection branches,
+join/bind/ingest/finish deadline/expiry transaction decisions. The sibling
+direct-mTLS HTTPS qualification covers the four-route replay-TTL operation-lock
+race above. These gates also do not qualify the remaining earlier or arbitrary
+network pre-commit/process-death timings, pre-commit exact-replay or rejection branches,
 completion of the final `INSERT` statement, entry into `COMMIT`, physical or
 WAL commit timing, the remaining mixed lifecycle/retry matrix,
 commit-wall-clock enforcement, live join-grant expiry or join at last-lease
