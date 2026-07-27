@@ -158,6 +158,8 @@ gateway_base_url=""
 workload_pid=""
 crash_client_pid=""
 qualification_private_artifacts=()
+precommit_blocker_pid=""
+precommit_blocker_application_name=""
 race_gateway_pids=()
 race_client_pids=()
 race_gateway_urls=()
@@ -200,6 +202,27 @@ stop_owned_process() {
     if [[ -n "$process_pid" ]]; then
         wait "$process_pid" 2>/dev/null || true
     fi
+}
+
+stop_precommit_database_blocker() {
+    if [[ -n "$precommit_blocker_application_name" ]] && \
+        timeout 5s docker container inspect "$container_name" >/dev/null 2>&1; then
+        timeout 5s docker exec -i "$container_name" \
+            psql --username "$database_user" --dbname "$database_name" \
+                --no-align --tuples-only \
+                --set=application_name="$precommit_blocker_application_name" <<'SQL' \
+                >/dev/null 2>&1 || true
+WITH blocker AS MATERIALIZED (
+    SELECT pid FROM pg_catalog.pg_stat_activity
+     WHERE application_name=:'application_name'
+       AND pid <> pg_backend_pid()
+)
+SELECT pg_terminate_backend(pid) FROM blocker;
+SQL
+    fi
+    stop_owned_process "$precommit_blocker_pid"
+    precommit_blocker_pid=""
+    precommit_blocker_application_name=""
 }
 
 stop_race_database_blocker() {
@@ -328,6 +351,463 @@ SQL
         fi
         sleep 0.1
     done
+}
+
+gateway_repository_fingerprint() {
+    local fingerprint=""
+    local snapshot=""
+    snapshot="$(timeout 15s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --quiet --set=ON_ERROR_STOP=1 \
+            --set=organization_id="$organization_id" <<'SQL'
+-- Hash only the organization-scoped repository transaction surface. mTLS
+-- admission audit is committed before this transaction, while PostgreSQL
+-- identity-sequence advances are intentionally nontransactional.
+SELECT format(
+    'SELECT %L || ''|'' || count(*)::text || ''|'' || md5(COALESCE(string_agg(row_data, E''\n'' ORDER BY row_data), '''')) FROM (SELECT to_jsonb(snapshot)::text AS row_data FROM apolysis_gateway.%I AS snapshot WHERE organization_id=%L) AS rows;',
+    relation_name,
+    relation_name,
+    :'organization_id'
+)
+  FROM (
+      VALUES
+          ('organization_sequences'),
+          ('runs'),
+          ('run_expected_source_kinds'),
+          ('client_runs'),
+          ('record_items'),
+          ('projection_outbox'),
+          ('source_streams'),
+          ('source_stream_capabilities'),
+          ('leases'),
+          ('lease_operations'),
+          ('join_authorizations'),
+          ('gateway_operations'),
+          ('operation_replays'),
+          ('evidence_events'),
+          ('runtime_bindings'),
+          ('active_runtime_identities'),
+          ('finalization_declarations'),
+          ('finalization_terminal_positions'),
+          ('finalization_outcome_claims'),
+          ('transaction_authority_audit')
+  ) AS lifecycle_relations(relation_name)
+ ORDER BY relation_name
+\gexec
+SQL
+)"
+    local snapshot_line_count=""
+    snapshot_line_count="$(awk 'END { print NR }' <<<"$snapshot")"
+    if [[ "$snapshot_line_count" != "20" ]] || \
+        grep -Evq '^[a-z_]+\|[0-9]+\|[0-9a-f]{32}$' <<<"$snapshot"; then
+        printf 'error: Gateway repository-state snapshot was incomplete\n' >&2
+        exit 1
+    fi
+    fingerprint="$(printf '%s' "$snapshot" | sha256sum | awk '{print $1}')"
+    if [[ ! "$fingerprint" =~ ^[0-9a-f]{64}$ ]]; then
+        printf 'error: Gateway repository-state fingerprint was invalid\n' >&2
+        exit 1
+    fi
+    printf '%s\n' "$fingerprint"
+}
+
+gateway_authority_audit_count() {
+    local operation="$1"
+    timeout 15s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+            --set=organization_id="$organization_id" \
+            --set=operation="$operation" <<'SQL' | tr -d '[:space:]'
+SELECT count(*) FROM apolysis_gateway.gateway_authority_audit
+ WHERE organization_id=:'organization_id'
+   AND operation=:'operation'
+   AND decision='authorized'
+   AND reason_code='current_authority';
+SQL
+}
+
+precommit_operation_counts() {
+    local operation="$1"
+    local operation_id="$2"
+    timeout 3s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+            --set=organization_id="$organization_id" \
+            --set=operation="$operation" \
+            --set=operation_id="$operation_id" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id'
+        AND operation_kind=:'operation'
+        AND client_operation_id=:'operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.operation_kind=:'operation'
+        AND operation.client_operation_id=:'operation_id')
+);
+SQL
+}
+
+prepare_precommit_qualification() {
+    local operation="$1"
+    local operation_id="$2"
+    local advisory_key="$3"
+    local installed_vector=""
+
+    installed_vector="$(timeout 15s docker exec -i "$container_name" \
+        psql --username "$schema_owner_login" --dbname "$database_name" \
+            --no-align --tuples-only --quiet --set=ON_ERROR_STOP=1 \
+            --set=organization_id="$organization_id" \
+            --set=operation="$operation" \
+            --set=operation_id="$operation_id" \
+            --set=advisory_key="$advisory_key" <<'SQL'
+SET client_min_messages=warning;
+DROP TRIGGER IF EXISTS qualification_precommit_replay_insert
+    ON apolysis_gateway.operation_replays;
+DROP SCHEMA IF EXISTS apolysis_precommit CASCADE;
+CREATE SCHEMA apolysis_precommit;
+REVOKE ALL ON SCHEMA apolysis_precommit FROM PUBLIC;
+CREATE SEQUENCE apolysis_precommit.reached_sequence;
+REVOKE ALL ON SEQUENCE apolysis_precommit.reached_sequence FROM PUBLIC;
+CREATE FUNCTION apolysis_precommit.block_replay_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path=pg_catalog
+AS $function$
+DECLARE
+    inserted_client_operation_id text;
+    inserted_operation_kind text;
+BEGIN
+    IF NEW.organization_id::text <> TG_ARGV[0] THEN
+        RETURN NEW;
+    END IF;
+    SELECT operation.client_operation_id::text, operation.operation_kind::text
+      INTO inserted_client_operation_id, inserted_operation_kind
+      FROM apolysis_gateway.gateway_operations AS operation
+     WHERE operation.organization_id=NEW.organization_id
+       AND operation.operation_id=NEW.operation_id;
+    IF inserted_client_operation_id=TG_ARGV[1]
+       AND inserted_operation_kind=TG_ARGV[2] THEN
+        -- The repository default is a short fail-closed lock timeout. Extend
+        -- only this transaction-local qualification wait, while retaining the
+        -- statement timeout as a hard upper bound.
+        PERFORM pg_catalog.set_config('lock_timeout', '10000ms', true);
+        PERFORM pg_catalog.nextval(
+            'apolysis_precommit.reached_sequence'::pg_catalog.regclass
+        );
+        PERFORM pg_catalog.pg_advisory_xact_lock(TG_ARGV[3]::bigint);
+    END IF;
+    RETURN NEW;
+END
+$function$;
+REVOKE ALL ON FUNCTION apolysis_precommit.block_replay_insert() FROM PUBLIC;
+CREATE TRIGGER qualification_precommit_replay_insert
+AFTER INSERT ON apolysis_gateway.operation_replays
+FOR EACH ROW
+EXECUTE FUNCTION apolysis_precommit.block_replay_insert(
+    :'organization_id',
+    :'operation_id',
+    :'operation',
+    :'advisory_key'
+);
+SELECT concat_ws('|',
+    (SELECT count(*) FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_precommit_replay_insert'
+        AND tgrelid='apolysis_gateway.operation_replays'::regclass
+        AND NOT tgisinternal),
+    (SELECT tgdeferrable FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_precommit_replay_insert'
+        AND tgrelid='apolysis_gateway.operation_replays'::regclass
+        AND NOT tgisinternal),
+    (SELECT tginitdeferred FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_precommit_replay_insert'
+        AND tgrelid='apolysis_gateway.operation_replays'::regclass
+        AND NOT tgisinternal),
+    (SELECT count(*) FROM pg_catalog.pg_proc
+      WHERE oid='apolysis_precommit.block_replay_insert()'::regprocedure
+        AND prosecdef
+        AND proconfig @> ARRAY['search_path=pg_catalog']::text[]),
+    (SELECT last_value FROM apolysis_precommit.reached_sequence),
+    (SELECT is_called FROM apolysis_precommit.reached_sequence)
+);
+SQL
+)"
+    installed_vector="$(tr -d '[:space:]' <<<"$installed_vector")"
+    if [[ "$installed_vector" != "1|f|f|1|1|f" ]]; then
+        printf 'error: %s ordinary precommit trigger was not installed exactly once\n' \
+            "$operation" >&2
+        exit 1
+    fi
+}
+
+drop_precommit_qualification() {
+    local removed_vector=""
+    timeout 15s docker exec -i "$container_name" \
+        psql --username "$schema_owner_login" --dbname "$database_name" \
+            --quiet --set=ON_ERROR_STOP=1 >/dev/null <<'SQL'
+SET client_min_messages=warning;
+DROP TRIGGER IF EXISTS qualification_precommit_replay_insert
+    ON apolysis_gateway.operation_replays;
+DROP SCHEMA IF EXISTS apolysis_precommit CASCADE;
+SQL
+    removed_vector="$(timeout 15s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 <<'SQL'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_precommit_replay_insert'
+        AND tgrelid='apolysis_gateway.operation_replays'::regclass
+        AND NOT tgisinternal),
+    (SELECT count(*) FROM pg_catalog.pg_proc AS routine
+      JOIN pg_catalog.pg_namespace AS namespace
+        ON namespace.oid=routine.pronamespace
+      WHERE namespace.nspname='apolysis_precommit'
+        AND routine.proname='block_replay_insert'),
+    (SELECT count(*) FROM pg_catalog.pg_namespace
+      WHERE nspname='apolysis_precommit')
+);
+SQL
+)"
+    removed_vector="$(tr -d '[:space:]' <<<"$removed_vector")"
+    if [[ "$removed_vector" != "0|0|0" ]]; then
+        printf 'error: precommit qualification objects were not removed\n' >&2
+        exit 1
+    fi
+}
+
+start_precommit_database_blocker() {
+    local operation="$1"
+    local advisory_key="$2"
+    local blocker_log="${secret_directory}/${operation}.precommit.database-blocker.log"
+    precommit_blocker_application_name="apolysis-precommit-${operation}-${random_suffix}"
+    qualification_private_artifacts+=("$blocker_log")
+
+    timeout --foreground --kill-after=5s 120s \
+        docker exec --env "PGAPPNAME=${precommit_blocker_application_name}" \
+            -i "$container_name" \
+            psql --username "$database_user" --dbname "$database_name" \
+                --set=ON_ERROR_STOP=1 \
+                --set=advisory_key="$advisory_key" >"$blocker_log" 2>&1 <<'SQL' &
+SELECT pg_advisory_lock(:'advisory_key'::bigint);
+SELECT pg_sleep(110);
+SELECT pg_advisory_unlock(:'advisory_key'::bigint);
+SQL
+    precommit_blocker_pid=$!
+
+    local blocker_deadline=$((SECONDS + 10))
+    local blocker_ready=""
+    while [[ "$blocker_ready" != "1" ]]; do
+        if ! kill -0 "$precommit_blocker_pid" >/dev/null 2>&1; then
+            printf 'error: %s precommit database blocker exited before acquiring its lock\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        blocker_ready="$(timeout 5s docker exec -i "$container_name" \
+            psql --username "$database_user" --dbname "$database_name" \
+                --no-align --tuples-only \
+                --set=application_name="$precommit_blocker_application_name" <<'SQL'
+SELECT count(*)
+  FROM pg_catalog.pg_stat_activity AS activity
+ WHERE activity.application_name=:'application_name'
+   AND activity.state='active'
+   AND activity.wait_event='PgSleep'
+   AND EXISTS (
+       SELECT 1 FROM pg_catalog.pg_locks AS held_lock
+        WHERE held_lock.pid=activity.pid
+          AND held_lock.locktype='advisory'
+          AND held_lock.granted
+   );
+SQL
+)"
+        blocker_ready="$(tr -d '[:space:]' <<<"$blocker_ready")"
+        if ((SECONDS >= blocker_deadline)); then
+            printf 'error: %s precommit database blocker did not acquire its lock\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        sleep 0.05
+    done
+}
+
+qualify_pre_commit_crash() {
+    local operation="$1"
+    local route="$2"
+    local request_file="$3"
+    local artifact_prefix="$4"
+    local operation_id=""
+    operation_id="$(jq -er '.client_operation_id' "$request_file")"
+    local advisory_key="$((16#$(random_hex 4)))"
+    local response="${secret_directory}/${artifact_prefix}.precommit.response"
+    local headers="${secret_directory}/${artifact_prefix}.precommit.headers"
+    local http_status="${secret_directory}/${artifact_prefix}.precommit.http-status"
+    local curl_status="${secret_directory}/${artifact_prefix}.precommit.curl-status"
+    local curl_stderr="${secret_directory}/${artifact_prefix}.precommit.curl-stderr"
+    : >"$response"
+    : >"$headers"
+    : >"$http_status"
+    : >"$curl_status"
+    : >"$curl_stderr"
+    qualification_private_artifacts+=(
+        "$response" "$headers" "$http_status" "$curl_status" "$curl_stderr"
+    )
+
+    printf 'Qualifying HTTPS late-precommit rollback for %s...\n' "$operation"
+    stop_precommit_database_blocker
+    prepare_precommit_qualification "$operation" "$operation_id" "$advisory_key"
+    start_precommit_database_blocker "$operation" "$advisory_key"
+    local baseline_fingerprint=""
+    baseline_fingerprint="$(gateway_repository_fingerprint)"
+    local baseline_authority_audits=""
+    baseline_authority_audits="$(gateway_authority_audit_count "$operation")"
+    if [[ ! "$baseline_authority_audits" =~ ^[0-9]+$ ]]; then
+        printf 'error: %s authority-audit baseline was invalid\n' "$operation" >&2
+        exit 1
+    fi
+
+    command curl --noproxy '*' --silent --show-error --http1.1 \
+        --connect-timeout 5 \
+        --max-time 45 \
+        --cacert "$ca_cert" \
+        --cert "$client_cert" \
+        --key "$client_key" \
+        --header 'Accept: application/json' \
+        --header 'Content-Type: application/json' \
+        --data-binary "@${request_file}" \
+        --dump-header "$headers" \
+        --output "$response" \
+        --write-out '%{http_code}\n' \
+        "${gateway_base_url}/gateway/v0.1/${route}" \
+        >"$http_status" 2>"$curl_stderr" &
+    crash_client_pid=$!
+
+    local barrier_deadline=$((SECONDS + 4))
+    local barrier_state=""
+    while [[ "$barrier_state" != "1|1|1" ]]; do
+        if ! kill -0 "$gateway_pid" >/dev/null 2>&1; then
+            printf 'error: Gateway exited before the %s precommit barrier\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        if ! kill -0 "$crash_client_pid" >/dev/null 2>&1; then
+            printf 'error: %s client exited before the precommit barrier\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        if ! kill -0 "$precommit_blocker_pid" >/dev/null 2>&1; then
+            printf 'error: %s precommit blocker exited before the Gateway wait\n' \
+                "$operation" >&2
+            exit 1
+        fi
+        barrier_state="$(timeout 2s docker exec -i "$container_name" \
+            psql --username "$database_user" --dbname "$database_name" \
+                --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+                --set=runtime_login="$gateway_runtime_login" \
+                --set=blocker_application_name="$precommit_blocker_application_name" <<'SQL'
+WITH holder AS MATERIALIZED (
+    SELECT pid FROM pg_catalog.pg_stat_activity
+     WHERE application_name=:'blocker_application_name'
+       AND pid <> pg_backend_pid()
+),
+waiter AS MATERIALIZED (
+    SELECT DISTINCT activity.pid
+      FROM pg_catalog.pg_stat_activity AS activity
+      CROSS JOIN holder
+      JOIN pg_catalog.pg_locks AS waiting_lock
+        ON waiting_lock.pid=activity.pid
+       AND waiting_lock.locktype='advisory'
+       AND NOT waiting_lock.granted
+      JOIN pg_catalog.pg_locks AS held_lock
+        ON held_lock.pid=holder.pid
+       AND held_lock.locktype=waiting_lock.locktype
+       AND held_lock.database IS NOT DISTINCT FROM waiting_lock.database
+       AND held_lock.classid=waiting_lock.classid
+       AND held_lock.objid=waiting_lock.objid
+       AND held_lock.objsubid=waiting_lock.objsubid
+       AND held_lock.granted
+     WHERE activity.usename=:'runtime_login'
+       AND activity.state='active'
+       AND activity.wait_event_type='Lock'
+       AND lower(activity.wait_event)='advisory'
+       AND activity.backend_xid IS NOT NULL
+       AND position(
+           'INSERT INTO apolysis_gateway.operation_replays' IN activity.query
+       ) > 0
+       AND holder.pid=ANY(pg_catalog.pg_blocking_pids(activity.pid))
+)
+SELECT concat_ws('|',
+    (SELECT CASE WHEN is_called THEN last_value ELSE 0 END
+       FROM apolysis_precommit.reached_sequence),
+    (SELECT count(*) FROM waiter),
+    (SELECT count(*) FROM holder)
+);
+SQL
+)"
+        barrier_state="$(tr -d '[:space:]' <<<"$barrier_state")"
+        if ((SECONDS >= barrier_deadline)); then
+            printf 'error: timed out waiting for the %s late-precommit barrier (state=%s)\n' \
+                "$operation" "$barrier_state" >&2
+            exit 1
+        fi
+        sleep 0.05
+    done
+
+    if [[ -s "$headers" || -s "$response" || -s "$http_status" ]]; then
+        printf 'error: %s HTTP acknowledgement escaped before the precommit crash\n' \
+            "$operation" >&2
+        exit 1
+    fi
+    if [[ "$(precommit_operation_counts "$operation" "$operation_id")" != "0|0" ]]; then
+        printf 'error: %s late-precommit state became externally durable\n' \
+            "$operation" >&2
+        exit 1
+    fi
+    if ! kill -0 "$gateway_pid" >/dev/null 2>&1 || \
+        ! kill -0 "$crash_client_pid" >/dev/null 2>&1; then
+        printf 'error: %s process escaped before the precommit SIGKILL\n' \
+            "$operation" >&2
+        exit 1
+    fi
+
+    kill -KILL "$gateway_pid"
+    if wait "$gateway_pid" >/dev/null 2>&1; then
+        printf 'error: killed %s precommit Gateway exited successfully\n' \
+            "$operation" >&2
+        exit 1
+    fi
+    gateway_pid=""
+    local observed_curl_status=""
+    if wait "$crash_client_pid" >/dev/null 2>&1; then
+        observed_curl_status=0
+    else
+        observed_curl_status=$?
+    fi
+    printf '%s\n' "$observed_curl_status" >"$curl_status"
+    crash_client_pid=""
+    if [[ "$observed_curl_status" == "0" ]] || \
+        [[ "$(<"$http_status")" != "000" ]] || \
+        [[ -s "$headers" || -s "$response" ]]; then
+        printf 'error: killed %s precommit Gateway still acknowledged its response\n' \
+            "$operation" >&2
+        exit 1
+    fi
+
+    stop_precommit_database_blocker
+    wait_for_gateway_sessions_to_close
+    local expected_authority_audits="$((baseline_authority_audits + 1))"
+    if [[ "$(precommit_operation_counts "$operation" "$operation_id")" != "0|0" ]] || \
+        [[ "$(gateway_repository_fingerprint)" != "$baseline_fingerprint" ]] || \
+        [[ "$(gateway_authority_audit_count "$operation")" != \
+            "$expected_authority_audits" ]]; then
+        printf 'error: killed %s precommit transaction did not roll back exactly\n' \
+            "$operation" >&2
+        exit 1
+    fi
+    drop_precommit_qualification
+    start_gateway
 }
 
 qualify_post_commit_crash() {
@@ -3865,6 +4345,7 @@ cleanup() {
 
     trap - EXIT INT TERM
     stop_gateway
+    stop_precommit_database_blocker
     stop_race_processes
     stop_owned_process "$workload_pid"
     stop_owned_process "$crash_client_pid"
@@ -4725,6 +5206,8 @@ assert_no_store "$method_headers" 'unsupported method'
 
 printf 'Opening a real Agent Run through the mTLS HTTP seam...\n'
 if [[ "$crash_recovery_enabled" == "1" ]]; then
+    qualify_pre_commit_crash \
+        open_run open-run "$signed_request" open-run
     qualify_post_commit_crash \
         open_run open-run "$signed_request" open-run
 fi
@@ -4861,6 +5344,8 @@ jq -n \
     --output "$bind_signed_request"
 
 if [[ "$crash_recovery_enabled" == "1" ]]; then
+    qualify_pre_commit_crash \
+        bind_runtime bind-runtime "$bind_signed_request" bind-runtime
     qualify_post_commit_crash \
         bind_runtime bind-runtime "$bind_signed_request" bind-runtime
 fi
@@ -4993,6 +5478,8 @@ jq -n \
     --output "$ingest_signed_request"
 
 if [[ "$crash_recovery_enabled" == "1" ]]; then
+    qualify_pre_commit_crash \
+        ingest ingest "$ingest_signed_request" ingest
     qualify_post_commit_crash \
         ingest ingest "$ingest_signed_request" ingest
 fi
@@ -5182,6 +5669,8 @@ if "$request_bin" finish-run \
 fi
 
 if [[ "$crash_recovery_enabled" == "1" ]]; then
+    qualify_pre_commit_crash \
+        finish_run finish-run "$finish_signed_request" finish-run
     qualify_post_commit_crash \
         finish_run finish-run "$finish_signed_request" finish-run
 fi

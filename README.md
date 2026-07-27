@@ -102,7 +102,8 @@ SIGKILL/WAL recovery, and Gateway application-process death before commit,
 after commit, and during replay while preserving rollback or exact convergence
 before a dedicated client acknowledgement is emitted. This qualifies a
 repository/application-process seam, not recovery of the HTTPS Gateway server.
-A sibling real direct-mTLS HTTPS recovery gate now covers post-commit/pre-ack
+A sibling real direct-mTLS HTTPS recovery gate now covers one bounded
+late-precommit rollback seam for accepted novel work plus post-commit/pre-ack
 Gateway-server death and exact replay convergence for all four lifecycle routes.
 An additional bounded two-process mTLS gate now qualifies coordinated
 writer/lifecycle races across run creation, one-use join, exact runtime binding,
@@ -113,7 +114,8 @@ exact replay and fail-closed or deterministically incomplete novel work. A
 separate repository qualification now covers all four exact lifecycle routes
 at the replay-TTL boundary; it is not live HTTPS evidence. This does not claim
 the complete mixed
-lifecycle/retry matrix. The broader process-death, network pre-commit,
+lifecycle/retry matrix. The remaining process-death and network pre-commit
+timings,
 staggered multi-lease, load, replication, failover, backup/restore, and high
 availability work remains unqualified, as do production KMS integration, database
 row-level-security deployment,
