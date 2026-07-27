@@ -119,6 +119,29 @@ endpoint. Database evidence requires one encrypted replay per accepted
 operation, record/outbox 1:1, contiguous organization sequences, one consumed
 grant, one active-identity winner, and no terminal-state resurrection.
 
+A bounded split-clock sibling uses the same independent processes, pools,
+private pre-operation release, and observed database-lock overlap to qualify
+exact replay against novel ingest when a transaction wait crosses an accepted
+finalization deadline or last-lease expiry. Qualification-owned late-write
+fault injection raises SQLSTATE `40001` once for the target novel operation to
+qualify the same boundaries through one real internal retry. Ingest attempts
+order their work as operation-identity lock, exact stored-operation replay, run
+and lease locks, fresh transaction time, expiry reconciliation, and only then
+novel mutation. Every bounded serialization or deadlock retry repeats that
+order and obtains fresh transaction time.
+
+For object-reference ingest, PostgreSQL `clock_timestamp()` through the
+schema-owned database-time function is authoritative. Content-off ingest uses
+the trusted Gateway clock passed through the repository port. At or after the
+accepted finalization deadline, a novel ingest returns non-retryable
+`409 invalid_lifecycle_transition`; at or after the last lease's expiry, it
+returns non-retryable `401 lease_expired`. The rejected operation creates no
+operation, encrypted replay, or novel evidence event. For either listed novel
+rejection, lazy reconciliation commits the single transition to `incomplete`
+and its matching record/outbox pair; competing requests cannot create a second
+transition. A retained exact operation replay returns its unchanged stored
+result before that reconciliation.
+
 Current PostgreSQL gap discovery evaluates a window over the full persisted
 history for one source stream; its SQL limit bounds returned gaps rather than
 scan work. Novel envelopes reserve one contiguous organization sequence range
@@ -146,10 +169,11 @@ complete W3–W6. In particular, it has:
 - the repository recovery gate remains a non-HTTPS application/repository seam;
   the sibling HTTPS gate qualifies post-commit/pre-ack process death for novel
   success and exact replay on all four routes, and the two-process gate
-  qualifies the bounded writer/lifecycle matrix above, but not a network
-  pre-commit/process-death fault matrix, mixed lifecycle/deadline races,
-  sustained or capacity load, replication/failover, backup/restore, or high
-  availability;
+  qualifies the bounded writer/lifecycle matrix above. The split-clock
+  transaction-boundary slices qualify the listed ingest deadline/expiry cases,
+  but not the remaining network pre-commit/process-death or mixed
+  lifecycle/retry matrix, sustained or capacity load, replication/failover,
+  backup/restore, or high availability;
 - no production KMS/envelope-data-key custody or tenant RLS deployment; the
   built-in replay protector and evidence-object wrapping key are direct-key
   in-process inputs, and the fixed database roles are not a shared-cluster
@@ -342,6 +366,45 @@ verdict.
 - Every observed timestamp carries its time basis and known clock uncertainty.
   Missing uncertainty is represented as unknown, not zero.
 
+### Clocks and transaction admission
+
+HTTP arrival, transport-authority resolution, request decoding, application
+entry, and transaction begin are not lifecycle acceptance points for novel
+ingest. Each repository transaction attempt must:
+
+1. resolve and lock the operation identity;
+2. return an unexpired, matching exact operation replay before dynamic
+   lifecycle reconciliation;
+3. lock the run and the request's lease;
+4. read fresh trusted transaction time;
+5. reconcile deadline or last-lease expiry; and
+6. only then admit a novel mutation.
+
+A PostgreSQL serialization or deadlock restart is a new attempt and must repeat
+that sequence, including the fresh-time read. For ingest containing an evidence
+object reference, the repository reads PostgreSQL `clock_timestamp()` through
+the schema-owned database-time function. Content-off ingest reads the trusted
+Gateway clock through the repository port. A zero or regressed trusted Gateway
+time fails closed rather than admitting work under a stale timestamp.
+
+The finalization deadline and lease expiry are inclusive boundaries. If the
+fresh transaction time is at or after the accepted finalization deadline, a
+novel ingest is rejected as HTTP `409`, `invalid_lifecycle_transition`, with
+`retryable: false`. If it is at or after the last lease's expiry, a novel ingest
+is rejected as HTTP `401`, `lease_expired`, with `retryable: false`. Neither
+response carries a retry delay. The rejection consumes no novel operation
+identity and creates no encrypted replay or novel evidence event. The same
+transaction lazily seals the run `incomplete`; across competing requests,
+reconciliation commits exactly one state-transition record and its matching
+outbox row.
+
+This rule defines the qualified lifecycle decision point; it does not claim
+that the database commit's wall-clock instant precedes the deadline or expiry.
+The current gate also does not qualify replay-TTL expiry while the
+operation-identity lock itself is waiting, novel join or runtime binding,
+staggered multi-lease combinations, or transaction-time transport-authority
+freshness and credential rotation.
+
 ### Gaps
 
 - Receiving a sequence above the next expected value records a gap and may
@@ -419,6 +482,14 @@ For v0.1 compatibility, readers must also accept a missing or `null` hint and
 then apply a bounded local backoff. A source may retry only the exact operation,
 preserving its operation identifier and digest. Its retry policy must also
 bound total attempts or elapsed time and apply backoff or jitter.
+
+The adapter's bounded internal transaction restart is distinct from a client
+retry. A serialization or deadlock restart that has not committed repeats the
+complete transaction-admission order and samples fresh transaction time. If
+the new attempt reaches a deadline or lease-expiry decision, that non-retryable
+lifecycle result is returned rather than `backpressure`. Exhausted retries or
+an unavailable persistence path retain the bounded external `backpressure`
+behavior.
 
 Configured run-scoped admission limits are not reported as `backpressure` in
 v0.1; they fail through the existing non-retryable lifecycle code. Generic

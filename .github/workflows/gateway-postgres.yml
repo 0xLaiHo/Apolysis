@@ -82,5 +82,5 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run fixed-time mTLS lifecycle deadline race gate
+      - name: Run mTLS lifecycle transaction-boundary gate
         run: make test-gateway-mixed-lifecycle-deadline-races

@@ -30,24 +30,42 @@ pub type HarnessResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 pub struct GatewayConformanceSnapshot {
     record_item_count: usize,
     projection_outbox_count: usize,
+    incomplete_record_item_count: usize,
+    incomplete_projection_outbox_count: usize,
     evidence_event_count: usize,
+    operation_count: usize,
+    replay_count: usize,
     finalization_declaration_count: usize,
     accepted_effective_trust_profiles: Vec<TrustProfile>,
 }
 
+/// Named content-free counts used to construct an adapter-neutral snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GatewayConformanceCounts {
+    pub record_item_count: usize,
+    pub projection_outbox_count: usize,
+    pub incomplete_record_item_count: usize,
+    pub incomplete_projection_outbox_count: usize,
+    pub evidence_event_count: usize,
+    pub operation_count: usize,
+    pub replay_count: usize,
+    pub finalization_declaration_count: usize,
+}
+
 impl GatewayConformanceSnapshot {
     pub fn new(
-        record_item_count: usize,
-        projection_outbox_count: usize,
-        evidence_event_count: usize,
-        finalization_declaration_count: usize,
+        counts: GatewayConformanceCounts,
         accepted_effective_trust_profiles: Vec<TrustProfile>,
     ) -> Self {
         Self {
-            record_item_count,
-            projection_outbox_count,
-            evidence_event_count,
-            finalization_declaration_count,
+            record_item_count: counts.record_item_count,
+            projection_outbox_count: counts.projection_outbox_count,
+            incomplete_record_item_count: counts.incomplete_record_item_count,
+            incomplete_projection_outbox_count: counts.incomplete_projection_outbox_count,
+            evidence_event_count: counts.evidence_event_count,
+            operation_count: counts.operation_count,
+            replay_count: counts.replay_count,
+            finalization_declaration_count: counts.finalization_declaration_count,
             accepted_effective_trust_profiles,
         }
     }
@@ -60,8 +78,24 @@ impl GatewayConformanceSnapshot {
         self.projection_outbox_count
     }
 
+    pub fn incomplete_record_item_count(&self) -> usize {
+        self.incomplete_record_item_count
+    }
+
+    pub fn incomplete_projection_outbox_count(&self) -> usize {
+        self.incomplete_projection_outbox_count
+    }
+
     pub fn evidence_event_count(&self) -> usize {
         self.evidence_event_count
+    }
+
+    pub fn operation_count(&self) -> usize {
+        self.operation_count
+    }
+
+    pub fn replay_count(&self) -> usize {
+        self.replay_count
     }
 
     pub fn finalization_declaration_count(&self) -> usize {
@@ -140,10 +174,17 @@ impl GatewayConformanceHarness for MemoryGatewayHarness {
                 .snapshot()
                 .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?;
             Ok(GatewayConformanceSnapshot::new(
-                snapshot.record_item_count(),
-                snapshot.projection_outbox_count(),
-                snapshot.evidence_event_count(),
-                snapshot.finalization_declaration_count(),
+                GatewayConformanceCounts {
+                    record_item_count: snapshot.record_item_count(),
+                    projection_outbox_count: snapshot.projection_outbox_count(),
+                    incomplete_record_item_count: snapshot.incomplete_record_item_count(),
+                    incomplete_projection_outbox_count: snapshot
+                        .incomplete_projection_outbox_count(),
+                    evidence_event_count: snapshot.evidence_event_count(),
+                    operation_count: snapshot.operation_count(),
+                    replay_count: snapshot.replay_count(),
+                    finalization_declaration_count: snapshot.finalization_declaration_count(),
+                },
                 snapshot.accepted_effective_trust_profiles().to_vec(),
             ))
         })
@@ -344,6 +385,24 @@ macro_rules! gateway_repository_conformance_tests {
         #[tokio::test]
         async fn finish_run_deadline_is_frozen_and_expires_to_incomplete() {
             $crate::scenarios::finish_run_deadline_is_frozen_and_expires_to_incomplete::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn ingest_rechecks_finalization_deadline_after_admission() {
+            $crate::scenarios::ingest_rechecks_finalization_deadline_after_admission::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn ingest_rechecks_last_lease_expiry_after_admission() {
+            $crate::scenarios::ingest_rechecks_last_lease_expiry_after_admission::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn ingest_rejects_invalid_transaction_time_without_partial_state() {
+            $crate::scenarios::ingest_rejects_invalid_transaction_time_without_partial_state::<$harness>().await;
         }
 
         $(#[$test_attr])*

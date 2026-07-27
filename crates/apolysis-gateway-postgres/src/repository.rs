@@ -8,8 +8,8 @@ use apolysis_contracts::{
     OpenRunOutcome, OpenRunResponse, RunId, RunState, RunStateTransition, SourceKind,
 };
 use apolysis_gateway::{
-    AuditReason, GatewayFailure, GatewayIdGenerator, GatewayRepository, LedgerCommand,
-    LedgerOperation, LedgerOutcome, RepositoryFuture,
+    AuditReason, GatewayClock, GatewayFailure, GatewayIdGenerator, GatewayRepository,
+    LedgerCommand, LedgerOperation, LedgerOutcome, RepositoryFuture,
 };
 use serde_json::Value;
 use sqlx::{postgres::PgPoolOptions, PgConnection, PgPool, Postgres, Row, Transaction};
@@ -365,6 +365,7 @@ impl PostgresGatewayRepository {
     async fn execute_command(
         &self,
         command: &LedgerCommand,
+        clock: &dyn GatewayClock,
         ids: &dyn GatewayIdGenerator,
     ) -> Result<LedgerOutcome, GatewayFailure> {
         let mut attempt = 0_u32;
@@ -412,10 +413,16 @@ impl PostgresGatewayRepository {
                     LedgerOperation::Ingest {
                         context,
                         request,
-                        now_unix_ms,
+                        now_unix_ms: admitted_at_unix_ms,
                     } => {
-                        self.execute_ingest(&mut transaction, context, request, now_unix_ms)
-                            .await
+                        self.execute_ingest(
+                            &mut transaction,
+                            context,
+                            request,
+                            admitted_at_unix_ms,
+                            clock,
+                        )
+                        .await
                     }
                     LedgerOperation::BindRuntime {
                         context,
@@ -943,9 +950,10 @@ impl GatewayRepository for PostgresGatewayRepository {
     fn execute<'a>(
         &'a self,
         command: LedgerCommand,
+        clock: &'a dyn GatewayClock,
         ids: &'a dyn GatewayIdGenerator,
     ) -> RepositoryFuture<'a, Result<LedgerOutcome, GatewayFailure>> {
-        Box::pin(async move { self.execute_command(&command, ids).await })
+        Box::pin(async move { self.execute_command(&command, clock, ids).await })
     }
 }
 

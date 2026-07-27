@@ -85,10 +85,11 @@ impl GatewayRepository for LoseFirstAcknowledgement {
     fn execute<'a>(
         &'a self,
         command: LedgerCommand,
+        clock: &'a dyn apolysis_gateway::GatewayClock,
         ids: &'a dyn GatewayIdGenerator,
     ) -> RepositoryFuture<'a, Result<LedgerOutcome, GatewayFailure>> {
         Box::pin(async move {
-            let outcome = self.inner.execute(command, ids).await?;
+            let outcome = self.inner.execute(command, clock, ids).await?;
             if self.lose_next_success.swap(false, Ordering::SeqCst) {
                 Err(GatewayFailure::repository_backpressure(
                     250,

@@ -39,6 +39,8 @@ async fn run() -> Result<(), QualificationServerError> {
                     .release
                     .ok_or(QualificationServerError::Arguments)?,
                 arguments.fixed_now_unix_ms,
+                arguments.transaction_now_unix_ms,
+                arguments.first_transaction_now_unix_ms,
             )
             .await
         }
@@ -53,6 +55,8 @@ struct QualificationArguments {
     phase: QualificationPhase,
     release: Option<PathBuf>,
     fixed_now_unix_ms: Option<u64>,
+    transaction_now_unix_ms: Option<u64>,
+    first_transaction_now_unix_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,6 +89,8 @@ impl QualificationArguments {
         let mut phase = None;
         let mut release = None;
         let mut fixed_now_unix_ms = None;
+        let mut transaction_now_unix_ms = None;
+        let mut first_transaction_now_unix_ms = None;
 
         while let Some(option) = arguments.next() {
             let value = arguments
@@ -119,12 +125,40 @@ impl QualificationArguments {
                     }
                     fixed_now_unix_ms = Some(value);
                 }
+                Some("--qualification-transaction-now-unix-ms")
+                    if transaction_now_unix_ms.is_none() =>
+                {
+                    let value = value
+                        .to_str()
+                        .ok_or(QualificationServerError::Arguments)?
+                        .parse::<u64>()
+                        .map_err(|_| QualificationServerError::Arguments)?;
+                    if !(1..=MAX_IJSON_INTEGER).contains(&value) {
+                        return Err(QualificationServerError::Arguments);
+                    }
+                    transaction_now_unix_ms = Some(value);
+                }
+                Some("--qualification-first-transaction-now-unix-ms")
+                    if first_transaction_now_unix_ms.is_none() =>
+                {
+                    let value = value
+                        .to_str()
+                        .ok_or(QualificationServerError::Arguments)?
+                        .parse::<u64>()
+                        .map_err(|_| QualificationServerError::Arguments)?;
+                    if !(1..=MAX_IJSON_INTEGER).contains(&value) {
+                        return Err(QualificationServerError::Arguments);
+                    }
+                    first_transaction_now_unix_ms = Some(value);
+                }
                 Some(
                     "--qualification-operation"
                     | "--qualification-marker"
                     | "--qualification-phase"
                     | "--qualification-release"
-                    | "--qualification-now-unix-ms",
+                    | "--qualification-now-unix-ms"
+                    | "--qualification-transaction-now-unix-ms"
+                    | "--qualification-first-transaction-now-unix-ms",
                 ) => {
                     return Err(QualificationServerError::Arguments);
                 }
@@ -136,20 +170,41 @@ impl QualificationArguments {
         }
 
         let phase = phase.unwrap_or(QualificationPhase::PostCommit);
+        let operation = operation.ok_or(QualificationServerError::Arguments)?;
         if (phase == QualificationPhase::PreOperation) != release.is_some() {
             return Err(QualificationServerError::Arguments);
         }
         if fixed_now_unix_ms.is_some() && phase != QualificationPhase::PreOperation {
             return Err(QualificationServerError::Arguments);
         }
+        if transaction_now_unix_ms.is_some()
+            && (phase != QualificationPhase::PreOperation || fixed_now_unix_ms.is_none())
+        {
+            return Err(QualificationServerError::Arguments);
+        }
+        if transaction_now_unix_ms.is_some_and(|transaction_now_unix_ms| {
+            operation != QualificationOperation::Ingest
+                || fixed_now_unix_ms
+                    .is_none_or(|fixed_now_unix_ms| transaction_now_unix_ms <= fixed_now_unix_ms)
+        }) {
+            return Err(QualificationServerError::Arguments);
+        }
+        if first_transaction_now_unix_ms.is_some_and(|first_transaction_now_unix_ms| {
+            transaction_now_unix_ms.is_none()
+                || fixed_now_unix_ms != Some(first_transaction_now_unix_ms)
+        }) {
+            return Err(QualificationServerError::Arguments);
+        }
 
         Ok(Self {
             server_arguments,
-            operation: operation.ok_or(QualificationServerError::Arguments)?,
+            operation,
             marker: marker.ok_or(QualificationServerError::Arguments)?,
             phase,
             release,
             fixed_now_unix_ms,
+            transaction_now_unix_ms,
+            first_transaction_now_unix_ms,
         })
     }
 }
@@ -357,5 +412,48 @@ mod tests {
             OsString::from("123456790"),
         ]);
         assert!(QualificationArguments::parse(duplicate).is_err());
+    }
+
+    #[test]
+    fn rejects_transaction_time_without_a_fixed_admission_time() {
+        let arguments = [
+            "qualification-server",
+            "--qualification-operation",
+            "ingest",
+            "--qualification-marker",
+            "/tmp/private/reached",
+            "--qualification-phase",
+            "pre_operation",
+            "--qualification-release",
+            "/tmp/private/release",
+            "--qualification-transaction-now-unix-ms",
+            "123456790",
+        ];
+
+        assert!(QualificationArguments::parse(arguments.into_iter().map(OsString::from)).is_err());
+    }
+
+    #[test]
+    fn rejects_a_transaction_time_that_does_not_advance_ingest_time() {
+        for transaction_time in ["123456788", "123456789"] {
+            let mut arguments = pre_operation_arguments_with_fixed_time("123456789");
+            arguments.extend([
+                OsString::from("--qualification-transaction-now-unix-ms"),
+                OsString::from(transaction_time),
+            ]);
+
+            assert!(QualificationArguments::parse(arguments).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_a_first_transaction_time_without_a_later_transaction_time() {
+        let mut arguments = pre_operation_arguments_with_fixed_time("123456789");
+        arguments.extend([
+            OsString::from("--qualification-first-transaction-now-unix-ms"),
+            OsString::from("123456789"),
+        ]);
+
+        assert!(QualificationArguments::parse(arguments).is_err());
     }
 }
