@@ -183,7 +183,7 @@ impl QualificationArguments {
             return Err(QualificationServerError::Arguments);
         }
         if transaction_now_unix_ms.is_some_and(|transaction_now_unix_ms| {
-            operation != QualificationOperation::Ingest
+            !operation.supports_transaction_time_qualification()
                 || fixed_now_unix_ms
                     .is_none_or(|fixed_now_unix_ms| transaction_now_unix_ms <= fixed_now_unix_ms)
         }) {
@@ -232,11 +232,11 @@ impl std::error::Error for QualificationServerError {}
 mod tests {
     use super::*;
 
-    fn pre_operation_arguments_with_fixed_time(value: &str) -> Vec<OsString> {
+    fn pre_operation_arguments_with_fixed_time_for(operation: &str, value: &str) -> Vec<OsString> {
         [
             "qualification-server",
             "--qualification-operation",
-            "ingest",
+            operation,
             "--qualification-marker",
             "/tmp/private/reached",
             "--qualification-phase",
@@ -249,6 +249,10 @@ mod tests {
         .into_iter()
         .map(OsString::from)
         .collect()
+    }
+
+    fn pre_operation_arguments_with_fixed_time(value: &str) -> Vec<OsString> {
+        pre_operation_arguments_with_fixed_time_for("ingest", value)
     }
 
     #[test]
@@ -434,7 +438,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_transaction_time_that_does_not_advance_ingest_time() {
+    fn accepts_transaction_time_only_for_routes_that_recheck_it() {
+        for operation in ["open_run", "bind_runtime", "ingest"] {
+            let mut arguments = pre_operation_arguments_with_fixed_time_for(operation, "123456789");
+            arguments.extend([
+                OsString::from("--qualification-transaction-now-unix-ms"),
+                OsString::from("123456790"),
+            ]);
+
+            let parsed = QualificationArguments::parse(arguments)
+                .unwrap_or_else(|_| panic!("{operation} must support split transaction time"));
+            assert_eq!(parsed.transaction_now_unix_ms, Some(123_456_790));
+        }
+
+        let mut finish = pre_operation_arguments_with_fixed_time_for("finish_run", "123456789");
+        finish.extend([
+            OsString::from("--qualification-transaction-now-unix-ms"),
+            OsString::from("123456790"),
+        ]);
+        assert!(QualificationArguments::parse(finish).is_err());
+    }
+
+    #[test]
+    fn rejects_a_transaction_time_that_does_not_advance_admission_time() {
         for transaction_time in ["123456788", "123456789"] {
             let mut arguments = pre_operation_arguments_with_fixed_time("123456789");
             arguments.extend([

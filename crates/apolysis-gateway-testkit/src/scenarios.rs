@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 
-use crate::GatewayConformanceHarness;
+use crate::{GatewayConformanceHarness, GatewayConformanceSnapshot};
 
 use apolysis_contracts::{
     AuthenticatedSourceContext, AuthenticationSnapshot, AuthorityKind, AuthorityRef,
@@ -13,7 +13,7 @@ use apolysis_contracts::{
 };
 use apolysis_gateway::{
     canonical_inline_payload_digest, canonical_request_digest, ExecutionEvidenceGateway,
-    GatewayClock, GatewayIdGenerator,
+    GatewayClock, GatewayFailure, GatewayIdGenerator,
 };
 
 #[derive(Clone, Copy)]
@@ -61,6 +61,54 @@ impl GatewayClock for ReplayOnlyClock {
     fn transaction_now_unix_ms(&self) -> u64 {
         panic!("exact operation replay must not sample transaction time")
     }
+}
+
+fn assert_non_retryable(error: &GatewayFailure) {
+    let response = error.response().expect("safe Gateway error response");
+    assert!(!response.retryable());
+    assert_eq!(response.retry_after_ms(), None);
+}
+
+fn assert_no_novel_gateway_effects(
+    before: &GatewayConformanceSnapshot,
+    after: &GatewayConformanceSnapshot,
+) {
+    assert_eq!(after.evidence_event_count(), before.evidence_event_count());
+    assert_eq!(after.operation_count(), before.operation_count());
+    assert_eq!(after.replay_count(), before.replay_count());
+    assert_eq!(after.source_stream_count(), before.source_stream_count());
+    assert_eq!(after.lease_count(), before.lease_count());
+    assert_eq!(
+        after.runtime_binding_count(),
+        before.runtime_binding_count()
+    );
+    assert_eq!(
+        after.pending_join_authorization_count(),
+        before.pending_join_authorization_count()
+    );
+    assert_eq!(
+        after.consumed_join_authorization_count(),
+        before.consumed_join_authorization_count()
+    );
+}
+
+fn assert_single_incomplete_transition(
+    before: &GatewayConformanceSnapshot,
+    after: &GatewayConformanceSnapshot,
+) {
+    assert_eq!(after.record_item_count(), before.record_item_count() + 1);
+    assert_eq!(
+        after.projection_outbox_count(),
+        before.projection_outbox_count() + 1
+    );
+    assert_eq!(
+        after.incomplete_record_item_count(),
+        before.incomplete_record_item_count() + 1
+    );
+    assert_eq!(
+        after.incomplete_projection_outbox_count(),
+        before.incomplete_projection_outbox_count() + 1
+    );
 }
 
 struct FixedIds {
@@ -739,6 +787,352 @@ pub async fn open_run_join_requires_a_server_registered_grant<H: GatewayConforma
         .await
         .expect_err("an expired grant fails closed without consuming identities");
     assert_eq!(expired_error.code(), ContractErrorCode::NotFound);
+}
+
+pub async fn open_run_join_rechecks_grant_expiry_after_admission<H: GatewayConformanceHarness>() {
+    let harness = H::start().await.expect("start isolated Gateway harness");
+    let repository = harness.repository();
+    let admission_unix_ms = 1_783_891_200_000;
+    let grant_expiry_unix_ms = admission_unix_ms + 100_000;
+    let creator = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admission_unix_ms),
+        FixedIds::new(&[
+            "run_join_grant_boundary_01",
+            "stream_join_grant_boundary_01",
+            "lease_aa23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let coordinator = source_context();
+    let opened = creator
+        .open_run(&coordinator, create_request())
+        .await
+        .expect("open run");
+    let runtime = runtime_source_context();
+    harness
+        .register_join_grant(
+            &coordinator,
+            &runtime,
+            opened.run_id().clone(),
+            SourceKind::RuntimeWitness,
+            "join_grant_transaction_boundary_01",
+            grant_expiry_unix_ms,
+        )
+        .await
+        .expect("register boundary join grant");
+    let mut join_wire =
+        serde_json::to_value(join_request(opened.run_id().as_str())).expect("serialize join");
+    join_wire["client_operation_id"] =
+        serde_json::json!("operation_join_grant_transaction_boundary_01");
+    join_wire["join_proof"]["proof_ref"] = serde_json::json!("join_grant_transaction_boundary_01");
+    join_wire["join_proof"]["expires_at_unix_ms"] = serde_json::json!(grant_expiry_unix_ms);
+    let request = resign_open_wire(join_wire);
+    let before = harness
+        .snapshot()
+        .await
+        .expect("snapshot before grant-expiry rejection");
+
+    let crossing_gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        AdvancingClock::new(admission_unix_ms, grant_expiry_unix_ms),
+        FixedIds::new(&[
+            "stream_join_grant_rejected_01",
+            "lease_ab23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let error = crossing_gateway
+        .open_run(&runtime, request.clone())
+        .await
+        .expect_err("a grant expiring during transaction admission must fail closed");
+    assert_eq!(error.code(), ContractErrorCode::NotFound);
+    assert_non_retryable(&error);
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after grant-expiry rejection"),
+        before
+    );
+
+    let recovery_gateway = ExecutionEvidenceGateway::new(
+        repository,
+        FixedClock(grant_expiry_unix_ms - 1),
+        FixedIds::new(&[
+            "stream_join_grant_recovery_01",
+            "lease_ac23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let joined = recovery_gateway
+        .open_run(&runtime, request)
+        .await
+        .expect("a rejected boundary attempt must leave its grant and operation reusable");
+    assert_eq!(joined.outcome(), OpenRunOutcome::Joined);
+    let after_recovery = harness
+        .snapshot()
+        .await
+        .expect("snapshot after valid grant consumption");
+    assert_eq!(
+        after_recovery.pending_join_authorization_count() + 1,
+        before.pending_join_authorization_count()
+    );
+    assert_eq!(
+        after_recovery.consumed_join_authorization_count(),
+        before.consumed_join_authorization_count() + 1
+    );
+}
+
+pub async fn open_run_join_rechecks_finalization_deadline_after_admission<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = H::start().await.expect("start isolated Gateway harness");
+    let repository = harness.repository();
+    let admission_unix_ms = 1_783_891_200_000;
+    let coordinator_gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admission_unix_ms),
+        FixedIds::new(&[
+            "run_join_deadline_boundary_01",
+            "stream_join_deadline_boundary_01",
+            "lease_af23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let coordinator = source_context_with_policy(
+        1_783_894_800_000,
+        vec![
+            SourceCapability::SemanticLifecycle,
+            SourceCapability::ToolCalls,
+            SourceCapability::ClaimedOutcome,
+        ],
+        vec![SourceKind::SemanticHook, SourceKind::RuntimeWitness],
+    );
+    let opened = coordinator_gateway
+        .open_run(
+            &coordinator,
+            create_request_with_expected_source_kinds(serde_json::json!([
+                "semantic_hook",
+                "runtime_witness"
+            ])),
+        )
+        .await
+        .expect("open multi-source run");
+    let runtime = runtime_source_context();
+    harness
+        .register_join_policy(
+            &coordinator,
+            &runtime,
+            opened.run_id().clone(),
+            SourceKind::RuntimeWitness,
+            "join_policy_runtime_01",
+            1_783_894_800_000,
+        )
+        .await
+        .expect("register reusable join policy");
+    let finishing = coordinator_gateway
+        .finish_run(
+            &coordinator,
+            finish_run_request(
+                opened.run_id().as_str(),
+                opened.lease().lease_id(),
+                opened.source_stream_id(),
+                "operation_finish_join_deadline_boundary_01",
+            ),
+        )
+        .await
+        .expect("enter finishing before the runtime source joins");
+    let deadline = finishing
+        .finalization_deadline_unix_ms()
+        .expect("bounded finalization deadline");
+    let baseline_join = registration_policy_join_request(
+        opened.run_id().as_str(),
+        "operation_join_before_deadline_boundary_01",
+    );
+    let joined = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(deadline - 1),
+        FixedIds::new(&[
+            "stream_join_before_deadline_boundary_01",
+            "lease_b023456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    )
+    .open_run(&runtime, baseline_join.clone())
+    .await
+    .expect("join before the finalization deadline");
+    assert_eq!(joined.lease().expires_at_unix_ms(), deadline);
+
+    let replayed = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        ReplayOnlyClock(deadline),
+        FixedIds::new(&[]),
+    )
+    .open_run(&runtime, baseline_join)
+    .await
+    .expect("exact join replay must precede transaction-time reconciliation");
+    assert_eq!(replayed.outcome(), OpenRunOutcome::IdempotentRetry);
+    assert_eq!(replayed.source_stream_id(), joined.source_stream_id());
+    assert_eq!(replayed.lease().lease_id(), joined.lease().lease_id());
+    let before = harness
+        .snapshot()
+        .await
+        .expect("snapshot before crossing-deadline join");
+
+    let error = ExecutionEvidenceGateway::new(
+        repository,
+        AdvancingClock::new(deadline - 1, deadline),
+        FixedIds::new(&[]),
+    )
+    .open_run(
+        &runtime,
+        registration_policy_join_request(
+            opened.run_id().as_str(),
+            "operation_join_crossing_deadline_boundary_01",
+        ),
+    )
+    .await
+    .expect_err("a novel join cannot cross the finalization deadline");
+    assert_eq!(error.code(), ContractErrorCode::InvalidLifecycleTransition);
+    assert_non_retryable(&error);
+    let after = harness
+        .snapshot()
+        .await
+        .expect("snapshot after crossing-deadline join");
+    assert_no_novel_gateway_effects(&before, &after);
+    assert_single_incomplete_transition(&before, &after);
+}
+
+pub async fn open_run_join_rechecks_last_lease_expiry_after_admission<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = H::start().await.expect("start isolated Gateway harness");
+    let repository = harness.repository();
+    let opened_at_unix_ms = 1_783_891_200_000;
+    let coordinator = source_context();
+    let opened = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(opened_at_unix_ms),
+        FixedIds::new(&[
+            "run_join_last_lease_boundary_01",
+            "stream_join_last_lease_boundary_01",
+            "lease_b523456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    )
+    .open_run(&coordinator, create_request())
+    .await
+    .expect("open run");
+    let last_lease_expiry = opened.lease().expires_at_unix_ms();
+    let runtime = runtime_source_context();
+    harness
+        .register_join_policy(
+            &coordinator,
+            &runtime,
+            opened.run_id().clone(),
+            SourceKind::RuntimeWitness,
+            "join_policy_runtime_01",
+            1_783_894_800_000,
+        )
+        .await
+        .expect("register reusable join policy");
+    let before = harness
+        .snapshot()
+        .await
+        .expect("snapshot before crossing last-lease expiry");
+
+    let error = ExecutionEvidenceGateway::new(
+        repository,
+        AdvancingClock::new(last_lease_expiry - 1, last_lease_expiry),
+        FixedIds::new(&[]),
+    )
+    .open_run(
+        &runtime,
+        registration_policy_join_request(
+            opened.run_id().as_str(),
+            "operation_join_crossing_last_lease_01",
+        ),
+    )
+    .await
+    .expect_err("a novel join cannot revive a run after its last lease expires");
+    assert_eq!(error.code(), ContractErrorCode::InvalidLifecycleTransition);
+    assert_non_retryable(&error);
+    let after = harness
+        .snapshot()
+        .await
+        .expect("snapshot after crossing last-lease expiry");
+    assert_no_novel_gateway_effects(&before, &after);
+    assert_single_incomplete_transition(&before, &after);
+}
+
+pub async fn open_run_join_rejects_invalid_transaction_time_without_partial_state<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = H::start().await.expect("start isolated Gateway harness");
+    let repository = harness.repository();
+    let admission_unix_ms = 1_783_891_200_000;
+    let creator = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admission_unix_ms),
+        FixedIds::new(&[
+            "run_join_invalid_time_01",
+            "stream_join_invalid_time_01",
+            "lease_ad23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let coordinator = source_context();
+    let opened = creator
+        .open_run(&coordinator, create_request())
+        .await
+        .expect("open run");
+    let runtime = runtime_source_context();
+    harness
+        .register_join_policy(
+            &coordinator,
+            &runtime,
+            opened.run_id().clone(),
+            SourceKind::RuntimeWitness,
+            "join_policy_runtime_01",
+            1_783_894_800_000,
+        )
+        .await
+        .expect("register reusable join policy");
+    let request = registration_policy_join_request(
+        opened.run_id().as_str(),
+        "operation_join_invalid_transaction_time_01",
+    );
+    let before = harness
+        .snapshot()
+        .await
+        .expect("snapshot before invalid join transaction time");
+
+    for transaction_unix_ms in [0, admission_unix_ms - 1] {
+        let invalid_gateway = ExecutionEvidenceGateway::new(
+            repository.clone(),
+            AdvancingClock::new(admission_unix_ms, transaction_unix_ms),
+            FixedIds::new(&[]),
+        );
+        let error = invalid_gateway
+            .open_run(&runtime, request.clone())
+            .await
+            .expect_err("invalid join transaction time must fail closed");
+        assert_eq!(error.code(), ContractErrorCode::Backpressure);
+        assert_eq!(
+            harness
+                .snapshot()
+                .await
+                .expect("snapshot after invalid join transaction time"),
+            before
+        );
+    }
+
+    let recovery = ExecutionEvidenceGateway::new(
+        repository,
+        FixedClock(admission_unix_ms),
+        FixedIds::new(&[
+            "stream_join_invalid_time_recovery_01",
+            "lease_ae23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    )
+    .open_run(&runtime, request)
+    .await
+    .expect("invalid transaction time must not consume join authority or operation identity");
+    assert_eq!(recovery.outcome(), OpenRunOutcome::Joined);
 }
 
 pub async fn open_run_join_is_enumeration_safe_across_organizations<
@@ -1619,7 +2013,10 @@ pub async fn active_run_seals_only_after_its_last_lease_expires_and_cannot_be_re
 
     let last_expiry_gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
-        FixedClock(joined.lease().expires_at_unix_ms()),
+        AdvancingClock::new(
+            joined.lease().expires_at_unix_ms() - 1,
+            joined.lease().expires_at_unix_ms(),
+        ),
         FixedIds::new(&[]),
     );
     let late_join = last_expiry_gateway
@@ -1636,20 +2033,20 @@ pub async fn active_run_seals_only_after_its_last_lease_expires_and_cannot_be_re
         late_join.code(),
         ContractErrorCode::InvalidLifecycleTransition
     );
+    assert_non_retryable(&late_join);
     let sealed = harness
         .snapshot()
         .await
         .expect("snapshot after lazy reconciliation");
-    assert_eq!(
-        sealed.record_item_count(),
-        before_first_expiry.record_item_count() + 1
-    );
-    assert_eq!(
-        sealed.projection_outbox_count(),
-        before_first_expiry.projection_outbox_count() + 1
-    );
+    assert_no_novel_gateway_effects(&before_first_expiry, &sealed);
+    assert_single_incomplete_transition(&before_first_expiry, &sealed);
 
-    let replayed = last_expiry_gateway
+    let replay_gateway = ExecutionEvidenceGateway::new(
+        repository,
+        ReplayOnlyClock(joined.lease().expires_at_unix_ms()),
+        FixedIds::new(&[]),
+    );
+    let replayed = replay_gateway
         .open_run(&runtime, join_request)
         .await
         .expect("exact join replay remains stable after lazy sealing");
@@ -1880,6 +2277,254 @@ pub async fn bind_runtime_prevents_cross_run_identity_confusion_until_seal<
         .expect("sealed run releases the exact runtime identity");
     assert!(rebound.accepted());
     assert!(!rebound.idempotent_replay());
+}
+
+pub async fn bind_runtime_rechecks_last_lease_expiry_after_admission<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = H::start().await.expect("start isolated Gateway harness");
+    let repository = harness.repository();
+    let admission_unix_ms = 1_783_891_200_000;
+    let context = runtime_source_context();
+    let opened = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admission_unix_ms),
+        FixedIds::new(&[
+            "run_bind_lease_boundary_01",
+            "stream_bind_lease_boundary_01",
+            "lease_b123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    )
+    .open_run(&context, runtime_create_request())
+    .await
+    .expect("open runtime run");
+    let lease_expiry_unix_ms = opened.lease().expires_at_unix_ms();
+    let baseline_request =
+        bind_runtime_request(opened.run_id().as_str(), opened.lease().lease_id());
+    let baseline = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admission_unix_ms),
+        FixedIds::new(&[]),
+    )
+    .bind_runtime(&context, baseline_request.clone())
+    .await
+    .expect("commit binding replay baseline");
+    assert!(!baseline.idempotent_replay());
+    let before_replay = harness
+        .snapshot()
+        .await
+        .expect("snapshot before exact binding replay");
+
+    let replay_gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        ReplayOnlyClock(lease_expiry_unix_ms),
+        FixedIds::new(&[]),
+    );
+    let replayed = replay_gateway
+        .bind_runtime(&context, baseline_request.clone())
+        .await
+        .expect("exact binding replay remains stable at lease expiry");
+    assert!(replayed.idempotent_replay());
+    assert_eq!(replayed.run_id(), baseline.run_id());
+    assert_eq!(replayed.binding_id(), baseline.binding_id());
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after exact binding replay"),
+        before_replay
+    );
+
+    let mut novel_wire =
+        serde_json::to_value(&baseline_request).expect("serialize novel binding request");
+    novel_wire["client_operation_id"] = serde_json::json!("operation_bind_crossing_last_lease_01");
+    novel_wire["binding"]["binding_id"] = serde_json::json!("binding_pod_crossing_last_lease_01");
+    let novel_request = resign_bind_wire(novel_wire);
+    let error = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        AdvancingClock::new(lease_expiry_unix_ms - 1, lease_expiry_unix_ms),
+        FixedIds::new(&[]),
+    )
+    .bind_runtime(&context, novel_request)
+    .await
+    .expect_err("a novel binding cannot cross its last lease expiry");
+    assert_eq!(error.code(), ContractErrorCode::LeaseExpired);
+    assert_non_retryable(&error);
+    let after_rejection = harness
+        .snapshot()
+        .await
+        .expect("snapshot after crossing-lease binding rejection");
+    assert_no_novel_gateway_effects(&before_replay, &after_rejection);
+    assert_single_incomplete_transition(&before_replay, &after_rejection);
+    assert_eq!(before_replay.active_runtime_identity_count(), 1);
+    assert_eq!(after_rejection.active_runtime_identity_count(), 0);
+
+    let replayed_after_seal = replay_gateway
+        .bind_runtime(&context, baseline_request)
+        .await
+        .expect("exact binding replay remains stable after lazy sealing");
+    assert!(replayed_after_seal.idempotent_replay());
+    assert_eq!(replayed_after_seal.binding_id(), baseline.binding_id());
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after post-seal binding replay"),
+        after_rejection
+    );
+}
+
+pub async fn bind_runtime_rejects_an_expired_lease_without_sealing_while_another_lease_is_live<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = H::start().await.expect("start isolated Gateway harness");
+    let repository = harness.repository();
+    let admission_unix_ms = 1_783_891_200_000;
+    let context = runtime_source_context();
+    let opened = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admission_unix_ms),
+        FixedIds::new(&[
+            "run_bind_staggered_lease_01",
+            "stream_bind_staggered_lease_01",
+            "lease_b223456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    )
+    .open_run(&context, runtime_create_request())
+    .await
+    .expect("open runtime run");
+    harness
+        .register_join_policy(
+            &context,
+            &context,
+            opened.run_id().clone(),
+            SourceKind::RuntimeWitness,
+            "join_policy_runtime_01",
+            1_783_894_800_000,
+        )
+        .await
+        .expect("register same-source replacement-stream policy");
+    let replacement = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admission_unix_ms + 100_000),
+        FixedIds::new(&[
+            "stream_bind_staggered_lease_02",
+            "lease_b323456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    )
+    .open_run(
+        &context,
+        registration_policy_join_request(
+            opened.run_id().as_str(),
+            "operation_join_bind_staggered_lease_01",
+        ),
+    )
+    .await
+    .expect("open a replacement stream with a later lease");
+    let first_expiry = opened.lease().expires_at_unix_ms();
+    assert!(replacement.lease().expires_at_unix_ms() > first_expiry);
+
+    let mut expired_wire = serde_json::to_value(bind_runtime_request(
+        opened.run_id().as_str(),
+        opened.lease().lease_id(),
+    ))
+    .expect("serialize expired-lease binding");
+    expired_wire["client_operation_id"] =
+        serde_json::json!("operation_bind_staggered_expired_lease_01");
+    expired_wire["binding"]["binding_id"] =
+        serde_json::json!("binding_pod_staggered_expired_lease_01");
+    let before = harness
+        .snapshot()
+        .await
+        .expect("snapshot before staggered-lease rejection");
+    let error = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        AdvancingClock::new(first_expiry - 1, first_expiry),
+        FixedIds::new(&[]),
+    )
+    .bind_runtime(&context, resign_bind_wire(expired_wire))
+    .await
+    .expect_err("an expired requested lease is rejected while another lease keeps the run active");
+    assert_eq!(error.code(), ContractErrorCode::LeaseExpired);
+    assert_non_retryable(&error);
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after staggered-lease rejection"),
+        before
+    );
+
+    let mut live_wire = serde_json::to_value(bind_runtime_request(
+        replacement.run_id().as_str(),
+        replacement.lease().lease_id(),
+    ))
+    .expect("serialize live-lease binding");
+    live_wire["client_operation_id"] = serde_json::json!("operation_bind_staggered_live_lease_01");
+    live_wire["binding"]["binding_id"] = serde_json::json!("binding_pod_staggered_live_lease_01");
+    let accepted =
+        ExecutionEvidenceGateway::new(repository, FixedClock(first_expiry), FixedIds::new(&[]))
+            .bind_runtime(&context, resign_bind_wire(live_wire))
+            .await
+            .expect("the later lease proves the run remained active");
+    assert!(accepted.accepted());
+    assert!(!accepted.idempotent_replay());
+}
+
+pub async fn bind_runtime_rejects_invalid_transaction_time_without_partial_state<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = H::start().await.expect("start isolated Gateway harness");
+    let repository = harness.repository();
+    let admission_unix_ms = 1_783_891_200_000;
+    let context = runtime_source_context();
+    let opened = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admission_unix_ms),
+        FixedIds::new(&[
+            "run_bind_invalid_time_01",
+            "stream_bind_invalid_time_01",
+            "lease_b423456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    )
+    .open_run(&context, runtime_create_request())
+    .await
+    .expect("open runtime run");
+    let request = bind_runtime_request(opened.run_id().as_str(), opened.lease().lease_id());
+    let before = harness
+        .snapshot()
+        .await
+        .expect("snapshot before invalid binding transaction time");
+
+    for transaction_unix_ms in [0, admission_unix_ms - 1] {
+        let error = ExecutionEvidenceGateway::new(
+            repository.clone(),
+            AdvancingClock::new(admission_unix_ms, transaction_unix_ms),
+            FixedIds::new(&[]),
+        )
+        .bind_runtime(&context, request.clone())
+        .await
+        .expect_err("invalid binding transaction time must fail closed");
+        assert_eq!(error.code(), ContractErrorCode::Backpressure);
+        assert_eq!(
+            harness
+                .snapshot()
+                .await
+                .expect("snapshot after invalid binding transaction time"),
+            before
+        );
+    }
+
+    let accepted = ExecutionEvidenceGateway::new(
+        repository,
+        FixedClock(admission_unix_ms),
+        FixedIds::new(&[]),
+    )
+    .bind_runtime(&context, request)
+    .await
+    .expect("invalid transaction time must not consume binding identity");
+    assert!(accepted.accepted());
+    assert!(!accepted.idempotent_replay());
 }
 
 pub async fn finish_run_remains_bounded_until_declared_gaps_are_filled<
@@ -2607,16 +3252,111 @@ pub async fn finishing_run_bounds_joined_leases_and_rejects_novel_work_at_deadli
         .expect("required source may join before the deadline");
     assert_eq!(joined.lease().expires_at_unix_ms(), deadline);
 
-    let deadline_gateway =
-        ExecutionEvidenceGateway::new(repository, FixedClock(deadline), FixedIds::new(&[]));
-    let replayed = deadline_gateway
+    let replay_gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        ReplayOnlyClock(deadline),
+        FixedIds::new(&[]),
+    );
+    let replayed = replay_gateway
         .open_run(&runtime, join)
         .await
         .expect("exact join retry retains its original response");
     assert_eq!(replayed.outcome(), OpenRunOutcome::IdempotentRetry);
     assert_eq!(replayed.lease().lease_id(), joined.lease().lease_id());
+    assert_eq!(
+        replayed.lease().expires_at_unix_ms(),
+        joined.lease().expires_at_unix_ms()
+    );
 
-    let late_join = deadline_gateway
+    let before_deadline = harness
+        .snapshot()
+        .await
+        .expect("snapshot before the co-terminating deadline and lease boundary");
+    let deadline_ingest_gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        AdvancingClock::new(deadline - 1, deadline),
+        FixedIds::new(&[]),
+    );
+    let late_ingest = deadline_ingest_gateway
+        .ingest(
+            &runtime,
+            runtime_ingest_request(
+                opened.run_id().as_str(),
+                joined.lease().lease_id(),
+                joined.source_stream_id(),
+            ),
+        )
+        .await
+        .expect_err("the finalization deadline dominates a co-terminating joined lease");
+    assert_eq!(
+        late_ingest.code(),
+        ContractErrorCode::InvalidLifecycleTransition
+    );
+    assert_non_retryable(&late_ingest);
+    let after_deadline = harness
+        .snapshot()
+        .await
+        .expect("snapshot after deadline reconciliation");
+    assert_no_novel_gateway_effects(&before_deadline, &after_deadline);
+    assert_single_incomplete_transition(&before_deadline, &after_deadline);
+
+    let mut second_late_ingest_wire = serde_json::to_value(runtime_ingest_request(
+        opened.run_id().as_str(),
+        joined.lease().lease_id(),
+        joined.source_stream_id(),
+    ))
+    .expect("serialize second novel ingest after deadline reconciliation");
+    second_late_ingest_wire["client_operation_id"] =
+        serde_json::json!("operation_ingest_after_deadline_02");
+    second_late_ingest_wire["envelopes"][0]["source_event_id"] =
+        serde_json::json!("event_runtime_after_deadline_02");
+    let second_late_ingest = deadline_ingest_gateway
+        .ingest(&runtime, resign_ingest_wire(second_late_ingest_wire))
+        .await
+        .expect_err("a sealed deadline cannot degrade to lease expiry for later novel ingest");
+    assert_eq!(
+        second_late_ingest.code(),
+        ContractErrorCode::InvalidLifecycleTransition
+    );
+    assert_non_retryable(&second_late_ingest);
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after second novel ingest rejection"),
+        after_deadline
+    );
+
+    let late_bind = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        AdvancingClock::new(deadline - 1, deadline),
+        FixedIds::new(&[]),
+    )
+    .bind_runtime(
+        &runtime,
+        bind_runtime_request(opened.run_id().as_str(), joined.lease().lease_id()),
+    )
+    .await
+    .expect_err("a sealed deadline cannot degrade to lease expiry for a later novel binding");
+    assert_eq!(
+        late_bind.code(),
+        ContractErrorCode::InvalidLifecycleTransition
+    );
+    assert_non_retryable(&late_bind);
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after post-deadline binding rejection"),
+        after_deadline
+    );
+
+    let late_join_gateway = ExecutionEvidenceGateway::new(
+        repository,
+        AdvancingClock::new(deadline - 1, deadline),
+        FixedIds::new(&[]),
+    );
+    let late_join = late_join_gateway
         .open_run(
             &runtime,
             registration_policy_join_request(
@@ -2630,19 +3370,14 @@ pub async fn finishing_run_bounds_joined_leases_and_rejects_novel_work_at_deadli
         late_join.code(),
         ContractErrorCode::InvalidLifecycleTransition
     );
-
-    let late_ingest = deadline_gateway
-        .ingest(
-            &runtime,
-            runtime_ingest_request(
-                opened.run_id().as_str(),
-                joined.lease().lease_id(),
-                joined.source_stream_id(),
-            ),
-        )
-        .await
-        .expect_err("the joined lease cannot accept novel evidence at the deadline");
-    assert_eq!(late_ingest.code(), ContractErrorCode::LeaseExpired);
+    assert_non_retryable(&late_join);
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after novel join rejection"),
+        after_deadline
+    );
 }
 
 pub async fn finish_run_requires_every_server_required_source_stream<

@@ -108,7 +108,7 @@ pub async fn serve_with_pre_operation_barrier(
             Some(admission_now_unix_ms),
             Some(transaction_now_unix_ms),
             first_transaction_now_unix_ms,
-        ) if operation == QualificationOperation::Ingest
+        ) if operation.supports_transaction_time_qualification()
             && (1..=MAX_IJSON_INTEGER).contains(&admission_now_unix_ms)
             && transaction_now_unix_ms > admission_now_unix_ms
             && transaction_now_unix_ms <= MAX_IJSON_INTEGER
