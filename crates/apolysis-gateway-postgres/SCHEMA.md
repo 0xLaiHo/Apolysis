@@ -242,14 +242,19 @@ SQLSTATE `40001` once for the target novel operation to exercise a real
 internal retry. Five operation/boundary scenarios run through both the
 transaction-wait and internal-retry modes, for ten qualified cells: join at the
 finalization deadline, bind at last-lease expiry, ingest at the finalization
-deadline, ingest at last-lease expiry, and finish at last-lease expiry. For the
-four join/bind/ingest scenarios, the oracle requires one unchanged stored
-replay result, no state for the rejected novel operation, and exactly one
-`incomplete` record/outbox pair. Finish instead converges on a durable HTTP
+deadline, ingest at last-lease expiry, and finish at last-lease expiry. A
+focused eleventh cell injects SQLSTATE
+`40P01` once for finish at last-lease expiry, proving parity when PostgreSQL
+returns that code without claiming a naturally detected multi-session
+deadlock. For the four join/bind/ingest scenarios, the oracle requires one
+unchanged stored replay result, no state for the rejected novel operation, and
+exactly one `incomplete` record/outbox pair. Finish instead converges on a
+durable HTTP
 `200` result with state `incomplete`: two identical requests produce one novel
-result and one exact replay, while the retry variant raises one late SQLSTATE
-`40001`, restarts at the inclusive expiry, and retains a stable exact replay.
-Both finish modes leave finalization declarations, terminal positions, and
+result and one exact replay, while the `40001` retry variant and focused
+`40P01` parity variant each raise once, restart at the inclusive expiry, and
+retain a stable exact replay.
+All three finish modes leave finalization declarations, terminal positions, and
 outcome claims absent and commit exactly one `active -> incomplete` transition.
 Exact replay performs the initial authority check only; novel work revalidates
 the same locked authority at final transaction time after its dynamic lock
@@ -293,8 +298,9 @@ network pre-commit/process-death timings, pre-commit exact-replay or rejection b
 completion of the final `INSERT` statement, entry into `COMMIT`, physical or
 WAL commit timing, the remaining mixed lifecycle/retry matrix,
 commit-wall-clock enforcement, live join-grant expiry or join at last-lease
-expiry, broader staggered multi-lease behavior, additional retry depths or live
-SQLSTATE `40P01` fault coverage, sustained or capacity load,
+expiry, broader staggered multi-lease behavior, additional retry depths or
+operations beyond the focused one-shot `40P01` finish parity cell, sustained
+or capacity load,
 replication/failover, backup/restore or point-in-time recovery, HA behavior,
 production KMS integration, or tenant RLS.
 The separate authority gates qualify only the bounded current-authority and

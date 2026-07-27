@@ -3443,17 +3443,39 @@ build_deadline_finish_request() {
     "$request_bin" finish-run --input "$unsigned_file" --output "$signed_file"
 }
 
+require_gateway_retry_fault_sqlstate() {
+    if (($# != 1)); then
+        printf 'error: Gateway retry fault SQLSTATE validation requires one argument\n' >&2
+        exit 1
+    fi
+    case "$1" in
+        40001 | 40P01) ;;
+        *)
+            printf 'error: unsupported Gateway retry fault SQLSTATE\n' >&2
+            exit 1
+            ;;
+    esac
+}
+
 install_gateway_operation_retry_fault() {
+    if (($# != 4)); then
+        printf 'error: Gateway retry fault requires organization, operation, kind, and SQLSTATE\n' >&2
+        exit 1
+    fi
     local target_organization_id="$1"
     local target_operation_id="$2"
     local target_operation_kind="$3"
+    local fault_sqlstate="$4"
+
+    require_gateway_retry_fault_sqlstate "$fault_sqlstate"
 
     timeout 30s docker exec -i "$container_name" \
         psql --username "$schema_owner_login" --dbname "$database_name" \
             --set=ON_ERROR_STOP=1 \
             --set=organization_id="$target_organization_id" \
             --set=operation_id="$target_operation_id" \
-            --set=operation_kind="$target_operation_kind" >/dev/null <<'SQL'
+            --set=operation_kind="$target_operation_kind" \
+            --set=fault_sqlstate="$fault_sqlstate" >/dev/null <<'SQL'
 CREATE SEQUENCE apolysis_gateway.qualification_gateway_retry_once_sequence;
 
 CREATE FUNCTION apolysis_gateway.qualification_gateway_retry_once()
@@ -3465,6 +3487,11 @@ AS $function$
 DECLARE
     fault_attempt bigint;
 BEGIN
+    IF TG_NARGS <> 4 OR TG_ARGV[3] NOT IN ('40001', '40P01') THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '22023',
+            MESSAGE = 'unsupported qualification Gateway retry SQLSTATE';
+    END IF;
     IF NEW.operation_kind = TG_ARGV[2]
        AND NEW.organization_id = TG_ARGV[0]
        AND NEW.client_operation_id = TG_ARGV[1] THEN
@@ -3473,7 +3500,7 @@ BEGIN
         );
         IF fault_attempt = 1 THEN
             RAISE EXCEPTION USING
-                ERRCODE = '40001',
+                ERRCODE = TG_ARGV[3],
                 MESSAGE = 'qualification Gateway transaction restart';
         END IF;
     END IF;
@@ -3490,14 +3517,16 @@ FOR EACH ROW
 EXECUTE FUNCTION apolysis_gateway.qualification_gateway_retry_once(
     :'organization_id',
     :'operation_id',
-    :'operation_kind'
+    :'operation_kind',
+    :'fault_sqlstate'
 );
 SQL
 
     local installed_vector=""
     installed_vector="$(timeout 15s docker exec -i "$container_name" \
         psql --username "$schema_owner_login" --dbname "$database_name" \
-            --no-align --tuples-only <<'SQL' | tr -d '[:space:]'
+            --no-align --tuples-only \
+            --set=fault_sqlstate="$fault_sqlstate" <<'SQL' | tr -d '[:space:]'
 SELECT concat_ws('|',
     (SELECT count(*) FROM pg_catalog.pg_trigger
       WHERE tgname='qualification_gateway_retry_once'
@@ -3505,6 +3534,18 @@ SELECT concat_ws('|',
         AND NOT tgisinternal),
     (SELECT count(*) FROM pg_catalog.pg_proc
       WHERE oid='apolysis_gateway.qualification_gateway_retry_once()'::regprocedure),
+    (SELECT tgnargs FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_gateway_retry_once'
+        AND tgrelid='apolysis_gateway.gateway_operations'::regclass
+        AND NOT tgisinternal),
+    (SELECT split_part(encode(tgargs, 'escape'), '\000', 4)
+       FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_gateway_retry_once'
+        AND tgrelid='apolysis_gateway.gateway_operations'::regclass
+        AND NOT tgisinternal),
+    (SELECT count(*) FROM pg_catalog.pg_proc
+      WHERE oid='apolysis_gateway.qualification_gateway_retry_once()'::regprocedure
+        AND position('ERRCODE = TG_ARGV[3]' IN prosrc) > 0),
     (SELECT last_value FROM
         apolysis_gateway.qualification_gateway_retry_once_sequence),
     (SELECT is_called FROM
@@ -3512,20 +3553,28 @@ SELECT concat_ws('|',
 );
 SQL
 )"
-    if [[ "$installed_vector" != "1|1|1|f" ]]; then
-        printf 'error: qualification Gateway retry fault was not installed exactly once\n' >&2
+    if [[ "$installed_vector" != "1|1|4|${fault_sqlstate}|1|1|f" ]]; then
+        printf 'error: qualification Gateway retry fault installation oracle mismatch: %s\n' \
+            "$installed_vector" >&2
         exit 1
     fi
 }
 
 assert_and_remove_gateway_operation_retry_fault() {
-    local expected_attempts="${1:-1}"
+    if (($# != 2)); then
+        printf 'error: Gateway retry fault oracle requires attempts and SQLSTATE\n' >&2
+        exit 1
+    fi
+    local expected_attempts="$1"
+    local fault_sqlstate="$2"
     require_positive_integer \
         "expected Gateway retry fault attempts" "$expected_attempts"
+    require_gateway_retry_fault_sqlstate "$fault_sqlstate"
     local fault_vector=""
     fault_vector="$(timeout 15s docker exec -i "$container_name" \
         psql --username "$schema_owner_login" --dbname "$database_name" \
-            --no-align --tuples-only <<'SQL' | tr -d '[:space:]'
+            --no-align --tuples-only \
+            --set=fault_sqlstate="$fault_sqlstate" <<'SQL' | tr -d '[:space:]'
 SELECT concat_ws('|',
     (SELECT last_value FROM
         apolysis_gateway.qualification_gateway_retry_once_sequence),
@@ -3536,11 +3585,23 @@ SELECT concat_ws('|',
         AND tgrelid='apolysis_gateway.gateway_operations'::regclass
         AND NOT tgisinternal),
     (SELECT count(*) FROM pg_catalog.pg_proc
-      WHERE oid='apolysis_gateway.qualification_gateway_retry_once()'::regprocedure)
+      WHERE oid='apolysis_gateway.qualification_gateway_retry_once()'::regprocedure),
+    (SELECT tgnargs FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_gateway_retry_once'
+        AND tgrelid='apolysis_gateway.gateway_operations'::regclass
+        AND NOT tgisinternal),
+    (SELECT split_part(encode(tgargs, 'escape'), '\000', 4)
+       FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_gateway_retry_once'
+        AND tgrelid='apolysis_gateway.gateway_operations'::regclass
+        AND NOT tgisinternal),
+    (SELECT count(*) FROM pg_catalog.pg_proc
+      WHERE oid='apolysis_gateway.qualification_gateway_retry_once()'::regprocedure
+        AND position('ERRCODE = TG_ARGV[3]' IN prosrc) > 0)
 );
 SQL
 )"
-    if [[ "$fault_vector" != "${expected_attempts}|t|1|1" ]]; then
+    if [[ "$fault_vector" != "${expected_attempts}|t|1|1|4|${fault_sqlstate}|1" ]]; then
         printf 'error: qualification retry attempt oracle mismatch: %s\n' \
             "$fault_vector" >&2
         exit 1
@@ -3811,7 +3872,7 @@ run_deadline_boundary_request() {
         internal-retry)
             install_gateway_operation_retry_fault \
                 "${deadline_case[organization_id]}" \
-                "$novel_operation_id" ingest
+                "$novel_operation_id" ingest 40001
             local -A retry_request=(
                 [operation]="ingest"
                 [route]="ingest"
@@ -3826,7 +3887,7 @@ run_deadline_boundary_request() {
                 [preexisting_operation_count]="0"
             )
             run_timed_pre_operation_request retry_request
-            assert_and_remove_gateway_operation_retry_fault
+            assert_and_remove_gateway_operation_retry_fault 1 40001
             if [[ "${retry_request[status]}" != "$expected_status" ]] || \
                 ! jq -e \
                     --arg code "$expected_code" \
@@ -4228,7 +4289,7 @@ run_join_deadline_boundary_request() {
         internal-retry)
             install_gateway_operation_retry_fault \
                 "${join_scenario[organization_id]}" \
-                "${join_scenario[rejected_operation_id]}" open_run
+                "${join_scenario[rejected_operation_id]}" open_run 40001
             local -A retry_request=(
                 [operation]="open_run"
                 [route]="open-run"
@@ -4243,7 +4304,7 @@ run_join_deadline_boundary_request() {
                 [preexisting_operation_count]="0"
             )
             run_timed_pre_operation_request retry_request
-            assert_and_remove_gateway_operation_retry_fault
+            assert_and_remove_gateway_operation_retry_fault 1 40001
             if [[ "${retry_request[status]}" != "409" ]] || \
                 ! jq -e \
                     '.code == "invalid_lifecycle_transition"
@@ -4605,7 +4666,7 @@ run_bind_lease_boundary_request() {
         internal-retry)
             install_gateway_operation_retry_fault \
                 "${bind_scenario[organization_id]}" \
-                "${bind_scenario[rejected_operation_id]}" bind_runtime
+                "${bind_scenario[rejected_operation_id]}" bind_runtime 40001
             local -A retry_request=(
                 [operation]="bind_runtime"
                 [route]="bind-runtime"
@@ -4620,7 +4681,7 @@ run_bind_lease_boundary_request() {
                 [preexisting_operation_count]="0"
             )
             run_timed_pre_operation_request retry_request
-            assert_and_remove_gateway_operation_retry_fault
+            assert_and_remove_gateway_operation_retry_fault 1 40001
             if [[ "${retry_request[status]}" != "401" ]] || \
                 ! jq -e \
                     '.code == "lease_expired"
@@ -4940,10 +5001,15 @@ run_finish_lease_boundary_request() {
             fi
             finish_scenario[expected_decision_authority_audits]="3"
             ;;
-        internal-retry)
+        internal-retry | sqlstate-40p01-retry)
+            local fault_sqlstate="40001"
+            if [[ "$boundary_mode" == "sqlstate-40p01-retry" ]]; then
+                fault_sqlstate="40P01"
+            fi
             install_gateway_operation_retry_fault \
                 "${finish_scenario[organization_id]}" \
-                "${finish_scenario[finish_operation_id]}" finish_run
+                "${finish_scenario[finish_operation_id]}" finish_run \
+                "$fault_sqlstate"
             local -A retry_request=(
                 [operation]="finish_run"
                 [route]="finish-run"
@@ -4958,7 +5024,7 @@ run_finish_lease_boundary_request() {
                 [preexisting_operation_count]="0"
             )
             run_timed_pre_operation_request retry_request
-            assert_and_remove_gateway_operation_retry_fault 2
+            assert_and_remove_gateway_operation_retry_fault 2 "$fault_sqlstate"
             if [[ "${retry_request[status]}" != "200" ]] || \
                 ! jq -e \
                     --arg run_id "${finish_scenario[run_id]}" \
@@ -4967,8 +5033,8 @@ run_finish_lease_boundary_request() {
                      and .finalization_deadline_unix_ms == null
                      and .idempotent_replay == false' \
                     "${retry_request[response]}" >/dev/null; then
-                printf 'error: %s finish retry did not restart at lease expiry\n' \
-                    "${finish_scenario[prefix]}" >&2
+                printf 'error: %s finish %s retry did not restart at lease expiry\n' \
+                    "${finish_scenario[prefix]}" "$fault_sqlstate" >&2
                 exit 1
             fi
             local -A exact_control=(
@@ -4987,8 +5053,8 @@ run_finish_lease_boundary_request() {
                      and .finalization_deadline_unix_ms == null
                      and .idempotent_replay == true' \
                     "${exact_control[response]}" >/dev/null; then
-                printf 'error: %s finish retry did not retain an exact replay\n' \
-                    "${finish_scenario[prefix]}" >&2
+                printf 'error: %s finish %s retry did not retain an exact replay\n' \
+                    "${finish_scenario[prefix]}" "$fault_sqlstate" >&2
                 exit 1
             fi
             finish_scenario[expected_decision_authority_audits]="2"
@@ -5076,7 +5142,9 @@ run_mixed_lifecycle_deadline_races() {
         transaction-wait deadline-finish-wait
     run_finish_lease_scenario \
         internal-retry deadline-finish-retry
-    printf 'Mixed lifecycle/deadline matrix passed (ingest, join, bind, and finish transaction waits and internal retries across finalization deadline and last-lease expiry).\n'
+    run_finish_lease_scenario \
+        sqlstate-40p01-retry deadline-finish-sqlstate-40p01-retry
+    printf 'Mixed lifecycle/deadline matrix passed (five transaction waits, five one-shot SQLSTATE 40001 retries, and one focused finish SQLSTATE 40P01 retry across finalization deadline and last-lease expiry).\n'
 }
 
 cleanup() {

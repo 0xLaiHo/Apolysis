@@ -93,7 +93,8 @@ test-gateway-multiprocess-lifecycle-races:
 
 # Opt-in transaction-boundary lifecycle qualification. Independent cases drive
 # exact replay against novel join, bind, ingest, and finish across finalization or
-# lease boundaries through a real lock wait and one internal transaction retry.
+# lease boundaries through real lock waits and one-shot SQLSTATE 40001 retries,
+# plus focused SQLSTATE 40P01 finish parity.
 test-gateway-mixed-lifecycle-deadline-races:
 	./scripts/test-gateway-mixed-lifecycle-deadline-races.sh
 

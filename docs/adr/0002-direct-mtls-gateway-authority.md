@@ -113,7 +113,10 @@ overlap in database lock waits before releasing the blocker. A
 qualification-owned late write trigger raises SQLSTATE `40001` exactly once
 for the internal-retry variants. The database oracle covers five
 operation/boundary cases, each through a transaction wait and one real
-internal retry, for ten matrix cells:
+internal retry, for ten base matrix cells. A focused eleventh cell injects
+SQLSTATE `40P01` once for finish at last-lease expiry. It proves retry parity
+when PostgreSQL returns that code; it does not claim that PostgreSQL's deadlock
+detector observed a naturally formed multi-session wait-for cycle:
 
 1. At an accepted finalization deadline, an exact replay of a join accepted
    before the deadline returns its unchanged stored result, while a novel join
@@ -135,9 +138,10 @@ internal retry, for ten matrix cells:
 5. At the requested last lease's expiry, finish converges on a durable HTTP
    `200` result with state `incomplete`, no finalization declaration, and one
    `active -> incomplete` transition. Two identical waiting requests produce
-   one novel result and one exact replay. The retry variant raises one late
-   SQLSTATE `40001`, restarts at the inclusive expiry, returns the novel
-   durable result, and preserves a stable exact replay.
+   one novel result and one exact replay. The SQLSTATE `40001` retry variant
+   and the focused `40P01` parity variant each raise once, restart at the
+   inclusive expiry, return the novel durable result, and preserve a stable
+   exact replay.
 
 For the first four cases, the accepted operation and encrypted replay remain
 exactly once and unchanged, while the rejected novel operation creates no
@@ -249,8 +253,9 @@ pre-commit/process-death fault timings, pre-commit exact-replay or rejection
 branches, completion of the final `INSERT` statement, entry into `COMMIT`,
 physical or WAL commit timing, commit-wall-clock boundary enforcement, live
 join-grant-expiry and join-at-last-lease-expiry cases,
-broader staggered multi-lease combinations, additional retry depths and live
-SQLSTATE `40P01` fault coverage, the remaining mixed lifecycle/retry matrix,
+broader staggered multi-lease combinations, additional retry depths and
+operations beyond the focused one-shot `40P01` finish parity cell, the
+remaining mixed lifecycle/retry matrix,
 load/capacity qualification, authorized object-read resolution and downstream
 deletion propagation, production KMS and tenant RLS integration,
 replication/failover/recovery, HA, quotas, and rate limits remain required.
