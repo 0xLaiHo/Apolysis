@@ -943,9 +943,10 @@ run_timed_pre_operation_race() {
         printf 'error: timed race clock context was already armed\n' >&2
         exit 1
     fi
-    require_positive_integer \
-        "${scenario_variable}[preexisting_operation_count]" \
-        "${timed_scenario[preexisting_operation_count]}"
+    if [[ ! "${timed_scenario[preexisting_operation_count]}" =~ ^[0-9]+$ ]]; then
+        printf 'error: timed race scenario preexisting count is invalid\n' >&2
+        exit 1
+    fi
 
     race_fixed_now_unix_ms="${timed_scenario[admission_now_unix_ms]}"
     race_transaction_now_unix_ms="${timed_scenario[transaction_now_unix_ms]}"
@@ -2299,6 +2300,9 @@ SQL
 }
 
 assert_and_remove_gateway_operation_retry_fault() {
+    local expected_attempts="${1:-1}"
+    require_positive_integer \
+        "expected Gateway retry fault attempts" "$expected_attempts"
     local fault_vector=""
     fault_vector="$(timeout 15s docker exec -i "$container_name" \
         psql --username "$schema_owner_login" --dbname "$database_name" \
@@ -2317,8 +2321,8 @@ SELECT concat_ws('|',
 );
 SQL
 )"
-    if [[ "$fault_vector" != "1|t|1|1" ]]; then
-        printf 'error: qualification retry did not observe exactly one late 40001 fault: %s\n' \
+    if [[ "$fault_vector" != "${expected_attempts}|t|1|1" ]]; then
+        printf 'error: qualification retry attempt oracle mismatch: %s\n' \
             "$fault_vector" >&2
         exit 1
     fi
@@ -3514,6 +3518,323 @@ run_bind_lease_scenario() {
     printf 'Bind last-lease-expiry %s qualification passed.\n' "$boundary_mode"
 }
 
+assert_finish_lease_database_oracle() {
+    local case_variable="$1"
+    local -n finish_scenario="$case_variable"
+    local database_vector=""
+    database_vector="$(timeout 30s docker exec -i "$container_name" \
+        psql --username "$gateway_runtime_login" --dbname "$database_name" \
+            --no-align --tuples-only \
+            --set=organization_id="${finish_scenario[organization_id]}" \
+            --set=run_id="${finish_scenario[run_id]}" \
+            --set=lease_expiry_unix_ms="${finish_scenario[decision_now_unix_ms]}" \
+            --set=admission_now_unix_ms="${finish_scenario[admission_now_unix_ms]}" \
+            --set=original_event_id="${finish_scenario[original_event_id]}" \
+            --set=finish_operation_id="${finish_scenario[finish_operation_id]}" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM apolysis_gateway.runs
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND state='incomplete' AND finalization_deadline_unix_ms IS NULL
+        AND state_changed_at_unix_ms=:'lease_expiry_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.source_streams
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND expires_at_unix_ms=:'lease_expiry_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.evidence_events
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_event_id=:'original_event_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.run_id=:'run_id'
+        AND replay.encryption_algorithm='aes-256-gcm'
+        AND octet_length(replay.nonce)=12
+        AND octet_length(replay.authentication_tag)=16
+        AND octet_length(replay.outcome_ciphertext)>0),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND operation_kind='finish_run'
+        AND client_operation_id=:'finish_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.run_id=:'run_id'
+        AND operation.operation_kind='finish_run'
+        AND operation.client_operation_id=:'finish_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.finalization_declarations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.finalization_terminal_positions
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.finalization_outcome_claims
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.projection_outbox AS outbox
+      JOIN apolysis_gateway.record_items AS record
+        ON record.organization_id=outbox.organization_id
+       AND record.ingest_sequence=outbox.ingest_sequence
+      WHERE record.organization_id=:'organization_id' AND record.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items AS record
+      LEFT JOIN apolysis_gateway.projection_outbox AS outbox
+        ON outbox.organization_id=record.organization_id
+       AND outbox.ingest_sequence=record.ingest_sequence
+      WHERE record.organization_id=:'organization_id'
+        AND record.run_id=:'run_id' AND outbox.ingest_sequence IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.projection_outbox AS outbox
+      LEFT JOIN apolysis_gateway.record_items AS record
+        ON record.organization_id=outbox.organization_id
+       AND record.ingest_sequence=outbox.ingest_sequence
+      WHERE outbox.organization_id=:'organization_id'
+        AND record.ingest_sequence IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND fact_kind='run_state_changed'
+        AND fact_json #>> '{fact,fact,from}'='active'
+        AND fact_json #>> '{fact,fact,to}'='incomplete'
+        AND (fact_json #>> '{fact,fact,recorded_at_unix_ms}')::bigint=
+            :'lease_expiry_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.organization_sequences
+      WHERE organization_id=:'organization_id'
+        AND next_ingest_sequence=(
+            SELECT count(*) + 1 FROM apolysis_gateway.record_items
+             WHERE organization_id=:'organization_id')),
+    (SELECT count(*) FROM (
+        SELECT min(ingest_sequence)=1
+               AND max(ingest_sequence)=count(*)
+               AND bool_and(outbox_ingest_sequence=ingest_sequence) AS valid
+          FROM apolysis_gateway.record_items
+         WHERE organization_id=:'organization_id'
+    ) AS contiguous WHERE valid),
+    (SELECT array_to_string(array_agg(fact_kind ORDER BY ingest_sequence), ',')
+       FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id')
+);
+SQL
+)"
+    local expected_vector=""
+    expected_vector="1|1|1|1|3|3|3|1|1|0|0|0|5|5|0|0|1|1|1"
+    expected_vector+="|run_opened,run_state_changed,source_registered,evidence_accepted,run_state_changed"
+    if [[ "$database_vector" != "$expected_vector" ]]; then
+        printf 'error: %s finish lease database oracle mismatch: %s\n' \
+            "${finish_scenario[prefix]}" "$database_vector" >&2
+        exit 1
+    fi
+
+    local audit_vector=""
+    audit_vector="$(timeout 15s docker exec -i "$container_name" \
+        psql --username "$schema_owner_login" --dbname "$database_name" \
+            --no-align --tuples-only \
+            --set=organization_id="${finish_scenario[organization_id]}" \
+            --set=lease_expiry_unix_ms="${finish_scenario[decision_now_unix_ms]}" \
+            --set=admission_now_unix_ms="${finish_scenario[admission_now_unix_ms]}" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM apolysis_gateway.transaction_authority_audit
+      WHERE organization_id=:'organization_id'
+        AND operation_kind='finish_run' AND decision='authorized'),
+    (SELECT count(*) FROM apolysis_gateway.transaction_authority_audit
+      WHERE organization_id=:'organization_id'
+        AND operation_kind='finish_run' AND decision='authorized'
+        AND checked_at_unix_ms=:'lease_expiry_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.transaction_authority_audit
+      WHERE organization_id=:'organization_id'
+        AND operation_kind='finish_run'
+        AND checked_at_unix_ms=:'admission_now_unix_ms'::bigint)
+);
+SQL
+)"
+    local expected_audit_vector=""
+    expected_audit_vector="$((finish_scenario[baseline_finish_authority_audits] + 3))"
+    expected_audit_vector+="|${finish_scenario[expected_decision_authority_audits]}|0"
+    if [[ "$audit_vector" != "$expected_audit_vector" ]]; then
+        printf 'error: %s finish lease authority-audit oracle mismatch: %s\n' \
+            "${finish_scenario[prefix]}" "$audit_vector" >&2
+        exit 1
+    fi
+}
+
+run_finish_lease_boundary_request() {
+    local case_variable="$1"
+    local boundary_mode="$2"
+    local -n finish_scenario="$case_variable"
+    local artifact_prefix="${finish_scenario[prefix]}-${boundary_mode}"
+
+    case "$boundary_mode" in
+        transaction-wait)
+            local -A timed_race=(
+                [operation]="finish_run"
+                [route]="finish-run"
+                [organization_id]="${finish_scenario[organization_id]}"
+                [left_request]="${finish_scenario[finish_request]}"
+                [left_certificate]="${finish_scenario[certificate]}"
+                [left_key]="${finish_scenario[key]}"
+                [right_request]="${finish_scenario[finish_request]}"
+                [right_certificate]="${finish_scenario[certificate]}"
+                [right_key]="${finish_scenario[key]}"
+                [artifact_prefix]="$artifact_prefix"
+                [admission_now_unix_ms]="${finish_scenario[admission_now_unix_ms]}"
+                [transaction_now_unix_ms]="${finish_scenario[decision_now_unix_ms]}"
+                [preexisting_operation_count]="0"
+            )
+            run_timed_pre_operation_race timed_race
+            local response=""
+            for response in "${timed_race[left_response]}" "${timed_race[right_response]}"; do
+                if ! jq -e \
+                    --arg run_id "${finish_scenario[run_id]}" \
+                    '.run_id == $run_id
+                     and .state == "incomplete"
+                     and .finalization_deadline_unix_ms == null
+                     and (.idempotent_replay | type) == "boolean"' \
+                    "$response" >/dev/null; then
+                    printf 'error: %s finish response did not converge on incomplete\n' \
+                        "${finish_scenario[prefix]}" >&2
+                    exit 1
+                fi
+            done
+            if [[ "${timed_race[left_status]}" != "200" || \
+                "${timed_race[right_status]}" != "200" ]]; then
+                printf 'error: %s finish wait did not return two durable outcomes\n' \
+                    "${finish_scenario[prefix]}" >&2
+                exit 1
+            fi
+            local left_replay=""
+            local right_replay=""
+            left_replay="$(jq -r '.idempotent_replay' "${timed_race[left_response]}")"
+            right_replay="$(jq -r '.idempotent_replay' "${timed_race[right_response]}")"
+            if [[ "$left_replay|$right_replay" != "false|true" && \
+                "$left_replay|$right_replay" != "true|false" ]]; then
+                printf 'error: %s finish wait did not produce one novel result and one replay\n' \
+                    "${finish_scenario[prefix]}" >&2
+                exit 1
+            fi
+            finish_scenario[expected_decision_authority_audits]="3"
+            ;;
+        internal-retry)
+            install_gateway_operation_retry_fault \
+                "${finish_scenario[organization_id]}" \
+                "${finish_scenario[finish_operation_id]}" finish_run
+            local -A retry_request=(
+                [operation]="finish_run"
+                [route]="finish-run"
+                [organization_id]="${finish_scenario[organization_id]}"
+                [request]="${finish_scenario[finish_request]}"
+                [certificate]="${finish_scenario[certificate]}"
+                [key]="${finish_scenario[key]}"
+                [artifact_prefix]="$artifact_prefix"
+                [admission_now_unix_ms]="${finish_scenario[admission_now_unix_ms]}"
+                [transaction_now_unix_ms]="${finish_scenario[decision_now_unix_ms]}"
+                [first_transaction_now_unix_ms]="${finish_scenario[admission_now_unix_ms]}"
+                [preexisting_operation_count]="0"
+            )
+            run_timed_pre_operation_request retry_request
+            assert_and_remove_gateway_operation_retry_fault 2
+            if [[ "${retry_request[status]}" != "200" ]] || \
+                ! jq -e \
+                    --arg run_id "${finish_scenario[run_id]}" \
+                    '.run_id == $run_id
+                     and .state == "incomplete"
+                     and .finalization_deadline_unix_ms == null
+                     and .idempotent_replay == false' \
+                    "${retry_request[response]}" >/dev/null; then
+                printf 'error: %s finish retry did not restart at lease expiry\n' \
+                    "${finish_scenario[prefix]}" >&2
+                exit 1
+            fi
+            local -A exact_control=(
+                [route]="finish-run"
+                [request]="${finish_scenario[finish_request]}"
+                [certificate]="${finish_scenario[certificate]}"
+                [key]="${finish_scenario[key]}"
+                [artifact_prefix]="${artifact_prefix}.exact-control"
+            )
+            send_deadline_setup_request exact_control
+            if [[ "${exact_control[status]}" != "200" ]] || \
+                ! jq -e \
+                    --arg run_id "${finish_scenario[run_id]}" \
+                    '.run_id == $run_id
+                     and .state == "incomplete"
+                     and .finalization_deadline_unix_ms == null
+                     and .idempotent_replay == true' \
+                    "${exact_control[response]}" >/dev/null; then
+                printf 'error: %s finish retry did not retain an exact replay\n' \
+                    "${finish_scenario[prefix]}" >&2
+                exit 1
+            fi
+            finish_scenario[expected_decision_authority_audits]="2"
+            ;;
+        *)
+            printf 'error: unsupported finish lease mode: %s\n' "$boundary_mode" >&2
+            exit 1
+            ;;
+    esac
+}
+
+run_finish_lease_scenario() {
+    local boundary_mode="$1"
+    local case_prefix="$2"
+    local -A finish_case=(
+        [prefix]="$case_prefix"
+        [organization_id]="$deadline_lease_organization_id"
+        [registration_id]="$deadline_lease_registration_id"
+        [principal_id]="$deadline_lease_principal_id"
+        [source_id]="$deadline_lease_source_id"
+        [authority_id]="$deadline_lease_authority_id"
+        [certificate]="$deadline_lease_client_cert"
+        [key]="$deadline_lease_client_key"
+    )
+    prepare_deadline_case finish_case
+
+    local lease_expiry_unix_ms="${finish_case[lease_expires_at_unix_ms]}"
+    local requested_deadline_unix_ms="$((lease_expiry_unix_ms + 300000))"
+    if ((lease_expiry_unix_ms <= now_unix_ms)) || \
+        ((requested_deadline_unix_ms >= expires_at_unix_ms)); then
+        printf 'error: finish lease time escaped its authority window\n' >&2
+        exit 1
+    fi
+    finish_case[admission_now_unix_ms]="$((lease_expiry_unix_ms - 1))"
+    finish_case[decision_now_unix_ms]="$lease_expiry_unix_ms"
+
+    local finish_unsigned="${secret_directory}/${case_prefix}.finish.unsigned.json"
+    local finish_signed="${secret_directory}/${case_prefix}.finish.json"
+    local finish_operation_id="operation_${case_prefix}_finish_${random_suffix}"
+    build_deadline_finish_request \
+        finish_case "$finish_operation_id" "$requested_deadline_unix_ms" \
+        "$finish_unsigned" "$finish_signed"
+    finish_case[finish_operation_id]="$finish_operation_id"
+    finish_case[finish_request]="$finish_signed"
+    finish_case[baseline_finish_authority_audits]="$(timeout 15s \
+        docker exec -i "$container_name" \
+        psql --username "$schema_owner_login" --dbname "$database_name" \
+            --no-align --tuples-only \
+            --set=organization_id="${finish_case[organization_id]}" <<'SQL' | tr -d '[:space:]'
+SELECT count(*) FROM apolysis_gateway.transaction_authority_audit
+ WHERE organization_id=:'organization_id'
+   AND operation_kind='finish_run'
+   AND decision='authorized';
+SQL
+)"
+    if [[ ! "${finish_case[baseline_finish_authority_audits]}" =~ ^[0-9]+$ ]]; then
+        printf 'error: finish lease authority-audit baseline is invalid\n' >&2
+        exit 1
+    fi
+
+    run_finish_lease_boundary_request finish_case "$boundary_mode"
+    assert_finish_lease_database_oracle finish_case
+    printf 'Finish last-lease-expiry %s qualification passed.\n' "$boundary_mode"
+}
+
 run_mixed_lifecycle_deadline_races() {
     printf 'Qualifying the bounded mixed lifecycle/deadline matrix...\n'
     run_finalization_deadline_scenario \
@@ -3532,7 +3853,11 @@ run_mixed_lifecycle_deadline_races() {
         internal-retry deadline-join-retry
     run_bind_lease_scenario \
         internal-retry deadline-bind-retry
-    printf 'Mixed lifecycle/deadline matrix passed (ingest, join, and bind transaction waits and internal retries across finalization deadline and last-lease expiry).\n'
+    run_finish_lease_scenario \
+        transaction-wait deadline-finish-wait
+    run_finish_lease_scenario \
+        internal-retry deadline-finish-retry
+    printf 'Mixed lifecycle/deadline matrix passed (ingest, join, bind, and finish transaction waits and internal retries across finalization deadline and last-lease expiry).\n'
 }
 
 cleanup() {

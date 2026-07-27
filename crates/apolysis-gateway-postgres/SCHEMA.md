@@ -118,13 +118,15 @@ the trusted Gateway clock passed through the repository port.
 At the fresh decision point, an accepted finalization deadline is an inclusive
 boundary and returns non-retryable `409 invalid_lifecycle_transition` for novel
 ingest. Last-lease expiry is also inclusive and returns non-retryable
-`401 lease_expired`. The rejected operation creates no operation row, encrypted
-replay, or evidence event. For the qualified boundary rejection, expiry
-reconciliation commits exactly one `incomplete` transition record and its
-deferred 1:1 outbox partner across competing requests; it cannot create a
-second transition. A retained matching exact operation replay is returned
-unchanged after the initial current-authority check but before run and lease
-reconciliation.
+`401 lease_expired` for novel bind or ingest. The rejected operation creates no
+operation row, encrypted replay, or evidence event. Finish at last-lease expiry
+instead durably returns HTTP `200` with state `incomplete`, accepts no
+finalization declaration, and persists one operation and replay. For either
+qualified boundary outcome, expiry reconciliation commits exactly one
+`incomplete` transition record and its deferred 1:1 outbox partner across
+competing requests; it cannot create a second transition. A retained matching
+exact operation replay is returned unchanged after the initial
+current-authority check but before run and lease reconciliation.
 
 `migrations/0003_evidence_object_lifecycle.sql` adds the separately bounded
 evidence-object write registry. It binds every object to the complete
@@ -219,13 +221,33 @@ The split-clock mixed lifecycle sibling uses the same independent Gateway
 processes, pools, private release, and observed database-lock overlap for
 transaction-wait cases. A qualification-owned late-write trigger raises
 SQLSTATE `40001` once for the target novel operation to exercise a real
-internal retry. It qualifies requests that enter before the accepted
-finalization deadline or last-lease expiry and reach the fresh lifecycle
-decision at or after the boundary. Its oracle requires one unchanged stored
+internal retry. Five operation/boundary scenarios run through both the
+transaction-wait and internal-retry modes, for ten qualified cells: join at the
+finalization deadline, bind at last-lease expiry, ingest at the finalization
+deadline, ingest at last-lease expiry, and finish at last-lease expiry. For the
+four join/bind/ingest scenarios, the oracle requires one unchanged stored
 replay result, no state for the rejected novel operation, and exactly one
-`incomplete` record/outbox pair. Exact replay performs the initial authority
-check only; novel work revalidates the same locked authority at final
-transaction time after its dynamic lock wait.
+`incomplete` record/outbox pair. Finish instead converges on a durable HTTP
+`200` result with state `incomplete`: two identical requests produce one novel
+result and one exact replay, while the retry variant raises one late SQLSTATE
+`40001`, restarts at the inclusive expiry, and retains a stable exact replay.
+Both finish modes leave finalization declarations, terminal positions, and
+outcome claims absent and commit exactly one `active -> incomplete` transition.
+Exact replay performs the initial authority check only; novel work revalidates
+the same locked authority at final transaction time after its dynamic lock
+wait.
+
+A separate non-HTTPS real-PostgreSQL repository test qualifies exact replay for
+`open_run`, `bind_runtime`, `ingest`, and `finish_run` across replay-TTL expiry
+while waiting for the exact operation row lock. Each route first has two stable
+positive controls at expiry minus one millisecond. The test then holds that
+route's operation row, proves the replay transaction is blocked by the holder,
+advances the transaction clock to the inclusive TTL expiry, and releases the
+lock. Deliberately corrupted ciphertext proves the adapter evaluates expiry
+before decryption: every route produces non-retryable `idempotency_conflict`,
+which the v0.1 HTTP adapter maps to `409`, samples transaction time once after
+the lock wait, and leaves the full captured Gateway-state fingerprint
+unchanged.
 
 The separate evidence-object provider gate additionally proves schema-owner
 separation with distinct SCRAM logins, no startup migration,
@@ -237,12 +259,15 @@ roles; it does not establish database-enforced tenant isolation.
 The repository crash gate alone is not HTTPS Gateway-server recovery and does
 not qualify trace or HTTP error-body secret handling. The sibling HTTPS gates
 cover bounded post-commit death, two-process writer/lifecycle races, and the
-listed join/bind/ingest deadline/expiry transaction decisions. They do not qualify the
-broader network pre-commit/process-death or remaining mixed lifecycle/retry
-matrix, commit-wall-clock enforcement, replay-TTL expiry during an
-operation-lock wait, broader staggered multi-lease behavior, additional retry
-depths, sustained or capacity load, replication/failover, backup/restore or
-point-in-time recovery, HA behavior, production KMS integration, or tenant RLS.
+listed join/bind/ingest/finish deadline/expiry transaction decisions. The
+replay-TTL operation-lock test above does not qualify that race through live
+HTTPS. These gates also do not qualify the broader network
+pre-commit/process-death or remaining mixed lifecycle/retry matrix,
+commit-wall-clock enforcement, live join-grant expiry or join at last-lease
+expiry, broader staggered multi-lease behavior, additional retry depths or live
+SQLSTATE `40P01` fault coverage, sustained or capacity load,
+replication/failover, backup/restore or point-in-time recovery, HA behavior,
+production KMS integration, or tenant RLS.
 The separate authority gates qualify only the bounded current-authority and
 rotation slice described above. A successful migration or gate run is
 therefore still not a production claim.

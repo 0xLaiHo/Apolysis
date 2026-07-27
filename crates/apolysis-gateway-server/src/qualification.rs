@@ -121,11 +121,11 @@ impl GatewayRouteOperation {
 
     /// Whether the local qualification binary may split HTTP admission time
     /// from a repository lifecycle-decision time for this route.
-    ///
-    /// `finish_run` does not yet re-sample transaction time and is kept
-    /// outside this feature-gated seam so qualification cannot overclaim it.
     pub fn supports_transaction_time_qualification(self) -> bool {
-        matches!(self, Self::OpenRun | Self::BindRuntime | Self::Ingest)
+        matches!(
+            self,
+            Self::OpenRun | Self::BindRuntime | Self::Ingest | Self::FinishRun
+        )
     }
 }
 

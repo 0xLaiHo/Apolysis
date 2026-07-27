@@ -203,7 +203,11 @@ cases, the gate admits the HTTP request before the boundary, then proves the
 repository lifecycle decision uses fresh time after operation identity, exact
 replay, and dynamic lifecycle locking. It performs the initial current-authority
 check before replay and the final check after the dynamic lock wait; the
-restarted transaction repeats the entire attempt:
+restarted transaction repeats the entire attempt. The matrix also drives
+`finish_run` at the requested last-lease expiry: two identical requests
+converge on one novel durable `incomplete` response and one exact replay, while
+the internal-retry variant proves a late SQLSTATE `40001` fully rolls back
+before the fresh expiry-time attempt:
 
 ```bash
 make test-gateway-mixed-lifecycle-deadline-races
@@ -217,16 +221,24 @@ check but before expiry reconciliation. At the fresh
 decision point, a novel ingest at or after the accepted finalization deadline
 returns non-retryable `409 invalid_lifecycle_transition`; at or after the last
 lease's expiry it returns non-retryable `401 lease_expired`.
+At that same last-lease boundary, `finish_run` durably returns `200` with
+`state: incomplete`, records no finalization declaration, and commits only one
+active-to-incomplete transition plus the exact operation/replay result.
 
 For either rejection, the database oracle requires no novel operation,
 encrypted replay, or evidence event. Across competing requests, lazy
 reconciliation commits exactly one transition to `incomplete` and its matching
 record/outbox pair. The qualified decision point is not a claim that the commit
-wall-clock precedes the boundary. Replay-TTL expiry while waiting on the
-operation lock, live join-grant-expiry/join-at-last-lease-expiry cases,
-broader staggered multi-lease combinations, and additional retry depths remain
-outside this gate. Authority rotation is qualified by the separate gates
-above.
+wall-clock precedes the boundary. A separate real-PostgreSQL test locks each
+stored operation row, proves the exact retry is waiting, advances trusted
+transaction time from replay expiry minus one millisecond to the inclusive TTL
+boundary, and requires all four routes to return non-retryable
+`idempotency_conflict` before touching deliberately invalid ciphertext; the
+v0.1 HTTP adapter maps that code to `409`. Its full Gateway-state fingerprint
+remains unchanged. Live
+join-grant-expiry/join-at-last-lease-expiry cases, broader staggered
+multi-lease combinations, and additional retry depths remain outside this
+gate. Authority rotation is qualified by the separate gates above.
 
 To compile and run only non-database tests:
 
@@ -255,12 +267,14 @@ HTTPS Gateway-server recovery by itself. The sibling Gateway-server gate
 qualifies the bounded post-commit/pre-ack HTTPS seam for all four routes, but
 the additional two-process gate qualifies the bounded writer/lifecycle matrix
 described above. The split-clock transaction-boundary sibling qualifies
-only the listed join/bind/ingest deadline/expiry cases. These gates do not qualify the
+only the listed join/bind/ingest/finish deadline/expiry cases. The real
+PostgreSQL suite separately qualifies all four exact replay routes at replay
+TTL after an operation-row lock wait, but not that race through live HTTPS.
+These gates do not qualify the
 broader network pre-commit/process-death or remaining mixed lifecycle/retry
-matrix, commit-wall-clock enforcement, replay-TTL expiry during an
-operation-lock wait, broader staggered multi-lease behavior, additional retry
-depths, sustained or capacity load, replication, failover, backup/restore, or
-high availability.
+matrix, commit-wall-clock enforcement, broader staggered multi-lease behavior,
+additional retry depths, sustained or capacity load, replication, failover,
+backup/restore, or high availability.
 The evidence-object provider gate separately qualifies distinct
 SCRAM logins, schema-owner separation, migration-history ownership, served-path
 role allowlists, and denial of owner assumption, trigger disabling, credential
