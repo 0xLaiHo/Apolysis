@@ -219,13 +219,17 @@ SQLSTATE `40001` once for the target operation to exercise the repository's
 real internal retry path. A focused finish variant independently raises
 SQLSTATE `40P01` once to prove parity when PostgreSQL returns that code; it
 does not claim a naturally detected multi-session deadlock. Across
-finalization-deadline and last-lease-expiry
-cases, the gate admits the HTTP request before the boundary, then proves the
+one-use join-grant-expiry, finalization-deadline, and last-lease-expiry cases,
+the gate admits the HTTP request before the boundary, then proves the
 repository lifecycle decision uses fresh time after operation identity, exact
 replay, and dynamic lifecycle locking. It performs the initial current-authority
-check before replay and the final check after the dynamic lock wait; the
-restarted transaction repeats the entire attempt. The matrix also drives
-`finish_run` at the requested last-lease expiry: two identical requests
+check before replay and the final check after acquiring the applicable dynamic
+locks; the restarted transaction repeats the entire attempt. Transaction-wait
+overlap is observed behind the qualification-owned operation-table blocker,
+not on a claimed run or join-authorization row wait. Seven scenarios run in
+both transaction-wait and one-shot SQLSTATE `40001` modes, producing fourteen
+base cells; the focused finish `40P01` retry is the fifteenth cell. The matrix
+also drives `finish_run` at the requested last-lease expiry: two identical requests
 converge on one novel durable `incomplete` response and one exact replay, while
 the serialization-retry variant and focused `40P01` parity variant prove each
 late fault fully rolls back before the fresh expiry-time attempt:
@@ -239,15 +243,23 @@ schema-owned database-time function. Content-off join, bind, ingest, and finish
 read the trusted Gateway clock passed through the repository port. A retained
 exact operation replay is returned unchanged after the initial current-authority
 check but before expiry reconciliation. At the fresh
-decision point, a novel ingest at or after the accepted finalization deadline
-returns non-retryable `409 invalid_lifecycle_transition`; at or after the last
-lease's expiry it returns non-retryable `401 lease_expired`.
+decision point, an expired one-use join grant returns non-retryable
+`404 not_found` and leaves lifecycle state unchanged. The qualification
+recovery reruns the identical request with the qualification clock at `T−1`,
+where `T` is the inclusive grant-expiry instant, and succeeds. A novel join,
+bind, or ingest at or after an accepted finalization deadline returns non-retryable
+`409 invalid_lifecycle_transition`. At inclusive last-lease expiry, a novel
+join with a still-valid one-use grant also returns `409` and commits exactly
+one active-to-incomplete transition; novel bind or ingest returns
+non-retryable `401 lease_expired`.
 At that same last-lease boundary, `finish_run` durably returns `200` with
 `state: incomplete`, records no finalization declaration, and commits only one
 active-to-incomplete transition plus the exact operation/replay result.
 
-For either rejection, the database oracle requires no novel operation,
-encrypted replay, or evidence event. Across competing requests, lazy
+For every rejection, the database oracle requires no novel operation,
+encrypted replay, stream, lease, runtime binding, or evidence event. The
+accepted join exact replay stays byte-stable across the new cells. Across
+the lifecycle-reconciling requests, lazy
 reconciliation commits exactly one transition to `incomplete` and its matching
 record/outbox pair. The qualified decision point is not a claim that the commit
 wall-clock precedes the boundary. A separate real-PostgreSQL test locks each
@@ -256,10 +268,11 @@ transaction time from replay expiry minus one millisecond to the inclusive TTL
 boundary, and requires all four routes to return non-retryable
 `idempotency_conflict` before touching deliberately invalid ciphertext; the
 v0.1 HTTP adapter maps that code to `409`. Its full Gateway-state fingerprint
-remains unchanged. Live
-join-grant-expiry/join-at-last-lease-expiry cases, broader staggered
-multi-lease combinations, and additional retry depths remain outside this
-gate. Authority rotation is qualified by the separate gates above.
+remains unchanged. The new live join cells use one-use grants and do not
+qualify registration-policy equivalents. Broader staggered combinations
+beyond the current focused two-lease shape and additional retry depths remain
+outside this gate. Authority
+rotation is qualified by the separate gates above.
 
 To compile and run only non-database tests:
 
@@ -304,8 +317,9 @@ remaining earlier or arbitrary network pre-commit/process-death timings,
 pre-commit exact-replay or rejection branches, completion of the final
 `INSERT` statement, entry into `COMMIT`, physical or WAL commit timing, the
 remaining mixed lifecycle/retry matrix, commit-wall-clock enforcement, broader
-staggered multi-lease behavior, additional retry depths and `40P01` operations
-beyond the focused finish parity cell, sustained or capacity load, replication,
+staggered combinations beyond the current focused two-lease shape, additional
+retry depths and `40P01` operations beyond the focused finish parity cell,
+sustained or capacity load, replication,
 failover, backup/restore, or high availability.
 The evidence-object provider gate separately qualifies distinct
 SCRAM logins, schema-owner separation, migration-history ownership, served-path

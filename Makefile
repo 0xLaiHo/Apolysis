@@ -91,10 +91,10 @@ test-gateway-https-replay-ttl-lock-wait:
 test-gateway-multiprocess-lifecycle-races:
 	./scripts/test-gateway-multiprocess-lifecycle-races.sh
 
-# Opt-in transaction-boundary lifecycle qualification. Independent cases drive
-# exact replay against novel join, bind, ingest, and finish across finalization or
-# lease boundaries through real lock waits and one-shot SQLSTATE 40001 retries,
-# plus focused SQLSTATE 40P01 finish parity.
+# Opt-in transaction-boundary lifecycle qualification. Fifteen cells drive
+# exact replay against novel join, bind, ingest, and finish across join-grant,
+# finalization, and lease boundaries: seven real lock waits, seven one-shot
+# SQLSTATE 40001 retries, and focused SQLSTATE 40P01 finish parity.
 test-gateway-mixed-lifecycle-deadline-races:
 	./scripts/test-gateway-mixed-lifecycle-deadline-races.sh
 

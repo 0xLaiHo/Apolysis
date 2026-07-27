@@ -109,16 +109,18 @@ An additional bounded two-process mTLS gate now qualifies coordinated
 writer/lifecycle races across run creation, one-use join, exact runtime binding,
 event deduplication and cross-run organization sequencing, finalization, and terminal
 irreversibility. A sibling bounded direct-mTLS/PostgreSQL gate now covers
-an additional transaction-boundary join/bind/ingest/finish slice with stable
-exact replay, one-shot SQLSTATE `40001` retries, and fail-closed or
-deterministically incomplete novel work; a focused `finish_run` check adds
-one-shot SQLSTATE `40P01` retry parity. A
+an additional transaction-boundary join/bind/ingest/finish slice across
+one-use join-grant expiry, finalization deadlines, and last-lease expiry.
+It keeps exact replay stable and novel work fail-closed or deterministically
+incomplete across one-shot SQLSTATE `40001` retries; a focused `finish_run`
+check adds one-shot SQLSTATE `40P01` retry parity. A
 direct-mTLS HTTPS qualification and its repository sibling now cover all four
 exact lifecycle routes across replay-TTL expiry after an exact operation-row
 lock wait. This does not claim the complete mixed
 lifecycle/retry matrix. The remaining process-death and network pre-commit
 timings,
-staggered multi-lease, load, replication, failover, backup/restore, and high
+broader staggered combinations beyond the current focused two-lease shape,
+load, replication, failover, backup/restore, and high
 availability work remains unqualified, as do production KMS integration, database
 row-level-security deployment,
 an authorized object-read resolver, evidence-object projection/read views,
