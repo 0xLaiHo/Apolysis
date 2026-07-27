@@ -108,8 +108,11 @@ An additional bounded two-process mTLS gate now qualifies coordinated
 writer/lifecycle races across run creation, one-use join, exact runtime binding,
 event deduplication and cross-run organization sequencing, finalization, and terminal
 irreversibility. A sibling bounded direct-mTLS/PostgreSQL gate now covers
-an additional transaction-boundary join/bind/ingest slice with stable exact
-replay and fail-closed novel work. This does not claim the complete mixed
+an additional transaction-boundary join/bind/ingest/finish slice with stable
+exact replay and fail-closed or deterministically incomplete novel work. A
+separate repository qualification now covers all four exact lifecycle routes
+at the replay-TTL boundary; it is not live HTTPS evidence. This does not claim
+the complete mixed
 lifecycle/retry matrix. The broader process-death, network pre-commit,
 staggered multi-lease, load, replication, failover, backup/restore, and high
 availability work remains unqualified, as do production KMS integration, database
