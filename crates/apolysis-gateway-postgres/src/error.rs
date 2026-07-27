@@ -136,6 +136,10 @@ pub(crate) fn lease_failure(code: ContractErrorCode) -> GatewayFailure {
     GatewayFailure::classified(code, AuditReason::SourceRegistrationMismatch)
 }
 
+pub(crate) fn current_authority_failure(code: ContractErrorCode) -> GatewayFailure {
+    GatewayFailure::classified(code, AuditReason::CurrentAuthorityStale)
+}
+
 pub(crate) fn policy_failure(code: ContractErrorCode) -> GatewayFailure {
     GatewayFailure::classified(code, AuditReason::SourcePolicyMismatch)
 }

@@ -26,6 +26,7 @@ pub const NOW_UNIX_MS: u64 = 1_783_891_200_000;
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 static DATABASE_TEST_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+const IJSON_MAX: i64 = 9_007_199_254_740_991;
 
 pub struct TestDatabase {
     database_url: String,
@@ -61,6 +62,7 @@ impl TestDatabase {
         .execute(&pool)
         .await
         .map_err(|_| io::Error::other("failed to isolate the PostgreSQL durability test"))?;
+        seed_current_authority(&pool).await?;
         Ok(Self {
             database_url,
             pool,
@@ -87,6 +89,92 @@ impl TestDatabase {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+}
+
+async fn seed_current_authority(pool: &PgPool) -> TestResult<()> {
+    let policy_document = serde_json::json!({
+        "fixture": "postgres_durability",
+        "source_id": "source_codex"
+    });
+    let credential_fingerprint = [0x44_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.organizations ( \
+             organization_id, organization_state, created_at_unix_ms, updated_at_unix_ms \
+         ) VALUES ('org_durability', 'active', 1, 1) \
+         ON CONFLICT (organization_id) DO UPDATE \
+         SET organization_state='active', \
+             updated_at_unix_ms=greatest(organizations.created_at_unix_ms, 1)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|_| io::Error::other("failed to seed the durability organization authority"))?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.source_registrations ( \
+             source_registration_id, organization_id, source_id, principal_kind, \
+             principal_id, registration_state, policy_revision, credential_epoch, \
+             effective_at_unix_ms, expires_at_unix_ms, policy_document, \
+             created_at_unix_ms, updated_at_unix_ms \
+         ) VALUES ( \
+             'registration_durability_codex', 'org_durability', 'source_codex', 'workload', \
+             'principal_runner', 'active', 7, 1, 1, $1, $2, 1, 1 \
+         ) \
+         ON CONFLICT (source_registration_id) DO UPDATE \
+         SET organization_id=EXCLUDED.organization_id, source_id=EXCLUDED.source_id, \
+             principal_kind=EXCLUDED.principal_kind, principal_id=EXCLUDED.principal_id, \
+             registration_state='active', policy_revision=7, credential_epoch=1, \
+             effective_at_unix_ms=1, expires_at_unix_ms=EXCLUDED.expires_at_unix_ms, \
+             policy_document=EXCLUDED.policy_document, \
+             updated_at_unix_ms=greatest(source_registrations.created_at_unix_ms, 1)",
+    )
+    .bind(IJSON_MAX)
+    .bind(&policy_document)
+    .execute(pool)
+    .await
+    .map_err(|_| io::Error::other("failed to seed the durability source authority"))?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.transport_credentials ( \
+             credential_id, certificate_fingerprint, organization_id, \
+             source_registration_id, credential_epoch, effective_at_unix_ms, \
+             expires_at_unix_ms, revoked_at_unix_ms, revocation_reason, \
+             created_at_unix_ms, updated_at_unix_ms \
+         ) VALUES ( \
+             'credential_durability_ci_runner', $1, 'org_durability', \
+             'registration_durability_codex', \
+             1, 1, $2, NULL, NULL, 1, 1 \
+         ) \
+         ON CONFLICT (credential_id) DO UPDATE \
+         SET certificate_fingerprint=EXCLUDED.certificate_fingerprint, \
+             organization_id=EXCLUDED.organization_id, \
+             source_registration_id=EXCLUDED.source_registration_id, credential_epoch=1, \
+             effective_at_unix_ms=1, expires_at_unix_ms=EXCLUDED.expires_at_unix_ms, \
+             revoked_at_unix_ms=NULL, revocation_reason=NULL, \
+             updated_at_unix_ms=greatest(transport_credentials.created_at_unix_ms, 1)",
+    )
+    .bind(credential_fingerprint.as_slice())
+    .bind(IJSON_MAX)
+    .execute(pool)
+    .await
+    .map_err(|_| io::Error::other("failed to seed the durability transport authority"))?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.source_authority_revisions ( \
+             organization_id, source_registration_id, credential_id, credential_epoch, \
+             registration_policy_revision, policy_document, effective_at_unix_ms, \
+             expires_at_unix_ms, recorded_at_unix_ms \
+         ) VALUES ( \
+             'org_durability', 'registration_durability_codex', \
+             'credential_durability_ci_runner', \
+             1, 7, $1, 1, $2, 1 \
+         ) \
+         ON CONFLICT (organization_id, source_registration_id, credential_id, \
+                      credential_epoch, registration_policy_revision) DO NOTHING",
+    )
+    .bind(policy_document)
+    .bind(IJSON_MAX)
+    .execute(pool)
+    .await
+    .map_err(|_| io::Error::other("failed to seed the durability authority revision"))?;
+    Ok(())
 }
 
 fn replay_protector() -> TestResult<Arc<Aes256GcmReplayProtector>> {
@@ -198,9 +286,10 @@ fn source_context_with_authentication_window(
     AuthenticatedSourceContext::new(
         "org_durability".try_into().expect("organization fixture"),
         principal,
-        "registration_codex",
+        "registration_durability_codex",
         AuthenticationSnapshot::new(
-            "credential_ci_runner",
+            "credential_durability_ci_runner",
+            1,
             7,
             issued_at_unix_ms,
             expires_at_unix_ms,

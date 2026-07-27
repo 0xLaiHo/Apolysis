@@ -300,7 +300,10 @@ GRANT SELECT, INSERT ON
     apolysis_gateway.finalization_terminal_positions,
     apolysis_gateway.finalization_outcome_claims
 TO apolysis_gateway_runtime;
-GRANT SELECT, INSERT, UPDATE ON apolysis_gateway.join_authorizations
+GRANT SELECT, INSERT ON apolysis_gateway.join_authorizations
+    TO apolysis_gateway_runtime;
+GRANT UPDATE (authorization_state, consumed_at_unix_ms)
+    ON apolysis_gateway.join_authorizations
     TO apolysis_gateway_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON apolysis_gateway.active_runtime_identities
     TO apolysis_gateway_runtime;
@@ -315,15 +318,22 @@ GRANT SELECT, INSERT ON apolysis_gateway.evidence_event_objects
     TO apolysis_gateway_runtime;
 GRANT INSERT ON apolysis_gateway.gateway_authority_audit
     TO apolysis_gateway_runtime;
+GRANT INSERT ON apolysis_gateway.transaction_authority_audit
+    TO apolysis_gateway_runtime;
 GRANT USAGE, SELECT ON SEQUENCE
     apolysis_gateway.gateway_operations_operation_id_seq,
     apolysis_gateway.gateway_authority_audit_gateway_authority_audit_id_seq
+TO apolysis_gateway_runtime;
+GRANT USAGE ON SEQUENCE
+    apolysis_gateway.transaction_authority_audit_transaction_authority_audit_id_seq
 TO apolysis_gateway_runtime;
 GRANT EXECUTE ON FUNCTION apolysis_gateway.evidence_object_db_now_unix_ms()
     TO apolysis_gateway_runtime;
 GRANT EXECUTE ON FUNCTION apolysis_gateway.lock_evidence_objects_for_ingest(text, text[])
     TO apolysis_gateway_runtime;
 GRANT EXECUTE ON FUNCTION apolysis_gateway.lock_gateway_authority_by_fingerprint(bytea)
+    TO apolysis_gateway_runtime;
+GRANT EXECUTE ON FUNCTION apolysis_gateway.lock_gateway_current_authority(text, text, text)
     TO apolysis_gateway_runtime;
 GRANT EXECUTE ON FUNCTION apolysis_gateway.lock_evidence_object_organization_shared(text)
     TO apolysis_gateway_runtime;
@@ -345,7 +355,42 @@ GRANT SELECT, INSERT, UPDATE ON
 TO apolysis_gateway_control;
 GRANT SELECT, INSERT ON
     apolysis_gateway.authority_change_audit,
-    apolysis_gateway.gateway_authority_audit
+    apolysis_gateway.gateway_authority_audit,
+    apolysis_gateway.source_authority_revisions
+TO apolysis_gateway_control;
+GRANT SELECT (
+    organization_id,
+    source_registration_id,
+    credential_id,
+    credential_epoch,
+    registration_policy_revision,
+    issued_at_unix_ms,
+    revoked_at_unix_ms
+) ON apolysis_gateway.leases
+TO apolysis_gateway_control;
+GRANT UPDATE (revoked_at_unix_ms)
+    ON apolysis_gateway.leases
+    TO apolysis_gateway_control;
+GRANT SELECT (
+    organization_id,
+    source_registration_id,
+    credential_id,
+    credential_epoch,
+    registration_policy_revision,
+    issued_by_source_registration_id,
+    issued_by_credential_id,
+    issued_by_credential_epoch,
+    issued_by_registration_policy_revision,
+    authorization_state,
+    issued_at_unix_ms,
+    consumed_at_unix_ms,
+    revoked_at_unix_ms
+) ON apolysis_gateway.join_authorizations
+TO apolysis_gateway_control;
+GRANT UPDATE (
+    authorization_state,
+    revoked_at_unix_ms
+) ON apolysis_gateway.join_authorizations
 TO apolysis_gateway_control;
 GRANT USAGE, SELECT ON SEQUENCE
     apolysis_gateway.authority_change_audit_authority_change_id_seq,

@@ -35,19 +35,6 @@ impl PostgresGatewayRepository {
             .envelopes()
             .iter()
             .any(|envelope| envelope.object_ref().is_some());
-        let replay_now_unix_ms = if includes_object_reference {
-            sql_u64(
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT apolysis_gateway.evidence_object_db_now_unix_ms()",
-                )
-                .fetch_one(&mut **transaction)
-                .await
-                .map_err(|error| TxFailure::from_sqlx_at("ingest_read_database_time", error))?,
-            )
-            .map_err(TxFailure::rollback)?
-        } else {
-            admitted_at_unix_ms
-        };
         // Establish the shared ancestor lock before operation, run, lease,
         // policy, and object locks when this transaction can bind an object.
         // The object-link trigger revalidates this authority later; prelocking
@@ -67,12 +54,43 @@ impl PostgresGatewayRepository {
         }
         let identity = operation_identity(context, "ingest", request.client_operation_id())
             .map_err(TxFailure::rollback)?;
+        self.lock_operation_identity(transaction, &identity).await?;
+        let authority_locked = self.lock_current_authority(transaction, context).await?;
+        let authority_now_unix_ms = if includes_object_reference {
+            sql_u64(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT apolysis_gateway.evidence_object_db_now_unix_ms()",
+                )
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(|error| TxFailure::from_sqlx_at("ingest_read_database_time", error))?,
+            )
+            .map_err(TxFailure::rollback)?
+        } else {
+            let transaction_now_unix_ms = clock.transaction_now_unix_ms();
+            if transaction_now_unix_ms < admitted_at_unix_ms {
+                return Err(TxFailure::rollback(repository_failure()));
+            }
+            transaction_now_unix_ms
+        };
+        if authority_now_unix_ms == 0 {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
+        self.revalidate_locked_current_authority(
+            transaction,
+            context,
+            identity.operation_kind,
+            authority_locked,
+            authority_now_unix_ms,
+        )
+        .await?;
         if let Some(outcome) = self
-            .lock_and_replay_operation(
+            .replay_locked_operation(
                 transaction,
+                context,
                 &identity,
                 request.request_digest(),
-                replay_now_unix_ms,
+                authority_now_unix_ms,
             )
             .await?
         {
@@ -87,54 +105,6 @@ impl PostgresGatewayRepository {
             .await?;
         let lease = load_lease(transaction, context, request).await?;
         validate_lease(context, request, &lease)?;
-        // HTTP arrival and transaction begin are not lifecycle acceptance
-        // points. Re-read trusted time only after the operation, run, and lease
-        // locks are held so a lock wait or a restarted transaction cannot admit
-        // novel work using a stale pre-boundary timestamp.
-        let now_unix_ms = if includes_object_reference {
-            sql_u64(
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT apolysis_gateway.evidence_object_db_now_unix_ms()",
-                )
-                .fetch_one(&mut **transaction)
-                .await
-                .map_err(|error| TxFailure::from_sqlx_at("ingest_refresh_database_time", error))?,
-            )
-            .map_err(TxFailure::rollback)?
-        } else {
-            let transaction_now_unix_ms = clock.transaction_now_unix_ms();
-            if transaction_now_unix_ms < admitted_at_unix_ms {
-                return Err(TxFailure::rollback(repository_failure()));
-            }
-            transaction_now_unix_ms
-        };
-        if now_unix_ms == 0 {
-            return Err(TxFailure::rollback(repository_failure()));
-        }
-        let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
-        let deadline_elapsed = run.state == RunState::Finishing
-            && run
-                .finalization_deadline_unix_ms
-                .is_some_and(|deadline| now_unix_ms >= deadline);
-        if self
-            .reconcile_expired_run(transaction, context, request.run_id(), &run, now_unix_ms)
-            .await?
-        {
-            return Err(TxFailure::commit(if deadline_elapsed {
-                policy_failure(ContractErrorCode::InvalidLifecycleTransition)
-            } else if requested_lease_expired {
-                lease_failure(ContractErrorCode::LeaseExpired)
-            } else {
-                policy_failure(ContractErrorCode::InvalidLifecycleTransition)
-            }));
-        }
-        if requested_lease_expired
-            && !matches!(run.state, RunState::Finished | RunState::Incomplete)
-        {
-            return Err(TxFailure::rollback(lease_failure(
-                ContractErrorCode::LeaseExpired,
-            )));
-        }
         let stream = load_stream(transaction, context, request, &lease).await?;
         let terminal_position = if run.state == RunState::Finishing {
             sqlx::query_scalar::<_, i64>(
@@ -300,21 +270,6 @@ impl PostgresGatewayRepository {
             );
             classified.push((ClassifiedEvent::Novel(digest_bytes), envelope.clone()));
         }
-        if matches!(run.state, RunState::Finished | RunState::Incomplete)
-            && classified
-                .iter()
-                .any(|(event, _)| matches!(event, ClassifiedEvent::Novel(_)))
-        {
-            return Err(TxFailure::rollback(policy_failure(
-                ContractErrorCode::InvalidLifecycleTransition,
-            )));
-        }
-        if requested_lease_expired {
-            return Err(TxFailure::rollback(lease_failure(
-                ContractErrorCode::LeaseExpired,
-            )));
-        }
-
         // Durable duplicates replay their original acceptance without reopening
         // object availability. Only novel events participate in object admission.
         let mut novel_object_bindings = BTreeMap::new();
@@ -341,6 +296,44 @@ impl PostgresGatewayRepository {
                 )));
             }
         }
+        // Acquire every evidence-object lock before the final acceptance
+        // instant. The second validation below runs while those locks remain
+        // held and therefore cannot admit an object or authority snapshot that
+        // expired during the wait.
+        validate_novel_object_bindings(
+            transaction,
+            context,
+            request,
+            &lease,
+            &stream.manifest,
+            &novel_object_bindings,
+            authority_now_unix_ms,
+        )
+        .await?;
+        let now_unix_ms = if includes_object_reference {
+            sql_u64(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT apolysis_gateway.evidence_object_db_now_unix_ms()",
+                )
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(|error| TxFailure::from_sqlx_at("ingest_refresh_database_time", error))?,
+            )
+            .map_err(TxFailure::rollback)?
+        } else {
+            clock.transaction_now_unix_ms()
+        };
+        if now_unix_ms == 0 || now_unix_ms < authority_now_unix_ms {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
+        self.revalidate_locked_current_authority(
+            transaction,
+            context,
+            identity.operation_kind,
+            authority_locked,
+            now_unix_ms,
+        )
+        .await?;
         let authorized_object_capabilities = validate_novel_object_bindings(
             transaction,
             context,
@@ -351,6 +344,38 @@ impl PostgresGatewayRepository {
             now_unix_ms,
         )
         .await?;
+
+        let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
+        let deadline_elapsed = run.state == RunState::Finishing
+            && run
+                .finalization_deadline_unix_ms
+                .is_some_and(|deadline| now_unix_ms >= deadline);
+        if self
+            .reconcile_expired_run(transaction, context, request.run_id(), &run, now_unix_ms)
+            .await?
+        {
+            return Err(TxFailure::commit(if deadline_elapsed {
+                policy_failure(ContractErrorCode::InvalidLifecycleTransition)
+            } else if requested_lease_expired {
+                lease_failure(ContractErrorCode::LeaseExpired)
+            } else {
+                policy_failure(ContractErrorCode::InvalidLifecycleTransition)
+            }));
+        }
+        if matches!(run.state, RunState::Finished | RunState::Incomplete)
+            && classified
+                .iter()
+                .any(|(event, _)| matches!(event, ClassifiedEvent::Novel(_)))
+        {
+            return Err(TxFailure::rollback(policy_failure(
+                ContractErrorCode::InvalidLifecycleTransition,
+            )));
+        }
+        if requested_lease_expired {
+            return Err(TxFailure::rollback(lease_failure(
+                ContractErrorCode::LeaseExpired,
+            )));
+        }
 
         let mut prepared = Vec::with_capacity(classified.len());
         let mut facts = Vec::new();
@@ -555,6 +580,7 @@ impl PostgresGatewayRepository {
         let outcome = LedgerOutcome::Ingest(acknowledgement);
         self.store_operation(
             transaction,
+            context,
             &identity,
             request.request_digest(),
             request.run_id(),
@@ -574,6 +600,8 @@ struct LeaseRow {
     source_id: String,
     principal_kind: String,
     principal_id: String,
+    credential_id: Option<String>,
+    credential_epoch: Option<u64>,
     registration_policy_revision: u64,
     expires_at_unix_ms: u64,
     revoked: bool,
@@ -893,7 +921,8 @@ async fn load_lease(
         .map_err(|error| TxFailure::from_sqlx_at("ingest_lock_lease", error))?;
     let row = sqlx::query(
         "SELECT run_id, source_registration_id, source_stream_id, source_id, principal_kind, \
-                principal_id, registration_policy_revision, expires_at_unix_ms, revoked_at_unix_ms \
+                principal_id, credential_id, credential_epoch, registration_policy_revision, \
+                expires_at_unix_ms, revoked_at_unix_ms \
          FROM apolysis_gateway.leases \
          WHERE organization_id=$1 AND lease_digest=$2",
     )
@@ -932,6 +961,15 @@ async fn load_lease(
         principal_id: row
             .try_get("principal_id")
             .map_err(|error| TxFailure::from_sqlx_at("ingest_decode_lease", error))?,
+        credential_id: row
+            .try_get::<Option<String>, _>("credential_id")
+            .map_err(|error| TxFailure::from_sqlx_at("ingest_decode_lease", error))?,
+        credential_epoch: row
+            .try_get::<Option<i64>, _>("credential_epoch")
+            .map_err(|error| TxFailure::from_sqlx_at("ingest_decode_lease", error))?
+            .map(sql_u64)
+            .transpose()
+            .map_err(TxFailure::rollback)?,
         registration_policy_revision: sql_u64(
             row.try_get("registration_policy_revision")
                 .map_err(|error| TxFailure::from_sqlx_at("ingest_decode_lease", error))?,
@@ -956,6 +994,8 @@ fn validate_lease(
     lease: &LeaseRow,
 ) -> TxResult<()> {
     if lease.revoked
+        || lease.credential_id.as_deref() != Some(context.authentication().credential_id())
+        || lease.credential_epoch != Some(context.authentication().credential_epoch())
         || lease.registration_policy_revision != context.authentication().policy_revision()
     {
         return Err(TxFailure::rollback(lease_failure(

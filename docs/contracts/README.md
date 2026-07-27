@@ -87,8 +87,9 @@ non-durable memory adapter. An initial PostgreSQL adapter applies the same
 atomic-command seam to normalized ledger/outbox state, hashed lease and join
 references, encrypted exact-operation replay, a 256-stream-per-run admission
 cap, and bounded transaction-local lock/statement deadlines. The shared
-38-scenario suite runs against both adapters and verifies atomic rejection at
-the stream boundary; an explicit real-PostgreSQL gate
+43-scenario suite runs against both adapters and verifies atomic rejection at
+the stream boundary plus credential/policy rotation and stale-capability
+rejection; an explicit real-PostgreSQL gate
 adds eleven targeted transaction, reconstruction, range-allocation, two-shape cross-pool
 concurrency, plaintext-absence, sequencing, and replay-expiry checks. The
 second concurrency shape races distinct operation IDs on one client run key
@@ -123,15 +124,37 @@ barrier.
 
 A bounded two-process gate additionally qualifies the reviewed writer and
 lifecycle races. Its split-clock sibling covers exact replay against novel
-ingest when transaction wait or one qualification-injected SQLSTATE `40001`
-internal retry crosses an accepted finalization deadline or last-lease expiry.
-The transaction-boundary implementation orders each ingest attempt as
-operation-identity lock, exact stored replay, run and lease locks, fresh
-transaction time, expiry reconciliation, then novel mutation. Every internal
-serialization or deadlock retry repeats that order and reads time again.
+join, bind, and ingest when transaction wait or one
+qualification-injected SQLSTATE `40001` internal retry crosses an accepted
+finalization deadline or last-lease expiry. The transaction-boundary
+implementation orders each covered lifecycle attempt as
+operation-identity lock, current organization/registration/credential locks
+and revalidation, exact stored replay, applicable run/lease/client-run/join
+locks, fresh transaction time, final revalidation of the same locked authority,
+expiry reconciliation, then novel mutation. The final check includes
+registration/credential and authentication-snapshot expiry after the dynamic
+lock wait. Exact replay performs only the initial current-authority check.
+Every internal serialization or deadlock retry repeats that order and both
+authority checks for novel work.
 Object-reference ingest uses
 PostgreSQL `clock_timestamp()` through the schema-owned database-time function;
-content-off ingest uses the trusted Gateway clock.
+content-off join, bind, ingest, and finish use the trusted Gateway clock.
+
+`AuthenticationSnapshot` binds credential identifier, credential epoch, and
+policy revision. PostgreSQL operations, encrypted replay records, leases, and
+join authorization retain the matching authority binding. Explicit policy or
+credential rotation updates current authority and atomically revokes live
+leases plus pending join authorization; replay bound to superseded authority
+fails closed before decryption. Initial registration cannot implicitly update
+or rotate an existing source. Shared real-PostgreSQL cases include a novel
+request waiting on policy rotation, exact replay waiting on credential
+rotation, authority revalidation after one SQLSTATE `40001` transaction
+restart, and complete restart after a deferred authority-denial commit returns
+SQLSTATE `40001`. Join-grant issuance also rechecks issuer and target authority
+after its run-lock wait, rejects expiry at final transaction time, and records
+that time as the grant issue time. The live direct-mTLS gate also exercises
+old/new certificate, policy, lease, replay, and new-stream behavior across both
+cutovers.
 
 At the fresh decision point, deadline crossing returns non-retryable
 `409 invalid_lifecycle_transition` and last-lease crossing returns
@@ -139,7 +162,8 @@ non-retryable `401 lease_expired`. A rejected novel request creates no
 operation, encrypted replay, or evidence event. Across competing requests,
 lazy reconciliation creates exactly one `incomplete` transition and its
 matching record/outbox pair. A retained exact operation replay remains
-unchanged and is resolved before reconciliation.
+unchanged and is resolved after current-authority revalidation but before
+dynamic lifecycle reconciliation.
 
 Current PostgreSQL ingest still uses a full per-stream history window for gap
 discovery—the SQL limit bounds returned gaps, not scan work. A novel batch now
@@ -153,10 +177,9 @@ network pre-commit/process-death and remaining mixed lifecycle/retry matrices,
 sustained or capacity load, replication/failover, backup/restore, and HA are
 not qualified. The bounded ingest decision is not a claim about the database
 commit's wall-clock instant or replay-TTL expiry during an operation-lock wait;
-novel join/bind, staggered multi-lease cases, and transaction-time authority
-freshness also remain open. Production KMS/envelope-key integration, database
-RLS deployment, transaction-time authority revalidation, lease/credential
-rotation, the authorized object-read resolver and downstream deletion
+novel join/bind and staggered multi-lease cases also remain open. Production
+KMS/envelope-key integration, database RLS deployment, the authorized
+object-read resolver and downstream deletion
 propagation, background deadline/replay cleanup, and production rate and
 request-size enforcement beyond the implemented stream cap are likewise
 unqualified. JWT/workload-identity transport profiles also remain open. The

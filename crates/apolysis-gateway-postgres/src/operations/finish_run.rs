@@ -7,7 +7,7 @@ use apolysis_contracts::{
     ContractErrorCode, FinishRunRequest, FinishRunResponse, GatewayOperation, RunState,
     RunStateTransition, SourceId, TerminalSourcePosition,
 };
-use apolysis_gateway::{lease_id_digest, LedgerOutcome};
+use apolysis_gateway::{lease_id_digest, GatewayClock, LedgerOutcome};
 use sqlx::{Postgres, Row, Transaction};
 
 use crate::{
@@ -22,17 +22,33 @@ impl PostgresGatewayRepository {
         transaction: &mut Transaction<'_, Postgres>,
         context: &AuthenticatedSourceContext,
         request: &FinishRunRequest,
-        now_unix_ms: u64,
+        admitted_at_unix_ms: u64,
         finalization_deadline_unix_ms: u64,
+        clock: &dyn GatewayClock,
     ) -> TxResult<LedgerOutcome> {
         let identity = operation_identity(context, "finish_run", request.client_operation_id())
             .map_err(TxFailure::rollback)?;
+        self.lock_operation_identity(transaction, &identity).await?;
+        let authority_locked = self.lock_current_authority(transaction, context).await?;
+        let authority_now_unix_ms = clock.transaction_now_unix_ms();
+        if authority_now_unix_ms == 0 || authority_now_unix_ms < admitted_at_unix_ms {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
+        self.revalidate_locked_current_authority(
+            transaction,
+            context,
+            identity.operation_kind,
+            authority_locked,
+            authority_now_unix_ms,
+        )
+        .await?;
         if let Some(outcome) = self
-            .lock_and_replay_operation(
+            .replay_locked_operation(
                 transaction,
+                context,
                 &identity,
                 request.request_digest(),
-                now_unix_ms,
+                authority_now_unix_ms,
             )
             .await?
         {
@@ -47,6 +63,18 @@ impl PostgresGatewayRepository {
             .await?;
         let lease = load_lease(transaction, context, request).await?;
         validate_lease(context, request, &lease)?;
+        let now_unix_ms = clock.transaction_now_unix_ms();
+        if now_unix_ms == 0 || now_unix_ms < authority_now_unix_ms {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
+        self.revalidate_locked_current_authority(
+            transaction,
+            context,
+            identity.operation_kind,
+            authority_locked,
+            now_unix_ms,
+        )
+        .await?;
         if run.initiating_source_registration_id != context.source_registration_id()
             && !context.registration_policy().may_finalize_runs()
         {
@@ -64,6 +92,7 @@ impl PostgresGatewayRepository {
             let outcome = LedgerOutcome::FinishRun(response);
             self.store_operation(
                 transaction,
+                context,
                 &identity,
                 request.request_digest(),
                 request.run_id(),
@@ -436,6 +465,7 @@ impl PostgresGatewayRepository {
         let outcome = LedgerOutcome::FinishRun(response);
         self.store_operation(
             transaction,
+            context,
             &identity,
             request.request_digest(),
             request.run_id(),
@@ -454,6 +484,8 @@ struct LeaseRow {
     source_id: String,
     principal_kind: String,
     principal_id: String,
+    credential_id: Option<String>,
+    credential_epoch: Option<u64>,
     registration_policy_revision: u64,
     expires_at_unix_ms: u64,
     revoked: bool,
@@ -488,7 +520,8 @@ async fn load_lease(
         .map_err(|error| TxFailure::from_sqlx_at("finish_run_lock_lease", error))?;
     let row = sqlx::query(
         "SELECT run_id, source_registration_id, source_stream_id, source_id, principal_kind, \
-                principal_id, registration_policy_revision, expires_at_unix_ms, revoked_at_unix_ms \
+                principal_id, credential_id, credential_epoch, registration_policy_revision, \
+                expires_at_unix_ms, revoked_at_unix_ms \
          FROM apolysis_gateway.leases WHERE organization_id=$1 AND lease_digest=$2",
     )
     .bind(context.organization_id().as_str())
@@ -525,6 +558,15 @@ async fn load_lease(
         principal_id: row
             .try_get("principal_id")
             .map_err(|error| TxFailure::from_sqlx_at("finish_run_decode_lease", error))?,
+        credential_id: row
+            .try_get::<Option<String>, _>("credential_id")
+            .map_err(|error| TxFailure::from_sqlx_at("finish_run_decode_lease", error))?,
+        credential_epoch: row
+            .try_get::<Option<i64>, _>("credential_epoch")
+            .map_err(|error| TxFailure::from_sqlx_at("finish_run_decode_lease", error))?
+            .map(sql_u64)
+            .transpose()
+            .map_err(TxFailure::rollback)?,
         registration_policy_revision: sql_u64(
             row.try_get("registration_policy_revision")
                 .map_err(|error| TxFailure::from_sqlx_at("finish_run_decode_lease", error))?,
@@ -549,6 +591,8 @@ fn validate_lease(
     lease: &LeaseRow,
 ) -> TxResult<()> {
     if lease.revoked
+        || lease.credential_id.as_deref() != Some(context.authentication().credential_id())
+        || lease.credential_epoch != Some(context.authentication().credential_epoch())
         || lease.registration_policy_revision != context.authentication().policy_revision()
     {
         return Err(TxFailure::rollback(lease_failure(
