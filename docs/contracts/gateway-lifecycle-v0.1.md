@@ -156,7 +156,11 @@ operation to qualify the same boundaries through one real internal retry. Five
 operation/boundary scenarios run through both modes, for ten live matrix cells:
 join at the finalization deadline, bind at the requested last-lease expiry,
 ingest at the finalization deadline, ingest at the requested last-lease expiry,
-and finish at the requested last-lease expiry. Join attempts lock the operation
+and finish at the requested last-lease expiry. A focused eleventh cell repeats
+finish at last-lease expiry with a one-shot
+SQLSTATE `40P01` fault. It proves retry parity when PostgreSQL returns that
+code; it does not claim that PostgreSQL's deadlock detector observed a naturally
+formed multi-session wait-for cycle. Join attempts lock the operation
 identity, current authority, exact stored-operation replay, run, and join
 authorization before reading fresh transaction time and reconciling expiry.
 Bind, ingest, and finish use the same order with the run and requested lease
@@ -180,8 +184,9 @@ deadline, bind or ingest at the relevant lease expiry returns non-retryable
 `200` with state `incomplete`, accepts no finalization declaration, and commits
 exactly one `active -> incomplete` transition. Two identical waiting finish
 requests converge on one novel result and one exact replay; after one late
-SQLSTATE `40001`, a restarted finish attempt reaches the same durable result at
-the inclusive expiry and retains a stable exact replay. After deadline
+SQLSTATE `40001` or focused `40P01`, a restarted finish attempt reaches the
+same durable result at the inclusive expiry and retains a stable exact replay.
+After deadline
 reconciliation seals the run, later novel lifecycle work remains a `409`
 lifecycle rejection rather than degrading to a lease error; the first
 last-lease reconciliation of an active run without a deadline remains `401`.
@@ -275,8 +280,9 @@ complete W3–W6. In particular, it has:
   exact-replay or rejection branches, completion of the final `INSERT`
   statement, entry into `COMMIT`, physical or WAL commit timing, the remaining
   mixed lifecycle/retry matrix, live join-grant expiry or join at last-lease
-  expiry, broader staggered combinations, additional retry depths or live
-  SQLSTATE `40P01` fault coverage, sustained or capacity load,
+  expiry, broader staggered combinations, additional retry depths or
+  operations beyond the focused one-shot `40P01` finish parity cell, sustained
+  or capacity load,
   replication/failover, backup/restore, or high availability;
 - no production KMS/envelope-data-key custody or tenant RLS deployment; the
   built-in replay protector and evidence-object wrapping key are direct-key
@@ -563,8 +569,8 @@ four routes at inclusive replay-TTL expiry after an exact operation-row lock
 wait, including expiry-before-decryption and unchanged-lifecycle-state oracles.
 Join-grant expiry and join at last-lease expiry remain unqualified through the
 live transport, as do broader staggered
-multi-lease combinations, additional retry depths and operations, and live
-SQLSTATE `40P01` fault coverage.
+multi-lease combinations and additional retry depths and operations beyond the
+focused one-shot `40P01` finish parity cell.
 
 ### Gaps
 
