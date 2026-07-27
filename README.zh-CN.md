@@ -71,7 +71,9 @@ write adapter，以及由 PostgreSQL current credential authority 支撑的 dire
 完整 lifecycle transport tracer。这些原型验证了服务器端 grant/policy join、RFC 8785
 摘要黄金向量、record append 与 outbox 的原子语义、加密的精确 operation replay，
 每个 novel ingest batch 只更新一次的 sequence-range allocation，以及有界的 finishing
-lifecycle。
+lifecycle。PostgreSQL path 现会在每个 lifecycle transaction 内复核 current authority，
+把 authentication 与耐久 work 绑定到 credential epoch，并通过显式 policy/credential
+rotation 使旧 lease、join authorization 与 replay 失效。
 
 聚焦的耐久 lifecycle projection foundation 还加入 organization-qualified generation、
 严格按 Gateway ingest order 的 projection、精确耐久 watermark、active outbox publication，
@@ -93,8 +95,7 @@ transaction-boundary join/bind/ingest 切片，并保持 exact replay 稳定及 
 失败关闭。它不代表完整 mixed lifecycle/retry matrix 已通过。更广的进程死亡、
 network pre-commit、staggered multi-lease、load、replication、failover、backup/restore
 与高可用工作仍未验证；production KMS integration、database RLS
-deployment、current authority 与 ledger commit 的原子复核、lease/credential rotation、
-授权 object-read resolver、evidence-object projection/read view、持续后台 reaper
+deployment、授权 object-read resolver、evidence-object projection/read view、持续后台 reaper
 运行与通过容量验证的 resource limit
 也仍待完成。Projection 尚不提供 public Query authorization、cursor/SSE、
 Console、coverage、finding、source health 或 evidence-object lifecycle view；其 RLS GUC

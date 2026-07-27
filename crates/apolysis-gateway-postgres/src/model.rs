@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_contracts::{
-    BindRuntimeResponse, FinishRunResponse, IngestAck, OpenRunResponse, PrincipalKind,
+    AuthenticatedSourceContext, BindRuntimeResponse, FinishRunResponse, IngestAck, OpenRunResponse,
+    PrincipalKind,
 };
 use apolysis_gateway::{GatewayFailure, LedgerOutcome};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -10,6 +11,23 @@ use sha2::{Digest, Sha256};
 use crate::error::{contract_failure, repository_failure};
 
 pub(crate) const MAX_SQL_INTEGER: u64 = 9_007_199_254_740_991;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AuthorityBinding {
+    pub(crate) credential_id: String,
+    pub(crate) credential_epoch: u64,
+    pub(crate) policy_revision: u64,
+}
+
+impl AuthorityBinding {
+    pub(crate) fn from_context(context: &AuthenticatedSourceContext) -> Self {
+        Self {
+            credential_id: context.authentication().credential_id().to_string(),
+            credential_epoch: context.authentication().credential_epoch(),
+            policy_revision: context.authentication().policy_revision(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct OperationIdentity {
@@ -41,6 +59,7 @@ impl OperationIdentity {
 
     pub(crate) fn associated_data(
         &self,
+        authority: &AuthorityBinding,
         request_digest: &str,
         replay_expires_at_unix_ms: i64,
     ) -> Vec<u8> {
@@ -51,22 +70,26 @@ impl OperationIdentity {
                 + self.principal_id.len()
                 + self.operation_kind.len()
                 + self.client_operation_id.len()
+                + authority.credential_id.len()
                 + request_digest.len()
-                + 96,
+                + 128,
         );
         for component in [
-            "apolysis.gateway.operation-replay.v1",
+            "apolysis.gateway.operation-replay.v2",
             self.organization_id.as_str(),
             self.source_registration_id.as_str(),
             self.principal_kind.as_str(),
             self.principal_id.as_str(),
             self.operation_kind,
             self.client_operation_id.as_str(),
+            authority.credential_id.as_str(),
             request_digest,
         ] {
             value.extend_from_slice(component.as_bytes());
             value.push(0);
         }
+        value.extend_from_slice(&authority.credential_epoch.to_be_bytes());
+        value.extend_from_slice(&authority.policy_revision.to_be_bytes());
         value.extend_from_slice(&replay_expires_at_unix_ms.to_be_bytes());
         value
     }
@@ -208,13 +231,51 @@ mod tests {
             operation_kind: "open_run",
             client_operation_id: "operation-a".into(),
         };
+        let authority = AuthorityBinding {
+            credential_id: "credential-a".into(),
+            credential_epoch: 7,
+            policy_revision: 11,
+        };
         assert_ne!(
-            identity.associated_data("digest-a", 100),
-            identity.associated_data("digest-a", 101)
+            identity.associated_data(&authority, "digest-a", 100),
+            identity.associated_data(&authority, "digest-a", 101)
         );
         assert_ne!(
-            identity.associated_data("digest-a", 100),
-            identity.associated_data("digest-b", 100)
+            identity.associated_data(&authority, "digest-a", 100),
+            identity.associated_data(&authority, "digest-b", 100)
+        );
+        assert_ne!(
+            identity.associated_data(&authority, "digest-a", 100),
+            identity.associated_data(
+                &AuthorityBinding {
+                    credential_epoch: 8,
+                    ..authority.clone()
+                },
+                "digest-a",
+                100,
+            )
+        );
+        assert_ne!(
+            identity.associated_data(&authority, "digest-a", 100),
+            identity.associated_data(
+                &AuthorityBinding {
+                    policy_revision: 12,
+                    ..authority.clone()
+                },
+                "digest-a",
+                100,
+            )
+        );
+        assert_ne!(
+            identity.associated_data(&authority, "digest-a", 100),
+            identity.associated_data(
+                &AuthorityBinding {
+                    credential_id: "credential-b".into(),
+                    ..authority
+                },
+                "digest-a",
+                100,
+            )
         );
     }
 

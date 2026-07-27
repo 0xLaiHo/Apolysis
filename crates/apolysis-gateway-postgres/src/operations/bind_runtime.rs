@@ -30,12 +30,27 @@ impl PostgresGatewayRepository {
     ) -> TxResult<LedgerOutcome> {
         let identity = operation_identity(context, "bind_runtime", request.client_operation_id())
             .map_err(TxFailure::rollback)?;
+        self.lock_operation_identity(transaction, &identity).await?;
+        let authority_locked = self.lock_current_authority(transaction, context).await?;
+        let authority_now_unix_ms = clock.transaction_now_unix_ms();
+        if authority_now_unix_ms == 0 || authority_now_unix_ms < admitted_at_unix_ms {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
+        self.revalidate_locked_current_authority(
+            transaction,
+            context,
+            identity.operation_kind,
+            authority_locked,
+            authority_now_unix_ms,
+        )
+        .await?;
         if let Some(outcome) = self
-            .lock_and_replay_operation(
+            .replay_locked_operation(
                 transaction,
+                context,
                 &identity,
                 request.request_digest(),
-                admitted_at_unix_ms,
+                authority_now_unix_ms,
             )
             .await?
         {
@@ -50,40 +65,6 @@ impl PostgresGatewayRepository {
             .await?;
         let lease = load_lease(transaction, context, request).await?;
         validate_lease(context, request, &lease)?;
-        // A novel binding samples trusted time only after the operation,
-        // run, and requested lease are locked. Retried transactions therefore
-        // cannot reuse a pre-wait lifecycle decision.
-        let now_unix_ms = clock.transaction_now_unix_ms();
-        if now_unix_ms == 0 || now_unix_ms < admitted_at_unix_ms {
-            return Err(TxFailure::rollback(repository_failure()));
-        }
-        let deadline_elapsed = run.state == RunState::Finishing
-            && run
-                .finalization_deadline_unix_ms
-                .is_some_and(|deadline| now_unix_ms >= deadline);
-        let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
-        if self
-            .reconcile_expired_run(transaction, context, request.run_id(), &run, now_unix_ms)
-            .await?
-        {
-            return Err(TxFailure::commit(if deadline_elapsed {
-                policy_failure(ContractErrorCode::InvalidLifecycleTransition)
-            } else if requested_lease_expired {
-                lease_failure(ContractErrorCode::LeaseExpired)
-            } else {
-                policy_failure(ContractErrorCode::InvalidLifecycleTransition)
-            }));
-        }
-        if run.state != RunState::Active {
-            return Err(TxFailure::rollback(policy_failure(
-                ContractErrorCode::InvalidLifecycleTransition,
-            )));
-        }
-        if requested_lease_expired {
-            return Err(TxFailure::rollback(lease_failure(
-                ContractErrorCode::LeaseExpired,
-            )));
-        }
         let stream = load_stream(transaction, context, request, &lease).await?;
         let required_capability = match request.binding().identity_kind() {
             RuntimeIdentityKind::Process => SourceCapability::Process,
@@ -115,7 +96,7 @@ impl PostgresGatewayRepository {
         .fetch_one(&mut **transaction)
         .await
         .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_lock_binding", error))?;
-        if let Some(existing) = sqlx::query(
+        let existing_binding = sqlx::query(
             "SELECT binding_digest, source_registration_id, source_stream_id, \
                     registration_policy_revision, effective_trust_profile, manifest_version, \
                     manifest_digest \
@@ -127,8 +108,93 @@ impl PostgresGatewayRepository {
         .bind(request.binding().binding_id())
         .fetch_optional(&mut **transaction)
         .await
-        .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_load_binding", error))?
+        .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_load_binding", error))?;
+
+        let identity_kind =
+            enum_name(&request.binding().identity_kind()).map_err(TxFailure::rollback)?;
+        let identity_digest = hash_runtime_identity(request.binding().identity_ref());
+        let mut exact_identity_already_bound_to_run = false;
+        if existing_binding.is_none()
+            && request.binding().attribution() == RuntimeAttribution::Exact
         {
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(hashtextextended(\
+                     jsonb_build_array($1::text, $2::text, encode($3, 'hex'))::text, \
+                     573274118\
+                 ))",
+            )
+            .bind(context.organization_id().as_str())
+            .bind(&identity_kind)
+            .bind(&identity_digest)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                TxFailure::from_sqlx_at("bind_runtime_lock_active_runtime_identity", error)
+            })?;
+            if let Some(bound_run) = sqlx::query_scalar::<_, String>(
+                "SELECT run_id FROM apolysis_gateway.active_runtime_identities \
+                 WHERE organization_id=$1 AND identity_kind=$2 AND identity_digest=$3 FOR UPDATE",
+            )
+            .bind(context.organization_id().as_str())
+            .bind(&identity_kind)
+            .bind(&identity_digest)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| {
+                TxFailure::from_sqlx_at("bind_runtime_load_active_runtime_identity", error)
+            })? {
+                if bound_run != request.run_id().as_str() {
+                    return Err(TxFailure::rollback(policy_failure(
+                        ContractErrorCode::InvalidContract,
+                    )));
+                }
+                exact_identity_already_bound_to_run = true;
+            }
+        }
+
+        // The final acceptance time is sampled only after every dynamic
+        // binding and exact-identity lock needed by this novel request.
+        let now_unix_ms = clock.transaction_now_unix_ms();
+        if now_unix_ms == 0 || now_unix_ms < authority_now_unix_ms {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
+        self.revalidate_locked_current_authority(
+            transaction,
+            context,
+            identity.operation_kind,
+            authority_locked,
+            now_unix_ms,
+        )
+        .await?;
+        let deadline_elapsed = run.state == RunState::Finishing
+            && run
+                .finalization_deadline_unix_ms
+                .is_some_and(|deadline| now_unix_ms >= deadline);
+        let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
+        if self
+            .reconcile_expired_run(transaction, context, request.run_id(), &run, now_unix_ms)
+            .await?
+        {
+            return Err(TxFailure::commit(if deadline_elapsed {
+                policy_failure(ContractErrorCode::InvalidLifecycleTransition)
+            } else if requested_lease_expired {
+                lease_failure(ContractErrorCode::LeaseExpired)
+            } else {
+                policy_failure(ContractErrorCode::InvalidLifecycleTransition)
+            }));
+        }
+        if run.state != RunState::Active {
+            return Err(TxFailure::rollback(policy_failure(
+                ContractErrorCode::InvalidLifecycleTransition,
+            )));
+        }
+        if requested_lease_expired {
+            return Err(TxFailure::rollback(lease_failure(
+                ContractErrorCode::LeaseExpired,
+            )));
+        }
+
+        if let Some(existing) = existing_binding {
             let same_frozen_provenance = existing
                 .try_get::<String, _>("source_registration_id")
                 .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_decode_binding", error))?
@@ -187,6 +253,7 @@ impl PostgresGatewayRepository {
             let outcome = LedgerOutcome::BindRuntime(response);
             self.store_operation(
                 transaction,
+                context,
                 &identity,
                 request.request_digest(),
                 request.run_id(),
@@ -195,32 +262,6 @@ impl PostgresGatewayRepository {
             )
             .await?;
             return Ok(outcome);
-        }
-
-        let identity_kind =
-            enum_name(&request.binding().identity_kind()).map_err(TxFailure::rollback)?;
-        let identity_digest = hash_runtime_identity(request.binding().identity_ref());
-        let mut exact_identity_already_bound_to_run = false;
-        if request.binding().attribution() == RuntimeAttribution::Exact {
-            if let Some(bound_run) = sqlx::query_scalar::<_, String>(
-                "SELECT run_id FROM apolysis_gateway.active_runtime_identities \
-                 WHERE organization_id=$1 AND identity_kind=$2 AND identity_digest=$3 FOR UPDATE",
-            )
-            .bind(context.organization_id().as_str())
-            .bind(&identity_kind)
-            .bind(&identity_digest)
-            .fetch_optional(&mut **transaction)
-            .await
-            .map_err(|error| {
-                TxFailure::from_sqlx_at("bind_runtime_load_active_runtime_identity", error)
-            })? {
-                if bound_run != request.run_id().as_str() {
-                    return Err(TxFailure::rollback(policy_failure(
-                        ContractErrorCode::InvalidContract,
-                    )));
-                }
-                exact_identity_already_bound_to_run = true;
-            }
         }
 
         let accepted_binding = AcceptedRuntimeBinding::new(
@@ -338,6 +379,7 @@ impl PostgresGatewayRepository {
         let outcome = LedgerOutcome::BindRuntime(response);
         self.store_operation(
             transaction,
+            context,
             &identity,
             request.request_digest(),
             request.run_id(),
@@ -356,6 +398,8 @@ struct LeaseRow {
     source_id: String,
     principal_kind: String,
     principal_id: String,
+    credential_id: Option<String>,
+    credential_epoch: Option<u64>,
     registration_policy_revision: u64,
     expires_at_unix_ms: u64,
     revoked: bool,
@@ -384,7 +428,8 @@ async fn load_lease(
         .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_lock_lease", error))?;
     let row = sqlx::query(
         "SELECT run_id, source_registration_id, source_stream_id, source_id, principal_kind, \
-                principal_id, registration_policy_revision, expires_at_unix_ms, revoked_at_unix_ms \
+                principal_id, credential_id, credential_epoch, registration_policy_revision, \
+                expires_at_unix_ms, revoked_at_unix_ms \
          FROM apolysis_gateway.leases \
          WHERE organization_id=$1 AND lease_digest=$2",
     )
@@ -422,6 +467,15 @@ async fn load_lease(
         principal_id: row
             .try_get("principal_id")
             .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_decode_lease", error))?,
+        credential_id: row
+            .try_get::<Option<String>, _>("credential_id")
+            .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_decode_lease", error))?,
+        credential_epoch: row
+            .try_get::<Option<i64>, _>("credential_epoch")
+            .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_decode_lease", error))?
+            .map(sql_u64)
+            .transpose()
+            .map_err(TxFailure::rollback)?,
         registration_policy_revision: sql_u64(
             row.try_get("registration_policy_revision")
                 .map_err(|error| TxFailure::from_sqlx_at("bind_runtime_decode_lease", error))?,
@@ -446,6 +500,8 @@ fn validate_lease(
     lease: &LeaseRow,
 ) -> TxResult<()> {
     if lease.revoked
+        || lease.credential_id.as_deref() != Some(context.authentication().credential_id())
+        || lease.credential_epoch != Some(context.authentication().credential_epoch())
         || lease.registration_policy_revision != context.authentication().policy_revision()
     {
         return Err(TxFailure::rollback(lease_failure(

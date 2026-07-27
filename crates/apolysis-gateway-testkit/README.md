@@ -5,10 +5,10 @@ contract against any adapter without widening the production
 `GatewayRepository::execute` seam.
 
 An adapter test defines a `GatewayConformanceHarness` that creates isolated
-state, returns the repository handle under test, registers trusted join
-authorization through test-only administration, and reports the normalized
-content-free `GatewayConformanceSnapshot`. It can then register the complete
-suite with:
+state, returns the repository handle under test, seeds and rotates current
+source authority through a narrow test-only control plane, registers trusted
+join authorization, and reports the normalized content-free
+`GatewayConformanceSnapshot`. It can then register the complete suite with:
 
 ```rust,ignore
 use apolysis_gateway_testkit::gateway_repository_conformance_tests;
@@ -18,9 +18,10 @@ gateway_repository_conformance_tests!(PostgresGatewayHarness);
 
 Each generated test starts a fresh harness. Implementations backed by an
 external database must therefore isolate scenarios even when the test runner
-executes them concurrently. The shared suite currently contains 28 lifecycle,
-idempotency, same-batch duplicate, authorization, atomicity, admission, expiry,
-and finalization scenarios.
+executes them concurrently. The shared suite covers lifecycle, idempotency,
+credential-epoch and policy rotation, replay and lease binding, same-batch
+duplicate handling, authorization, atomicity, admission, expiry, and
+finalization.
 
 The snapshot is a testkit inspection shape, not a production repository API.
 Each adapter harness owns its test-only inspection mechanism; adapters do not

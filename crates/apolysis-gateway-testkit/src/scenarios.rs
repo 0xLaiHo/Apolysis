@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Mutex,
+};
 
 use crate::{GatewayConformanceHarness, GatewayConformanceSnapshot};
 
@@ -12,8 +15,8 @@ use apolysis_contracts::{
     TypedEvidencePayload,
 };
 use apolysis_gateway::{
-    canonical_inline_payload_digest, canonical_request_digest, ExecutionEvidenceGateway,
-    GatewayClock, GatewayFailure, GatewayIdGenerator,
+    canonical_inline_payload_digest, canonical_request_digest, AuditReason,
+    ExecutionEvidenceGateway, GatewayClock, GatewayFailure, GatewayIdGenerator,
 };
 
 #[derive(Clone, Copy)]
@@ -50,16 +53,64 @@ impl GatewayClock for AdvancingClock {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ReplayOnlyClock(u64);
+struct ReplayOnlyClock {
+    authority_unix_ms: u64,
+    transaction_reads: AtomicUsize,
+}
+
+impl ReplayOnlyClock {
+    fn new(authority_unix_ms: u64) -> Self {
+        Self {
+            authority_unix_ms,
+            transaction_reads: AtomicUsize::new(0),
+        }
+    }
+}
 
 impl GatewayClock for ReplayOnlyClock {
     fn now_unix_ms(&self) -> u64 {
-        self.0
+        self.authority_unix_ms
     }
 
     fn transaction_now_unix_ms(&self) -> u64 {
-        panic!("exact operation replay must not sample transaction time")
+        assert_eq!(
+            self.transaction_reads.fetch_add(1, Ordering::SeqCst),
+            0,
+            "exact operation replay may refresh current authority once but must not sample dynamic lifecycle time"
+        );
+        self.authority_unix_ms
+    }
+}
+
+struct AuthorityExpiryClock {
+    admission_unix_ms: u64,
+    authority_unix_ms: u64,
+    expired_unix_ms: u64,
+    transaction_reads: AtomicUsize,
+}
+
+impl AuthorityExpiryClock {
+    fn new(admission_unix_ms: u64, authority_unix_ms: u64, expired_unix_ms: u64) -> Self {
+        Self {
+            admission_unix_ms,
+            authority_unix_ms,
+            expired_unix_ms,
+            transaction_reads: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl GatewayClock for AuthorityExpiryClock {
+    fn now_unix_ms(&self) -> u64 {
+        self.admission_unix_ms
+    }
+
+    fn transaction_now_unix_ms(&self) -> u64 {
+        if self.transaction_reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.authority_unix_ms
+        } else {
+            self.expired_unix_ms
+        }
     }
 }
 
@@ -199,11 +250,19 @@ fn join_request(run_id: &str) -> OpenRunRequest {
 }
 
 fn registration_policy_join_request(run_id: &str, operation_id: &str) -> OpenRunRequest {
+    registration_policy_join_request_with_proof(run_id, operation_id, "join_policy_runtime_01")
+}
+
+fn registration_policy_join_request_with_proof(
+    run_id: &str,
+    operation_id: &str,
+    proof_ref: &str,
+) -> OpenRunRequest {
     let mut wire = request_fixture("positive/open_run_join_request.json");
     wire["run_id"] = serde_json::Value::String(run_id.to_string());
     wire["client_operation_id"] = serde_json::Value::String(operation_id.to_string());
     wire["join_proof"]["kind"] = serde_json::json!("registration_policy");
-    wire["join_proof"]["proof_ref"] = serde_json::json!("join_policy_runtime_01");
+    wire["join_proof"]["proof_ref"] = serde_json::json!(proof_ref);
     wire["join_proof"]["run_id"] = serde_json::Value::String(run_id.to_string());
     resign_open_wire(wire)
 }
@@ -402,6 +461,7 @@ fn source_context_with_trust_and_revision(
         "registration_codex",
         AuthenticationSnapshot::new(
             "credential_ci_runner",
+            1,
             policy_revision,
             1_783_891_100_000,
             expires_at_unix_ms,
@@ -428,13 +488,68 @@ fn source_context() -> AuthenticatedSourceContext {
     source_context_with_expiry(1_783_894_800_000)
 }
 
+fn context_with_authority(
+    template: &AuthenticatedSourceContext,
+    credential_id: &str,
+    credential_epoch: u64,
+    policy_revision: u64,
+) -> AuthenticatedSourceContext {
+    AuthenticatedSourceContext::new(
+        template.organization_id().clone(),
+        template.principal().clone(),
+        template.source_registration_id(),
+        AuthenticationSnapshot::new(
+            credential_id,
+            credential_epoch,
+            policy_revision,
+            template.authentication().authenticated_at_unix_ms(),
+            template.authentication().expires_at_unix_ms(),
+        )
+        .expect("replacement authentication snapshot"),
+        template.registration_policy().clone(),
+    )
+    .expect("replacement authenticated source context")
+}
+
+fn context_with_expiry(
+    template: &AuthenticatedSourceContext,
+    expires_at_unix_ms: u64,
+) -> AuthenticatedSourceContext {
+    AuthenticatedSourceContext::new(
+        template.organization_id().clone(),
+        template.principal().clone(),
+        template.source_registration_id(),
+        AuthenticationSnapshot::new(
+            template.authentication().credential_id(),
+            template.authentication().credential_epoch(),
+            template.authentication().policy_revision(),
+            template.authentication().authenticated_at_unix_ms(),
+            expires_at_unix_ms,
+        )
+        .expect("expiry-bound authentication snapshot"),
+        template.registration_policy().clone(),
+    )
+    .expect("expiry-bound authenticated source context")
+}
+
 fn source_context_for_organization(organization_id: &str) -> AuthenticatedSourceContext {
     let template = source_context();
     AuthenticatedSourceContext::new(
         organization_id.try_into().expect("organization"),
         template.principal().clone(),
-        template.source_registration_id(),
-        template.authentication().clone(),
+        format!("{}_{}", template.source_registration_id(), organization_id),
+        AuthenticationSnapshot::new(
+            format!(
+                "{}_{}",
+                template.authentication().credential_id(),
+                organization_id
+            ),
+            template.authentication().credential_epoch(),
+            template.authentication().policy_revision(),
+            template.authentication().authenticated_at_unix_ms(),
+            template.authentication().expires_at_unix_ms(),
+        )
+        .expect("organization-scoped authentication"),
         template.registration_policy().clone(),
     )
     .expect("organization-scoped source context")
@@ -487,6 +602,7 @@ fn runtime_source_context_with_finish(may_finish: bool) -> AuthenticatedSourceCo
         "registration_runtime",
         AuthenticationSnapshot::new(
             "credential_runtime",
+            1,
             3,
             1_783_891_100_000,
             1_783_894_800_000,
@@ -510,15 +626,39 @@ fn runtime_source_context_for_organization(organization_id: &str) -> Authenticat
     AuthenticatedSourceContext::new(
         organization_id.try_into().expect("organization"),
         template.principal().clone(),
-        template.source_registration_id(),
-        template.authentication().clone(),
+        format!("{}_{}", template.source_registration_id(), organization_id),
+        AuthenticationSnapshot::new(
+            format!(
+                "{}_{}",
+                template.authentication().credential_id(),
+                organization_id
+            ),
+            template.authentication().credential_epoch(),
+            template.authentication().policy_revision(),
+            template.authentication().authenticated_at_unix_ms(),
+            template.authentication().expires_at_unix_ms(),
+        )
+        .expect("organization-scoped runtime authentication"),
         template.registration_policy().clone(),
     )
     .expect("organization-scoped runtime context")
 }
 
-pub async fn open_run_returns_a_scoped_lease_and_exact_retry<H: GatewayConformanceHarness>() {
+async fn start_harness<H: GatewayConformanceHarness>() -> H {
     let harness = H::start().await.expect("start isolated Gateway harness");
+    harness
+        .seed_current_authority(&source_context())
+        .await
+        .expect("seed coordinator current authority");
+    harness
+        .seed_current_authority(&runtime_source_context())
+        .await
+        .expect("seed runtime current authority");
+    harness
+}
+
+pub async fn open_run_returns_a_scoped_lease_and_exact_retry<H: GatewayConformanceHarness>() {
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository,
@@ -573,7 +713,7 @@ pub async fn open_run_returns_a_scoped_lease_and_exact_retry<H: GatewayConforman
 }
 
 pub async fn source_stream_freezes_trust_and_policy_revision<H: GatewayConformanceHarness>() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -635,6 +775,23 @@ pub async fn source_stream_freezes_trust_and_policy_revision<H: GatewayConforman
         TrustProfile::HostVerified,
         8,
     );
+    harness
+        .rotate_current_authority(&initial, &revised_policy)
+        .await
+        .expect("publish the revised current policy");
+    let old_policy_replay = gateway
+        .open_run(&initial, create_request())
+        .await
+        .expect_err("the current credential cannot authenticate an old policy snapshot");
+    assert_eq!(old_policy_replay.code(), ContractErrorCode::Forbidden);
+    let revised_policy_replay = gateway
+        .open_run(&revised_policy, create_request())
+        .await
+        .expect_err("an operation replay cannot cross a policy-only rotation");
+    assert_eq!(
+        revised_policy_replay.code(),
+        ContractErrorCode::LeaseRevoked
+    );
     let error = gateway
         .ingest(
             &revised_policy,
@@ -649,8 +806,589 @@ pub async fn source_stream_freezes_trust_and_policy_revision<H: GatewayConforman
     assert_eq!(error.code(), ContractErrorCode::LeaseRevoked);
 }
 
+pub async fn current_authority_rotation_rejects_stale_replay_and_preserves_operation_identity<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = start_harness::<H>().await;
+    let repository = harness.repository();
+    let initial = source_context();
+    harness
+        .seed_current_authority(&initial)
+        .await
+        .expect("seed initial current authority");
+    let gateway = ExecutionEvidenceGateway::new(
+        repository,
+        FixedClock(1_783_891_200_000),
+        FixedIds::new(&[
+            "run_authority_epoch_01",
+            "stream_authority_epoch_01",
+            "lease_f123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "run_authority_epoch_02",
+            "stream_authority_epoch_02",
+            "lease_f223456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let original_request = create_request();
+    let opened = gateway
+        .open_run(&initial, original_request.clone())
+        .await
+        .expect("open under initial current authority");
+    let replacement = context_with_authority(&initial, "credential_ci_runner_rotated", 2, 8);
+    harness
+        .rotate_current_authority(&initial, &replacement)
+        .await
+        .expect("rotate current credential, epoch, and policy");
+    let after_rotation = harness.snapshot().await.expect("snapshot after rotation");
+
+    let old_replay = gateway
+        .open_run(&initial, original_request.clone())
+        .await
+        .expect_err("an old credential cannot retrieve a stored replay");
+    assert_eq!(old_replay.code(), ContractErrorCode::Unauthenticated);
+
+    let mut novel_wire =
+        serde_json::to_value(create_request()).expect("serialize novel old-authority request");
+    novel_wire["client_operation_id"] = serde_json::json!("operation_open_old_authority_novel");
+    novel_wire["client_run_key"] = serde_json::json!("workload_old_authority_novel");
+    let novel_request = resign_open_wire(novel_wire);
+    let old_novel = gateway
+        .open_run(&initial, novel_request.clone())
+        .await
+        .expect_err("an old credential cannot perform novel work");
+    assert_eq!(old_novel.code(), ContractErrorCode::Unauthenticated);
+
+    let wrong_epoch = context_with_authority(&initial, "credential_ci_runner_rotated", 1, 8);
+    let wrong_epoch_error = gateway
+        .open_run(&wrong_epoch, novel_request.clone())
+        .await
+        .expect_err("the current credential identifier cannot reuse an old epoch");
+    assert_eq!(wrong_epoch_error.code(), ContractErrorCode::Unauthenticated);
+
+    let stale_policy = context_with_authority(&initial, "credential_ci_runner_rotated", 2, 7);
+    let stale_policy_replay = gateway
+        .open_run(&stale_policy, original_request.clone())
+        .await
+        .expect_err("the current credential cannot use an old policy for replay");
+    assert_eq!(stale_policy_replay.code(), ContractErrorCode::Forbidden);
+    let stale_policy_novel = gateway
+        .open_run(&stale_policy, novel_request.clone())
+        .await
+        .expect_err("the current credential cannot use an old policy for novel work");
+    assert_eq!(stale_policy_novel.code(), ContractErrorCode::Forbidden);
+
+    let stale_replay = gateway
+        .open_run(&replacement, original_request.clone())
+        .await
+        .expect_err("a replay bound to the old epoch cannot cross authority rotation");
+    assert_eq!(stale_replay.code(), ContractErrorCode::LeaseRevoked);
+
+    let mut conflicting_wire =
+        serde_json::to_value(original_request).expect("serialize old operation identity");
+    conflicting_wire["objective_ref"] = serde_json::json!("objective_changed_after_rotation");
+    let stale_conflict = gateway
+        .open_run(&replacement, resign_open_wire(conflicting_wire))
+        .await
+        .expect_err("the old operation identity remains a tombstone after rotation");
+    assert_eq!(stale_conflict.code(), ContractErrorCode::LeaseRevoked);
+
+    let stale_lease = gateway
+        .ingest(
+            &replacement,
+            ingest_request(
+                opened.run_id().as_str(),
+                opened.lease().lease_id(),
+                opened.source_stream_id(),
+            ),
+        )
+        .await
+        .expect_err("a lease bound to the old epoch cannot cross authority rotation");
+    assert_eq!(stale_lease.code(), ContractErrorCode::LeaseRevoked);
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after stale authority attempts"),
+        after_rotation,
+        "stale authority and replay attempts have no lifecycle effects"
+    );
+
+    let recovered = gateway
+        .open_run(&replacement, novel_request)
+        .await
+        .expect("a distinct operation identity works under the current authority");
+    assert_eq!(recovered.outcome(), OpenRunOutcome::Created);
+    assert_eq!(recovered.run_id().as_str(), "run_authority_epoch_02");
+}
+
+pub async fn novel_lifecycle_operations_recheck_authentication_expiry_at_final_transaction_time<
+    H: GatewayConformanceHarness,
+>() {
+    const ADMISSION_UNIX_MS: u64 = 1_783_891_200_000;
+    const AUTHORITY_UNIX_MS: u64 = 1_783_891_249_999;
+    const AUTHENTICATION_EXPIRY_UNIX_MS: u64 = 1_783_891_250_000;
+
+    let harness = start_harness::<H>().await;
+    let repository = harness.repository();
+    let current = source_context();
+    let runtime_current = runtime_source_context();
+    let setup_gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(ADMISSION_UNIX_MS),
+        FixedIds::new(&[
+            "run_authority_expiry_01",
+            "stream_authority_expiry_01",
+            "lease_a123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "stream_runtime_authority_expiry_01",
+            "lease_c123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let opened = setup_gateway
+        .open_run(&current, create_request())
+        .await
+        .expect("open run before the authentication-expiry boundary");
+    harness
+        .register_join_policy(
+            &current,
+            &runtime_current,
+            opened.run_id().clone(),
+            SourceKind::RuntimeWitness,
+            "join_policy_runtime_authority_expiry_01",
+            1_783_894_800_000,
+        )
+        .await
+        .expect("register runtime source before the authentication-expiry boundary");
+    let joined = setup_gateway
+        .open_run(
+            &runtime_current,
+            registration_policy_join_request_with_proof(
+                opened.run_id().as_str(),
+                "operation_join_runtime_authority_expiry_01",
+                "join_policy_runtime_authority_expiry_01",
+            ),
+        )
+        .await
+        .expect("join runtime source before the authentication-expiry boundary");
+    setup_gateway
+        .ingest(
+            &current,
+            ingest_request(
+                opened.run_id().as_str(),
+                opened.lease().lease_id(),
+                opened.source_stream_id(),
+            ),
+        )
+        .await
+        .expect("seed valid evidence before the authentication-expiry boundary");
+    let baseline = harness.snapshot().await.expect("baseline snapshot");
+    let expiring = context_with_expiry(&current, AUTHENTICATION_EXPIRY_UNIX_MS);
+    let runtime_expiring = context_with_expiry(&runtime_current, AUTHENTICATION_EXPIRY_UNIX_MS);
+
+    let mut open_wire =
+        serde_json::to_value(create_request()).expect("serialize expiry-boundary open");
+    open_wire["client_operation_id"] = serde_json::json!("operation_open_authentication_expiry_01");
+    open_wire["client_run_key"] = serde_json::json!("workload_authentication_expiry_01");
+    let open_error = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        AuthorityExpiryClock::new(
+            ADMISSION_UNIX_MS,
+            AUTHORITY_UNIX_MS,
+            AUTHENTICATION_EXPIRY_UNIX_MS,
+        ),
+        FixedIds::new(&[
+            "run_authentication_expiry_rejected",
+            "stream_authentication_expiry_rejected",
+            "lease_b123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    )
+    .open_run(&expiring, resign_open_wire(open_wire))
+    .await
+    .expect_err("open_run must not cross authentication expiry after its client-run lock");
+    assert_eq!(open_error.code(), ContractErrorCode::Unauthenticated);
+    assert_eq!(
+        open_error.audit_reason(),
+        AuditReason::CurrentAuthorityStale
+    );
+    assert_non_retryable(&open_error);
+    assert_eq!(
+        harness.snapshot().await.expect("post-open snapshot"),
+        baseline
+    );
+
+    let bind_error = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        AuthorityExpiryClock::new(
+            ADMISSION_UNIX_MS,
+            AUTHORITY_UNIX_MS,
+            AUTHENTICATION_EXPIRY_UNIX_MS,
+        ),
+        FixedIds::new(&[]),
+    )
+    .bind_runtime(
+        &runtime_expiring,
+        bind_runtime_request(opened.run_id().as_str(), joined.lease().lease_id()),
+    )
+    .await
+    .expect_err("bind_runtime must not cross authentication expiry after run and lease locks");
+    assert_eq!(bind_error.code(), ContractErrorCode::Unauthenticated);
+    assert_eq!(
+        bind_error.audit_reason(),
+        AuditReason::CurrentAuthorityStale
+    );
+    assert_non_retryable(&bind_error);
+    assert_eq!(
+        harness.snapshot().await.expect("post-bind snapshot"),
+        baseline
+    );
+
+    let ingest_error = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        AuthorityExpiryClock::new(
+            ADMISSION_UNIX_MS,
+            AUTHORITY_UNIX_MS,
+            AUTHENTICATION_EXPIRY_UNIX_MS,
+        ),
+        FixedIds::new(&[]),
+    )
+    .ingest(
+        &expiring,
+        gap_fill_request(
+            opened.run_id().as_str(),
+            opened.lease().lease_id(),
+            opened.source_stream_id(),
+        ),
+    )
+    .await
+    .expect_err("ingest must not cross authentication expiry after run and lease locks");
+    assert_eq!(ingest_error.code(), ContractErrorCode::Unauthenticated);
+    assert_eq!(
+        ingest_error.audit_reason(),
+        AuditReason::CurrentAuthorityStale
+    );
+    assert_non_retryable(&ingest_error);
+    assert_eq!(
+        harness.snapshot().await.expect("post-ingest snapshot"),
+        baseline
+    );
+
+    let finish_error = ExecutionEvidenceGateway::new(
+        repository,
+        AuthorityExpiryClock::new(
+            ADMISSION_UNIX_MS,
+            AUTHORITY_UNIX_MS,
+            AUTHENTICATION_EXPIRY_UNIX_MS,
+        ),
+        FixedIds::new(&[]),
+    )
+    .finish_run(
+        &expiring,
+        finish_run_request(
+            opened.run_id().as_str(),
+            opened.lease().lease_id(),
+            opened.source_stream_id(),
+            "operation_finish_authentication_expiry_01",
+        ),
+    )
+    .await
+    .expect_err("finish_run must not cross authentication expiry after run and lease locks");
+    assert_eq!(finish_error.code(), ContractErrorCode::Unauthenticated);
+    assert_eq!(
+        finish_error.audit_reason(),
+        AuditReason::CurrentAuthorityStale
+    );
+    assert_non_retryable(&finish_error);
+    assert_eq!(
+        harness.snapshot().await.expect("post-finish snapshot"),
+        baseline
+    );
+}
+
+pub async fn credential_rotation_requires_new_join_authority_and_a_new_source_stream<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = start_harness::<H>().await;
+    let repository = harness.repository();
+    let coordinator = source_context();
+    let original_runtime = runtime_source_context();
+    let gateway = ExecutionEvidenceGateway::new(
+        repository,
+        FixedClock(1_783_891_200_000),
+        FixedIds::new(&[
+            "run_rotation_continuity_01",
+            "stream_rotation_coordinator_01",
+            "lease_c123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "stream_rotation_runtime_01",
+            "lease_c223456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "stream_rotation_runtime_02",
+            "lease_c323456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let opened = gateway
+        .open_run(&coordinator, create_request())
+        .await
+        .expect("open run with a coordinator lease that remains live");
+    harness
+        .register_join_policy(
+            &coordinator,
+            &original_runtime,
+            opened.run_id().clone(),
+            SourceKind::RuntimeWitness,
+            "join_policy_runtime_epoch_01",
+            1_783_894_800_000,
+        )
+        .await
+        .expect("register runtime join policy for epoch one");
+    let first_join_request = registration_policy_join_request_with_proof(
+        opened.run_id().as_str(),
+        "operation_join_runtime_epoch_01",
+        "join_policy_runtime_epoch_01",
+    );
+    let first_join = gateway
+        .open_run(&original_runtime, first_join_request.clone())
+        .await
+        .expect("join runtime source under epoch one");
+
+    let rotated_runtime =
+        context_with_authority(&original_runtime, "credential_runtime_rotated", 2, 3);
+    harness
+        .rotate_current_authority(&original_runtime, &rotated_runtime)
+        .await
+        .expect("rotate only the runtime credential and epoch");
+    let after_rotation = harness.snapshot().await.expect("snapshot after rotation");
+
+    let old_replay = gateway
+        .open_run(&original_runtime, first_join_request.clone())
+        .await
+        .expect_err("the old runtime credential cannot retrieve its join replay");
+    assert_eq!(old_replay.code(), ContractErrorCode::Unauthenticated);
+    let rotated_replay = gateway
+        .open_run(&rotated_runtime, first_join_request)
+        .await
+        .expect_err("the old join operation remains bound to epoch one");
+    assert_eq!(rotated_replay.code(), ContractErrorCode::LeaseRevoked);
+    let old_lease = gateway
+        .ingest(
+            &rotated_runtime,
+            runtime_ingest_request(
+                opened.run_id().as_str(),
+                first_join.lease().lease_id(),
+                first_join.source_stream_id(),
+            ),
+        )
+        .await
+        .expect_err("the rotated runtime cannot reuse its epoch-one lease");
+    assert_eq!(old_lease.code(), ContractErrorCode::LeaseRevoked);
+
+    let stale_join_policy = gateway
+        .open_run(
+            &rotated_runtime,
+            registration_policy_join_request_with_proof(
+                opened.run_id().as_str(),
+                "operation_join_runtime_stale_policy",
+                "join_policy_runtime_epoch_01",
+            ),
+        )
+        .await
+        .expect_err("join authority issued for epoch one cannot authorize epoch two");
+    assert_eq!(stale_join_policy.code(), ContractErrorCode::NotFound);
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after stale credential artifacts"),
+        after_rotation
+    );
+
+    harness
+        .register_join_policy(
+            &coordinator,
+            &rotated_runtime,
+            opened.run_id().clone(),
+            SourceKind::RuntimeWitness,
+            "join_policy_runtime_epoch_02",
+            1_783_894_800_000,
+        )
+        .await
+        .expect("register fresh runtime join policy for epoch two");
+    let second_join = gateway
+        .open_run(
+            &rotated_runtime,
+            registration_policy_join_request_with_proof(
+                opened.run_id().as_str(),
+                "operation_join_runtime_epoch_02",
+                "join_policy_runtime_epoch_02",
+            ),
+        )
+        .await
+        .expect("join the still-live run with a fresh epoch-two stream");
+    assert_ne!(
+        second_join.source_stream_id(),
+        first_join.source_stream_id()
+    );
+    assert_ne!(
+        second_join.lease().lease_id(),
+        first_join.lease().lease_id()
+    );
+}
+
+pub async fn revoked_current_authority_rejects_novel_work_and_replay_without_effects<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = start_harness::<H>().await;
+    let repository = harness.repository();
+    let current = source_context();
+    let gateway = ExecutionEvidenceGateway::new(
+        repository,
+        FixedClock(1_783_891_200_000),
+        FixedIds::new(&[
+            "run_authority_revoke_01",
+            "stream_authority_revoke_01",
+            "lease_c423456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let request = create_request();
+    gateway
+        .open_run(&current, request.clone())
+        .await
+        .expect("open under the current authority");
+    harness
+        .revoke_current_authority(&current)
+        .await
+        .expect("revoke the current authority");
+    let after_revoke = harness.snapshot().await.expect("snapshot after revocation");
+
+    let replay = gateway
+        .open_run(&current, request)
+        .await
+        .expect_err("a revoked credential cannot retrieve a replay");
+    assert_eq!(replay.code(), ContractErrorCode::Unauthenticated);
+    let mut novel_wire =
+        serde_json::to_value(create_request()).expect("serialize novel revoked request");
+    novel_wire["client_operation_id"] = serde_json::json!("operation_open_revoked_novel");
+    novel_wire["client_run_key"] = serde_json::json!("workload_revoked_novel");
+    let novel = gateway
+        .open_run(&current, resign_open_wire(novel_wire))
+        .await
+        .expect_err("a revoked credential cannot perform novel work");
+    assert_eq!(novel.code(), ContractErrorCode::Unauthenticated);
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after revoked authority attempts"),
+        after_revoke
+    );
+}
+
+pub async fn every_lifecycle_replay_is_bound_to_its_credential_epoch_and_policy<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = start_harness::<H>().await;
+    let repository = harness.repository();
+    let registered_runtime = runtime_source_context();
+    let initial = context_with_authority(&runtime_finalizer_context(), "credential_runtime", 1, 4);
+    harness
+        .rotate_current_authority(&registered_runtime, &initial)
+        .await
+        .expect("publish a current runtime policy that permits finalization");
+    let gateway = ExecutionEvidenceGateway::new(
+        repository,
+        FixedClock(1_783_891_200_000),
+        FixedIds::new(&[
+            "run_all_epoch_replays_01",
+            "stream_all_epoch_replays_01",
+            "lease_c523456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let open_request = runtime_create_request();
+    let opened = gateway
+        .open_run(&initial, open_request.clone())
+        .await
+        .expect("open runtime run under epoch one");
+    let bind_request = bind_runtime_request(opened.run_id().as_str(), opened.lease().lease_id());
+    gateway
+        .bind_runtime(&initial, bind_request.clone())
+        .await
+        .expect("bind runtime under epoch one");
+    let ingest_request = runtime_ingest_request(
+        opened.run_id().as_str(),
+        opened.lease().lease_id(),
+        opened.source_stream_id(),
+    );
+    gateway
+        .ingest(&initial, ingest_request.clone())
+        .await
+        .expect("ingest runtime evidence under epoch one");
+    let finish_request = runtime_finish_run_request(
+        opened.run_id().as_str(),
+        opened.lease().lease_id(),
+        opened.source_stream_id(),
+    );
+    gateway
+        .finish_run(&initial, finish_request.clone())
+        .await
+        .expect("finish runtime run under epoch one");
+
+    let replacement = context_with_authority(&initial, "credential_runtime_epoch_two", 2, 4);
+    harness
+        .rotate_current_authority(&initial, &replacement)
+        .await
+        .expect("rotate runtime credential without changing policy");
+    let after_rotation = harness.snapshot().await.expect("snapshot after rotation");
+
+    let old_failures = [
+        gateway
+            .open_run(&initial, open_request)
+            .await
+            .expect_err("old open replay must fail"),
+        gateway
+            .bind_runtime(&initial, bind_request.clone())
+            .await
+            .expect_err("old bind replay must fail"),
+        gateway
+            .ingest(&initial, ingest_request.clone())
+            .await
+            .expect_err("old ingest replay must fail"),
+        gateway
+            .finish_run(&initial, finish_request.clone())
+            .await
+            .expect_err("old finish replay must fail"),
+    ];
+    for failure in old_failures {
+        assert_eq!(failure.code(), ContractErrorCode::Unauthenticated);
+    }
+
+    let replacement_failures = [
+        gateway
+            .open_run(&replacement, runtime_create_request())
+            .await
+            .expect_err("epoch-one open replay must not materialize under epoch two"),
+        gateway
+            .bind_runtime(&replacement, bind_request)
+            .await
+            .expect_err("epoch-one bind replay must not materialize under epoch two"),
+        gateway
+            .ingest(&replacement, ingest_request)
+            .await
+            .expect_err("epoch-one ingest replay must not materialize under epoch two"),
+        gateway
+            .finish_run(&replacement, finish_request)
+            .await
+            .expect_err("epoch-one finish replay must not materialize under epoch two"),
+    ];
+    for failure in replacement_failures {
+        assert_eq!(failure.code(), ContractErrorCode::LeaseRevoked);
+    }
+    assert_eq!(
+        harness
+            .snapshot()
+            .await
+            .expect("snapshot after rejected lifecycle replays"),
+        after_rotation
+    );
+}
+
 pub async fn open_run_join_requires_a_server_registered_grant<H: GatewayConformanceHarness>() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -708,6 +1446,7 @@ pub async fn open_run_join_requires_a_server_registered_grant<H: GatewayConforma
         runtime_context.source_registration_id(),
         AuthenticationSnapshot::new(
             runtime_context.authentication().credential_id(),
+            runtime_context.authentication().credential_epoch(),
             runtime_context.authentication().policy_revision() + 1,
             runtime_context.authentication().authenticated_at_unix_ms(),
             runtime_context.authentication().expires_at_unix_ms(),
@@ -719,8 +1458,8 @@ pub async fn open_run_join_requires_a_server_registered_grant<H: GatewayConforma
     let stale_grant_error = gateway
         .open_run(&revised_runtime_context, request.clone())
         .await
-        .expect_err("a join grant is bound to its registered policy revision");
-    assert_eq!(stale_grant_error.code(), ContractErrorCode::NotFound);
+        .expect_err("an unregistered policy revision is not current authority");
+    assert_eq!(stale_grant_error.code(), ContractErrorCode::Forbidden);
 
     let joined = gateway
         .open_run(&runtime_context, request.clone())
@@ -790,7 +1529,7 @@ pub async fn open_run_join_requires_a_server_registered_grant<H: GatewayConforma
 }
 
 pub async fn open_run_join_rechecks_grant_expiry_after_admission<H: GatewayConformanceHarness>() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let admission_unix_ms = 1_783_891_200_000;
     let grant_expiry_unix_ms = admission_unix_ms + 100_000;
@@ -884,7 +1623,7 @@ pub async fn open_run_join_rechecks_grant_expiry_after_admission<H: GatewayConfo
 pub async fn open_run_join_rechecks_finalization_deadline_after_admission<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let admission_unix_ms = 1_783_891_200_000;
     let coordinator_gateway = ExecutionEvidenceGateway::new(
@@ -961,7 +1700,7 @@ pub async fn open_run_join_rechecks_finalization_deadline_after_admission<
 
     let replayed = ExecutionEvidenceGateway::new(
         repository.clone(),
-        ReplayOnlyClock(deadline),
+        ReplayOnlyClock::new(deadline),
         FixedIds::new(&[]),
     )
     .open_run(&runtime, baseline_join)
@@ -1002,7 +1741,7 @@ pub async fn open_run_join_rechecks_finalization_deadline_after_admission<
 pub async fn open_run_join_rechecks_last_lease_expiry_after_admission<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let opened_at_unix_ms = 1_783_891_200_000;
     let coordinator = source_context();
@@ -1063,7 +1802,7 @@ pub async fn open_run_join_rechecks_last_lease_expiry_after_admission<
 pub async fn open_run_join_rejects_invalid_transaction_time_without_partial_state<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let admission_unix_ms = 1_783_891_200_000;
     let creator = ExecutionEvidenceGateway::new(
@@ -1138,7 +1877,7 @@ pub async fn open_run_join_rejects_invalid_transaction_time_without_partial_stat
 pub async fn open_run_join_is_enumeration_safe_across_organizations<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository,
@@ -1155,6 +1894,10 @@ pub async fn open_run_join_is_enumeration_safe_across_organizations<
         .expect("create run");
     let same_organization = runtime_source_context();
     let other_organization = runtime_source_context_for_organization("org_other");
+    harness
+        .seed_current_authority(&other_organization)
+        .await
+        .expect("seed authenticated source in the other organization");
 
     let unauthorized_existing = gateway
         .open_run(&same_organization, join_request(opened.run_id().as_str()))
@@ -1193,7 +1936,7 @@ pub async fn open_run_join_is_enumeration_safe_across_organizations<
 pub async fn open_run_registration_policy_is_server_registered_and_reusable<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1251,7 +1994,7 @@ pub async fn open_run_registration_policy_is_server_registered_and_reusable<
 pub async fn open_run_enforces_the_256_source_stream_limit_without_partial_state<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let mut identities = vec![
         "run_stream_cap_01".to_string(),
@@ -1353,7 +2096,7 @@ pub async fn open_run_enforces_the_256_source_stream_limit_without_partial_state
 }
 
 pub async fn open_run_rejects_an_expired_authentication_snapshot<H: GatewayConformanceHarness>() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1373,7 +2116,7 @@ pub async fn open_run_rejects_an_expired_authentication_snapshot<H: GatewayConfo
 }
 
 pub async fn open_run_rejects_source_capability_escalation<H: GatewayConformanceHarness>() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1395,7 +2138,7 @@ pub async fn open_run_rejects_source_capability_escalation<H: GatewayConformance
 }
 
 pub async fn open_run_rejects_a_client_selected_authority<H: GatewayConformanceHarness>() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1422,7 +2165,7 @@ pub async fn open_run_rejects_a_client_selected_authority<H: GatewayConformanceH
 pub async fn open_run_rejects_stale_request_digest_without_consuming_identity<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1459,7 +2202,7 @@ pub async fn open_run_rejects_stale_request_digest_without_consuming_identity<
 pub async fn ingest_commits_an_atomic_batch_and_reports_source_gaps<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1519,7 +2262,7 @@ pub async fn ingest_commits_an_atomic_batch_and_reports_source_gaps<
 }
 
 pub async fn ingest_accepts_a_mixed_duplicate_and_gap_fill_retry<H: GatewayConformanceHarness>() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1576,7 +2319,7 @@ pub async fn ingest_accepts_a_mixed_duplicate_and_gap_fill_retry<H: GatewayConfo
 pub async fn ingest_coalesces_same_batch_exact_duplicates_without_partial_state<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository,
@@ -1668,7 +2411,7 @@ pub async fn ingest_coalesces_same_batch_exact_duplicates_without_partial_state<
 pub async fn ingest_rejects_payload_tampering_without_a_partial_commit<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1710,7 +2453,7 @@ pub async fn ingest_rejects_payload_tampering_without_a_partial_commit<
 pub async fn ingest_rejects_reused_operation_identity_with_changed_content<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1749,7 +2492,7 @@ pub async fn ingest_rejects_reused_operation_identity_with_changed_content<
 pub async fn ingest_conflicts_roll_back_the_entire_batch_and_operation_identity<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1859,7 +2602,7 @@ pub async fn ingest_conflicts_roll_back_the_entire_batch_and_operation_identity<
 pub async fn lease_failures_are_explicit_and_cross_organization_safe<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let creator = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -1881,16 +2624,18 @@ pub async fn lease_failures_are_explicit_and_cross_organization_safe<
         opened.source_stream_id(),
     );
 
+    let other_context = source_context_for_organization("org_other");
+    harness
+        .seed_current_authority(&other_context)
+        .await
+        .expect("seed authenticated source in the other organization");
     let other_organization = ExecutionEvidenceGateway::new(
         repository.clone(),
         FixedClock(1_783_891_200_000),
         FixedIds::new(&[]),
     );
     let cross_org = other_organization
-        .ingest(
-            &source_context_for_organization("org_other"),
-            request.clone(),
-        )
+        .ingest(&other_context, request.clone())
         .await
         .expect_err("lease is organization-bound");
 
@@ -1902,7 +2647,7 @@ pub async fn lease_failures_are_explicit_and_cross_organization_safe<
     }
     let missing = resign_ingest_wire(missing_wire);
     let missing_error = other_organization
-        .ingest(&source_context_for_organization("org_other"), missing)
+        .ingest(&other_context, missing)
         .await
         .expect_err("missing run is enumeration-safe");
     assert_eq!(
@@ -1935,7 +2680,7 @@ pub async fn lease_failures_are_explicit_and_cross_organization_safe<
 pub async fn active_run_seals_only_after_its_last_lease_expires_and_cannot_be_revived<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let creator = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -2043,7 +2788,7 @@ pub async fn active_run_seals_only_after_its_last_lease_expires_and_cannot_be_re
 
     let replay_gateway = ExecutionEvidenceGateway::new(
         repository,
-        ReplayOnlyClock(joined.lease().expires_at_unix_ms()),
+        ReplayOnlyClock::new(joined.lease().expires_at_unix_ms()),
         FixedIds::new(&[]),
     );
     let replayed = replay_gateway
@@ -2058,7 +2803,7 @@ pub async fn active_run_seals_only_after_its_last_lease_expires_and_cannot_be_re
 pub async fn open_run_does_not_leave_partial_state_when_identity_generation_fails<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let failing_gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -2094,7 +2839,7 @@ pub async fn open_run_does_not_leave_partial_state_when_identity_generation_fail
 }
 
 pub async fn bind_runtime_is_source_scoped_and_idempotent<H: GatewayConformanceHarness>() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -2184,7 +2929,7 @@ pub async fn bind_runtime_is_source_scoped_and_idempotent<H: GatewayConformanceH
 pub async fn bind_runtime_prevents_cross_run_identity_confusion_until_seal<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository,
@@ -2282,7 +3027,7 @@ pub async fn bind_runtime_prevents_cross_run_identity_confusion_until_seal<
 pub async fn bind_runtime_rechecks_last_lease_expiry_after_admission<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let admission_unix_ms = 1_783_891_200_000;
     let context = runtime_source_context();
@@ -2317,7 +3062,7 @@ pub async fn bind_runtime_rechecks_last_lease_expiry_after_admission<
 
     let replay_gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
-        ReplayOnlyClock(lease_expiry_unix_ms),
+        ReplayOnlyClock::new(lease_expiry_unix_ms),
         FixedIds::new(&[]),
     );
     let replayed = replay_gateway
@@ -2359,7 +3104,12 @@ pub async fn bind_runtime_rechecks_last_lease_expiry_after_admission<
     assert_eq!(before_replay.active_runtime_identity_count(), 1);
     assert_eq!(after_rejection.active_runtime_identity_count(), 0);
 
-    let replayed_after_seal = replay_gateway
+    let post_seal_replay_gateway = ExecutionEvidenceGateway::new(
+        repository,
+        ReplayOnlyClock::new(lease_expiry_unix_ms),
+        FixedIds::new(&[]),
+    );
+    let replayed_after_seal = post_seal_replay_gateway
         .bind_runtime(&context, baseline_request)
         .await
         .expect("exact binding replay remains stable after lazy sealing");
@@ -2377,7 +3127,7 @@ pub async fn bind_runtime_rechecks_last_lease_expiry_after_admission<
 pub async fn bind_runtime_rejects_an_expired_lease_without_sealing_while_another_lease_is_live<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let admission_unix_ms = 1_783_891_200_000;
     let context = runtime_source_context();
@@ -2474,7 +3224,7 @@ pub async fn bind_runtime_rejects_an_expired_lease_without_sealing_while_another
 pub async fn bind_runtime_rejects_invalid_transaction_time_without_partial_state<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let admission_unix_ms = 1_783_891_200_000;
     let context = runtime_source_context();
@@ -2530,7 +3280,7 @@ pub async fn bind_runtime_rejects_invalid_transaction_time_without_partial_state
 pub async fn finish_run_remains_bounded_until_declared_gaps_are_filled<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -2628,7 +3378,7 @@ pub async fn finish_run_remains_bounded_until_declared_gaps_are_filled<
 pub async fn first_finish_seals_an_already_reconciled_run_atomically<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -2696,7 +3446,7 @@ pub async fn first_finish_seals_an_already_reconciled_run_atomically<
 pub async fn finish_run_rejects_a_terminal_position_below_the_durable_watermark<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -2757,7 +3507,7 @@ pub async fn finish_run_rejects_a_terminal_position_below_the_durable_watermark<
 pub async fn finish_run_deadline_is_frozen_and_expires_to_incomplete<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -2852,7 +3602,7 @@ pub async fn finish_run_deadline_is_frozen_and_expires_to_incomplete<
 }
 
 pub async fn ingest_rechecks_finalization_deadline_after_admission<H: GatewayConformanceHarness>() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let admitted_at_unix_ms = 1_783_891_200_000;
     let deadline_unix_ms = admitted_at_unix_ms + 60_000;
@@ -2902,7 +3652,7 @@ pub async fn ingest_rechecks_finalization_deadline_after_admission<H: GatewayCon
         .expect("snapshot before exact replay at finalization deadline");
     let replay_gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
-        ReplayOnlyClock(deadline_unix_ms),
+        ReplayOnlyClock::new(deadline_unix_ms),
         FixedIds::new(&[]),
     );
     let replayed = replay_gateway
@@ -2971,7 +3721,7 @@ pub async fn ingest_rechecks_finalization_deadline_after_admission<H: GatewayCon
 }
 
 pub async fn ingest_rechecks_last_lease_expiry_after_admission<H: GatewayConformanceHarness>() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let admitted_at_unix_ms = 1_783_891_200_000;
     let gateway = ExecutionEvidenceGateway::new(
@@ -3005,7 +3755,7 @@ pub async fn ingest_rechecks_last_lease_expiry_after_admission<H: GatewayConform
 
     let replay_gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
-        ReplayOnlyClock(lease_expiry_unix_ms),
+        ReplayOnlyClock::new(lease_expiry_unix_ms),
         FixedIds::new(&[]),
     );
     let replayed = replay_gateway
@@ -3077,7 +3827,7 @@ pub async fn ingest_rechecks_last_lease_expiry_after_admission<H: GatewayConform
 pub async fn ingest_rejects_invalid_transaction_time_without_partial_state<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let admitted_at_unix_ms = 1_783_891_200_000;
     let gateway = ExecutionEvidenceGateway::new(
@@ -3128,7 +3878,7 @@ pub async fn ingest_rejects_invalid_transaction_time_without_partial_state<
 pub async fn finish_run_rejects_an_elapsed_requested_deadline_without_extending_it<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -3176,7 +3926,7 @@ pub async fn finish_run_rejects_an_elapsed_requested_deadline_without_extending_
 pub async fn finishing_run_bounds_joined_leases_and_rejects_novel_work_at_deadline<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let coordinator_gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
@@ -3254,7 +4004,7 @@ pub async fn finishing_run_bounds_joined_leases_and_rejects_novel_work_at_deadli
 
     let replay_gateway = ExecutionEvidenceGateway::new(
         repository.clone(),
-        ReplayOnlyClock(deadline),
+        ReplayOnlyClock::new(deadline),
         FixedIds::new(&[]),
     );
     let replayed = replay_gateway
@@ -3383,7 +4133,7 @@ pub async fn finishing_run_bounds_joined_leases_and_rejects_novel_work_at_deadli
 pub async fn finish_run_requires_every_server_required_source_stream<
     H: GatewayConformanceHarness,
 >() {
-    let harness = H::start().await.expect("start isolated Gateway harness");
+    let harness = start_harness::<H>().await;
     let repository = harness.repository();
     let gateway = ExecutionEvidenceGateway::new(
         repository.clone(),

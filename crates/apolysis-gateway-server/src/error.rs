@@ -258,6 +258,7 @@ impl std::error::Error for GatewayServerError {}
 fn safe_configuration_message(message: &'static str) -> &'static str {
     match message {
         "A revoked client certificate cannot be registered again"
+        | "Authority change reason is invalid"
         | "Authority command is required"
         | "Authority command is unsupported"
         | "Authority command names must be UTF-8"
@@ -279,6 +280,7 @@ fn safe_configuration_message(message: &'static str) -> &'static str {
         | "Client certificate must declare clientAuth"
         | "Client certificate usage is invalid"
         | "Client certificate validity is invalid"
+        | "Credential rotation sequence is invalid"
         | "Gateway authority operation is invalid"
         | "Gateway clock is invalid"
         | "Gateway database URL file is invalid"
@@ -317,6 +319,7 @@ fn safe_configuration_message(message: &'static str) -> &'static str {
         | "Gateway secret file must not be empty"
         | "Gateway secret file permissions are too broad"
         | "Gateway stopped before becoming ready"
+        | "Policy rotation sequence is invalid"
         | "Revocation reason is invalid"
         | "Source authority updates require the credential rotation gate"
         | "Source policy is invalid"
@@ -535,6 +538,7 @@ fn contract_code_name(code: ContractErrorCode) -> &'static str {
 fn audit_reason_name(reason: AuditReason) -> &'static str {
     match reason {
         AuditReason::AuthenticationExpired => "authentication_expired",
+        AuditReason::CurrentAuthorityStale => "current_authority_stale",
         AuditReason::PrincipalMismatch => "principal_mismatch",
         AuditReason::SourceRegistrationMismatch => "source_registration_mismatch",
         AuditReason::SourcePolicyMismatch => "source_policy_mismatch",

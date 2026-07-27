@@ -306,7 +306,7 @@ fn source_context_for(
         OrganizationId::try_from(organization_id).expect("organization id"),
         PrincipalRef::new(PrincipalKind::Workload, PRINCIPAL_ID).expect("principal"),
         source_registration_id,
-        AuthenticationSnapshot::new(credential_id, 1, now - 1_000, now + 3_600_000)
+        AuthenticationSnapshot::new(credential_id, 1, 1, now - 1_000, now + 3_600_000)
             .expect("authentication snapshot"),
         source_policy(),
     )
@@ -370,7 +370,7 @@ async fn seed_authority(
     .bind(PRINCIPAL_ID)
     .bind(now - 60_000)
     .bind(now + 3_600_000)
-    .bind(policy)
+    .bind(&policy)
     .execute(pool)
     .await?;
     let mut fingerprint = [0_u8; 32];
@@ -386,6 +386,21 @@ async fn seed_authority(
     .bind(fingerprint.as_slice())
     .bind(organization_id)
     .bind(source_registration_id)
+    .bind(now - 60_000)
+    .bind(now + 3_600_000)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.source_authority_revisions (\
+            organization_id, source_registration_id, credential_id, credential_epoch, \
+            registration_policy_revision, policy_document, effective_at_unix_ms, \
+            expires_at_unix_ms, recorded_at_unix_ms\
+         ) VALUES ($1,$2,$3,1,1,$4,$5,$6,$5)",
+    )
+    .bind(organization_id)
+    .bind(source_registration_id)
+    .bind(credential_id)
+    .bind(policy)
     .bind(now - 60_000)
     .bind(now + 3_600_000)
     .execute(pool)

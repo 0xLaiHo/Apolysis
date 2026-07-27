@@ -169,10 +169,11 @@ async fn run() -> DriverResult<()> {
         ensure_output_absent(path)?;
     }
 
+    let (context, request) = build_operation(&arguments.scenario)?;
     let database_url = read_database_url(&arguments.database_url_file)?;
     let replay_key = read_replay_key(&arguments.replay_key_file)?;
     let (gateway, pool) = production_gateway(&database_url, replay_key).await?;
-    let (context, request) = build_operation(&arguments.scenario)?;
+    seed_current_authority(&pool, &context).await?;
 
     match arguments.mode {
         Mode::Open => {
@@ -592,6 +593,7 @@ fn build_operation(scenario: &str) -> DriverResult<(AuthenticatedSourceContext, 
     let authentication = AuthenticationSnapshot::new(
         format!("credential_{scenario}"),
         1,
+        1,
         now_unix_ms.saturating_sub(60_000).max(1),
         now_unix_ms
             .checked_add(60 * 60 * 1_000)
@@ -631,6 +633,141 @@ fn build_operation(scenario: &str) -> DriverResult<(AuthenticatedSourceContext, 
         OpenRunRequest::Join { .. } => return Err(DriverError("operation construction")),
     }
     Ok((context, request))
+}
+
+async fn seed_current_authority(
+    pool: &PgPool,
+    context: &AuthenticatedSourceContext,
+) -> DriverResult<()> {
+    let authentication = context.authentication();
+    let policy = context.registration_policy();
+    let fingerprint = Sha256::digest(authentication.credential_id().as_bytes());
+    let policy_document = serde_json::json!({
+        "fixture": "postgres_crash_driver",
+        "source_id": policy.source_id().as_str()
+    });
+    let authenticated_at = i64::try_from(authentication.authenticated_at_unix_ms())
+        .map_err(|_| DriverError("authority fixture construction"))?;
+    let expires_at = i64::try_from(authentication.expires_at_unix_ms())
+        .map_err(|_| DriverError("authority fixture construction"))?;
+    let policy_revision = i64::try_from(authentication.policy_revision())
+        .map_err(|_| DriverError("authority fixture construction"))?;
+    let credential_epoch = i64::try_from(authentication.credential_epoch())
+        .map_err(|_| DriverError("authority fixture construction"))?;
+
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.organizations ( \
+             organization_id, organization_state, created_at_unix_ms, updated_at_unix_ms \
+         ) VALUES ($1, 'active', $2, $2) \
+         ON CONFLICT (organization_id) DO NOTHING",
+    )
+    .bind(context.organization_id().as_str())
+    .bind(authenticated_at)
+    .execute(pool)
+    .await
+    .map_err(|_| DriverError("authority fixture organization"))?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.source_registrations ( \
+             source_registration_id, organization_id, source_id, principal_kind, \
+             principal_id, registration_state, policy_revision, credential_epoch, \
+             effective_at_unix_ms, expires_at_unix_ms, policy_document, \
+             created_at_unix_ms, updated_at_unix_ms \
+         ) VALUES ($1,$2,$3,'workload',$4,'active',$5,$6,$7,$8,$9,$7,$7) \
+         ON CONFLICT (source_registration_id) DO NOTHING",
+    )
+    .bind(context.source_registration_id())
+    .bind(context.organization_id().as_str())
+    .bind(policy.source_id().as_str())
+    .bind(context.principal().id())
+    .bind(policy_revision)
+    .bind(credential_epoch)
+    .bind(authenticated_at)
+    .bind(expires_at)
+    .bind(&policy_document)
+    .execute(pool)
+    .await
+    .map_err(|_| DriverError("authority fixture registration"))?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.transport_credentials ( \
+             credential_id, certificate_fingerprint, organization_id, \
+             source_registration_id, credential_epoch, effective_at_unix_ms, \
+             expires_at_unix_ms, revoked_at_unix_ms, revocation_reason, \
+             created_at_unix_ms, updated_at_unix_ms \
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,NULL,$6,$6) \
+         ON CONFLICT (credential_id) DO NOTHING",
+    )
+    .bind(authentication.credential_id())
+    .bind(fingerprint.as_slice())
+    .bind(context.organization_id().as_str())
+    .bind(context.source_registration_id())
+    .bind(credential_epoch)
+    .bind(authenticated_at)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .map_err(|_| DriverError("authority fixture credential"))?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.source_authority_revisions ( \
+             organization_id, source_registration_id, credential_id, credential_epoch, \
+             registration_policy_revision, policy_document, effective_at_unix_ms, \
+             expires_at_unix_ms, recorded_at_unix_ms \
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$7) \
+         ON CONFLICT (organization_id, source_registration_id, credential_id, \
+                      credential_epoch, registration_policy_revision) DO NOTHING",
+    )
+    .bind(context.organization_id().as_str())
+    .bind(context.source_registration_id())
+    .bind(authentication.credential_id())
+    .bind(credential_epoch)
+    .bind(policy_revision)
+    .bind(policy_document)
+    .bind(authenticated_at)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .map_err(|_| DriverError("authority fixture revision"))?;
+
+    let exact_authority = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS ( \
+             SELECT 1 \
+             FROM apolysis_gateway.source_registrations AS registration \
+             JOIN apolysis_gateway.transport_credentials AS credential \
+               ON credential.organization_id=registration.organization_id \
+              AND credential.source_registration_id=registration.source_registration_id \
+             JOIN apolysis_gateway.source_authority_revisions AS revision \
+               ON revision.organization_id=registration.organization_id \
+              AND revision.source_registration_id=registration.source_registration_id \
+              AND revision.credential_id=credential.credential_id \
+              AND revision.credential_epoch=credential.credential_epoch \
+              AND revision.registration_policy_revision=registration.policy_revision \
+             WHERE registration.organization_id=$1 \
+               AND registration.source_registration_id=$2 \
+               AND registration.source_id=$3 \
+               AND registration.principal_kind='workload' \
+               AND registration.principal_id=$4 \
+               AND registration.registration_state='active' \
+               AND registration.policy_revision=$5 \
+               AND registration.credential_epoch=$6 \
+               AND credential.credential_id=$7 \
+               AND credential.certificate_fingerprint=$8 \
+               AND credential.revoked_at_unix_ms IS NULL \
+         )",
+    )
+    .bind(context.organization_id().as_str())
+    .bind(context.source_registration_id())
+    .bind(policy.source_id().as_str())
+    .bind(context.principal().id())
+    .bind(policy_revision)
+    .bind(credential_epoch)
+    .bind(authentication.credential_id())
+    .bind(fingerprint.as_slice())
+    .fetch_one(pool)
+    .await
+    .map_err(|_| DriverError("authority fixture validation"))?;
+    if !exact_authority {
+        return Err(DriverError("authority fixture validation"));
+    }
+    Ok(())
 }
 
 fn require_outcome(response: &OpenRunResponse, expected: OpenRunOutcome) -> DriverResult<()> {

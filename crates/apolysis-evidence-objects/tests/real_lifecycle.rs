@@ -171,7 +171,7 @@ fn source_context(organization_id: &str, now: u64) -> AuthenticatedSourceContext
         OrganizationId::try_from(organization_id).expect("organization id"),
         PrincipalRef::new(PrincipalKind::Workload, PRINCIPAL_ID).expect("principal"),
         SOURCE_REGISTRATION_ID,
-        AuthenticationSnapshot::new(CREDENTIAL_ID, 1, now - 1_000, now + 3_600_000)
+        AuthenticationSnapshot::new(CREDENTIAL_ID, 1, 1, now - 1_000, now + 3_600_000)
             .expect("authentication snapshot"),
         source_policy(),
     )
@@ -250,7 +250,7 @@ async fn prepare_database(database_url: &str, now: u64) -> TestResult<PgPool> {
     .bind(PRINCIPAL_ID)
     .bind(i64::try_from(now - 60_000)?)
     .bind(i64::try_from(now + 3_600_000)?)
-    .bind(stored_policy)
+    .bind(&stored_policy)
     .execute(&pool)
     .await?;
     let mut fingerprint_digest = Sha256::new();
@@ -268,6 +268,21 @@ async fn prepare_database(database_url: &str, now: u64) -> TestResult<PgPool> {
     .bind(fingerprint.as_slice())
     .bind(ORGANIZATION_ID)
     .bind(SOURCE_REGISTRATION_ID)
+    .bind(i64::try_from(now - 60_000)?)
+    .bind(i64::try_from(now + 3_600_000)?)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.source_authority_revisions (\
+            organization_id, source_registration_id, credential_id, credential_epoch, \
+            registration_policy_revision, policy_document, effective_at_unix_ms, \
+            expires_at_unix_ms, recorded_at_unix_ms\
+         ) VALUES ($1,$2,$3,1,1,$4,$5,$6,$5)",
+    )
+    .bind(ORGANIZATION_ID)
+    .bind(SOURCE_REGISTRATION_ID)
+    .bind(CREDENTIAL_ID)
+    .bind(stored_policy)
     .bind(i64::try_from(now - 60_000)?)
     .bind(i64::try_from(now + 3_600_000)?)
     .execute(&pool)
@@ -952,6 +967,19 @@ async fn real_postgres_and_s3_object_lifecycle_is_fail_closed() -> TestResult<()
         .register_deletion_target(&operator, &deletion_component)
         .await?;
 
+    // The rate oracle below needs four accepted reservations in one database
+    // minute. Align immediately before the first reservation and use the same
+    // database clock as the trigger so quota cannot win after a window turn.
+    let database_now: i64 =
+        sqlx::query_scalar("SELECT apolysis_gateway.evidence_object_db_now_unix_ms()")
+            .fetch_one(&pool)
+            .await?;
+    let rate_window_elapsed_ms = u64::try_from(database_now)? % 60_000;
+    const MINIMUM_RATE_WINDOW_BUDGET_MS: u64 = 30_000;
+    if rate_window_elapsed_ms > 60_000 - MINIMUM_RATE_WINDOW_BUDGET_MS {
+        tokio::time::sleep(Duration::from_millis(60_000 - rate_window_elapsed_ms + 100)).await;
+    }
+
     let first_payload = random_payload(256 * 1024);
     let first_request = capture_request(
         opened.run_id().as_str(),
@@ -1259,6 +1287,23 @@ async fn real_postgres_and_s3_object_lifecycle_is_fail_closed() -> TestResult<()
             ),
         )
         .await?;
+    let accepted_in_current_window: i64 = sqlx::query_scalar(
+        "SELECT COALESCE((\
+            SELECT accepted_uploads \
+            FROM apolysis_gateway.evidence_object_rate_windows \
+            WHERE organization_id=$1 \
+              AND window_start_unix_ms=(\
+                  apolysis_gateway.evidence_object_db_now_unix_ms() / 60000\
+              ) * 60000\
+         ),0)",
+    )
+    .bind(ORGANIZATION_ID)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        accepted_in_current_window, 4,
+        "rate-limit oracle requires four accepted reservations in the current database minute"
+    );
     let rate_payload = random_payload(16 * 1024);
     let rate_error = lifecycle
         .begin_upload(

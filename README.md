@@ -83,7 +83,10 @@ prototypes exercise
 server-side grant/policy joins, RFC 8785 golden digest vectors, atomic
 record-append/outbox semantics, encrypted exact-operation replay, one-update
 sequence-range allocation for novel ingest batches, and a bounded finishing
-lifecycle.
+lifecycle. The PostgreSQL path now revalidates current authority inside each
+lifecycle transaction, binds authentication and durable work to the credential
+epoch, and provides explicit policy and credential rotation that invalidates
+stale leases, join authorizations, and replay.
 
 A focused durable lifecycle projection foundation adds organization-qualified
 generations, strict Gateway-ingest-order projection, exact durable watermarks,
@@ -111,7 +114,6 @@ lifecycle/retry matrix. The broader process-death, network pre-commit,
 staggered multi-lease, load, replication, failover, backup/restore, and high
 availability work remains unqualified, as do production KMS integration, database
 row-level-security deployment,
-atomic authority revalidation with ledger commit, lease/credential rotation,
 an authorized object-read resolver, evidence-object projection/read views,
 continuous background reaper operation, and capacity-qualified resource
 limits. The projection does not provide public

@@ -99,12 +99,16 @@ impl GatewayClock for GatewayServerClock {
         match self {
             #[cfg(feature = "qualification")]
             Self::Qualification(clock) => {
-                if clock.transaction_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                    clock
-                        .first_transaction_now_unix_ms
-                        .unwrap_or(clock.transaction_now_unix_ms)
-                } else {
-                    clock.transaction_now_unix_ms
+                let call = clock.transaction_calls.fetch_add(1, Ordering::SeqCst);
+                match clock.first_transaction_now_unix_ms {
+                    // Every novel lifecycle attempt performs an initial and a
+                    // final transaction-time authority read. Keep both reads
+                    // on the first attempt before advancing the qualification
+                    // clock for an internally restarted transaction.
+                    Some(first_transaction_now_unix_ms) if call < 2 => {
+                        first_transaction_now_unix_ms
+                    }
+                    _ => clock.transaction_now_unix_ms,
                 }
             }
             _ => self.now_unix_ms(),
@@ -648,6 +652,8 @@ mod tests {
         let retry_clock = GatewayServerClock::qualification(100, 200, Some(100));
         assert_eq!(retry_clock.now_unix_ms(), 100);
         assert_eq!(retry_clock.transaction_now_unix_ms(), 100);
+        assert_eq!(retry_clock.transaction_now_unix_ms(), 100);
+        assert_eq!(retry_clock.transaction_now_unix_ms(), 200);
         assert_eq!(retry_clock.transaction_now_unix_ms(), 200);
     }
 

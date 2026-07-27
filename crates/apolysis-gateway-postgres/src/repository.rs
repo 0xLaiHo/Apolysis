@@ -17,12 +17,13 @@ use zeroize::Zeroizing;
 
 use crate::{
     error::{
-        database_failure, idempotency_conflict, not_found, policy_failure, report_database_retry,
-        repository_failure,
+        current_authority_failure, database_failure, idempotency_conflict, not_found,
+        policy_failure, report_database_retry, repository_failure,
     },
     model::{
         enum_name, hex_digest, join_proof_digest, json_decode, json_value, principal_kind_name,
-        sha256_bytes, sql_i64, sql_u64, OperationIdentity, ReplayOutcome, MAX_SQL_INTEGER,
+        sha256_bytes, sql_i64, sql_u64, AuthorityBinding, OperationIdentity, ReplayOutcome,
+        MAX_SQL_INTEGER,
     },
     replay::{Aes256GcmReplayProtector, ReplayProtector, SealedReplay},
 };
@@ -180,6 +181,7 @@ impl PostgresGatewayRepository {
         Ok(Self::from_pool(pool, replay_protector, config))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_join_grant(
         &self,
         issuer: &AuthenticatedSourceContext,
@@ -188,6 +190,7 @@ impl PostgresGatewayRepository {
         source_kind: SourceKind,
         proof_ref: &str,
         expires_at_unix_ms: u64,
+        clock: &dyn GatewayClock,
     ) -> Result<(), GatewayFailure> {
         self.register_join_authorization(
             issuer,
@@ -197,10 +200,12 @@ impl PostgresGatewayRepository {
             proof_ref,
             expires_at_unix_ms,
             JoinProofKind::Grant,
+            clock,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_join_policy(
         &self,
         issuer: &AuthenticatedSourceContext,
@@ -209,6 +214,7 @@ impl PostgresGatewayRepository {
         source_kind: SourceKind,
         proof_ref: &str,
         expires_at_unix_ms: u64,
+        clock: &dyn GatewayClock,
     ) -> Result<(), GatewayFailure> {
         self.register_join_authorization(
             issuer,
@@ -218,6 +224,7 @@ impl PostgresGatewayRepository {
             proof_ref,
             expires_at_unix_ms,
             JoinProofKind::RegistrationPolicy,
+            clock,
         )
         .await
     }
@@ -232,6 +239,7 @@ impl PostgresGatewayRepository {
         proof_ref: &str,
         expires_at_unix_ms: u64,
         kind: JoinProofKind,
+        clock: &dyn GatewayClock,
     ) -> Result<(), GatewayFailure> {
         if proof_ref.is_empty()
             || proof_ref.len() > 512
@@ -251,6 +259,49 @@ impl PostgresGatewayRepository {
         self.configure_transaction_deadlines(&mut transaction)
             .await
             .map_err(|failure| failure.failure)?;
+        let mut authorities = [issuer, joining_source];
+        authorities.sort_by(|left, right| {
+            (
+                left.source_registration_id(),
+                left.authentication().credential_id(),
+            )
+                .cmp(&(
+                    right.source_registration_id(),
+                    right.authentication().credential_id(),
+                ))
+        });
+        let first_locked = self
+            .lock_current_authority(&mut transaction, authorities[0])
+            .await
+            .map_err(|failure| failure.failure)?;
+        let second_locked = self
+            .lock_current_authority(&mut transaction, authorities[1])
+            .await
+            .map_err(|failure| failure.failure)?;
+        let checked_at_unix_ms = clock.transaction_now_unix_ms();
+        for (authority, locked) in authorities
+            .iter()
+            .copied()
+            .zip([first_locked, second_locked])
+        {
+            if let Err(failure) = self
+                .revalidate_locked_current_authority(
+                    &mut transaction,
+                    authority,
+                    "open_run",
+                    locked,
+                    checked_at_unix_ms,
+                )
+                .await
+            {
+                if failure.commit_on_failure {
+                    transaction.commit().await.map_err(|error| {
+                        database_failure("register_join_authority_commit", &error)
+                    })?;
+                }
+                return Err(failure.failure);
+            }
+        }
         let run = self
             .load_run_for_update(&mut transaction, issuer.organization_id().as_str(), &run_id)
             .await
@@ -266,21 +317,56 @@ impl PostgresGatewayRepository {
         {
             return Err(policy_failure(ContractErrorCode::Forbidden));
         }
+        let final_checked_at_unix_ms = clock.transaction_now_unix_ms();
+        if final_checked_at_unix_ms == 0 || final_checked_at_unix_ms < checked_at_unix_ms {
+            return Err(repository_failure());
+        }
+        for (authority, locked) in authorities
+            .iter()
+            .copied()
+            .zip([first_locked, second_locked])
+        {
+            if let Err(failure) = self
+                .revalidate_locked_current_authority(
+                    &mut transaction,
+                    authority,
+                    "open_run",
+                    locked,
+                    final_checked_at_unix_ms,
+                )
+                .await
+            {
+                if failure.commit_on_failure {
+                    transaction.commit().await.map_err(|error| {
+                        database_failure("register_join_final_authority_commit", &error)
+                    })?;
+                }
+                return Err(failure.failure);
+            }
+        }
+        if expires_at_unix_ms <= final_checked_at_unix_ms {
+            return Err(policy_failure(ContractErrorCode::Forbidden));
+        }
         let proof_digest = join_proof_digest(proof_ref);
         let kind_name = enum_name(&kind)?;
         let source_kind_name = enum_name(&source_kind)?;
         let joining_principal_kind = principal_kind_name(joining_source.principal().kind())?;
         let issuer_principal_kind = principal_kind_name(issuer.principal().kind())?;
         let expires_at = sql_i64(expires_at_unix_ms)?;
-        let issued_at = sql_i64(issuer.authentication().authenticated_at_unix_ms())?;
+        let issued_at = sql_i64(final_checked_at_unix_ms)?;
         let policy_revision = sql_i64(joining_source.authentication().policy_revision())?;
+        let credential_epoch = sql_i64(joining_source.authentication().credential_epoch())?;
+        let issuer_credential_epoch = sql_i64(issuer.authentication().credential_epoch())?;
+        let issuer_policy_revision = sql_i64(issuer.authentication().policy_revision())?;
         let inserted = sqlx::query(
             "INSERT INTO apolysis_gateway.join_authorizations (\
                 organization_id, proof_digest, authorization_kind, run_id, source_id, \
                 source_kind, environment, source_registration_id, principal_kind, principal_id, \
-                registration_policy_revision, issued_by_source_registration_id, \
-                issued_by_principal_kind, issued_by_principal_id, issued_at_unix_ms, expires_at_unix_ms\
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+                registration_policy_revision, credential_id, credential_epoch, \
+                issued_by_source_registration_id, issued_by_principal_kind, \
+                issued_by_principal_id, issued_by_credential_id, issued_by_credential_epoch, \
+                issued_by_registration_policy_revision, issued_at_unix_ms, expires_at_unix_ms\
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) \
              ON CONFLICT (organization_id, proof_digest) DO NOTHING",
         )
         .bind(issuer.organization_id().as_str())
@@ -294,9 +380,14 @@ impl PostgresGatewayRepository {
         .bind(&joining_principal_kind)
         .bind(joining_source.principal().id())
         .bind(policy_revision)
+        .bind(joining_source.authentication().credential_id())
+        .bind(credential_epoch)
         .bind(issuer.source_registration_id())
         .bind(&issuer_principal_kind)
         .bind(issuer.principal().id())
+        .bind(issuer.authentication().credential_id())
+        .bind(issuer_credential_epoch)
+        .bind(issuer_policy_revision)
         .bind(issued_at)
         .bind(expires_at)
         .execute(&mut *transaction)
@@ -306,7 +397,11 @@ impl PostgresGatewayRepository {
             let existing = sqlx::query(
                 "SELECT authorization_kind, authorization_state, run_id, source_id, source_kind, \
                         environment, source_registration_id, principal_kind, principal_id, \
-                        registration_policy_revision, expires_at_unix_ms \
+                        registration_policy_revision, credential_id, credential_epoch, \
+                        issued_by_source_registration_id, issued_by_principal_kind, \
+                        issued_by_principal_id, issued_by_credential_id, \
+                        issued_by_credential_epoch, issued_by_registration_policy_revision, \
+                        expires_at_unix_ms \
                  FROM apolysis_gateway.join_authorizations \
                  WHERE organization_id=$1 AND proof_digest=$2 FOR UPDATE",
             )
@@ -355,6 +450,38 @@ impl PostgresGatewayRepository {
                     .try_get::<i64, _>("registration_policy_revision")
                     .map_err(|error| database_failure("register_join_decode", &error))?
                     == policy_revision
+                && existing
+                    .try_get::<String, _>("credential_id")
+                    .map_err(|error| database_failure("register_join_decode", &error))?
+                    == joining_source.authentication().credential_id()
+                && existing
+                    .try_get::<i64, _>("credential_epoch")
+                    .map_err(|error| database_failure("register_join_decode", &error))?
+                    == credential_epoch
+                && existing
+                    .try_get::<String, _>("issued_by_source_registration_id")
+                    .map_err(|error| database_failure("register_join_decode", &error))?
+                    == issuer.source_registration_id()
+                && existing
+                    .try_get::<String, _>("issued_by_principal_kind")
+                    .map_err(|error| database_failure("register_join_decode", &error))?
+                    == issuer_principal_kind
+                && existing
+                    .try_get::<String, _>("issued_by_principal_id")
+                    .map_err(|error| database_failure("register_join_decode", &error))?
+                    == issuer.principal().id()
+                && existing
+                    .try_get::<String, _>("issued_by_credential_id")
+                    .map_err(|error| database_failure("register_join_decode", &error))?
+                    == issuer.authentication().credential_id()
+                && existing
+                    .try_get::<i64, _>("issued_by_credential_epoch")
+                    .map_err(|error| database_failure("register_join_decode", &error))?
+                    == issuer_credential_epoch
+                && existing
+                    .try_get::<i64, _>("issued_by_registration_policy_revision")
+                    .map_err(|error| database_failure("register_join_decode", &error))?
+                    == issuer_policy_revision
                 && existing
                     .try_get::<i64, _>("expires_at_unix_ms")
                     .map_err(|error| database_failure("register_join_decode", &error))?
@@ -460,6 +587,7 @@ impl PostgresGatewayRepository {
                             request,
                             now_unix_ms,
                             finalization_deadline_unix_ms,
+                            clock,
                         )
                         .await
                     }
@@ -500,13 +628,25 @@ impl PostgresGatewayRepository {
                     );
                     tokio::time::sleep(retry_delay(attempt)).await;
                 }
-                Err(failure) if failure.commit_on_failure => {
-                    transaction
-                        .commit()
-                        .await
-                        .map_err(|error| database_failure("command_reconcile_commit", &error))?;
-                    return Err(failure.failure);
-                }
+                Err(failure) if failure.commit_on_failure => match transaction.commit().await {
+                    Ok(()) => return Err(failure.failure),
+                    Err(error)
+                        if is_transaction_restartable_error(&error)
+                            && attempt < self.config.max_transaction_retries() =>
+                    {
+                        attempt += 1;
+                        report_database_retry(
+                            "command_reconcile_commit",
+                            &error,
+                            attempt,
+                            self.config.max_transaction_retries(),
+                        );
+                        tokio::time::sleep(retry_delay(attempt)).await;
+                    }
+                    Err(error) => {
+                        return Err(database_failure("command_reconcile_commit", &error));
+                    }
+                },
                 Err(failure) => {
                     if let Err(error) = transaction.rollback().await {
                         let _ = database_failure("command_rollback", &error);
@@ -544,13 +684,129 @@ impl PostgresGatewayRepository {
         Ok(())
     }
 
-    pub(crate) async fn lock_and_replay_operation(
+    pub(crate) async fn lock_current_authority(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        context: &AuthenticatedSourceContext,
+    ) -> TxResult<bool> {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT apolysis_gateway.lock_gateway_current_authority($1,$2,$3)",
+        )
+        .bind(context.organization_id().as_str())
+        .bind(context.source_registration_id())
+        .bind(context.authentication().credential_id())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| TxFailure::from_sqlx_at("current_authority_lock", error))
+    }
+
+    pub(crate) async fn revalidate_locked_current_authority(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        context: &AuthenticatedSourceContext,
+        operation_kind: &'static str,
+        locked: bool,
+        now_unix_ms: u64,
+    ) -> TxResult<()> {
+        if now_unix_ms == 0 || now_unix_ms < context.authentication().authenticated_at_unix_ms() {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
+
+        let decision = if !locked {
+            CurrentAuthorityDecision::Unauthenticated("authority_binding_missing")
+        } else {
+            let row = sqlx::query(
+                "SELECT organization.organization_state, \
+                        registration.source_id, registration.principal_kind, \
+                        registration.principal_id, registration.registration_state, \
+                        registration.policy_revision, \
+                        registration.credential_epoch AS registration_credential_epoch, \
+                        registration.effective_at_unix_ms AS registration_effective_at_unix_ms, \
+                        registration.expires_at_unix_ms AS registration_expires_at_unix_ms, \
+                        credential.credential_epoch AS transport_credential_epoch, \
+                        credential.effective_at_unix_ms AS credential_effective_at_unix_ms, \
+                        credential.expires_at_unix_ms AS credential_expires_at_unix_ms, \
+                        credential.revoked_at_unix_ms \
+                 FROM apolysis_gateway.organizations AS organization \
+                 JOIN apolysis_gateway.source_registrations AS registration \
+                   ON registration.organization_id=organization.organization_id \
+                 JOIN apolysis_gateway.transport_credentials AS credential \
+                   ON credential.organization_id=registration.organization_id \
+                  AND credential.source_registration_id=registration.source_registration_id \
+                 WHERE organization.organization_id=$1 \
+                   AND registration.source_registration_id=$2 \
+                   AND credential.credential_id=$3",
+            )
+            .bind(context.organization_id().as_str())
+            .bind(context.source_registration_id())
+            .bind(context.authentication().credential_id())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| TxFailure::from_sqlx_at("current_authority_load", error))?
+            .ok_or_else(|| TxFailure::rollback(repository_failure()))?;
+            classify_current_authority(&row, context, now_unix_ms)?
+        };
+
+        self.record_transaction_authority_decision(
+            transaction,
+            context,
+            operation_kind,
+            now_unix_ms,
+            decision,
+        )
+        .await?;
+
+        match decision {
+            CurrentAuthorityDecision::Authorized => Ok(()),
+            CurrentAuthorityDecision::Unauthenticated(_) => Err(TxFailure::commit(
+                current_authority_failure(ContractErrorCode::Unauthenticated),
+            )),
+            CurrentAuthorityDecision::Forbidden(_) => Err(TxFailure::commit(
+                current_authority_failure(ContractErrorCode::Forbidden),
+            )),
+        }
+    }
+
+    async fn record_transaction_authority_decision(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        context: &AuthenticatedSourceContext,
+        operation_kind: &'static str,
+        now_unix_ms: u64,
+        decision: CurrentAuthorityDecision,
+    ) -> TxResult<()> {
+        let (decision_name, reason_code) = match decision {
+            CurrentAuthorityDecision::Authorized => ("authorized", "current_authority"),
+            CurrentAuthorityDecision::Unauthenticated(reason) => ("unauthenticated", reason),
+            CurrentAuthorityDecision::Forbidden(reason) => ("forbidden", reason),
+        };
+        sqlx::query(
+            "INSERT INTO apolysis_gateway.transaction_authority_audit (\
+                checked_at_unix_ms, operation_kind, decision, reason_code, organization_id, \
+                source_registration_id, credential_id, registration_policy_revision, \
+                credential_epoch\
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        )
+        .bind(sql_i64(now_unix_ms).map_err(TxFailure::rollback)?)
+        .bind(operation_kind)
+        .bind(decision_name)
+        .bind(reason_code)
+        .bind(context.organization_id().as_str())
+        .bind(context.source_registration_id())
+        .bind(context.authentication().credential_id())
+        .bind(sql_i64(context.authentication().policy_revision()).map_err(TxFailure::rollback)?)
+        .bind(sql_i64(context.authentication().credential_epoch()).map_err(TxFailure::rollback)?)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| TxFailure::from_sqlx_at("current_authority_audit", error))?;
+        Ok(())
+    }
+
+    pub(crate) async fn lock_operation_identity(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
         identity: &OperationIdentity,
-        request_digest: &str,
-        now_unix_ms: u64,
-    ) -> TxResult<Option<LedgerOutcome>> {
+    ) -> TxResult<()> {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 573274117))")
             .bind(identity.advisory_lock_key())
             .execute(&mut **transaction)
@@ -568,11 +824,28 @@ impl PostgresGatewayRepository {
         .fetch_one(&mut **transaction)
         .await
         .map_err(|error| TxFailure::from_sqlx_at("operation_row_lock", error))?;
+        Ok(())
+    }
+
+    pub(crate) async fn replay_locked_operation(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        context: &AuthenticatedSourceContext,
+        identity: &OperationIdentity,
+        request_digest: &str,
+        now_unix_ms: u64,
+    ) -> TxResult<Option<LedgerOutcome>> {
         let existing = sqlx::query(
             "SELECT operation.operation_id, operation.request_digest, operation.outcome_kind, \
+                    operation.credential_id AS operation_credential_id, \
+                    operation.credential_epoch AS operation_credential_epoch, \
+                    operation.registration_policy_revision AS operation_policy_revision, \
                     replay.encryption_algorithm, replay.cipher_version, replay.encryption_key_ref, \
                     replay.nonce, replay.authentication_tag, replay.aad_digest, \
-                    replay.outcome_ciphertext, replay.expires_at_unix_ms \
+                    replay.outcome_ciphertext, replay.expires_at_unix_ms, \
+                    replay.credential_id AS replay_credential_id, \
+                    replay.credential_epoch AS replay_credential_epoch, \
+                    replay.registration_policy_revision AS replay_policy_revision \
              FROM apolysis_gateway.gateway_operations AS operation \
              LEFT JOIN apolysis_gateway.operation_replays AS replay \
                ON replay.organization_id=operation.organization_id \
@@ -596,6 +869,41 @@ impl PostgresGatewayRepository {
         let Some(row) = existing else {
             return Ok(None);
         };
+        let authority = AuthorityBinding::from_context(context);
+        let expected_epoch = sql_i64(authority.credential_epoch).map_err(TxFailure::rollback)?;
+        let expected_policy_revision =
+            sql_i64(authority.policy_revision).map_err(TxFailure::rollback)?;
+        let operation_binding_matches = row
+            .try_get::<Option<String>, _>("operation_credential_id")
+            .map_err(|error| TxFailure::from_sqlx_at("operation_replay_decode", error))?
+            .as_deref()
+            == Some(authority.credential_id.as_str())
+            && row
+                .try_get::<Option<i64>, _>("operation_credential_epoch")
+                .map_err(|error| TxFailure::from_sqlx_at("operation_replay_decode", error))?
+                == Some(expected_epoch)
+            && row
+                .try_get::<Option<i64>, _>("operation_policy_revision")
+                .map_err(|error| TxFailure::from_sqlx_at("operation_replay_decode", error))?
+                == Some(expected_policy_revision);
+        let replay_binding_matches = row
+            .try_get::<Option<String>, _>("replay_credential_id")
+            .map_err(|error| TxFailure::from_sqlx_at("operation_replay_decode", error))?
+            .as_deref()
+            == Some(authority.credential_id.as_str())
+            && row
+                .try_get::<Option<i64>, _>("replay_credential_epoch")
+                .map_err(|error| TxFailure::from_sqlx_at("operation_replay_decode", error))?
+                == Some(expected_epoch)
+            && row
+                .try_get::<Option<i64>, _>("replay_policy_revision")
+                .map_err(|error| TxFailure::from_sqlx_at("operation_replay_decode", error))?
+                == Some(expected_policy_revision);
+        if !operation_binding_matches || !replay_binding_matches {
+            return Err(TxFailure::rollback(current_authority_failure(
+                ContractErrorCode::LeaseRevoked,
+            )));
+        }
         if row
             .try_get::<Vec<u8>, _>("request_digest")
             .map_err(|error| TxFailure::from_sqlx_at("operation_replay_decode", error))?
@@ -637,7 +945,7 @@ impl PostgresGatewayRepository {
         ciphertext.extend_from_slice(&tag);
         let sealed = SealedReplay::new(key_id, cipher_version, nonce, ciphertext)
             .map_err(TxFailure::rollback)?;
-        let associated_data = identity.associated_data(request_digest, expires_at);
+        let associated_data = identity.associated_data(&authority, request_digest, expires_at);
         let expected_aad_digest = sha256_bytes(&associated_data);
         if required_optional_bytes(&row, "aad_digest")? != expected_aad_digest {
             return Err(TxFailure::rollback(idempotency_conflict()));
@@ -652,9 +960,11 @@ impl PostgresGatewayRepository {
         Ok(Some(outcome))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn store_operation(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
+        context: &AuthenticatedSourceContext,
         identity: &OperationIdentity,
         request_digest: &str,
         run_id: &RunId,
@@ -671,8 +981,9 @@ impl PostgresGatewayRepository {
             "INSERT INTO apolysis_gateway.gateway_operations (\
                 organization_id, source_registration_id, principal_kind, principal_id, \
                 operation_kind, client_operation_id, request_digest, run_id, outcome_kind, \
-                committed_at_unix_ms\
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING operation_id",
+                committed_at_unix_ms, credential_id, credential_epoch, \
+                registration_policy_revision\
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING operation_id",
         )
         .bind(&identity.organization_id)
         .bind(&identity.source_registration_id)
@@ -684,10 +995,17 @@ impl PostgresGatewayRepository {
         .bind(run_id.as_str())
         .bind(identity.operation_kind)
         .bind(now)
+        .bind(context.authentication().credential_id())
+        .bind(sql_i64(context.authentication().credential_epoch()).map_err(TxFailure::rollback)?)
+        .bind(sql_i64(context.authentication().policy_revision()).map_err(TxFailure::rollback)?)
         .fetch_one(&mut **transaction)
         .await
         .map_err(|error| TxFailure::from_sqlx_at("operation_insert", error))?;
-        let associated_data = identity.associated_data(request_digest, replay_expires);
+        let associated_data = identity.associated_data(
+            &AuthorityBinding::from_context(context),
+            request_digest,
+            replay_expires,
+        );
         let plaintext = Zeroizing::new(
             serde_json::to_vec(&ReplayOutcome::from(outcome.clone()))
                 .map_err(|_| TxFailure::rollback(repository_failure()))?,
@@ -705,8 +1023,9 @@ impl PostgresGatewayRepository {
             "INSERT INTO apolysis_gateway.operation_replays (\
                 organization_id, operation_id, encryption_algorithm, cipher_version, \
                 encryption_key_ref, wrapped_data_key, nonce, authentication_tag, aad_digest, \
-                outcome_ciphertext, created_at_unix_ms, expires_at_unix_ms\
-             ) VALUES ($1,$2,'aes-256-gcm',$3,$4,NULL,$5,$6,$7,$8,$9,$10)",
+                outcome_ciphertext, created_at_unix_ms, expires_at_unix_ms, credential_id, \
+                credential_epoch, registration_policy_revision\
+             ) VALUES ($1,$2,'aes-256-gcm',$3,$4,NULL,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
         )
         .bind(&identity.organization_id)
         .bind(operation_id)
@@ -718,6 +1037,9 @@ impl PostgresGatewayRepository {
         .bind(ciphertext)
         .bind(now)
         .bind(replay_expires)
+        .bind(context.authentication().credential_id())
+        .bind(sql_i64(context.authentication().credential_epoch()).map_err(TxFailure::rollback)?)
+        .bind(sql_i64(context.authentication().policy_revision()).map_err(TxFailure::rollback)?)
         .execute(&mut **transaction)
         .await
         .map_err(|error| TxFailure::from_sqlx_at("operation_replay_insert", error))?;
@@ -981,6 +1303,97 @@ pub(crate) struct RunRow {
     pub(crate) initiating_principal_kind: String,
     pub(crate) initiating_principal_id: String,
     pub(crate) finalization_deadline_unix_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+enum CurrentAuthorityDecision {
+    Authorized,
+    Unauthenticated(&'static str),
+    Forbidden(&'static str),
+}
+
+fn classify_current_authority(
+    row: &sqlx::postgres::PgRow,
+    context: &AuthenticatedSourceContext,
+    now_unix_ms: u64,
+) -> TxResult<CurrentAuthorityDecision> {
+    let decode = |column: &'static str| {
+        row.try_get::<String, _>(column)
+            .map_err(|error| TxFailure::from_sqlx_at("current_authority_decode", error))
+    };
+    let decode_i64 = |column: &'static str| {
+        row.try_get::<i64, _>(column)
+            .map_err(|error| TxFailure::from_sqlx_at("current_authority_decode", error))
+    };
+    let now = sql_i64(now_unix_ms).map_err(TxFailure::rollback)?;
+    let organization_state = decode("organization_state")?;
+    let registration_state = decode("registration_state")?;
+    let source_id = decode("source_id")?;
+    let principal_kind = decode("principal_kind")?;
+    let principal_id = decode("principal_id")?;
+    let registration_policy_revision = decode_i64("policy_revision")?;
+    let registration_credential_epoch = decode_i64("registration_credential_epoch")?;
+    let transport_credential_epoch = decode_i64("transport_credential_epoch")?;
+    let registration_effective_at = decode_i64("registration_effective_at_unix_ms")?;
+    let registration_expires_at = decode_i64("registration_expires_at_unix_ms")?;
+    let credential_effective_at = decode_i64("credential_effective_at_unix_ms")?;
+    let credential_expires_at = decode_i64("credential_expires_at_unix_ms")?;
+    let credential_revoked_at = row
+        .try_get::<Option<i64>, _>("revoked_at_unix_ms")
+        .map_err(|error| TxFailure::from_sqlx_at("current_authority_decode", error))?;
+
+    if organization_state != "active" {
+        return Ok(CurrentAuthorityDecision::Unauthenticated(
+            "organization_inactive",
+        ));
+    }
+    if registration_state != "active"
+        || now < registration_effective_at
+        || now >= registration_expires_at
+    {
+        return Ok(CurrentAuthorityDecision::Unauthenticated(
+            "registration_inactive",
+        ));
+    }
+    if credential_revoked_at.is_some()
+        || now < credential_effective_at
+        || now >= credential_expires_at
+    {
+        return Ok(CurrentAuthorityDecision::Unauthenticated(
+            "credential_inactive",
+        ));
+    }
+    if now_unix_ms >= context.authentication().expires_at_unix_ms() {
+        return Ok(CurrentAuthorityDecision::Unauthenticated(
+            "authentication_snapshot_expired",
+        ));
+    }
+    if source_id != context.registration_policy().source_id().as_str()
+        || principal_kind
+            != principal_kind_name(context.principal().kind()).map_err(TxFailure::rollback)?
+        || principal_id != context.principal().id()
+    {
+        return Ok(CurrentAuthorityDecision::Unauthenticated(
+            "authority_identity_stale",
+        ));
+    }
+    let expected_epoch =
+        sql_i64(context.authentication().credential_epoch()).map_err(TxFailure::rollback)?;
+    if registration_credential_epoch != expected_epoch
+        || transport_credential_epoch != expected_epoch
+    {
+        return Ok(CurrentAuthorityDecision::Unauthenticated(
+            "credential_epoch_stale",
+        ));
+    }
+    if registration_policy_revision
+        != sql_i64(context.authentication().policy_revision()).map_err(TxFailure::rollback)?
+    {
+        return Ok(CurrentAuthorityDecision::Forbidden(
+            "registration_policy_stale",
+        ));
+    }
+    Ok(CurrentAuthorityDecision::Authorized)
 }
 
 pub(crate) struct TxFailure {

@@ -88,6 +88,7 @@ pub async fn register_qualification_join_grant(
             SourceKind::SemanticHook,
             &proof,
             expires_at_unix_ms,
+            &SystemClock,
         )
         .await
         .map_err(GatewayServerError::gateway)

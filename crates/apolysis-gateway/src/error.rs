@@ -11,6 +11,7 @@ const MAX_REPOSITORY_RETRY_AFTER_MS: u64 = 60_000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuditReason {
     AuthenticationExpired,
+    CurrentAuthorityStale,
     PrincipalMismatch,
     SourceRegistrationMismatch,
     SourcePolicyMismatch,

@@ -13,6 +13,10 @@ assert authority. Authority-looking headers are rejected, and the resulting
 `AuthenticatedSourceContext` remains a server-only input with no wire
 serialization.
 
+Its `AuthenticationSnapshot` binds the credential identifier, credential
+epoch, and policy revision. The snapshot records the transport decision; it is
+not a lease and cannot by itself authorize later database work.
+
 The listener terminates TLS itself, has no browser CORS or cookie surface, and
 is separate from the future Query API. A deployment that terminates TLS at a
 proxy will require a later, explicitly authenticated proxy-hop profile; plain
@@ -30,7 +34,9 @@ The first implementation now exposes all four frozen lifecycle routes:
 `open-run`, `bind-runtime`, `ingest`, and `finish-run`. Its real tracer proves
 TLS identity, current PostgreSQL lookup, cross-organization rejection,
 credential revocation on every route, durable exact replay, and continuation
-across Gateway-process restarts.
+across Gateway-process restarts. The same live gate now also exercises explicit
+policy and credential rotation with old and replacement client certificates,
+stale leases and replay, and the required new source stream.
 
 A sibling real direct-mTLS HTTPS qualification gate now fixes the
 post-commit/pre-ack server-death boundary for all four routes. It exercises each
@@ -117,16 +123,30 @@ its outbox effect occur exactly once; and neither competing request can revive
 the run.
 
 The transaction-boundary extension makes request arrival and transaction begin
-explicitly non-authoritative for novel join, bind, and ingest admission. Each
-transaction attempt locks the operation identity and returns a retained
-matching exact replay when present. Novel join then locks the run and join
-authorization; novel bind and ingest lock the run and requested lease. Only
-after those reads does the adapter sample fresh transaction time, reconcile
-deadline or last-lease expiry, and admit novel work. An internal PostgreSQL
-serialization or deadlock retry repeats the full order and reads time again.
+explicitly non-authoritative for every lifecycle operation. Each transaction
+attempt locks the operation identity, then locks the current organization,
+source registration, and transport credential and revalidates them at an
+initial transaction time. Only after that check may it materialize and return
+matching exact replay. Novel join then
+locks the run and join authorization; novel bind, ingest, and finish lock the
+run and requested lease, while create mode may wait on the client-run identity.
+After those dynamic lock waits, the adapter samples final transaction time and
+revalidates the same locked organization, registration, and credential,
+including registration/credential validity and authentication-snapshot expiry.
+Only then may it reconcile deadline or last-lease expiry and admit novel work.
+Exact replay performs only the initial current-authority check. An internal
+PostgreSQL serialization or deadlock retry repeats the full two-check order for
+novel work and reads time again.
+
+Object-reference ingest is the sole precondition exception to this
+operation-first Gateway order: it first takes the evidence-object organization
+shared-ancestor lock to preserve the evidence-object cross-plane ancestor
+order, then resumes the same operation-identity, current-authority, and dynamic
+resource order inside the Gateway plane.
+
 Object-reference ingest uses PostgreSQL `clock_timestamp()` through the
-schema-owned database-time function; content-off ingest, join, and bind use the
-trusted Gateway clock passed to the repository.
+schema-owned database-time function; content-off ingest, join, bind, and finish
+use the trusted Gateway clock passed to the repository.
 
 Join-authorization freshness is evaluated before lifecycle reconciliation; an
 authorization that expires at the fresh decision time returns
@@ -142,15 +162,42 @@ Neither path creates a novel operation, encrypted replay, stream, lease,
 binding, or evidence event. The only durable rejection effect is exactly one
 transition to `incomplete` and its matching record/outbox pair across competing
 requests. Exact stored-operation replay remains prior to dynamic reconciliation
-and returns the unchanged result. Shared memory and real-PostgreSQL conformance
+but after initial current-authority revalidation, and returns the unchanged
+result. Shared memory and real-PostgreSQL conformance
 additionally cover join-grant expiry, join at last-lease expiry, zero or
 regressed transaction time, and one staggered requested-lease bind while
 another lease remains live.
 
-This still does not close the W3–W6 transport gate. Transaction-time authority
-revalidation, credential-epoch binding in leases and replay records,
-policy/credential rotation, the broader network pre-commit/process-death fault
-matrix, commit-wall-clock boundary enforcement, replay-TTL expiry during an
+Operations, encrypted replay records, leases, and join authorization retain
+the credential-identifier, credential-epoch, and policy-revision binding. Join
+authorization binds both the target source and its issuer. A superseded
+successful operation remains an idempotency tombstone, but its encrypted replay
+cannot be opened and returned under stale authority.
+
+Registration is initial enrollment or exact idempotent confirmation, not an
+implicit update path. Explicit `rotate-policy` and `rotate-credential`
+operations serialize organization, registration, and credential changes,
+append authority history, update current authority, revoke live leases and
+pending join authorization, and record content-free audit evidence in one
+transaction. Policy rotation advances the policy revision. Credential rotation
+advances the epoch, retires the old certificate, and may retain the policy or
+advance it once.
+
+Shared real-PostgreSQL qualification covers a novel request blocked behind
+policy rotation, exact replay blocked behind credential rotation,
+current-authority revalidation after one SQLSTATE `40001` transaction restart,
+and complete transaction restart when a deferred authority-denial commit
+returns SQLSTATE `40001`. Join-grant issuance waiting on a run lock resamples
+final transaction time, rechecks issuer and target authority before mutation,
+requires expiry after that time, and records that time as
+`issued_at_unix_ms`. The direct-mTLS gate covers live policy and certificate
+cutover, rejection of old leases and replay, rejection of the old certificate,
+admission of the replacement certificate at the new epoch, and creation of a
+new stream.
+
+This still does not close the W3–W6 transport gate. Sender-bound JWT/workload
+identity profiles, the broader network pre-commit/process-death fault matrix,
+commit-wall-clock boundary enforcement, replay-TTL expiry during an
 operation-lock wait, live join-grant-expiry and join-at-last-lease-expiry
 cases, broader staggered multi-lease combinations and retry depths, the
 remaining mixed lifecycle/retry matrix, load/capacity qualification, authorized

@@ -6,6 +6,13 @@ does not use blanket `IF NOT EXISTS`: the runner's version/checksum table is the
 repeat-execution guard, and unexpected pre-existing objects must surface as
 drift.
 
+`migrations/0004_transaction_authority_binding.sql` adds append-only source
+authority revision history plus credential-identifier, credential-epoch, and
+policy-revision binding for lifecycle capabilities and replay. Its upgrade
+path fails legacy leases and join grants closed, removes legacy replay
+ciphertext while retaining operation tombstones, and grants only the reviewed
+runtime/control surfaces.
+
 The migration creates only the dedicated `apolysis_gateway` schema. Every
 tenant-owned key and foreign key carries `organization_id`.
 `deploy/bootstrap_roles.sql` and `deploy/privileges.sql` provide the reviewed
@@ -44,8 +51,14 @@ migrations.
 
 Security invariants:
 
-- `leases` stores only the domain-separated SHA-256 lease digest.
-- `join_authorizations` stores only the domain-separated SHA-256 proof digest.
+- `leases` stores only the domain-separated SHA-256 lease digest and binds it
+  to credential identifier, credential epoch, and policy revision.
+- `join_authorizations` stores only the domain-separated SHA-256 proof digest
+  and binds both target and issuer current authority.
+- `source_authority_revisions` is append-only authority history. Initial
+  registration cannot use an upsert as implicit policy or credential rotation;
+  explicit rotation advances the revision/epoch and atomically invalidates live
+  leases plus pending join authorization.
 - `operation_replays` stores an encrypted response, algorithm/cipher version,
   nonce, tag, AAD digest, key reference, optional wrapped data key for envelope
   encryption, and mandatory expiry. A direct KMS or secret-manager key
@@ -82,10 +95,22 @@ the record/outbox commit boundary. The application adapter also caps a run at
 statement deadlines. Other child-table cardinalities and production admission
 limits remain application responsibilities rather than trigger logic.
 
-Novel ingest follows one lock and decision order: operation identity, retained
-exact operation replay, run and request lease, fresh transaction time, expiry
-reconciliation, then novel mutation. Each bounded serialization or deadlock
-retry starts a new transaction, repeats that order, and reads time again.
+A novel lifecycle transaction follows one lock and decision order: operation
+identity, current organization/registration/credential authority at initial transaction
+time, retained exact operation replay, applicable
+run/lease/client-run/join locks, final transaction time, second validation of
+the same locked authority, expiry reconciliation, then novel mutation. The
+second check includes registration/credential and authentication-snapshot
+expiry after the dynamic lock wait. Exact replay exits after the initial check.
+Each bounded serialization or deadlock retry starts a new transaction and
+repeats both checks for novel work.
+
+Object-reference ingest is the sole precondition exception to this
+operation-first Gateway order. It first acquires the evidence-object
+organization shared-ancestor lock to preserve the evidence-object cross-plane
+ancestor order, then follows operation identity, current authority, and dynamic
+resource locking within the Gateway plane.
+
 Object-reference ingest reads PostgreSQL `clock_timestamp()` through
 `apolysis_gateway.evidence_object_db_now_unix_ms()`; content-off ingest reads
 the trusted Gateway clock passed through the repository port.
@@ -98,7 +123,8 @@ replay, or evidence event. For the qualified boundary rejection, expiry
 reconciliation commits exactly one `incomplete` transition record and its
 deferred 1:1 outbox partner across competing requests; it cannot create a
 second transition. A retained matching exact operation replay is returned
-unchanged before run and lease reconciliation.
+unchanged after the initial current-authority check but before run and lease
+reconciliation.
 
 `migrations/0003_evidence_object_lifecycle.sql` adds the separately bounded
 evidence-object write registry. It binds every object to the complete
@@ -134,8 +160,8 @@ the transaction retains the sequencing lock. Incremental watermark/gap state,
 bounded scan work, bulk insertion, and load/capacity qualification remain
 required before this schema path can leave the W3–W6 storage gate.
 
-The explicit real-PostgreSQL gate runs 28 shared conformance scenarios,
-including the 256-stream admission boundary, and eleven targeted tests. Those
+The explicit real-PostgreSQL gate runs 43 shared conformance scenarios,
+including the 256-stream admission boundary, and targeted tests. Those
 targeted tests cover repository/pool reconstruction,
 post-commit/pre-ack retry, two identical-operation concurrent tasks, distinct
 operation IDs racing on the same client run key with one winner and one
@@ -143,6 +169,18 @@ idempotency conflict, plaintext lease scanning, and contiguous organization
 sequence plus 1:1 outbox state, and replay expiry that remains a durable
 idempotency tombstone after reconstruction. The concurrency checks use
 independent repositories and connection pools.
+
+The same disposable real-PostgreSQL gate also checks fresh and upgraded
+transaction-authority schema state and covers shared-database cases including a
+novel operation waiting on policy rotation, exact replay waiting on credential
+rotation, authority revalidation after one SQLSTATE `40001` transaction
+restart, and complete transaction restart when a deferred authority-denial
+commit returns SQLSTATE `40001`. A real run-lock case proves join-grant
+issuance rechecks issuer and target authority at final transaction time before
+mutation, requires the grant expiry to remain in the future, and stores that
+final time as `issued_at_unix_ms`. A separate control-plane gate qualifies
+monotonic atomic policy/credential cutovers; the direct-mTLS gate qualifies
+old/new certificate, lease, replay, and stream behavior.
 
 Four additional range scenarios prove one update for a maximum batch, no
 allocation for exact replay or an all-duplicate operation, novel-only allocation
@@ -185,7 +223,9 @@ internal retry. It qualifies requests that enter before the accepted
 finalization deadline or last-lease expiry and reach the fresh lifecycle
 decision at or after the boundary. Its oracle requires one unchanged stored
 replay result, no state for the rejected novel operation, and exactly one
-`incomplete` record/outbox pair.
+`incomplete` record/outbox pair. Exact replay performs the initial authority
+check only; novel work revalidates the same locked authority at final
+transaction time after its dynamic lock wait.
 
 The separate evidence-object provider gate additionally proves schema-owner
 separation with distinct SCRAM logins, no startup migration,
@@ -197,11 +237,12 @@ roles; it does not establish database-enforced tenant isolation.
 The repository crash gate alone is not HTTPS Gateway-server recovery and does
 not qualify trace or HTTP error-body secret handling. The sibling HTTPS gates
 cover bounded post-commit death, two-process writer/lifecycle races, and the
-listed ingest deadline/expiry transaction decisions. They do not qualify the
+listed join/bind/ingest deadline/expiry transaction decisions. They do not qualify the
 broader network pre-commit/process-death or remaining mixed lifecycle/retry
 matrix, commit-wall-clock enforcement, replay-TTL expiry during an
-operation-lock wait, novel join/bind, staggered multi-lease behavior,
-transaction-time authority freshness or rotation, sustained or capacity load,
-replication/failover, backup/restore or point-in-time recovery, HA behavior,
-production KMS integration, or tenant RLS. A successful migration or gate run
-is therefore still not a production claim.
+operation-lock wait, broader staggered multi-lease behavior, additional retry
+depths, sustained or capacity load, replication/failover, backup/restore or
+point-in-time recovery, HA behavior, production KMS integration, or tenant RLS.
+The separate authority gates qualify only the bounded current-authority and
+rotation slice described above. A successful migration or gate run is
+therefore still not a production claim.
