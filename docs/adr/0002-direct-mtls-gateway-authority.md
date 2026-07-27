@@ -38,10 +38,24 @@ across Gateway-process restarts. The same live gate now also exercises explicit
 policy and credential rotation with old and replacement client certificates,
 stale leases and replay, and the required new source stream.
 
-A sibling real direct-mTLS HTTPS qualification gate now fixes the
-post-commit/pre-ack server-death boundary for all four routes. It exercises each
-novel success and exact replay through the production listener, authority,
-application, and repository paths. After the database commit and complete HTTP
+A sibling real direct-mTLS HTTPS qualification gate now fixes two bounded
+server-death columns for all four routes. First, it sends each accepted novel
+request through the normal production listener, authority, application, and
+repository paths. A qualification-owned ordinary, non-deferred `AFTER INSERT`
+trigger targets only that client's `operation_replays` insertion, the
+repository's final write. The trigger advances a nontransactional sequence and
+then waits on an advisory lock. `pg_stat_activity` must show the runtime session
+blocked by the known holder while loopback `curl` remains response-silent. A
+separate session must see no target operation/replay. External `SIGKILL` must
+leave loopback `curl` at HTTP `000` with no header or body. After every runtime
+database session closes, the logical organization-scoped repository-state
+fingerprint must match its pre-request baseline. The independently committed
+mTLS admission audit is excluded from that fingerprint and its count must be
+exactly one above the baseline.
+
+The gate then reuses the same signed request at the existing
+post-commit/pre-ack boundary. It exercises each novel success and exact replay
+through the same production paths. After the database commit and complete HTTP
 response construction, but before the handler returns the response to Axum, a
 feature-gated qualification-only binary writes one static marker to a private
 mode-`0600` file and waits. The gate externally sends `SIGKILL`; loopback
@@ -49,14 +63,17 @@ mode-`0600` file and waits. The gate externally sends `SIGKILL`; loopback
 then proves the operation, encrypted replay, and expected ledger/outbox effects
 exist exactly once. It also records an encrypted replay fingerprint and
 requires it to remain unchanged when the exact-replay server is killed at the
-same boundary. A third normal production server must return
-the exact durable result and allow the lifecycle to continue.
+same boundary. A third normal production server must return the exact durable
+result and allow the lifecycle to continue.
 
-The response barrier is not a production control surface. It is compiled only
-for the separate qualification binary, accepts only an ephemeral loopback
-listener and a private local marker, and has no request, header, environment, or
-normal production-CLI input capable of arming it. The production CLI rejects
-the qualification options.
+Neither seam is a production control surface. The late-precommit trigger,
+helper schema, and sequence are disposable qualification objects installed in
+and removed from the dedicated database; they are not migrations. The response
+barrier is compiled only for the separate qualification binary, accepts only an
+ephemeral loopback listener and a private local marker, and has no request,
+header, environment, or normal production-CLI input capable of arming it. The
+production CLI rejects the qualification options. Neither the production CLI
+nor remote input can install or configure the late-precommit database objects.
 
 A second qualification-only mode places a bounded barrier after mTLS authority
 resolution and request decoding but before the application call. Two
@@ -219,7 +236,10 @@ the v0.1 HTTP adapter maps to `409`, samples time once after the lock wait, and
 leaves the full captured Gateway-state fingerprint unchanged.
 
 This still does not close the W3–W6 transport gate. Sender-bound JWT/workload
-identity profiles, the broader network pre-commit/process-death fault matrix,
+identity profiles, the remaining earlier or arbitrary network
+pre-commit/process-death fault timings, pre-commit exact-replay or rejection
+branches, completion of the final `INSERT` statement, entry into `COMMIT`,
+physical or WAL commit timing,
 commit-wall-clock boundary enforcement, the same replay-TTL operation-lock race
 through live HTTPS, live join-grant-expiry and join-at-last-lease-expiry cases,
 broader staggered multi-lease combinations, additional retry depths and live

@@ -96,9 +96,22 @@ scans, private-file checks, and dedicated-resource cleanup. It exercises an
 application/repository process seam, not recovery of an HTTPS Gateway server.
 
 A sibling real direct-mTLS HTTPS recovery gate reuses the production listener,
-application core, and PostgreSQL repository while adding one feature-gated
-response barrier through a separate qualification-only binary. For each of
-`open_run`, `bind_runtime`, `ingest`, and `finish_run`, it stops both the novel
+application core, and PostgreSQL repository for two bounded crash columns on
+each of `open_run`, `bind_runtime`, `ingest`, and `finish_run`. The
+late-precommit column sends an accepted novel request through the normal
+production binary. A qualification-owned ordinary, non-deferred `AFTER INSERT`
+trigger targets that client's final `operation_replays` write, advances a
+nontransactional sequence, and waits on an advisory lock. The driver requires
+`pg_stat_activity` to show the runtime session blocked by the known holder
+while the client remains response-silent. A separate session must see no target
+operation/replay. External `SIGKILL` must leave loopback `curl` at HTTP `000`
+with no header or body. After every runtime session closes, the logical
+organization-scoped repository-state fingerprint must match its pre-request
+baseline and the separately committed mTLS admission audit count must be
+exactly one above its baseline.
+
+The same signed request then enters the post-commit column. A feature-gated
+response barrier in a separate qualification-only binary stops both the novel
 success and its exact replay after the database commit and complete response
 construction, but before the handler returns that response to Axum. A static
 mode-`0600` marker in a private local directory signals that boundary; the gate
@@ -107,9 +120,12 @@ observe HTTP `000` with no response header or body. PostgreSQL inspection proves
 one operation, one encrypted replay, and the route's expected ledger/outbox
 effects, while the encrypted replay fingerprint remains unchanged across the
 replay crash. A third, normal production server then returns the exact durable
-result and lets the lifecycle proceed. The barrier exists only in an explicit
-feature build, requires an ephemeral loopback listener, and cannot be armed by
-the production CLI or any remote request, header, or body.
+result and lets the lifecycle proceed. The late-precommit database objects are
+disposable qualification state, not migrations or production controls. The
+post-commit barrier exists only in an explicit feature build, requires an
+ephemeral loopback listener, and cannot be armed by the production CLI or any
+remote request, header, or body. Neither the production CLI nor remote input can
+install or configure the late-precommit database objects.
 
 A separate bounded multiprocess gate starts two qualification-only Gateway
 processes with independent loopback mTLS listeners and PostgreSQL pools. After
@@ -237,19 +253,22 @@ The slice is a conformance foundation, not a production service, and does not
 complete W3–W6. In particular, it has:
 
 - the repository recovery gate remains a non-HTTPS application/repository seam;
-  the sibling HTTPS gate qualifies post-commit/pre-ack process death for novel
-  success and exact replay on all four routes, and the two-process gate
-  qualifies the bounded writer/lifecycle matrix above. The split-clock
+  the sibling HTTPS gate qualifies one accepted-novel late-precommit rollback
+  seam plus post-commit/pre-ack process death for novel success and exact replay
+  on all four routes, and the two-process gate qualifies the bounded
+  writer/lifecycle matrix above. The split-clock
   transaction-boundary slices qualify the listed join, bind, ingest, and finish
   cases. The separate repository replay-TTL operation-lock proof is not a live
   HTTPS qualification. Shared real-PostgreSQL conformance additionally covers
   join-grant expiry, join at last-lease expiry, invalid transaction time, and
   one staggered requested-lease bind case. They do not qualify the remaining
-  network pre-commit/process-death or mixed lifecycle/retry matrix, live
-  join-grant expiry or join at last-lease expiry, broader staggered
-  combinations, additional retry depths or live SQLSTATE `40P01` fault
-  coverage, sustained or capacity load, replication/failover, backup/restore,
-  or high availability;
+  earlier or arbitrary network pre-commit/process-death timings, pre-commit
+  exact-replay or rejection branches, completion of the final `INSERT`
+  statement, entry into `COMMIT`, physical or WAL commit timing, the remaining
+  mixed lifecycle/retry matrix, live join-grant expiry or join at last-lease
+  expiry, broader staggered combinations, additional retry depths or live
+  SQLSTATE `40P01` fault coverage, sustained or capacity load,
+  replication/failover, backup/restore, or high availability;
 - no production KMS/envelope-data-key custody or tenant RLS deployment; the
   built-in replay protector and evidence-object wrapping key are direct-key
   in-process inputs, and the fixed database roles are not a shared-cluster
@@ -257,10 +276,11 @@ complete W3–W6. In particular, it has:
 - a real direct-mTLS HTTP tracer covers all four lifecycle routes, live
   credential revocation, cross-organization rejection, and graceful
   Gateway-process restart; the sibling gate also covers the bounded HTTPS
-  post-commit/pre-ack crash seam, and the current PostgreSQL/direct-mTLS slice
-  covers transaction-time authority revalidation plus credential/policy
-  rotation, but JWT/workload-identity profiles, production admission, and the
-  broader network fault/race matrix remain open;
+  accepted-novel late-precommit rollback and post-commit/pre-ack crash seams,
+  and the current PostgreSQL/direct-mTLS slice covers transaction-time authority
+  revalidation plus credential/policy rotation, but JWT/workload-identity
+  profiles, production admission, and the broader network fault/race matrix
+  remain open;
 - no authorized Query/object-read resolver for referenced payloads;
 - no background deadline or encrypted-replay cleanup reaper—run expiration is
   reconciled only when a later novel lifecycle command reaches the application

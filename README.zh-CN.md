@@ -87,15 +87,16 @@ recovery，以及 Gateway application process 在 commit 前、commit 后和 rep
 rollback 或精确收敛，且整个过程都发生在独立 client acknowledgement 发出之前。这只验证
 repository/application-process seam，不代表 HTTPS Gateway server
 recovery 已通过资格验证。与之并行的真实 direct-mTLS HTTPS recovery gate 现已覆盖
-四个 lifecycle route 在 commit 后/ack 前的 Gateway-server 死亡与精确 replay 收敛。
+四个 lifecycle route 上 accepted novel work 的一个有界 late-precommit rollback seam，以及
+commit 后/ack 前的 Gateway-server 死亡与精确 replay 收敛。
 另一个有界双进程 mTLS 门禁现已验证 run 创建、one-use join、exact runtime binding、
 event 去重与跨 run organization sequencing、finalization 及终态不可逆等协调 writer/lifecycle
 竞态。同级的有界 direct-mTLS/PostgreSQL 门禁现已覆盖额外的
 transaction-boundary join/bind/ingest/finish 切片，并保持 exact replay 稳定，同时让 novel
 work 失败关闭或确定性收敛为 `incomplete`。独立的 repository qualification 现已覆盖四条
 exact lifecycle route 的 replay-TTL 边界；该证据不经过 live HTTPS。它不代表完整 mixed
-lifecycle/retry matrix 已通过。更广的进程死亡、
-network pre-commit、staggered multi-lease、load、replication、failover、backup/restore
+lifecycle/retry matrix 已通过。其余进程死亡与 network pre-commit 时序、
+staggered multi-lease、load、replication、failover、backup/restore
 与高可用工作仍未验证；production KMS integration、database RLS
 deployment、授权 object-read resolver、evidence-object projection/read view、持续后台 reaper
 运行与通过容量验证的 resource limit

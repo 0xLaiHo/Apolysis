@@ -111,16 +111,31 @@ scanning, `pg_amcheck`, `pg_dump`, generated-secret scans, private-file checks,
 and dedicated-resource cleanup are part of the gate. This qualifies the
 application/repository process seam, not HTTPS Gateway-server recovery.
 A sibling real direct-mTLS HTTPS gate now covers all four lifecycle routes at
-the post-commit/pre-ack server-death seam. For both the novel result and exact
-replay, a feature-gated qualification-only binary writes a static private
-mode-`0600` marker after commit and complete response construction but before
-returning the response to Axum; an external `SIGKILL` must leave loopback
-`curl` at HTTP `000` with no headers or body. The database must retain one
-operation/replay and the expected ledger/outbox effects without changing the
-encrypted replay fingerprint, after which a third normal production server
-returns the exact result. The qualification binary accepts only an ephemeral
-loopback listener; the production CLI and remote HTTP requests cannot arm the
-barrier.
+one accepted-novel late-precommit rollback seam and at the
+post-commit/pre-ack server-death seam. The late-precommit column uses the normal
+production binary and a qualification-owned ordinary, non-deferred
+`AFTER INSERT` trigger on the final `operation_replays` write. A
+nontransactional sequence and an advisory-lock wait prove that the target
+request reached the seam and that its runtime session is blocked by the known
+holder. While the client remains response-silent, a separate session must see
+no target operation/replay. External `SIGKILL` must leave loopback `curl` at
+HTTP `000` with no header or body. After every runtime session closes, the
+logical organization-scoped repository-state fingerprint must match its
+pre-request baseline and the separately committed mTLS admission audit count
+must be exactly one above its baseline.
+
+The same signed request then enters the existing post-commit column. For both
+the novel result and exact replay, a feature-gated qualification-only binary
+writes a static private mode-`0600` marker after commit and complete response
+construction but before returning the response to Axum; external `SIGKILL`
+must leave loopback `curl` at HTTP `000` with no headers or body. The database
+must retain one operation/replay and the expected ledger/outbox effects without
+changing the encrypted replay fingerprint, after which a third normal
+production server returns the exact result. The late-precommit database objects
+are disposable qualification state, not migrations or production controls. The
+post-commit qualification binary accepts only an ephemeral loopback listener;
+neither the production CLI nor remote HTTP input can install or configure the
+late-precommit objects or arm the response barrier.
 
 A bounded two-process gate additionally qualifies the reviewed writer and
 lifecycle races. Its split-clock sibling qualifies five operation/boundary
@@ -186,11 +201,14 @@ record, outbox, and evidence inserts remain row-wise while holding organization
 sequencing. Incremental watermark/gap state, bulk insertion, and load/capacity
 qualification remain W3–W6 storage work.
 
-This is not a production Gateway and does not complete W3–W6. The broader
-network pre-commit/process-death and remaining mixed lifecycle/retry matrices,
-sustained or capacity load, replication/failover, backup/restore, and HA are
-not qualified. The bounded lifecycle decision is not a claim about the database
-commit's wall-clock instant. The repository replay-TTL operation-lock proof is
+This is not a production Gateway and does not complete W3–W6. The remaining
+earlier or arbitrary network pre-commit/process-death timings, pre-commit
+exact-replay or rejection branches, completion of the final `INSERT` statement,
+entry into `COMMIT`, physical or WAL commit timing, and the remaining mixed
+lifecycle/retry matrices, sustained or capacity load, replication/failover,
+backup/restore, and HA are not qualified. The bounded lifecycle decision is not
+a claim about the database commit's wall-clock instant. The repository
+replay-TTL operation-lock proof is
 not qualified through live HTTPS; live join-grant expiry, live join at
 last-lease expiry, remaining novel join/bind cases, broader staggered
 multi-lease combinations, additional retry depths, and live SQLSTATE `40P01`

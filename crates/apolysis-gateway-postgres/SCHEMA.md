@@ -204,6 +204,24 @@ Catalog-discovered plaintext scanning, `pg_amcheck`, `pg_dump`, generated-secret
 scanning, private-file mode checks, and cleanup of the dedicated container,
 volume, and control directory are part of the gate.
 
+The sibling real direct-mTLS HTTPS crash gate adds one bounded late-precommit
+column for accepted novel `open_run`, `bind_runtime`, `ingest`, and `finish_run`
+requests. It installs a disposable ordinary, non-deferred `AFTER INSERT`
+trigger on `operation_replays`, the final repository write. For only the target
+client operation, the trigger advances a nontransactional sequence and waits on
+a held advisory lock. The driver proves the runtime session is blocked by that
+known holder, the client remains response-silent, and a separate database
+session sees neither the target operation nor replay. The captured
+logical organization-scoped repository-state fingerprint is checked after
+Gateway `SIGKILL` and runtime-session closure and must match its pre-request
+baseline. The killed client must observe HTTP `000` without a header or body.
+The independently committed mTLS admission audit is outside that transaction
+fingerprint and must advance by exactly one from its baseline count. The
+trigger, helper schema, and sequence are qualification-owned objects removed
+after each route, not migration state.
+The same signed request then enters the sibling post-commit/pre-ack novel and
+exact-replay crash column before a normal server proves exact convergence.
+
 The separate two-process mTLS lifecycle-race gate now drives independent
 Gateway processes and pools through a qualification-only pre-operation
 barrier. It proves identical-operation replay, one winner for a shared client
@@ -257,12 +275,15 @@ acknowledgements. This qualifies the evidence-object served paths' process-plane
 roles; it does not establish database-enforced tenant isolation.
 
 The repository crash gate alone is not HTTPS Gateway-server recovery and does
-not qualify trace or HTTP error-body secret handling. The sibling HTTPS gates
-cover bounded post-commit death, two-process writer/lifecycle races, and the
-listed join/bind/ingest/finish deadline/expiry transaction decisions. The
-replay-TTL operation-lock test above does not qualify that race through live
-HTTPS. These gates also do not qualify the broader network
-pre-commit/process-death or remaining mixed lifecycle/retry matrix,
+not qualify trace or HTTP error-body secret handling. The sibling HTTPS
+qualifications cover one accepted-novel late-precommit rollback seam, bounded
+post-commit death, two-process writer/lifecycle races, and the listed
+join/bind/ingest/finish deadline/expiry transaction decisions. The replay-TTL
+operation-lock test above does not qualify that race through live HTTPS. These
+gates also do not qualify the remaining earlier or arbitrary network
+pre-commit/process-death timings, pre-commit exact-replay or rejection branches,
+completion of the final `INSERT` statement, entry into `COMMIT`, physical or
+WAL commit timing, the remaining mixed lifecycle/retry matrix,
 commit-wall-clock enforcement, live join-grant expiry or join at last-lease
 expiry, broader staggered multi-lease behavior, additional retry depths or live
 SQLSTATE `40P01` fault coverage, sustained or capacity load,
