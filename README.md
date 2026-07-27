@@ -105,15 +105,11 @@ An additional bounded two-process mTLS gate now qualifies coordinated
 writer/lifecycle races across run creation, one-use join, exact runtime binding,
 event deduplication and cross-run organization sequencing, finalization, and terminal
 irreversibility. A sibling bounded direct-mTLS/PostgreSQL gate now covers
-exact replay versus novel ingest when a transaction wait or one real internal
-transaction retry crosses an accepted finalization deadline or the last
-lease's expiry. Exact replay remains stable; novel work fails closed without a
-novel event, operation, or replay effect, while one matching incomplete
-transition/outbox pair may be committed lazily. This does not claim the
-complete mixed lifecycle/retry matrix. The broader process-death and network
-pre-commit matrices, join/bind and staggered multi-lease boundary cases, load,
-replication, failover, backup/restore, and high availability remain
-unqualified, as do production KMS integration, database
+an additional transaction-boundary join/bind/ingest slice with stable exact
+replay and fail-closed novel work. This does not claim the complete mixed
+lifecycle/retry matrix. The broader process-death, network pre-commit,
+staggered multi-lease, load, replication, failover, backup/restore, and high
+availability work remains unqualified, as do production KMS integration, database
 row-level-security deployment,
 atomic authority revalidation with ledger commit, lease/credential rotation,
 an authorized object-read resolver, evidence-object projection/read views,

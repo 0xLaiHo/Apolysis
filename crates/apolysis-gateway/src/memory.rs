@@ -161,6 +161,12 @@ pub struct MemoryGatewaySnapshot {
     operation_count: usize,
     replay_count: usize,
     finalization_declaration_count: usize,
+    source_stream_count: usize,
+    lease_count: usize,
+    runtime_binding_count: usize,
+    active_runtime_identity_count: usize,
+    pending_join_authorization_count: usize,
+    consumed_join_authorization_count: usize,
     accepted_effective_trust_profiles: Vec<TrustProfile>,
 }
 
@@ -195,6 +201,30 @@ impl MemoryGatewaySnapshot {
 
     pub fn finalization_declaration_count(&self) -> usize {
         self.finalization_declaration_count
+    }
+
+    pub fn source_stream_count(&self) -> usize {
+        self.source_stream_count
+    }
+
+    pub fn lease_count(&self) -> usize {
+        self.lease_count
+    }
+
+    pub fn runtime_binding_count(&self) -> usize {
+        self.runtime_binding_count
+    }
+
+    pub fn active_runtime_identity_count(&self) -> usize {
+        self.active_runtime_identity_count
+    }
+
+    pub fn pending_join_authorization_count(&self) -> usize {
+        self.pending_join_authorization_count
+    }
+
+    pub fn consumed_join_authorization_count(&self) -> usize {
+        self.consumed_join_authorization_count
     }
 
     /// Return only the trust classifications assigned to accepted evidence.
@@ -320,6 +350,20 @@ impl MemoryGatewayRepository {
             // The memory adapter stores each replay outcome inline with its successful operation.
             replay_count: state.operations.len(),
             finalization_declaration_count,
+            source_stream_count: state.streams.len(),
+            lease_count: state.leases.len(),
+            runtime_binding_count: state.bindings.len(),
+            active_runtime_identity_count: state.exact_runtime_identities.len(),
+            pending_join_authorization_count: state
+                .join_grants
+                .values()
+                .filter(|grant| grant.status == JoinGrantStatus::Pending)
+                .count(),
+            consumed_join_authorization_count: state
+                .join_grants
+                .values()
+                .filter(|grant| grant.status == JoinGrantStatus::Consumed)
+                .count(),
             accepted_effective_trust_profiles,
         })
     }
@@ -462,8 +506,9 @@ impl MemoryGatewayRepository {
         &self,
         context: apolysis_contracts::AuthenticatedSourceContext,
         request: OpenRunRequest,
-        now_unix_ms: u64,
+        admitted_at_unix_ms: u64,
         lease_expires_at_unix_ms: u64,
+        clock: &dyn crate::GatewayClock,
         ids: &dyn GatewayIdGenerator,
     ) -> Result<OpenRunResponse, GatewayFailure> {
         let operation_key = OperationKey {
@@ -506,6 +551,7 @@ impl MemoryGatewayRepository {
             created_run,
             consumed_join_grant,
             run_finalization_deadline_unix_ms,
+            transaction_now_unix_ms,
         ) = match &request {
             OpenRunRequest::Create {
                 client_run_key,
@@ -557,6 +603,7 @@ impl MemoryGatewayRepository {
                     Some((client_run_key, run_record)),
                     None,
                     None,
+                    admitted_at_unix_ms,
                 )
             }
             OpenRunRequest::Join {
@@ -593,12 +640,20 @@ impl MemoryGatewayRepository {
                     || grant.registration_policy_revision
                         != context.authentication().policy_revision()
                     || grant.expires_at_unix_ms != join_proof.expires_at_unix_ms()
-                    || now_unix_ms >= grant.expires_at_unix_ms
                     || grant.status != JoinGrantStatus::Pending
                 {
                     return Err(unauthorized_join_not_found());
                 }
-                if reconcile_expired_run(&mut state, &context, run_id, now_unix_ms)?.is_some() {
+                let transaction_now_unix_ms = clock.transaction_now_unix_ms();
+                if transaction_now_unix_ms == 0 || transaction_now_unix_ms < admitted_at_unix_ms {
+                    return Err(repository_invariant());
+                }
+                if transaction_now_unix_ms >= grant.expires_at_unix_ms {
+                    return Err(unauthorized_join_not_found());
+                }
+                if reconcile_expired_run(&mut state, &context, run_id, transaction_now_unix_ms)?
+                    .is_some()
+                {
                     *committed_state = state;
                     return Err(GatewayFailure::new(
                         ContractErrorCode::InvalidLifecycleTransition,
@@ -628,7 +683,7 @@ impl MemoryGatewayRepository {
                     let deadline = run
                         .finalization_deadline_unix_ms
                         .ok_or_else(repository_invariant)?;
-                    if now_unix_ms >= deadline {
+                    if transaction_now_unix_ms >= deadline {
                         return Err(GatewayFailure::new(
                             ContractErrorCode::InvalidLifecycleTransition,
                             "Run finalization deadline has elapsed",
@@ -659,12 +714,18 @@ impl MemoryGatewayRepository {
                     None,
                     (grant.kind == JoinProofKind::Grant).then_some(grant_key),
                     run_finalization_deadline_unix_ms,
+                    transaction_now_unix_ms,
                 )
             }
         };
         let lease_expires_at_unix_ms = run_finalization_deadline_unix_ms
             .map(|deadline| lease_expires_at_unix_ms.min(deadline))
             .unwrap_or(lease_expires_at_unix_ms);
+        if transaction_now_unix_ms >= lease_expires_at_unix_ms {
+            return Err(GatewayFailure::repository_fault(
+                AuditReason::RepositoryInvariant,
+            ));
+        }
         let lease_id = next_id(ids, "lease")?;
         let lease = RunLease::new(
             lease_id.clone(),
@@ -736,17 +797,21 @@ impl MemoryGatewayRepository {
                 &mut state,
                 &context,
                 &run_id,
-                now_unix_ms,
+                transaction_now_unix_ms,
                 AgentExecutionRecordFact::RunOpened(Box::new(descriptor)),
             )?;
             append_record_fact(
                 &mut state,
                 &context,
                 &run_id,
-                now_unix_ms,
+                transaction_now_unix_ms,
                 AgentExecutionRecordFact::RunStateChanged(
-                    RunStateTransition::new(RunState::Opening, RunState::Active, now_unix_ms)
-                        .map_err(contract_invariant)?,
+                    RunStateTransition::new(
+                        RunState::Opening,
+                        RunState::Active,
+                        transaction_now_unix_ms,
+                    )
+                    .map_err(contract_invariant)?,
                 ),
             )?;
         }
@@ -763,7 +828,7 @@ impl MemoryGatewayRepository {
             &mut state,
             &context,
             &run_id,
-            now_unix_ms,
+            transaction_now_unix_ms,
             AgentExecutionRecordFact::SourceRegistered(Box::new(registered)),
         )?;
         if let Some((client_run_key, (run_key, run_record))) = created_run {
@@ -864,9 +929,16 @@ impl MemoryGatewayRepository {
             return Err(repository_invariant());
         }
         let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
+        let deadline_elapsed = finalization_deadline_elapsed(&run, now_unix_ms);
         if reconcile_expired_run(&mut state, &context, request.run_id(), now_unix_ms)?.is_some() {
             *committed_state = state;
-            return Err(if requested_lease_expired {
+            return Err(if deadline_elapsed {
+                GatewayFailure::new(
+                    ContractErrorCode::InvalidLifecycleTransition,
+                    "Run finalization deadline has elapsed",
+                    AuditReason::RepositoryInvariant,
+                )
+            } else if requested_lease_expired {
                 lease_scope_failure(ContractErrorCode::LeaseExpired)
             } else {
                 GatewayFailure::new(
@@ -876,7 +948,9 @@ impl MemoryGatewayRepository {
                 )
             });
         }
-        if requested_lease_expired {
+        if requested_lease_expired
+            && !matches!(run.state, RunState::Finished | RunState::Incomplete)
+        {
             return Err(lease_scope_failure(ContractErrorCode::LeaseExpired));
         }
 
@@ -1018,6 +1092,9 @@ impl MemoryGatewayRepository {
                 AuditReason::RepositoryInvariant,
             ));
         }
+        if requested_lease_expired {
+            return Err(lease_scope_failure(ContractErrorCode::LeaseExpired));
+        }
 
         let organization_id = context.organization_id().to_string();
         let mut acknowledgements = Vec::with_capacity(classified.len());
@@ -1110,7 +1187,8 @@ impl MemoryGatewayRepository {
         &self,
         context: apolysis_contracts::AuthenticatedSourceContext,
         request: BindRuntimeRequest,
-        now_unix_ms: u64,
+        admitted_at_unix_ms: u64,
+        clock: &dyn crate::GatewayClock,
     ) -> Result<BindRuntimeResponse, GatewayFailure> {
         let mut committed_state = self.state.lock().map_err(|_| repository_invariant())?;
         let mut state = committed_state.clone();
@@ -1142,6 +1220,11 @@ impl MemoryGatewayRepository {
             .map_err(contract_invariant);
         }
         let lease = scoped_lease(&state, &context, request.run_id(), request.lease_id())?;
+        let run_key = RunKey {
+            organization_id: context.organization_id().to_string(),
+            run_id: request.run_id().to_string(),
+        };
+        let run = state.runs.get(&run_key).cloned().ok_or_else(not_found)?;
         if lease.registration_policy_revision != context.authentication().policy_revision() {
             return Err(lease_scope_failure(ContractErrorCode::LeaseRevoked));
         }
@@ -1156,10 +1239,21 @@ impl MemoryGatewayRepository {
         {
             return Err(lease_scope_failure(ContractErrorCode::LeaseScopeMismatch));
         }
+        let now_unix_ms = clock.transaction_now_unix_ms();
+        if now_unix_ms == 0 || now_unix_ms < admitted_at_unix_ms {
+            return Err(repository_invariant());
+        }
         let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
+        let deadline_elapsed = finalization_deadline_elapsed(&run, now_unix_ms);
         if reconcile_expired_run(&mut state, &context, request.run_id(), now_unix_ms)?.is_some() {
             *committed_state = state;
-            return Err(if requested_lease_expired {
+            return Err(if deadline_elapsed {
+                GatewayFailure::new(
+                    ContractErrorCode::InvalidLifecycleTransition,
+                    "Run finalization deadline has elapsed",
+                    AuditReason::RepositoryInvariant,
+                )
+            } else if requested_lease_expired {
                 lease_scope_failure(ContractErrorCode::LeaseExpired)
             } else {
                 GatewayFailure::new(
@@ -1169,20 +1263,15 @@ impl MemoryGatewayRepository {
                 )
             });
         }
-        if requested_lease_expired {
-            return Err(lease_scope_failure(ContractErrorCode::LeaseExpired));
-        }
-        let run_key = RunKey {
-            organization_id: context.organization_id().to_string(),
-            run_id: request.run_id().to_string(),
-        };
-        let run = state.runs.get(&run_key).cloned().ok_or_else(not_found)?;
         if run.state != RunState::Active {
             return Err(GatewayFailure::new(
                 ContractErrorCode::InvalidLifecycleTransition,
                 "Runtime binding is not valid in the current run state",
                 AuditReason::RepositoryInvariant,
             ));
+        }
+        if requested_lease_expired {
+            return Err(lease_scope_failure(ContractErrorCode::LeaseExpired));
         }
         let stream = state
             .streams
@@ -1622,6 +1711,7 @@ impl GatewayRepository for MemoryGatewayRepository {
                         request.clone(),
                         now_unix_ms,
                         lease_expires_at_unix_ms,
+                        clock,
                         ids,
                     )
                     .map(LedgerOutcome::OpenRun),
@@ -1637,7 +1727,7 @@ impl GatewayRepository for MemoryGatewayRepository {
                     request,
                     now_unix_ms,
                 } => self
-                    .bind_runtime(context.clone(), request.clone(), now_unix_ms)
+                    .bind_runtime(context.clone(), request.clone(), now_unix_ms, clock)
                     .map(LedgerOutcome::BindRuntime),
                 LedgerOperation::FinishRun {
                     context,
@@ -1705,10 +1795,7 @@ fn reconcile_expired_run(
         run_id: run_id.to_string(),
     };
     let run = state.runs.get(&run_key).cloned().ok_or_else(not_found)?;
-    let deadline_elapsed = run.state == RunState::Finishing
-        && run
-            .finalization_deadline_unix_ms
-            .is_some_and(|deadline| now_unix_ms >= deadline);
+    let deadline_elapsed = finalization_deadline_elapsed(&run, now_unix_ms);
     let has_unexpired_lease = state.leases.iter().any(|(key, lease)| {
         key.organization_id == context.organization_id().as_str()
             && lease.run_id == *run_id
@@ -1743,6 +1830,13 @@ fn reconcile_expired_run(
         .exact_runtime_identities
         .retain(|_, bound_run| bound_run != run_id);
     Ok(Some(run.state))
+}
+
+fn finalization_deadline_elapsed(run: &RunRecord, now_unix_ms: u64) -> bool {
+    run.state == RunState::Finishing
+        && run
+            .finalization_deadline_unix_ms
+            .is_some_and(|deadline| now_unix_ms >= deadline)
 }
 
 fn terminal_position_is_reconciled(

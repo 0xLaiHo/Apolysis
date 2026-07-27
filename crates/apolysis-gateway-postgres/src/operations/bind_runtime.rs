@@ -5,7 +5,9 @@ use apolysis_contracts::{
     BindRuntimeRequest, BindRuntimeResponse, ContractErrorCode, GatewayOperation, RunState,
     RuntimeAttribution, RuntimeIdentityKind, SourceCapability, SourceManifest, TrustProfile,
 };
-use apolysis_gateway::{canonical_runtime_binding_digest, lease_id_digest, LedgerOutcome};
+use apolysis_gateway::{
+    canonical_runtime_binding_digest, lease_id_digest, GatewayClock, LedgerOutcome,
+};
 use sqlx::{Postgres, Row, Transaction};
 
 use crate::{
@@ -23,7 +25,8 @@ impl PostgresGatewayRepository {
         transaction: &mut Transaction<'_, Postgres>,
         context: &AuthenticatedSourceContext,
         request: &BindRuntimeRequest,
-        now_unix_ms: u64,
+        admitted_at_unix_ms: u64,
+        clock: &dyn GatewayClock,
     ) -> TxResult<LedgerOutcome> {
         let identity = operation_identity(context, "bind_runtime", request.client_operation_id())
             .map_err(TxFailure::rollback)?;
@@ -32,7 +35,7 @@ impl PostgresGatewayRepository {
                 transaction,
                 &identity,
                 request.request_digest(),
-                now_unix_ms,
+                admitted_at_unix_ms,
             )
             .await?
         {
@@ -47,25 +50,38 @@ impl PostgresGatewayRepository {
             .await?;
         let lease = load_lease(transaction, context, request).await?;
         validate_lease(context, request, &lease)?;
+        // A novel binding samples trusted time only after the operation,
+        // run, and requested lease are locked. Retried transactions therefore
+        // cannot reuse a pre-wait lifecycle decision.
+        let now_unix_ms = clock.transaction_now_unix_ms();
+        if now_unix_ms == 0 || now_unix_ms < admitted_at_unix_ms {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
+        let deadline_elapsed = run.state == RunState::Finishing
+            && run
+                .finalization_deadline_unix_ms
+                .is_some_and(|deadline| now_unix_ms >= deadline);
         let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
         if self
             .reconcile_expired_run(transaction, context, request.run_id(), &run, now_unix_ms)
             .await?
         {
-            return Err(TxFailure::commit(if requested_lease_expired {
+            return Err(TxFailure::commit(if deadline_elapsed {
+                policy_failure(ContractErrorCode::InvalidLifecycleTransition)
+            } else if requested_lease_expired {
                 lease_failure(ContractErrorCode::LeaseExpired)
             } else {
                 policy_failure(ContractErrorCode::InvalidLifecycleTransition)
             }));
         }
-        if requested_lease_expired {
-            return Err(TxFailure::rollback(lease_failure(
-                ContractErrorCode::LeaseExpired,
-            )));
-        }
         if run.state != RunState::Active {
             return Err(TxFailure::rollback(policy_failure(
                 ContractErrorCode::InvalidLifecycleTransition,
+            )));
+        }
+        if requested_lease_expired {
+            return Err(TxFailure::rollback(lease_failure(
+                ContractErrorCode::LeaseExpired,
             )));
         }
         let stream = load_stream(transaction, context, request, &lease).await?;

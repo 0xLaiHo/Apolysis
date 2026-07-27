@@ -6,8 +6,8 @@ use apolysis_contracts::{
     RunPolicySelection, RunState, RunStateTransition, SourceManifest,
 };
 use apolysis_gateway::{
-    canonical_source_manifest_digest, lease_id_digest, AuditReason, GatewayFailure,
-    GatewayIdGenerator, LedgerOutcome, MAX_SOURCE_STREAMS_PER_RUN,
+    canonical_source_manifest_digest, lease_id_digest, AuditReason, GatewayFailure, LedgerOutcome,
+    MAX_SOURCE_STREAMS_PER_RUN,
 };
 use sqlx::{Postgres, Row, Transaction};
 
@@ -15,7 +15,8 @@ use crate::{
     error::{idempotency_conflict, policy_failure, repository_failure},
     model::{enum_name, join_proof_digest, principal_kind_name, sql_i64},
     repository::{
-        digest_bytes, next_id, operation_identity, PostgresGatewayRepository, TxFailure, TxResult,
+        digest_bytes, next_id, operation_identity, OpenRunAttempt, PostgresGatewayRepository,
+        TxFailure, TxResult,
     },
 };
 
@@ -25,10 +26,14 @@ impl PostgresGatewayRepository {
         transaction: &mut Transaction<'_, Postgres>,
         context: &AuthenticatedSourceContext,
         request: &OpenRunRequest,
-        now_unix_ms: u64,
-        lease_expires_at_unix_ms: u64,
-        ids: &dyn GatewayIdGenerator,
+        attempt: OpenRunAttempt<'_>,
     ) -> TxResult<LedgerOutcome> {
+        let OpenRunAttempt {
+            admitted_at_unix_ms,
+            lease_expires_at_unix_ms,
+            clock,
+            ids,
+        } = attempt;
         let identity = operation_identity(context, "open_run", request.client_operation_id())
             .map_err(TxFailure::rollback)?;
         if let Some(outcome) = self
@@ -36,16 +41,20 @@ impl PostgresGatewayRepository {
                 transaction,
                 &identity,
                 request.request_digest(),
-                now_unix_ms,
+                admitted_at_unix_ms,
             )
             .await?
         {
             return Ok(outcome);
         }
-        self.ensure_organization(transaction, context.organization_id().as_str(), now_unix_ms)
-            .await?;
+        self.ensure_organization(
+            transaction,
+            context.organization_id().as_str(),
+            admitted_at_unix_ms,
+        )
+        .await?;
 
-        let prepared = match request {
+        let (prepared, now_unix_ms) = match request {
             OpenRunRequest::Create {
                 client_run_key,
                 environment,
@@ -100,7 +109,7 @@ impl PostgresGatewayRepository {
                 let run_id = RunId::try_from(next_id(ids, "run").map_err(TxFailure::rollback)?)
                     .map_err(|_| TxFailure::rollback(repository_failure()))?;
                 let source_stream_id = next_id(ids, "stream").map_err(TxFailure::rollback)?;
-                let now = sql_i64(now_unix_ms).map_err(TxFailure::rollback)?;
+                let now = sql_i64(admitted_at_unix_ms).map_err(TxFailure::rollback)?;
                 sqlx::query(
                     "INSERT INTO apolysis_gateway.runs (\
                         organization_id, run_id, state, environment, authority_kind, authority_id, \
@@ -178,7 +187,7 @@ impl PostgresGatewayRepository {
                     transaction,
                     context,
                     &run_id,
-                    now_unix_ms,
+                    admitted_at_unix_ms,
                     AgentExecutionRecordFact::RunOpened(Box::new(descriptor)),
                 )
                 .await?;
@@ -186,22 +195,32 @@ impl PostgresGatewayRepository {
                     transaction,
                     context,
                     &run_id,
-                    now_unix_ms,
+                    admitted_at_unix_ms,
                     AgentExecutionRecordFact::RunStateChanged(
-                        RunStateTransition::new(RunState::Opening, RunState::Active, now_unix_ms)
-                            .map_err(|_| TxFailure::rollback(repository_failure()))?,
+                        RunStateTransition::new(
+                            RunState::Opening,
+                            RunState::Active,
+                            admitted_at_unix_ms,
+                        )
+                        .map_err(|_| TxFailure::rollback(repository_failure()))?,
                     ),
                 )
                 .await?;
-                PreparedOpen {
-                    run_id,
-                    source_stream_id,
-                    source_manifest,
-                    outcome: OpenRunOutcome::Created,
-                    allowed_operations: context.registration_policy().allowed_operations().to_vec(),
-                    lease_expires_at_unix_ms,
-                    consumed_grant_digest: None,
-                }
+                (
+                    PreparedOpen {
+                        run_id,
+                        source_stream_id,
+                        source_manifest,
+                        outcome: OpenRunOutcome::Created,
+                        allowed_operations: context
+                            .registration_policy()
+                            .allowed_operations()
+                            .to_vec(),
+                        lease_expires_at_unix_ms,
+                        consumed_grant_digest: None,
+                    },
+                    admitted_at_unix_ms,
+                )
             }
             OpenRunRequest::Join {
                 run_id,
@@ -238,7 +257,7 @@ impl PostgresGatewayRepository {
                 let grant_expires: i64 = grant.try_get("expires_at_unix_ms").map_err(|error| {
                     TxFailure::from_sqlx_at("open_run_decode_join_authorization", error)
                 })?;
-                let authorized = grant_kind
+                let statically_authorized = grant_kind
                     == enum_name(&join_proof.kind()).map_err(TxFailure::rollback)?
                     && grant
                         .try_get::<String, _>("authorization_state")
@@ -287,9 +306,22 @@ impl PostgresGatewayRepository {
                         == sql_i64(context.authentication().policy_revision())
                             .map_err(TxFailure::rollback)?
                     && grant_expires
-                        == sql_i64(join_proof.expires_at_unix_ms()).map_err(TxFailure::rollback)?
-                    && sql_i64(now_unix_ms).map_err(TxFailure::rollback)? < grant_expires;
-                if !authorized {
+                        == sql_i64(join_proof.expires_at_unix_ms()).map_err(TxFailure::rollback)?;
+                if !statically_authorized {
+                    return Err(TxFailure::rollback(policy_failure(
+                        apolysis_contracts::ContractErrorCode::NotFound,
+                    )));
+                }
+                // HTTP admission and transaction begin are not lifecycle
+                // acceptance points. The operation identity, exact replay,
+                // run, and join authorization are locked before sampling the
+                // trusted clock. A restarted transaction repeats this entire
+                // sequence and samples again.
+                let now_unix_ms = clock.transaction_now_unix_ms();
+                if now_unix_ms == 0 || now_unix_ms < admitted_at_unix_ms {
+                    return Err(TxFailure::rollback(repository_failure()));
+                }
+                if sql_i64(now_unix_ms).map_err(TxFailure::rollback)? >= grant_expires {
                     return Err(TxFailure::rollback(policy_failure(
                         apolysis_contracts::ContractErrorCode::NotFound,
                     )));
@@ -348,18 +380,24 @@ impl PostgresGatewayRepository {
                             || context.registration_policy().may_finalize_runs()
                     })
                     .collect();
-                PreparedOpen {
-                    run_id: run_id.clone(),
-                    source_stream_id,
-                    source_manifest,
-                    outcome: OpenRunOutcome::Joined,
-                    allowed_operations,
-                    lease_expires_at_unix_ms: lease_expiry,
-                    consumed_grant_digest: (grant_kind == "grant").then_some(proof_digest),
-                }
+                (
+                    PreparedOpen {
+                        run_id: run_id.clone(),
+                        source_stream_id,
+                        source_manifest,
+                        outcome: OpenRunOutcome::Joined,
+                        allowed_operations,
+                        lease_expires_at_unix_ms: lease_expiry,
+                        consumed_grant_digest: (grant_kind == "grant").then_some(proof_digest),
+                    },
+                    now_unix_ms,
+                )
             }
         };
 
+        if now_unix_ms >= prepared.lease_expires_at_unix_ms {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
         let lease_id = next_id(ids, "lease").map_err(TxFailure::rollback)?;
         let lease = RunLease::new(
             lease_id.clone(),

@@ -87,7 +87,7 @@ non-durable memory adapter. An initial PostgreSQL adapter applies the same
 atomic-command seam to normalized ledger/outbox state, hashed lease and join
 references, encrypted exact-operation replay, a 256-stream-per-run admission
 cap, and bounded transaction-local lock/statement deadlines. The shared
-28-scenario suite runs against both adapters and verifies atomic rejection at
+38-scenario suite runs against both adapters and verifies atomic rejection at
 the stream boundary; an explicit real-PostgreSQL gate
 adds eleven targeted transaction, reconstruction, range-allocation, two-shape cross-pool
 concurrency, plaintext-absence, sequencing, and replay-expiry checks. The

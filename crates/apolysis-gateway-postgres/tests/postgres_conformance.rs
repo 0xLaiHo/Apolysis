@@ -82,7 +82,16 @@ impl GatewayConformanceHarness for PostgresGatewayHarness {
                     (SELECT count(*) FROM apolysis_gateway.evidence_events) AS events, \
                     (SELECT count(*) FROM apolysis_gateway.gateway_operations) AS operations, \
                     (SELECT count(*) FROM apolysis_gateway.operation_replays) AS replays, \
-                    (SELECT count(*) FROM apolysis_gateway.finalization_declarations) AS finalizations",
+                    (SELECT count(*) FROM apolysis_gateway.finalization_declarations) AS finalizations, \
+                    (SELECT count(*) FROM apolysis_gateway.source_streams) AS source_streams, \
+                    (SELECT count(*) FROM apolysis_gateway.leases) AS leases, \
+                    (SELECT count(*) FROM apolysis_gateway.runtime_bindings) AS runtime_bindings, \
+                    (SELECT count(*) FROM apolysis_gateway.active_runtime_identities) \
+                      AS active_runtime_identities, \
+                    (SELECT count(*) FROM apolysis_gateway.join_authorizations \
+                       WHERE authorization_state='pending') AS pending_join_authorizations, \
+                    (SELECT count(*) FROM apolysis_gateway.join_authorizations \
+                       WHERE authorization_state='consumed') AS consumed_join_authorizations",
             )
             .fetch_one(&self.inspection_pool)
             .await?;
@@ -122,6 +131,22 @@ impl GatewayConformanceHarness for PostgresGatewayHarness {
                     replay_count: usize::try_from(counts.try_get::<i64, _>("replays")?)?,
                     finalization_declaration_count: usize::try_from(
                         counts.try_get::<i64, _>("finalizations")?,
+                    )?,
+                    source_stream_count: usize::try_from(
+                        counts.try_get::<i64, _>("source_streams")?,
+                    )?,
+                    lease_count: usize::try_from(counts.try_get::<i64, _>("leases")?)?,
+                    runtime_binding_count: usize::try_from(
+                        counts.try_get::<i64, _>("runtime_bindings")?,
+                    )?,
+                    active_runtime_identity_count: usize::try_from(
+                        counts.try_get::<i64, _>("active_runtime_identities")?,
+                    )?,
+                    pending_join_authorization_count: usize::try_from(
+                        counts.try_get::<i64, _>("pending_join_authorizations")?,
+                    )?,
+                    consumed_join_authorization_count: usize::try_from(
+                        counts.try_get::<i64, _>("consumed_join_authorizations")?,
                     )?,
                 },
                 accepted_trust,
