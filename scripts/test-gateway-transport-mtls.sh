@@ -167,6 +167,8 @@ race_overlap_watcher_pid=""
 race_overlap_watcher_application_name=""
 race_overlap_watcher_log=""
 race_fixed_now_unix_ms=""
+race_transaction_now_unix_ms=""
+race_first_transaction_now_unix_ms=""
 race_expected_premature_operation_count=0
 race_secret_values=()
 race_forbidden_response_values=()
@@ -510,6 +512,18 @@ start_pre_operation_race_gateways() {
         if [[ -n "$race_fixed_now_unix_ms" ]]; then
             qualification_time_arguments=(
                 --qualification-now-unix-ms "$race_fixed_now_unix_ms"
+            )
+        fi
+        if [[ -n "$race_transaction_now_unix_ms" ]]; then
+            qualification_time_arguments+=(
+                --qualification-transaction-now-unix-ms \
+                    "$race_transaction_now_unix_ms"
+            )
+        fi
+        if [[ -n "$race_first_transaction_now_unix_ms" ]]; then
+            qualification_time_arguments+=(
+                --qualification-first-transaction-now-unix-ms \
+                    "$race_first_transaction_now_unix_ms"
             )
         fi
         rm -f -- "$marker" "$instance_ready" "$instance_log"
@@ -904,7 +918,8 @@ run_timed_pre_operation_race() {
         operation route organization_id \
         left_request left_certificate left_key \
         right_request right_certificate right_key \
-        artifact_prefix now_unix_ms preexisting_operation_count; do
+        artifact_prefix admission_now_unix_ms transaction_now_unix_ms \
+        preexisting_operation_count; do
         if [[ -z "${timed_scenario[$required_field]:-}" ]]; then
             printf 'error: timed race scenario omitted required field: %s\n' \
                 "$required_field" >&2
@@ -912,9 +927,19 @@ run_timed_pre_operation_race() {
         fi
     done
     require_positive_integer \
-        "${scenario_variable}[now_unix_ms]" \
-        "${timed_scenario[now_unix_ms]}"
-    if [[ -n "$race_fixed_now_unix_ms" ]]; then
+        "${scenario_variable}[admission_now_unix_ms]" \
+        "${timed_scenario[admission_now_unix_ms]}"
+    require_positive_integer \
+        "${scenario_variable}[transaction_now_unix_ms]" \
+        "${timed_scenario[transaction_now_unix_ms]}"
+    if ((timed_scenario[transaction_now_unix_ms] <= \
+        timed_scenario[admission_now_unix_ms])); then
+        printf 'error: timed race transaction clock did not advance past admission\n' >&2
+        exit 1
+    fi
+    if [[ -n "$race_fixed_now_unix_ms" || \
+        -n "$race_transaction_now_unix_ms" || \
+        -n "$race_first_transaction_now_unix_ms" ]]; then
         printf 'error: timed race clock context was already armed\n' >&2
         exit 1
     fi
@@ -922,7 +947,8 @@ run_timed_pre_operation_race() {
         "${scenario_variable}[preexisting_operation_count]" \
         "${timed_scenario[preexisting_operation_count]}"
 
-    race_fixed_now_unix_ms="${timed_scenario[now_unix_ms]}"
+    race_fixed_now_unix_ms="${timed_scenario[admission_now_unix_ms]}"
+    race_transaction_now_unix_ms="${timed_scenario[transaction_now_unix_ms]}"
     race_expected_premature_operation_count="${timed_scenario[preexisting_operation_count]}"
     run_pre_operation_race \
         "${timed_scenario[operation]}" \
@@ -936,6 +962,8 @@ run_timed_pre_operation_race() {
         "${timed_scenario[right_key]}" \
         "${timed_scenario[artifact_prefix]}"
     race_fixed_now_unix_ms=""
+    race_transaction_now_unix_ms=""
+    race_first_transaction_now_unix_ms=""
     race_expected_premature_operation_count=0
 
     timed_scenario[left_response]="$race_left_response"
@@ -944,6 +972,193 @@ run_timed_pre_operation_race() {
     timed_scenario[right_headers]="$race_right_headers"
     timed_scenario[left_status]="$race_left_status"
     timed_scenario[right_status]="$race_right_status"
+}
+
+run_timed_pre_operation_request() {
+    local scenario_variable="$1"
+    local -n timed_request="$scenario_variable"
+    local required_field=""
+    for required_field in \
+        operation route organization_id request certificate key artifact_prefix \
+        admission_now_unix_ms transaction_now_unix_ms \
+        first_transaction_now_unix_ms preexisting_operation_count; do
+        if [[ -z "${timed_request[$required_field]:-}" ]]; then
+            printf 'error: timed request scenario omitted required field: %s\n' \
+                "$required_field" >&2
+            exit 1
+        fi
+    done
+    require_positive_integer \
+        "${scenario_variable}[admission_now_unix_ms]" \
+        "${timed_request[admission_now_unix_ms]}"
+    require_positive_integer \
+        "${scenario_variable}[transaction_now_unix_ms]" \
+        "${timed_request[transaction_now_unix_ms]}"
+    require_positive_integer \
+        "${scenario_variable}[first_transaction_now_unix_ms]" \
+        "${timed_request[first_transaction_now_unix_ms]}"
+    if ((timed_request[transaction_now_unix_ms] <= \
+        timed_request[admission_now_unix_ms])) || \
+        ((timed_request[first_transaction_now_unix_ms] != \
+        timed_request[admission_now_unix_ms])); then
+        printf 'error: timed retry request clock sequence is invalid\n' >&2
+        exit 1
+    fi
+    if [[ ! "${timed_request[preexisting_operation_count]}" =~ ^[0-9]+$ ]]; then
+        printf 'error: timed retry request preexisting count is invalid\n' >&2
+        exit 1
+    fi
+
+    stop_gateway
+    stop_race_processes
+
+    local artifact_prefix="${timed_request[artifact_prefix]}"
+    local marker="${secret_directory}/${artifact_prefix}.ready"
+    local release_file="${secret_directory}/${artifact_prefix}.release"
+    local instance_ready="${secret_directory}/${artifact_prefix}.listener"
+    local instance_log="${secret_directory}/${artifact_prefix}.log"
+    rm -f -- \
+        "$marker" "$release_file" "${release_file}.tmp" \
+        "$instance_ready" "$instance_log"
+    qualification_private_artifacts+=("$marker" "$instance_ready" "$instance_log")
+
+    "$qualification_gateway_bin" \
+        --qualification-operation "${timed_request[operation]}" \
+        --qualification-marker "$marker" \
+        --qualification-phase pre_operation \
+        --qualification-release "$release_file" \
+        --qualification-now-unix-ms "${timed_request[admission_now_unix_ms]}" \
+        --qualification-transaction-now-unix-ms \
+            "${timed_request[transaction_now_unix_ms]}" \
+        --qualification-first-transaction-now-unix-ms \
+            "${timed_request[first_transaction_now_unix_ms]}" \
+        --listen 127.0.0.1:0 \
+        --database-url-file "$database_url_file" \
+        --tls-certificate "$server_cert" \
+        --tls-private-key "$server_key" \
+        --client-ca "$ca_cert" \
+        --replay-key "$replay_key_file" \
+        --ready-file "$instance_ready" \
+        >>"$instance_log" 2>&1 &
+    gateway_pid=$!
+
+    local gateway_deadline=$((SECONDS + start_timeout_seconds))
+    while [[ ! -s "$instance_ready" ]]; do
+        if ! kill -0 "$gateway_pid" >/dev/null 2>&1; then
+            printf 'error: %s retry Gateway exited before becoming ready\n' \
+                "$artifact_prefix" >&2
+            exit 1
+        fi
+        if ((SECONDS >= gateway_deadline)); then
+            printf 'error: %s retry Gateway did not become ready within %s seconds\n' \
+                "$artifact_prefix" "$start_timeout_seconds" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    gateway_base_url="$(<"$instance_ready")"
+    if [[ ! "$gateway_base_url" =~ ^https://127\.0\.0\.1:[0-9]+$ ]] || \
+        [[ "$(stat -c '%a' "$instance_ready")" != "600" ]]; then
+        printf 'error: %s retry Gateway violated its private loopback contract\n' \
+            "$artifact_prefix" >&2
+        exit 1
+    fi
+
+    timed_request[response]="${secret_directory}/${artifact_prefix}.response.json"
+    timed_request[headers]="${secret_directory}/${artifact_prefix}.headers"
+    local status_file="${secret_directory}/${artifact_prefix}.http-status"
+    local client_stderr="${secret_directory}/${artifact_prefix}.curl-stderr"
+    : >"${timed_request[response]}"
+    : >"${timed_request[headers]}"
+    : >"$status_file"
+    : >"$client_stderr"
+    race_private_artifacts+=("${timed_request[response]}")
+    qualification_private_artifacts+=(
+        "${timed_request[headers]}" "$status_file" "$client_stderr"
+    )
+
+    command curl --noproxy '*' --silent --show-error --http1.1 \
+        --connect-timeout 5 \
+        --max-time 105 \
+        --cacert "$ca_cert" \
+        --cert "${timed_request[certificate]}" \
+        --key "${timed_request[key]}" \
+        --header 'Accept: application/json' \
+        --header 'Content-Type: application/json' \
+        --data-binary "@${timed_request[request]}" \
+        --dump-header "${timed_request[headers]}" \
+        --output "${timed_request[response]}" \
+        --write-out '%{http_code}\n' \
+        "${gateway_base_url}/gateway/v0.1/${timed_request[route]}" \
+        >"$status_file" 2>"$client_stderr" &
+    race_client_pids=("$!")
+
+    local marker_deadline=$((SECONDS + 30))
+    while [[ ! -s "$marker" ]]; do
+        if ! kill -0 "$gateway_pid" >/dev/null 2>&1 || \
+            ! kill -0 "${race_client_pids[0]}" >/dev/null 2>&1; then
+            printf 'error: %s retry participant exited before admission marker\n' \
+                "$artifact_prefix" >&2
+            exit 1
+        fi
+        if ((SECONDS >= marker_deadline)); then
+            printf 'error: timed out waiting for %s retry admission marker\n' \
+                "$artifact_prefix" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    if [[ "$(<"$marker")" != "ready" ]] || \
+        [[ "$(stat -c '%a' "$marker")" != "600" ]] || \
+        [[ -s "${timed_request[headers]}" || \
+            -s "${timed_request[response]}" || -s "$status_file" ]]; then
+        printf 'error: %s retry request escaped its private admission barrier\n' \
+            "$artifact_prefix" >&2
+        exit 1
+    fi
+
+    local operation_id=""
+    operation_id="$(jq -er '.client_operation_id' "${timed_request[request]}")"
+    local premature_operation_count=""
+    premature_operation_count="$(timeout 15s docker exec -i "$container_name" \
+        psql --username "$gateway_runtime_login" --dbname "$database_name" \
+            --no-align --tuples-only \
+            --set=organization_id="${timed_request[organization_id]}" \
+            --set=operation_id="$operation_id" <<'SQL' | tr -d '[:space:]'
+SELECT count(*) FROM apolysis_gateway.gateway_operations
+ WHERE organization_id=:'organization_id'
+   AND client_operation_id=:'operation_id';
+SQL
+)"
+    if [[ "$premature_operation_count" != \
+        "${timed_request[preexisting_operation_count]}" ]]; then
+        printf 'error: %s reached durable state before retry release\n' \
+            "$artifact_prefix" >&2
+        exit 1
+    fi
+
+    local release_temp="${release_file}.tmp"
+    printf 'release\n' >"$release_temp"
+    chmod 600 "$release_temp"
+    mv -- "$release_temp" "$release_file"
+    qualification_private_artifacts+=("$release_file")
+
+    if ! wait "${race_client_pids[0]}"; then
+        printf 'error: %s retry HTTP client failed after release\n' \
+            "$artifact_prefix" >&2
+        exit 1
+    fi
+    race_client_pids=()
+    timed_request[status]="$(tr -d '[:space:]' <"$status_file")"
+    assert_no_store "${timed_request[headers]}" "${artifact_prefix} retry response"
+    if ! kill -0 "$gateway_pid" >/dev/null 2>&1; then
+        printf 'error: %s retry Gateway exited after the request\n' \
+            "$artifact_prefix" >&2
+        exit 1
+    fi
+
+    stop_gateway
+    start_gateway
 }
 
 build_race_open_request() {
@@ -2008,6 +2223,136 @@ build_deadline_finish_request() {
     "$request_bin" finish-run --input "$unsigned_file" --output "$signed_file"
 }
 
+install_ingest_retry_fault() {
+    local target_organization_id="$1"
+    local target_operation_id="$2"
+
+    timeout 30s docker exec -i "$container_name" \
+        psql --username "$schema_owner_login" --dbname "$database_name" \
+            --set=ON_ERROR_STOP=1 \
+            --set=organization_id="$target_organization_id" \
+            --set=operation_id="$target_operation_id" >/dev/null <<'SQL'
+CREATE SEQUENCE apolysis_gateway.qualification_ingest_retry_once_sequence;
+
+CREATE FUNCTION apolysis_gateway.qualification_ingest_retry_once()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, apolysis_gateway, pg_temp
+AS $function$
+DECLARE
+    fault_attempt bigint;
+BEGIN
+    IF NEW.operation_kind = 'ingest'
+       AND NEW.organization_id = TG_ARGV[0]
+       AND NEW.client_operation_id = TG_ARGV[1] THEN
+        fault_attempt := nextval(
+            'apolysis_gateway.qualification_ingest_retry_once_sequence'::regclass
+        );
+        IF fault_attempt = 1 THEN
+            RAISE EXCEPTION USING
+                ERRCODE = '40001',
+                MESSAGE = 'qualification ingest transaction restart';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION apolysis_gateway.qualification_ingest_retry_once()
+FROM PUBLIC;
+
+CREATE TRIGGER qualification_ingest_retry_once
+BEFORE INSERT ON apolysis_gateway.gateway_operations
+FOR EACH ROW
+EXECUTE FUNCTION apolysis_gateway.qualification_ingest_retry_once(
+    :'organization_id',
+    :'operation_id'
+);
+SQL
+
+    local installed_vector=""
+    installed_vector="$(timeout 15s docker exec -i "$container_name" \
+        psql --username "$schema_owner_login" --dbname "$database_name" \
+            --no-align --tuples-only <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_ingest_retry_once'
+        AND tgrelid='apolysis_gateway.gateway_operations'::regclass
+        AND NOT tgisinternal),
+    (SELECT count(*) FROM pg_catalog.pg_proc
+      WHERE oid='apolysis_gateway.qualification_ingest_retry_once()'::regprocedure),
+    (SELECT last_value FROM
+        apolysis_gateway.qualification_ingest_retry_once_sequence),
+    (SELECT is_called FROM
+        apolysis_gateway.qualification_ingest_retry_once_sequence)
+);
+SQL
+)"
+    if [[ "$installed_vector" != "1|1|1|f" ]]; then
+        printf 'error: qualification ingest retry fault was not installed exactly once\n' >&2
+        exit 1
+    fi
+}
+
+assert_and_remove_ingest_retry_fault() {
+    local fault_vector=""
+    fault_vector="$(timeout 15s docker exec -i "$container_name" \
+        psql --username "$schema_owner_login" --dbname "$database_name" \
+            --no-align --tuples-only <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT last_value FROM
+        apolysis_gateway.qualification_ingest_retry_once_sequence),
+    (SELECT is_called FROM
+        apolysis_gateway.qualification_ingest_retry_once_sequence),
+    (SELECT count(*) FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_ingest_retry_once'
+        AND tgrelid='apolysis_gateway.gateway_operations'::regclass
+        AND NOT tgisinternal),
+    (SELECT count(*) FROM pg_catalog.pg_proc
+      WHERE oid='apolysis_gateway.qualification_ingest_retry_once()'::regprocedure)
+);
+SQL
+)"
+    if [[ "$fault_vector" != "1|t|1|1" ]]; then
+        printf 'error: qualification retry did not observe exactly one late 40001 fault: %s\n' \
+            "$fault_vector" >&2
+        exit 1
+    fi
+
+    timeout 30s docker exec -i "$container_name" \
+        psql --username "$schema_owner_login" --dbname "$database_name" \
+            --set=ON_ERROR_STOP=1 >/dev/null <<'SQL'
+DROP TRIGGER qualification_ingest_retry_once
+ON apolysis_gateway.gateway_operations;
+DROP FUNCTION apolysis_gateway.qualification_ingest_retry_once();
+DROP SEQUENCE apolysis_gateway.qualification_ingest_retry_once_sequence;
+SQL
+
+    local removed_vector=""
+    removed_vector="$(timeout 15s docker exec -i "$container_name" \
+        psql --username "$schema_owner_login" --dbname "$database_name" \
+            --no-align --tuples-only <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM pg_catalog.pg_trigger
+      WHERE tgname='qualification_ingest_retry_once'
+        AND tgrelid='apolysis_gateway.gateway_operations'::regclass
+        AND NOT tgisinternal),
+    (SELECT count(*) FROM pg_catalog.pg_proc
+      WHERE pronamespace='apolysis_gateway'::regnamespace
+        AND proname='qualification_ingest_retry_once'),
+    (SELECT count(*) FROM pg_catalog.pg_class
+      WHERE relnamespace='apolysis_gateway'::regnamespace
+        AND relname='qualification_ingest_retry_once_sequence')
+);
+SQL
+)"
+    if [[ "$removed_vector" != "0|0|0" ]]; then
+        printf 'error: qualification ingest retry fault was not removed\n' >&2
+        exit 1
+    fi
+}
+
 assert_deadline_case_database_oracle() {
     local case_variable="$1"
     local -n deadline_case="$case_variable"
@@ -2017,13 +2362,13 @@ assert_deadline_case_database_oracle() {
             --no-align --tuples-only \
             --set=organization_id="${deadline_case[organization_id]}" \
             --set=source_registration_id="${deadline_case[registration_id]}" \
-            --set=fixed_now_unix_ms="${deadline_case[fixed_now_unix_ms]}" <<'SQL' | tr -d '[:space:]'
+            --set=admission_now_unix_ms="${deadline_case[admission_now_unix_ms]}" <<'SQL' | tr -d '[:space:]'
 SELECT count(*) FROM apolysis_gateway.gateway_authority_audit
  WHERE organization_id=:'organization_id'
    AND source_registration_id=:'source_registration_id'
    AND operation='ingest'
    AND decision='authorized'
-   AND requested_at_unix_ms=:'fixed_now_unix_ms'::bigint;
+   AND requested_at_unix_ms=:'admission_now_unix_ms'::bigint;
 SQL
 )"
     local database_vector=""
@@ -2037,13 +2382,13 @@ SQL
             --set=novel_event_id="${deadline_case[novel_event_id]}" \
             --set=accepted_operation_ids="${deadline_case[accepted_operation_ids]}" \
             --set=rejected_operation_id="${deadline_case[rejected_operation_id]}" \
-            --set=fixed_now_unix_ms="${deadline_case[fixed_now_unix_ms]}" \
+            --set=decision_now_unix_ms="${deadline_case[decision_now_unix_ms]}" \
             --set=prior_state="${deadline_case[prior_state]}" <<'SQL' | tr -d '[:space:]'
 SELECT concat_ws('|',
     (SELECT count(*) FROM apolysis_gateway.runs
       WHERE organization_id=:'organization_id' AND run_id=:'run_id'
         AND state='incomplete' AND finalization_deadline_unix_ms IS NULL
-        AND state_changed_at_unix_ms=:'fixed_now_unix_ms'::bigint),
+        AND state_changed_at_unix_ms=:'decision_now_unix_ms'::bigint),
     (SELECT count(*) FROM apolysis_gateway.leases
       WHERE organization_id=:'organization_id' AND run_id=:'run_id'
         AND expires_at_unix_ms=:'lease_expires_at_unix_ms'::bigint
@@ -2059,7 +2404,7 @@ SELECT concat_ws('|',
     (SELECT count(*) FROM apolysis_gateway.finalization_declarations
       WHERE organization_id=:'organization_id' AND run_id=:'run_id'
         AND resulting_run_state='finishing'
-        AND accepted_deadline_unix_ms=:'fixed_now_unix_ms'::bigint),
+        AND accepted_deadline_unix_ms=:'decision_now_unix_ms'::bigint),
     (SELECT count(*) FROM apolysis_gateway.gateway_operations
       WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
     (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
@@ -2108,7 +2453,7 @@ SELECT concat_ws('|',
         AND fact_json #>> '{fact,fact,from}'=:'prior_state'
         AND fact_json #>> '{fact,fact,to}'='incomplete'
         AND (fact_json #>> '{fact,fact,recorded_at_unix_ms}')::bigint=
-            :'fixed_now_unix_ms'::bigint),
+            :'decision_now_unix_ms'::bigint),
     (SELECT count(*) FROM apolysis_gateway.record_items
       WHERE organization_id=:'organization_id' AND run_id=:'run_id'
         AND fact_kind='run_state_changed'
@@ -2153,7 +2498,8 @@ SQL
 )"
     database_vector="${authority_audit_count}|${database_vector}"
     local expected_vector=""
-    expected_vector="2|1|1|1|0|${deadline_case[expected_finalization_count]}"
+    expected_vector="${deadline_case[expected_authority_audit_count]}"
+    expected_vector+="|1|1|1|0|${deadline_case[expected_finalization_count]}"
     expected_vector+="|${deadline_case[expected_finalization_count]}"
     expected_vector+="|${deadline_case[expected_operation_count]}"
     expected_vector+="|${deadline_case[expected_operation_count]}"
@@ -2169,9 +2515,118 @@ SQL
     fi
 }
 
-run_finalization_deadline_race() {
+assert_deadline_exact_replay() {
+    local case_variable="$1"
+    local artifact_prefix="$2"
+    local -n deadline_case="$case_variable"
+    local -A exact_request=(
+        [route]="ingest"
+        [request]="${deadline_case[ingest_request]}"
+        [certificate]="${deadline_case[certificate]}"
+        [key]="${deadline_case[key]}"
+        [artifact_prefix]="$artifact_prefix"
+    )
+    send_deadline_setup_request exact_request
+    if [[ "${exact_request[status]}" != "200" ]] || \
+        ! cmp -s "${deadline_case[ingest_response]}" "${exact_request[response]}"; then
+        printf 'error: %s exact ingest replay changed after the boundary decision\n' \
+            "${deadline_case[prefix]}" >&2
+        exit 1
+    fi
+}
+
+run_deadline_boundary_request() {
+    local case_variable="$1"
+    local boundary_mode="$2"
+    local novel_request="$3"
+    local novel_operation_id="$4"
+    local expected_status="$5"
+    local expected_code="$6"
+    local -n deadline_case="$case_variable"
+    local artifact_prefix="${deadline_case[prefix]}-${boundary_mode}"
+
+    case "$boundary_mode" in
+        transaction-wait)
+            local -A timed_race=(
+                [operation]="ingest"
+                [route]="ingest"
+                [organization_id]="${deadline_case[organization_id]}"
+                [left_request]="${deadline_case[ingest_request]}"
+                [left_certificate]="${deadline_case[certificate]}"
+                [left_key]="${deadline_case[key]}"
+                [right_request]="$novel_request"
+                [right_certificate]="${deadline_case[certificate]}"
+                [right_key]="${deadline_case[key]}"
+                [artifact_prefix]="$artifact_prefix"
+                [admission_now_unix_ms]="${deadline_case[admission_now_unix_ms]}"
+                [transaction_now_unix_ms]="${deadline_case[decision_now_unix_ms]}"
+                [preexisting_operation_count]="1"
+            )
+            run_timed_pre_operation_race timed_race
+            if [[ "${timed_race[left_status]}" != "200" ]] || \
+                ! cmp -s \
+                    "${deadline_case[ingest_response]}" \
+                    "${timed_race[left_response]}"; then
+                printf 'error: %s exact ingest replay changed across the transaction wait\n' \
+                    "${deadline_case[prefix]}" >&2
+                exit 1
+            fi
+            if [[ "${timed_race[right_status]}" != "$expected_status" ]] || \
+                ! jq -e \
+                    --arg code "$expected_code" \
+                    '.code == $code and .retryable == false' \
+                    "${timed_race[right_response]}" >/dev/null; then
+                printf 'error: %s novel ingest crossed its transaction-wait boundary\n' \
+                    "${deadline_case[prefix]}" >&2
+                exit 1
+            fi
+            deadline_case[expected_authority_audit_count]="2"
+            ;;
+        internal-retry)
+            install_ingest_retry_fault \
+                "${deadline_case[organization_id]}" \
+                "$novel_operation_id"
+            local -A retry_request=(
+                [operation]="ingest"
+                [route]="ingest"
+                [organization_id]="${deadline_case[organization_id]}"
+                [request]="$novel_request"
+                [certificate]="${deadline_case[certificate]}"
+                [key]="${deadline_case[key]}"
+                [artifact_prefix]="$artifact_prefix"
+                [admission_now_unix_ms]="${deadline_case[admission_now_unix_ms]}"
+                [transaction_now_unix_ms]="${deadline_case[decision_now_unix_ms]}"
+                [first_transaction_now_unix_ms]="${deadline_case[admission_now_unix_ms]}"
+                [preexisting_operation_count]="0"
+            )
+            run_timed_pre_operation_request retry_request
+            assert_and_remove_ingest_retry_fault
+            if [[ "${retry_request[status]}" != "$expected_status" ]] || \
+                ! jq -e \
+                    --arg code "$expected_code" \
+                    '.code == $code and .retryable == false' \
+                    "${retry_request[response]}" >/dev/null; then
+                printf 'error: %s novel ingest crossed its internal-retry boundary\n' \
+                    "${deadline_case[prefix]}" >&2
+                exit 1
+            fi
+            assert_deadline_exact_replay \
+                "$case_variable" "${artifact_prefix}.exact-control"
+            deadline_case[expected_authority_audit_count]="1"
+            ;;
+        *)
+            printf 'error: unsupported deadline boundary mode: %s\n' \
+                "$boundary_mode" >&2
+            exit 1
+            ;;
+    esac
+}
+
+run_finalization_deadline_scenario() {
+    local boundary_mode="$1"
+    local case_prefix="$2"
     local -A finalization_case=(
-        [prefix]="deadline-finalization"
+        [prefix]="$case_prefix"
         [organization_id]="$deadline_finalization_organization_id"
         [registration_id]="$deadline_finalization_registration_id"
         [principal_id]="$deadline_finalization_principal_id"
@@ -2189,11 +2644,12 @@ run_finalization_deadline_race() {
         printf 'error: finalization race time escaped its lease or authority window\n' >&2
         exit 1
     fi
-    finalization_case[fixed_now_unix_ms]="$requested_deadline_unix_ms"
+    finalization_case[admission_now_unix_ms]="$((requested_deadline_unix_ms - 1))"
+    finalization_case[decision_now_unix_ms]="$requested_deadline_unix_ms"
 
-    local finish_unsigned="${secret_directory}/deadline-finalization.finish.unsigned.json"
-    local finish_signed="${secret_directory}/deadline-finalization.finish.json"
-    local finish_operation_id="operation_deadline_finalization_finish_${random_suffix}"
+    local finish_unsigned="${secret_directory}/${case_prefix}.finish.unsigned.json"
+    local finish_signed="${secret_directory}/${case_prefix}.finish.json"
+    local finish_operation_id="operation_${case_prefix}_finish_${random_suffix}"
     build_deadline_finish_request \
         finalization_case "$finish_operation_id" "$requested_deadline_unix_ms" \
         "$finish_unsigned" "$finish_signed"
@@ -2202,7 +2658,7 @@ run_finalization_deadline_race() {
         [request]="$finish_signed"
         [certificate]="$deadline_finalization_client_cert"
         [key]="$deadline_finalization_client_key"
-        [artifact_prefix]="deadline-finalization.finish"
+        [artifact_prefix]="${case_prefix}.finish"
     )
     send_deadline_setup_request finish_request
     if [[ "${finish_request[status]}" != "200" ]] || \
@@ -2216,10 +2672,10 @@ run_finalization_deadline_race() {
         exit 1
     fi
 
-    local novel_unsigned="${secret_directory}/deadline-finalization.novel.unsigned.json"
-    local novel_signed="${secret_directory}/deadline-finalization.novel.json"
-    local novel_operation_id="operation_deadline_finalization_novel_${random_suffix}"
-    local novel_event_id="event_deadline_finalization_novel_${random_suffix}"
+    local novel_unsigned="${secret_directory}/${case_prefix}.novel.unsigned.json"
+    local novel_signed="${secret_directory}/${case_prefix}.novel.json"
+    local novel_operation_id="operation_${case_prefix}_novel_${random_suffix}"
+    local novel_event_id="event_${case_prefix}_novel_${random_suffix}"
     build_race_ingest_request \
         "$novel_operation_id" \
         "${finalization_case[run_id]}" \
@@ -2229,35 +2685,9 @@ run_finalization_deadline_race() {
         "$novel_event_id" 2 \
         "$novel_unsigned" "$novel_signed"
 
-    local -A timed_race=(
-        [operation]="ingest"
-        [route]="ingest"
-        [organization_id]="$deadline_finalization_organization_id"
-        [left_request]="${finalization_case[ingest_request]}"
-        [left_certificate]="$deadline_finalization_client_cert"
-        [left_key]="$deadline_finalization_client_key"
-        [right_request]="$novel_signed"
-        [right_certificate]="$deadline_finalization_client_cert"
-        [right_key]="$deadline_finalization_client_key"
-        [artifact_prefix]="deadline-finalization-boundary"
-        [now_unix_ms]="$requested_deadline_unix_ms"
-        [preexisting_operation_count]="1"
-    )
-    run_timed_pre_operation_race timed_race
-    if [[ "${timed_race[left_status]}" != "200" ]] || \
-        ! cmp -s \
-            "${finalization_case[ingest_response]}" \
-            "${timed_race[left_response]}"; then
-        printf 'error: exact ingest replay changed at the finalization deadline\n' >&2
-        exit 1
-    fi
-    if [[ "${timed_race[right_status]}" != "409" ]] || \
-        ! jq -e \
-            '.code == "invalid_lifecycle_transition" and .retryable == false' \
-            "${timed_race[right_response]}" >/dev/null; then
-        printf 'error: novel ingest crossed the finalization deadline\n' >&2
-        exit 1
-    fi
+    run_deadline_boundary_request \
+        finalization_case "$boundary_mode" "$novel_signed" \
+        "$novel_operation_id" 409 invalid_lifecycle_transition
 
     finalization_case[novel_event_id]="$novel_event_id"
     finalization_case[accepted_operation_ids]="${finalization_case[open_operation_id]},${finalization_case[ingest_operation_id]},${finish_operation_id}"
@@ -2268,12 +2698,14 @@ run_finalization_deadline_race() {
     finalization_case[expected_record_count]="7"
     finalization_case[expected_fact_kinds]="run_opened,run_state_changed,source_registered,evidence_accepted,run_finalization_declared,run_state_changed,run_state_changed"
     assert_deadline_case_database_oracle finalization_case
-    printf 'Finalization-deadline replay/novel race passed.\n'
+    printf 'Finalization-deadline %s qualification passed.\n' "$boundary_mode"
 }
 
-run_lease_expiry_race() {
+run_lease_expiry_scenario() {
+    local boundary_mode="$1"
+    local case_prefix="$2"
     local -A lease_case=(
-        [prefix]="deadline-lease"
+        [prefix]="$case_prefix"
         [organization_id]="$deadline_lease_organization_id"
         [registration_id]="$deadline_lease_registration_id"
         [principal_id]="$deadline_lease_principal_id"
@@ -2290,12 +2722,13 @@ run_lease_expiry_race() {
         printf 'error: lease race time escaped its authority window\n' >&2
         exit 1
     fi
-    lease_case[fixed_now_unix_ms]="$lease_expiry_unix_ms"
+    lease_case[admission_now_unix_ms]="$((lease_expiry_unix_ms - 1))"
+    lease_case[decision_now_unix_ms]="$lease_expiry_unix_ms"
 
-    local novel_unsigned="${secret_directory}/deadline-lease.novel.unsigned.json"
-    local novel_signed="${secret_directory}/deadline-lease.novel.json"
-    local novel_operation_id="operation_deadline_lease_novel_${random_suffix}"
-    local novel_event_id="event_deadline_lease_novel_${random_suffix}"
+    local novel_unsigned="${secret_directory}/${case_prefix}.novel.unsigned.json"
+    local novel_signed="${secret_directory}/${case_prefix}.novel.json"
+    local novel_operation_id="operation_${case_prefix}_novel_${random_suffix}"
+    local novel_event_id="event_${case_prefix}_novel_${random_suffix}"
     build_race_ingest_request \
         "$novel_operation_id" \
         "${lease_case[run_id]}" \
@@ -2305,32 +2738,9 @@ run_lease_expiry_race() {
         "$novel_event_id" 2 \
         "$novel_unsigned" "$novel_signed"
 
-    local -A timed_race=(
-        [operation]="ingest"
-        [route]="ingest"
-        [organization_id]="$deadline_lease_organization_id"
-        [left_request]="${lease_case[ingest_request]}"
-        [left_certificate]="$deadline_lease_client_cert"
-        [left_key]="$deadline_lease_client_key"
-        [right_request]="$novel_signed"
-        [right_certificate]="$deadline_lease_client_cert"
-        [right_key]="$deadline_lease_client_key"
-        [artifact_prefix]="deadline-lease-boundary"
-        [now_unix_ms]="$lease_expiry_unix_ms"
-        [preexisting_operation_count]="1"
-    )
-    run_timed_pre_operation_race timed_race
-    if [[ "${timed_race[left_status]}" != "200" ]] || \
-        ! cmp -s "${lease_case[ingest_response]}" "${timed_race[left_response]}"; then
-        printf 'error: exact ingest replay changed at lease expiry\n' >&2
-        exit 1
-    fi
-    if [[ "${timed_race[right_status]}" != "401" ]] || \
-        ! jq -e '.code == "lease_expired" and .retryable == false' \
-            "${timed_race[right_response]}" >/dev/null; then
-        printf 'error: novel ingest crossed lease expiry\n' >&2
-        exit 1
-    fi
+    run_deadline_boundary_request \
+        lease_case "$boundary_mode" "$novel_signed" \
+        "$novel_operation_id" 401 lease_expired
 
     lease_case[novel_event_id]="$novel_event_id"
     lease_case[accepted_operation_ids]="${lease_case[open_operation_id]},${lease_case[ingest_operation_id]}"
@@ -2341,14 +2751,20 @@ run_lease_expiry_race() {
     lease_case[expected_record_count]="5"
     lease_case[expected_fact_kinds]="run_opened,run_state_changed,source_registered,evidence_accepted,run_state_changed"
     assert_deadline_case_database_oracle lease_case
-    printf 'Lease-expiry replay/novel race passed.\n'
+    printf 'Lease-expiry %s qualification passed.\n' "$boundary_mode"
 }
 
 run_mixed_lifecycle_deadline_races() {
     printf 'Qualifying the bounded mixed lifecycle/deadline matrix...\n'
-    run_finalization_deadline_race
-    run_lease_expiry_race
-    printf 'Mixed lifecycle/deadline matrix passed (finalization deadline and last-lease expiry).\n'
+    run_finalization_deadline_scenario \
+        transaction-wait deadline-finalization-wait
+    run_lease_expiry_scenario \
+        transaction-wait deadline-lease-wait
+    run_finalization_deadline_scenario \
+        internal-retry deadline-finalization-retry
+    run_lease_expiry_scenario \
+        internal-retry deadline-lease-retry
+    printf 'Mixed lifecycle/deadline matrix passed (transaction wait and internal retry across finalization deadline and last-lease expiry).\n'
 }
 
 cleanup() {

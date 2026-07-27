@@ -155,7 +155,11 @@ struct StoredEnvelope {
 pub struct MemoryGatewaySnapshot {
     record_item_count: usize,
     projection_outbox_count: usize,
+    incomplete_record_item_count: usize,
+    incomplete_projection_outbox_count: usize,
     evidence_event_count: usize,
+    operation_count: usize,
+    replay_count: usize,
     finalization_declaration_count: usize,
     accepted_effective_trust_profiles: Vec<TrustProfile>,
 }
@@ -169,8 +173,24 @@ impl MemoryGatewaySnapshot {
         self.projection_outbox_count
     }
 
+    pub fn incomplete_record_item_count(&self) -> usize {
+        self.incomplete_record_item_count
+    }
+
+    pub fn incomplete_projection_outbox_count(&self) -> usize {
+        self.incomplete_projection_outbox_count
+    }
+
     pub fn evidence_event_count(&self) -> usize {
         self.evidence_event_count
+    }
+
+    pub fn operation_count(&self) -> usize {
+        self.operation_count
+    }
+
+    pub fn replay_count(&self) -> usize {
+        self.replay_count
     }
 
     pub fn finalization_declaration_count(&self) -> usize {
@@ -271,10 +291,34 @@ impl MemoryGatewayRepository {
                 )
             })
             .count();
+        let incomplete_record_keys = state
+            .ledger
+            .iter()
+            .filter_map(|item| match item.fact() {
+                AgentExecutionRecordFact::RunStateChanged(transition)
+                    if transition.to() == RunState::Incomplete =>
+                {
+                    Some((item.organization_id().as_str(), item.ingest_sequence()))
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let incomplete_projection_outbox_count = state
+            .projection_outbox
+            .iter()
+            .filter(|(organization_id, _, ingest_sequence)| {
+                incomplete_record_keys.contains(&(organization_id.as_str(), *ingest_sequence))
+            })
+            .count();
         Ok(MemoryGatewaySnapshot {
             record_item_count: state.ledger.len(),
             projection_outbox_count: state.projection_outbox.len(),
+            incomplete_record_item_count: incomplete_record_keys.len(),
+            incomplete_projection_outbox_count,
             evidence_event_count,
+            operation_count: state.operations.len(),
+            // The memory adapter stores each replay outcome inline with its successful operation.
+            replay_count: state.operations.len(),
             finalization_declaration_count,
             accepted_effective_trust_profiles,
         })
@@ -772,7 +816,8 @@ impl MemoryGatewayRepository {
         &self,
         context: apolysis_contracts::AuthenticatedSourceContext,
         request: IngestRequest,
-        now_unix_ms: u64,
+        admission_unix_ms: u64,
+        clock: &dyn crate::GatewayClock,
     ) -> Result<IngestAck, GatewayFailure> {
         let mut committed_state = self.state.lock().map_err(|_| repository_invariant())?;
         let mut state = committed_state.clone();
@@ -809,6 +854,15 @@ impl MemoryGatewayRepository {
         {
             return Err(lease_scope_failure(ContractErrorCode::LeaseScopeMismatch));
         }
+        let run_key = RunKey {
+            organization_id: context.organization_id().to_string(),
+            run_id: request.run_id().to_string(),
+        };
+        let run = state.runs.get(&run_key).cloned().ok_or_else(not_found)?;
+        let now_unix_ms = clock.transaction_now_unix_ms();
+        if now_unix_ms == 0 || now_unix_ms < admission_unix_ms {
+            return Err(repository_invariant());
+        }
         let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
         if reconcile_expired_run(&mut state, &context, request.run_id(), now_unix_ms)?.is_some() {
             *committed_state = state;
@@ -826,11 +880,6 @@ impl MemoryGatewayRepository {
             return Err(lease_scope_failure(ContractErrorCode::LeaseExpired));
         }
 
-        let run_key = RunKey {
-            organization_id: context.organization_id().to_string(),
-            run_id: request.run_id().to_string(),
-        };
-        let run = state.runs.get(&run_key).cloned().ok_or_else(not_found)?;
         let stream_key = StreamKey {
             organization_id: context.organization_id().to_string(),
             run_id: request.run_id().to_string(),
@@ -1557,6 +1606,7 @@ impl GatewayRepository for MemoryGatewayRepository {
     fn execute<'a>(
         &'a self,
         command: LedgerCommand,
+        clock: &'a dyn crate::GatewayClock,
         ids: &'a dyn GatewayIdGenerator,
     ) -> RepositoryFuture<'a, Result<LedgerOutcome, GatewayFailure>> {
         Box::pin(async move {
@@ -1580,7 +1630,7 @@ impl GatewayRepository for MemoryGatewayRepository {
                     request,
                     now_unix_ms,
                 } => self
-                    .ingest(context.clone(), request.clone(), now_unix_ms)
+                    .ingest(context.clone(), request.clone(), now_unix_ms, clock)
                     .map(LedgerOutcome::Ingest),
                 LedgerOperation::BindRuntime {
                     context,

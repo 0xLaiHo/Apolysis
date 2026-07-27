@@ -121,6 +121,26 @@ returns the exact result. The qualification binary accepts only an ephemeral
 loopback listener; the production CLI and remote HTTP requests cannot arm the
 barrier.
 
+A bounded two-process gate additionally qualifies the reviewed writer and
+lifecycle races. Its split-clock sibling covers exact replay against novel
+ingest when transaction wait or one qualification-injected SQLSTATE `40001`
+internal retry crosses an accepted finalization deadline or last-lease expiry.
+The transaction-boundary implementation orders each ingest attempt as
+operation-identity lock, exact stored replay, run and lease locks, fresh
+transaction time, expiry reconciliation, then novel mutation. Every internal
+serialization or deadlock retry repeats that order and reads time again.
+Object-reference ingest uses
+PostgreSQL `clock_timestamp()` through the schema-owned database-time function;
+content-off ingest uses the trusted Gateway clock.
+
+At the fresh decision point, deadline crossing returns non-retryable
+`409 invalid_lifecycle_transition` and last-lease crossing returns
+non-retryable `401 lease_expired`. A rejected novel request creates no
+operation, encrypted replay, or evidence event. Across competing requests,
+lazy reconciliation creates exactly one `incomplete` transition and its
+matching record/outbox pair. A retained exact operation replay remains
+unchanged and is resolved before reconciliation.
+
 Current PostgreSQL ingest still uses a full per-stream history window for gap
 discovery—the SQL limit bounds returned gaps, not scan work. A novel batch now
 reserves one contiguous organization sequence range with one row update, but
@@ -129,13 +149,16 @@ sequencing. Incremental watermark/gap state, bulk insertion, and load/capacity
 qualification remain W3–W6 storage work.
 
 This is not a production Gateway and does not complete W3–W6. The broader
-multiprocess/lifecycle and network pre-commit race matrices, sustained or
-capacity load, replication/failover, backup/restore, and HA are not qualified;
-nor are production KMS/envelope-key integration or database RLS deployment,
-transaction-time authority revalidation, lease/credential rotation, the
-authorized object-read resolver and downstream deletion propagation,
-background deadline/replay cleanup, or production rate and request-size
-enforcement beyond the implemented stream cap. JWT/workload-identity transport
-profiles also remain open. The
+network pre-commit/process-death and remaining mixed lifecycle/retry matrices,
+sustained or capacity load, replication/failover, backup/restore, and HA are
+not qualified. The bounded ingest decision is not a claim about the database
+commit's wall-clock instant or replay-TTL expiry during an operation-lock wait;
+novel join/bind, staggered multi-lease cases, and transaction-time authority
+freshness also remain open. Production KMS/envelope-key integration, database
+RLS deployment, transaction-time authority revalidation, lease/credential
+rotation, the authorized object-read resolver and downstream deletion
+propagation, background deadline/replay cleanup, and production rate and
+request-size enforcement beyond the implemented stream cap are likewise
+unqualified. JWT/workload-identity transport profiles also remain open. The
 organization-scoped Query API, complete Console-v0 read-model projectors, and
 Web Console specified here are also not implemented.

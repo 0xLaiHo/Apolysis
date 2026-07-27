@@ -20,7 +20,11 @@ operation, and append-fact state. Its transaction boundary includes:
 - exact runtime-identity exclusion for active runs;
 - run/lease locking, bounded retry for PostgreSQL serialization/deadlock
   failures, and transaction-local lock/statement deadlines (2 seconds and 15
-  seconds by default, configurable within a bounded range); and
+  seconds by default, configurable within a bounded range);
+- replay-first ingest admission that locks operation identity, run, and lease,
+  then reads fresh transaction time and reconciles expiry before any novel
+  mutation; each internal transaction retry repeats this order and reads time
+  again; and
 - transient/permanent database-failure classification for transaction control
   and protected diagnostics limited to the operation stage, error kind,
   SQLSTATE, and constraint name; the frozen v0.1 external response keeps generic
@@ -157,6 +161,38 @@ production repository validation path. Stale, symlinked, non-private,
 modified, or missing release files fail closed. The production binary exposes
 neither the barrier nor the grant helper.
 
+## Sibling mixed lifecycle and transaction-boundary gate
+
+The split-clock sibling uses two independent Gateway processes and pools,
+the same private pre-operation release, and observed database-lock overlap for
+transaction-wait cases. Qualification-owned late-write fault injection raises
+SQLSTATE `40001` once for the target operation to exercise the repository's
+real internal retry path. Across finalization-deadline and last-lease-expiry
+cases, the gate admits the HTTP request before the boundary, then proves the
+repository lifecycle decision uses fresh time after operation identity, exact
+replay, run, and lease locking. The restarted transaction repeats the entire
+attempt and reads time again:
+
+```bash
+make test-gateway-mixed-lifecycle-deadline-races
+```
+
+Object-reference ingest reads PostgreSQL `clock_timestamp()` through the
+schema-owned database-time function. Content-off ingest reads the trusted
+Gateway clock passed through the repository port. A retained exact operation
+replay is returned unchanged before expiry reconciliation. At the fresh
+decision point, a novel ingest at or after the accepted finalization deadline
+returns non-retryable `409 invalid_lifecycle_transition`; at or after the last
+lease's expiry it returns non-retryable `401 lease_expired`.
+
+For either rejection, the database oracle requires no novel operation,
+encrypted replay, or evidence event. Across competing requests, lazy
+reconciliation commits exactly one transition to `incomplete` and its matching
+record/outbox pair. The qualified decision point is not a claim that the commit
+wall-clock precedes the boundary. Replay-TTL expiry while waiting on the
+operation lock, novel join/bind, staggered multi-lease combinations, and
+transaction-time authority freshness/rotation remain outside this gate.
+
 To compile and run only non-database tests:
 
 ```bash
@@ -183,9 +219,12 @@ commit boundary for one runtime-generated `open_run` shape. It does not qualify
 HTTPS Gateway-server recovery by itself. The sibling Gateway-server gate
 qualifies the bounded post-commit/pre-ack HTTPS seam for all four routes, but
 the additional two-process gate qualifies the bounded writer/lifecycle matrix
-described above. Neither gate qualifies the broader network
-pre-commit/process-death matrix, mixed lifecycle/deadline races, sustained or
-capacity load, replication, failover, backup/restore, or high availability.
+described above. The split-clock transaction-boundary sibling qualifies
+only the listed ingest deadline/expiry cases. These gates do not qualify the
+broader network pre-commit/process-death or remaining mixed lifecycle/retry
+matrix, commit-wall-clock enforcement, replay-TTL expiry during an
+operation-lock wait, novel join/bind, staggered multi-lease behavior, sustained
+or capacity load, replication, failover, backup/restore, or high availability.
 The evidence-object provider gate separately qualifies distinct
 SCRAM logins, schema-owner separation, migration-history ownership, served-path
 role allowlists, and denial of owner assumption, trigger disabling, credential

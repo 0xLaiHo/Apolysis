@@ -82,6 +82,24 @@ the record/outbox commit boundary. The application adapter also caps a run at
 statement deadlines. Other child-table cardinalities and production admission
 limits remain application responsibilities rather than trigger logic.
 
+Novel ingest follows one lock and decision order: operation identity, retained
+exact operation replay, run and request lease, fresh transaction time, expiry
+reconciliation, then novel mutation. Each bounded serialization or deadlock
+retry starts a new transaction, repeats that order, and reads time again.
+Object-reference ingest reads PostgreSQL `clock_timestamp()` through
+`apolysis_gateway.evidence_object_db_now_unix_ms()`; content-off ingest reads
+the trusted Gateway clock passed through the repository port.
+
+At the fresh decision point, an accepted finalization deadline is an inclusive
+boundary and returns non-retryable `409 invalid_lifecycle_transition` for novel
+ingest. Last-lease expiry is also inclusive and returns non-retryable
+`401 lease_expired`. The rejected operation creates no operation row, encrypted
+replay, or evidence event. For the qualified boundary rejection, expiry
+reconciliation commits exactly one `incomplete` transition record and its
+deferred 1:1 outbox partner across competing requests; it cannot create a
+second transition. A retained matching exact operation replay is returned
+unchanged before run and lease reconciliation.
+
 `migrations/0003_evidence_object_lifecycle.sql` adds the separately bounded
 evidence-object write registry. It binds every object to the complete
 organization/run/profile/source-stream/capability/payload scope and binds an
@@ -159,6 +177,16 @@ fixture is created through the production repository validation path rather
 than direct SQL. This qualifies the bounded writer/lifecycle matrix, not
 arbitrary process death or network timing.
 
+The split-clock mixed lifecycle sibling uses the same independent Gateway
+processes, pools, private release, and observed database-lock overlap for
+transaction-wait cases. A qualification-owned late-write trigger raises
+SQLSTATE `40001` once for the target novel operation to exercise a real
+internal retry. It qualifies requests that enter before the accepted
+finalization deadline or last-lease expiry and reach the fresh lifecycle
+decision at or after the boundary. Its oracle requires one unchanged stored
+replay result, no state for the rejected novel operation, and exactly one
+`incomplete` record/outbox pair.
+
 The separate evidence-object provider gate additionally proves schema-owner
 separation with distinct SCRAM logins, no startup migration,
 migration-history ownership, runtime/control allowlists, and denial of owner
@@ -168,9 +196,12 @@ roles; it does not establish database-enforced tenant isolation.
 
 The repository crash gate alone is not HTTPS Gateway-server recovery and does
 not qualify trace or HTTP error-body secret handling. The sibling HTTPS gates
-cover bounded post-commit death and two-process writer/lifecycle races, but the
-broader network pre-commit/process-death matrix, mixed lifecycle/deadline
-races, sustained or capacity load, replication/failover, backup/restore or
-point-in-time recovery, HA behavior, production KMS integration, and tenant
-RLS remain unqualified. A successful migration or gate run is therefore still
-not a production claim.
+cover bounded post-commit death, two-process writer/lifecycle races, and the
+listed ingest deadline/expiry transaction decisions. They do not qualify the
+broader network pre-commit/process-death or remaining mixed lifecycle/retry
+matrix, commit-wall-clock enforcement, replay-TTL expiry during an
+operation-lock wait, novel join/bind, staggered multi-lease behavior,
+transaction-time authority freshness or rotation, sustained or capacity load,
+replication/failover, backup/restore or point-in-time recovery, HA behavior,
+production KMS integration, or tenant RLS. A successful migration or gate run
+is therefore still not a production claim.

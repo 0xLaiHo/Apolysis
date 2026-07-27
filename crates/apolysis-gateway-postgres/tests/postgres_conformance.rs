@@ -10,8 +10,8 @@ use apolysis_gateway_postgres::{
     Aes256GcmReplayProtector, PostgresGatewayConfig, PostgresGatewayRepository, MIGRATOR,
 };
 use apolysis_gateway_testkit::{
-    gateway_repository_conformance_tests, GatewayConformanceHarness, GatewayConformanceSnapshot,
-    HarnessAdminFuture, HarnessFuture,
+    gateway_repository_conformance_tests, GatewayConformanceCounts, GatewayConformanceHarness,
+    GatewayConformanceSnapshot, HarnessAdminFuture, HarnessFuture,
 };
 use sqlx::Row;
 
@@ -69,7 +69,19 @@ impl GatewayConformanceHarness for PostgresGatewayHarness {
                 "SELECT \
                     (SELECT count(*) FROM apolysis_gateway.record_items) AS records, \
                     (SELECT count(*) FROM apolysis_gateway.projection_outbox) AS outbox, \
+                    (SELECT count(*) FROM apolysis_gateway.record_items \
+                       WHERE fact_kind='run_state_changed' \
+                         AND fact_json #>> '{fact,fact,to}'='incomplete') AS incomplete_records, \
+                    (SELECT count(*) FROM apolysis_gateway.projection_outbox AS incomplete_outbox \
+                       JOIN apolysis_gateway.record_items AS incomplete_record \
+                         ON incomplete_record.organization_id=incomplete_outbox.organization_id \
+                        AND incomplete_record.ingest_sequence=incomplete_outbox.ingest_sequence \
+                       WHERE incomplete_record.fact_kind='run_state_changed' \
+                         AND incomplete_record.fact_json #>> '{fact,fact,to}'='incomplete') \
+                      AS incomplete_outbox, \
                     (SELECT count(*) FROM apolysis_gateway.evidence_events) AS events, \
+                    (SELECT count(*) FROM apolysis_gateway.gateway_operations) AS operations, \
+                    (SELECT count(*) FROM apolysis_gateway.operation_replays) AS replays, \
                     (SELECT count(*) FROM apolysis_gateway.finalization_declarations) AS finalizations",
             )
             .fetch_one(&self.inspection_pool)
@@ -96,10 +108,22 @@ impl GatewayConformanceHarness for PostgresGatewayHarness {
                 })
                 .collect::<Result<Vec<_>, Box<dyn Error + Send + Sync>>>()?;
             Ok(GatewayConformanceSnapshot::new(
-                usize::try_from(counts.try_get::<i64, _>("records")?)?,
-                usize::try_from(counts.try_get::<i64, _>("outbox")?)?,
-                usize::try_from(counts.try_get::<i64, _>("events")?)?,
-                usize::try_from(counts.try_get::<i64, _>("finalizations")?)?,
+                GatewayConformanceCounts {
+                    record_item_count: usize::try_from(counts.try_get::<i64, _>("records")?)?,
+                    projection_outbox_count: usize::try_from(counts.try_get::<i64, _>("outbox")?)?,
+                    incomplete_record_item_count: usize::try_from(
+                        counts.try_get::<i64, _>("incomplete_records")?,
+                    )?,
+                    incomplete_projection_outbox_count: usize::try_from(
+                        counts.try_get::<i64, _>("incomplete_outbox")?,
+                    )?,
+                    evidence_event_count: usize::try_from(counts.try_get::<i64, _>("events")?)?,
+                    operation_count: usize::try_from(counts.try_get::<i64, _>("operations")?)?,
+                    replay_count: usize::try_from(counts.try_get::<i64, _>("replays")?)?,
+                    finalization_declaration_count: usize::try_from(
+                        counts.try_get::<i64, _>("finalizations")?,
+                    )?,
+                },
                 accepted_trust,
             ))
         })
