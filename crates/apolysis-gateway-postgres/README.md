@@ -216,7 +216,10 @@ The split-clock sibling uses two independent Gateway processes and pools,
 the same private pre-operation release, and observed database-lock overlap for
 transaction-wait cases. Qualification-owned late-write fault injection raises
 SQLSTATE `40001` once for the target operation to exercise the repository's
-real internal retry path. Across finalization-deadline and last-lease-expiry
+real internal retry path. A focused finish variant independently raises
+SQLSTATE `40P01` once to prove parity when PostgreSQL returns that code; it
+does not claim a naturally detected multi-session deadlock. Across
+finalization-deadline and last-lease-expiry
 cases, the gate admits the HTTP request before the boundary, then proves the
 repository lifecycle decision uses fresh time after operation identity, exact
 replay, and dynamic lifecycle locking. It performs the initial current-authority
@@ -224,8 +227,8 @@ check before replay and the final check after the dynamic lock wait; the
 restarted transaction repeats the entire attempt. The matrix also drives
 `finish_run` at the requested last-lease expiry: two identical requests
 converge on one novel durable `incomplete` response and one exact replay, while
-the internal-retry variant proves a late SQLSTATE `40001` fully rolls back
-before the fresh expiry-time attempt:
+the serialization-retry variant and focused `40P01` parity variant prove each
+late fault fully rolls back before the fresh expiry-time attempt:
 
 ```bash
 make test-gateway-mixed-lifecycle-deadline-races
@@ -301,8 +304,9 @@ remaining earlier or arbitrary network pre-commit/process-death timings,
 pre-commit exact-replay or rejection branches, completion of the final
 `INSERT` statement, entry into `COMMIT`, physical or WAL commit timing, the
 remaining mixed lifecycle/retry matrix, commit-wall-clock enforcement, broader
-staggered multi-lease behavior, additional retry depths, sustained or capacity
-load, replication, failover, backup/restore, or high availability.
+staggered multi-lease behavior, additional retry depths and `40P01` operations
+beyond the focused finish parity cell, sustained or capacity load, replication,
+failover, backup/restore, or high availability.
 The evidence-object provider gate separately qualifies distinct
 SCRAM logins, schema-owner separation, migration-history ownership, served-path
 role allowlists, and denial of owner assumption, trigger disabling, credential

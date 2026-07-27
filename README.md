@@ -110,7 +110,9 @@ writer/lifecycle races across run creation, one-use join, exact runtime binding,
 event deduplication and cross-run organization sequencing, finalization, and terminal
 irreversibility. A sibling bounded direct-mTLS/PostgreSQL gate now covers
 an additional transaction-boundary join/bind/ingest/finish slice with stable
-exact replay and fail-closed or deterministically incomplete novel work. A
+exact replay, one-shot SQLSTATE `40001` retries, and fail-closed or
+deterministically incomplete novel work; a focused `finish_run` check adds
+one-shot SQLSTATE `40P01` retry parity. A
 direct-mTLS HTTPS qualification and its repository sibling now cover all four
 exact lifecycle routes across replay-TTL expiry after an exact operation-row
 lock wait. This does not claim the complete mixed

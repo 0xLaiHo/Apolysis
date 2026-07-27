@@ -142,7 +142,10 @@ lifecycle races. Its split-clock sibling qualifies five operation/boundary
 scenarios through both a transaction wait and one qualification-injected, real
 SQLSTATE `40001` internal retry, for ten cells: join at the finalization
 deadline, bind at last-lease expiry, ingest at the finalization deadline,
-ingest at last-lease expiry, and finish at last-lease expiry. The
+ingest at last-lease expiry, and finish at last-lease expiry. A focused
+eleventh cell repeats finish at last-lease expiry with a one-shot SQLSTATE
+`40P01` fault, proving retry parity when PostgreSQL returns that code without
+claiming a naturally detected multi-session deadlock. The
 transaction-boundary implementation orders each covered lifecycle attempt as
 operation-identity lock, current organization/registration/credential locks
 and revalidation, exact stored replay, applicable run/lease/client-run/join
@@ -219,9 +222,9 @@ lifecycle/retry matrices, sustained or capacity load, replication/failover,
 backup/restore, and HA are not qualified. The bounded lifecycle decision is not
 a claim about the database commit's wall-clock instant. Live join-grant expiry,
 live join at last-lease expiry, remaining novel join/bind cases, broader
-staggered multi-lease combinations, additional retry depths, and live SQLSTATE
-`40P01`
-fault coverage also remain open. Production KMS/envelope-key integration,
+staggered multi-lease combinations, and additional retry depths and operations
+beyond the focused one-shot `40P01` finish parity cell also remain open.
+Production KMS/envelope-key integration,
 database RLS deployment, the authorized object-read resolver and downstream
 deletion propagation, background deadline/replay cleanup, and production rate and
 request-size enforcement beyond the implemented stream cap are likewise
