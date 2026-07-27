@@ -76,9 +76,9 @@ test-gateway-https-crash-recovery:
 test-gateway-multiprocess-lifecycle-races:
 	./scripts/test-gateway-multiprocess-lifecycle-races.sh
 
-# Opt-in transaction-boundary lifecycle qualification. Independent
-# organizations drive exact replay against novel ingest across
-# finalization-deadline and lease-expiry waits and one real internal retry.
+# Opt-in transaction-boundary lifecycle qualification. Independent cases drive
+# exact replay against novel join, bind, and ingest across finalization or
+# lease boundaries through a real lock wait and one internal transaction retry.
 test-gateway-mixed-lifecycle-deadline-races:
 	./scripts/test-gateway-mixed-lifecycle-deadline-races.sh
 

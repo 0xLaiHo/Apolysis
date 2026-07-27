@@ -36,6 +36,12 @@ pub struct GatewayConformanceSnapshot {
     operation_count: usize,
     replay_count: usize,
     finalization_declaration_count: usize,
+    source_stream_count: usize,
+    lease_count: usize,
+    runtime_binding_count: usize,
+    active_runtime_identity_count: usize,
+    pending_join_authorization_count: usize,
+    consumed_join_authorization_count: usize,
     accepted_effective_trust_profiles: Vec<TrustProfile>,
 }
 
@@ -50,6 +56,12 @@ pub struct GatewayConformanceCounts {
     pub operation_count: usize,
     pub replay_count: usize,
     pub finalization_declaration_count: usize,
+    pub source_stream_count: usize,
+    pub lease_count: usize,
+    pub runtime_binding_count: usize,
+    pub active_runtime_identity_count: usize,
+    pub pending_join_authorization_count: usize,
+    pub consumed_join_authorization_count: usize,
 }
 
 impl GatewayConformanceSnapshot {
@@ -66,6 +78,12 @@ impl GatewayConformanceSnapshot {
             operation_count: counts.operation_count,
             replay_count: counts.replay_count,
             finalization_declaration_count: counts.finalization_declaration_count,
+            source_stream_count: counts.source_stream_count,
+            lease_count: counts.lease_count,
+            runtime_binding_count: counts.runtime_binding_count,
+            active_runtime_identity_count: counts.active_runtime_identity_count,
+            pending_join_authorization_count: counts.pending_join_authorization_count,
+            consumed_join_authorization_count: counts.consumed_join_authorization_count,
             accepted_effective_trust_profiles,
         }
     }
@@ -100,6 +118,30 @@ impl GatewayConformanceSnapshot {
 
     pub fn finalization_declaration_count(&self) -> usize {
         self.finalization_declaration_count
+    }
+
+    pub fn source_stream_count(&self) -> usize {
+        self.source_stream_count
+    }
+
+    pub fn lease_count(&self) -> usize {
+        self.lease_count
+    }
+
+    pub fn runtime_binding_count(&self) -> usize {
+        self.runtime_binding_count
+    }
+
+    pub fn active_runtime_identity_count(&self) -> usize {
+        self.active_runtime_identity_count
+    }
+
+    pub fn pending_join_authorization_count(&self) -> usize {
+        self.pending_join_authorization_count
+    }
+
+    pub fn consumed_join_authorization_count(&self) -> usize {
+        self.consumed_join_authorization_count
     }
 
     pub fn accepted_effective_trust_profiles(&self) -> &[TrustProfile] {
@@ -184,6 +226,12 @@ impl GatewayConformanceHarness for MemoryGatewayHarness {
                     operation_count: snapshot.operation_count(),
                     replay_count: snapshot.replay_count(),
                     finalization_declaration_count: snapshot.finalization_declaration_count(),
+                    source_stream_count: snapshot.source_stream_count(),
+                    lease_count: snapshot.lease_count(),
+                    runtime_binding_count: snapshot.runtime_binding_count(),
+                    active_runtime_identity_count: snapshot.active_runtime_identity_count(),
+                    pending_join_authorization_count: snapshot.pending_join_authorization_count(),
+                    consumed_join_authorization_count: snapshot.consumed_join_authorization_count(),
                 },
                 snapshot.accepted_effective_trust_profiles().to_vec(),
             ))
@@ -253,6 +301,30 @@ macro_rules! gateway_repository_conformance_tests {
         #[tokio::test]
         async fn open_run_join_requires_a_server_registered_grant() {
             $crate::scenarios::open_run_join_requires_a_server_registered_grant::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn open_run_join_rechecks_grant_expiry_after_admission() {
+            $crate::scenarios::open_run_join_rechecks_grant_expiry_after_admission::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn open_run_join_rechecks_finalization_deadline_after_admission() {
+            $crate::scenarios::open_run_join_rechecks_finalization_deadline_after_admission::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn open_run_join_rechecks_last_lease_expiry_after_admission() {
+            $crate::scenarios::open_run_join_rechecks_last_lease_expiry_after_admission::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn open_run_join_rejects_invalid_transaction_time_without_partial_state() {
+            $crate::scenarios::open_run_join_rejects_invalid_transaction_time_without_partial_state::<$harness>().await;
         }
 
         $(#[$test_attr])*
@@ -361,6 +433,24 @@ macro_rules! gateway_repository_conformance_tests {
         #[tokio::test]
         async fn bind_runtime_prevents_cross_run_identity_confusion_until_seal() {
             $crate::scenarios::bind_runtime_prevents_cross_run_identity_confusion_until_seal::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn bind_runtime_rechecks_last_lease_expiry_after_admission() {
+            $crate::scenarios::bind_runtime_rechecks_last_lease_expiry_after_admission::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn bind_runtime_rejects_an_expired_lease_without_sealing_while_another_lease_is_live() {
+            $crate::scenarios::bind_runtime_rejects_an_expired_lease_without_sealing_while_another_lease_is_live::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn bind_runtime_rejects_invalid_transaction_time_without_partial_state() {
+            $crate::scenarios::bind_runtime_rejects_invalid_transaction_time_without_partial_state::<$harness>().await;
         }
 
         $(#[$test_attr])*

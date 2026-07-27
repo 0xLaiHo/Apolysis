@@ -112,17 +112,25 @@ impl PostgresGatewayRepository {
             return Err(TxFailure::rollback(repository_failure()));
         }
         let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
+        let deadline_elapsed = run.state == RunState::Finishing
+            && run
+                .finalization_deadline_unix_ms
+                .is_some_and(|deadline| now_unix_ms >= deadline);
         if self
             .reconcile_expired_run(transaction, context, request.run_id(), &run, now_unix_ms)
             .await?
         {
-            return Err(TxFailure::commit(if requested_lease_expired {
+            return Err(TxFailure::commit(if deadline_elapsed {
+                policy_failure(ContractErrorCode::InvalidLifecycleTransition)
+            } else if requested_lease_expired {
                 lease_failure(ContractErrorCode::LeaseExpired)
             } else {
                 policy_failure(ContractErrorCode::InvalidLifecycleTransition)
             }));
         }
-        if requested_lease_expired {
+        if requested_lease_expired
+            && !matches!(run.state, RunState::Finished | RunState::Incomplete)
+        {
             return Err(TxFailure::rollback(lease_failure(
                 ContractErrorCode::LeaseExpired,
             )));
@@ -299,6 +307,11 @@ impl PostgresGatewayRepository {
         {
             return Err(TxFailure::rollback(policy_failure(
                 ContractErrorCode::InvalidLifecycleTransition,
+            )));
+        }
+        if requested_lease_expired {
+            return Err(TxFailure::rollback(lease_failure(
+                ContractErrorCode::LeaseExpired,
             )));
         }
 

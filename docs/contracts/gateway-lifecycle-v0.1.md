@@ -53,7 +53,7 @@ The Gateway foundation slice currently implements:
   `finished`, and lazy command-boundary reconciliation that seals an active or
   finishing run after its last lease or finalization deadline expires.
 
-The 28 shared repository scenarios run against both adapters, including the
+The 38 shared repository scenarios run against both adapters, including the
 256-stream admission boundary and atomic rejection of the 257th stream. The
 explicit real-PostgreSQL gate also has eleven targeted tests for repository/pool
 reconstruction, post-commit/pre-ack retry, two identical-operation concurrent
@@ -121,26 +121,37 @@ grant, one active-identity winner, and no terminal-state resurrection.
 
 A bounded split-clock sibling uses the same independent processes, pools,
 private pre-operation release, and observed database-lock overlap to qualify
-exact replay against novel ingest when a transaction wait crosses an accepted
-finalization deadline or last-lease expiry. Qualification-owned late-write
-fault injection raises SQLSTATE `40001` once for the target novel operation to
-qualify the same boundaries through one real internal retry. Ingest attempts
-order their work as operation-identity lock, exact stored-operation replay, run
-and lease locks, fresh transaction time, expiry reconciliation, and only then
-novel mutation. Every bounded serialization or deadlock retry repeats that
-order and obtains fresh transaction time.
+exact replay against novel lifecycle work when a transaction wait crosses an
+accepted finalization deadline or last-lease expiry. Qualification-owned
+late-write fault injection raises SQLSTATE `40001` once for the target novel
+operation to qualify the same boundaries through one real internal retry. The
+live matrix covers join at the finalization deadline, bind at the requested
+last-lease expiry, and ingest at both boundaries. Join attempts lock the
+operation identity, exact stored-operation replay, run, and join authorization
+before reading fresh transaction time and reconciling expiry. Bind and ingest
+use the same order with the requested lease locked instead of a join
+authorization. Only then may novel mutation begin. Every bounded serialization
+or deadlock retry repeats its complete order and obtains fresh transaction
+time.
 
 For object-reference ingest, PostgreSQL `clock_timestamp()` through the
-schema-owned database-time function is authoritative. Content-off ingest uses
-the trusted Gateway clock passed through the repository port. At or after the
-accepted finalization deadline, a novel ingest returns non-retryable
-`409 invalid_lifecycle_transition`; at or after the last lease's expiry, it
-returns non-retryable `401 lease_expired`. The rejected operation creates no
-operation, encrypted replay, or novel evidence event. For either listed novel
-rejection, lazy reconciliation commits the single transition to `incomplete`
-and its matching record/outbox pair; competing requests cannot create a second
-transition. A retained exact operation replay returns its unchanged stored
-result before that reconciliation.
+schema-owned database-time function is authoritative. Content-off join, bind,
+and ingest use the trusted Gateway clock passed through the repository port. A
+join authorization that expires at the fresh decision time is rejected first
+as enumeration-safe `404 not_found`. For otherwise eligible work at or after
+the accepted finalization deadline, novel join, bind, or ingest is rejected
+with non-retryable `409 invalid_lifecycle_transition`; that deadline takes
+precedence when a lease expires at the same instant. Without an elapsed
+deadline, bind or ingest at the relevant lease expiry returns non-retryable
+`401 lease_expired`. After deadline reconciliation seals the run, later novel
+lifecycle work remains a `409` lifecycle rejection rather than degrading to a
+lease error; the first last-lease reconciliation of an active run without a
+deadline remains `401`. The rejected operation creates no operation, encrypted
+replay, stream, lease, runtime binding, or novel evidence event. A
+lifecycle-boundary rejection may commit only the single lazy transition to
+`incomplete` and its matching record/outbox pair; competing requests cannot
+create a second transition. A retained exact operation replay returns its
+unchanged stored result before that reconciliation.
 
 Current PostgreSQL gap discovery evaluates a window over the full persisted
 history for one source stream; its SQL limit bounds returned gaps rather than
@@ -170,10 +181,13 @@ complete W3–W6. In particular, it has:
   the sibling HTTPS gate qualifies post-commit/pre-ack process death for novel
   success and exact replay on all four routes, and the two-process gate
   qualifies the bounded writer/lifecycle matrix above. The split-clock
-  transaction-boundary slices qualify the listed ingest deadline/expiry cases,
-  but not the remaining network pre-commit/process-death or mixed
-  lifecycle/retry matrix, sustained or capacity load, replication/failover,
-  backup/restore, or high availability;
+  transaction-boundary slices qualify the listed join, bind, and ingest cases.
+  Shared real-PostgreSQL conformance additionally covers join-grant expiry,
+  join at last-lease expiry, invalid transaction time, and one staggered
+  requested-lease bind case. They do not qualify the remaining network
+  pre-commit/process-death or mixed lifecycle/retry matrix, broader staggered
+  combinations or retry depths, sustained or capacity load,
+  replication/failover, backup/restore, or high availability;
 - no production KMS/envelope-data-key custody or tenant RLS deployment; the
   built-in replay protector and evidence-object wrapping key are direct-key
   in-process inputs, and the fixed database roles are not a shared-cluster
@@ -370,12 +384,12 @@ verdict.
 
 HTTP arrival, transport-authority resolution, request decoding, application
 entry, and transaction begin are not lifecycle acceptance points for novel
-ingest. Each repository transaction attempt must:
+join, bind, or ingest. Each repository transaction attempt must:
 
 1. resolve and lock the operation identity;
 2. return an unexpired, matching exact operation replay before dynamic
    lifecycle reconciliation;
-3. lock the run and the request's lease;
+3. lock the run and either the join authorization or request's lease;
 4. read fresh trusted transaction time;
 5. reconcile deadline or last-lease expiry; and
 6. only then admit a novel mutation.
@@ -383,17 +397,27 @@ ingest. Each repository transaction attempt must:
 A PostgreSQL serialization or deadlock restart is a new attempt and must repeat
 that sequence, including the fresh-time read. For ingest containing an evidence
 object reference, the repository reads PostgreSQL `clock_timestamp()` through
-the schema-owned database-time function. Content-off ingest reads the trusted
-Gateway clock through the repository port. A zero or regressed trusted Gateway
-time fails closed rather than admitting work under a stale timestamp.
+the schema-owned database-time function. Content-off join, bind, and ingest
+read the trusted Gateway clock through the repository port. A zero or regressed
+trusted Gateway time fails closed rather than admitting work under a stale
+timestamp.
 
 The finalization deadline and lease expiry are inclusive boundaries. If the
-fresh transaction time is at or after the accepted finalization deadline, a
-novel ingest is rejected as HTTP `409`, `invalid_lifecycle_transition`, with
-`retryable: false`. If it is at or after the last lease's expiry, a novel ingest
-is rejected as HTTP `401`, `lease_expired`, with `retryable: false`. Neither
-response carries a retry delay. The rejection consumes no novel operation
-identity and creates no encrypted replay or novel evidence event. The same
+join authorization has expired at fresh transaction time, the request first
+fails enumeration-safe as HTTP `404`, `not_found`, without consuming that
+authorization. For otherwise eligible work, if the fresh transaction time is
+at or after the accepted finalization deadline, a novel join, bind, or ingest
+is rejected as HTTP `409`,
+`invalid_lifecycle_transition`, with `retryable: false`; this result takes
+precedence if the requested lease expires at the same instant. Without an
+elapsed deadline, bind or ingest at the relevant lease expiry is rejected as
+HTTP `401`, `lease_expired`, with `retryable: false`. A run already sealed by
+deadline reconciliation continues to reject later novel lifecycle work as
+`409`; clearing its active deadline metadata must not downgrade that result to
+`401`. The first last-lease reconciliation of an active run with no elapsed
+deadline remains `401`. None of these responses carries a retry delay. The
+rejection consumes no novel operation identity and creates no encrypted replay,
+stream, lease, runtime binding, or evidence event. A lifecycle-boundary
 transaction lazily seals the run `incomplete`; across competing requests,
 reconciliation commits exactly one state-transition record and its matching
 outbox row.
@@ -401,9 +425,10 @@ outbox row.
 This rule defines the qualified lifecycle decision point; it does not claim
 that the database commit's wall-clock instant precedes the deadline or expiry.
 The current gate also does not qualify replay-TTL expiry while the
-operation-identity lock itself is waiting, novel join or runtime binding,
-staggered multi-lease combinations, or transaction-time transport-authority
-freshness and credential rotation.
+operation-identity lock itself is waiting, join-grant expiry or join at
+last-lease expiry through the live transport, broader staggered multi-lease
+combinations, additional retry depths, `finish_run` transaction-time refresh,
+or transaction-time transport-authority freshness and credential rotation.
 
 ### Gaps
 

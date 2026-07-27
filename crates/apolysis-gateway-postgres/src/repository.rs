@@ -138,6 +138,13 @@ pub struct PostgresGatewayRepository {
     pub(crate) config: PostgresGatewayConfig,
 }
 
+pub(crate) struct OpenRunAttempt<'a> {
+    pub(crate) admitted_at_unix_ms: u64,
+    pub(crate) lease_expires_at_unix_ms: u64,
+    pub(crate) clock: &'a dyn GatewayClock,
+    pub(crate) ids: &'a dyn GatewayIdGenerator,
+}
+
 impl PostgresGatewayRepository {
     pub fn from_pool(
         pool: PgPool,
@@ -404,9 +411,12 @@ impl PostgresGatewayRepository {
                             &mut transaction,
                             context,
                             request,
-                            now_unix_ms,
-                            lease_expires_at_unix_ms,
-                            ids,
+                            OpenRunAttempt {
+                                admitted_at_unix_ms: now_unix_ms,
+                                lease_expires_at_unix_ms,
+                                clock,
+                                ids,
+                            },
                         )
                         .await
                     }
@@ -429,8 +439,14 @@ impl PostgresGatewayRepository {
                         request,
                         now_unix_ms,
                     } => {
-                        self.execute_bind_runtime(&mut transaction, context, request, now_unix_ms)
-                            .await
+                        self.execute_bind_runtime(
+                            &mut transaction,
+                            context,
+                            request,
+                            now_unix_ms,
+                            clock,
+                        )
+                        .await
                     }
                     LedgerOperation::FinishRun {
                         context,
