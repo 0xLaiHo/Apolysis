@@ -178,6 +178,48 @@ async fn seed_retention_control_fixture(owner_pool: &sqlx::PgPool) -> TestResult
             apolysis_gateway.evidence_object_db_now_unix_ms(),
             apolysis_gateway.evidence_object_db_now_unix_ms()
         );
+        INSERT INTO apolysis_gateway.transport_credentials (
+            credential_id,
+            certificate_fingerprint,
+            organization_id,
+            source_registration_id,
+            credential_epoch,
+            effective_at_unix_ms,
+            expires_at_unix_ms,
+            created_at_unix_ms,
+            updated_at_unix_ms
+        ) VALUES (
+            'credential_privilege_retention',
+            decode(repeat('30', 32), 'hex'),
+            'org_privilege_retention',
+            'registration_privilege_retention',
+            1,
+            apolysis_gateway.evidence_object_db_now_unix_ms() - 1000,
+            apolysis_gateway.evidence_object_db_now_unix_ms() + 600000,
+            apolysis_gateway.evidence_object_db_now_unix_ms(),
+            apolysis_gateway.evidence_object_db_now_unix_ms()
+        );
+        INSERT INTO apolysis_gateway.source_authority_revisions (
+            organization_id,
+            source_registration_id,
+            credential_id,
+            credential_epoch,
+            registration_policy_revision,
+            policy_document,
+            effective_at_unix_ms,
+            expires_at_unix_ms,
+            recorded_at_unix_ms
+        ) VALUES (
+            'org_privilege_retention',
+            'registration_privilege_retention',
+            'credential_privilege_retention',
+            1,
+            1,
+            '{"allowed_operations":["ingest"],"allowed_capabilities":["tool_calls"]}'::jsonb,
+            apolysis_gateway.evidence_object_db_now_unix_ms() - 1000,
+            apolysis_gateway.evidence_object_db_now_unix_ms() + 600000,
+            apolysis_gateway.evidence_object_db_now_unix_ms()
+        );
         INSERT INTO apolysis_gateway.runs (
             organization_id,
             run_id,
@@ -297,6 +339,8 @@ async fn seed_retention_control_fixture(owner_pool: &sqlx::PgPool) -> TestResult
             principal_kind,
             principal_id,
             registration_policy_revision,
+            credential_id,
+            credential_epoch,
             issued_at_unix_ms,
             expires_at_unix_ms
         ) VALUES (
@@ -308,6 +352,8 @@ async fn seed_retention_control_fixture(owner_pool: &sqlx::PgPool) -> TestResult
             'source_privilege_retention',
             'workload',
             'principal_privilege_retention',
+            1,
+            'credential_privilege_retention',
             1,
             apolysis_gateway.evidence_object_db_now_unix_ms() - 1000,
             apolysis_gateway.evidence_object_db_now_unix_ms() + 600000

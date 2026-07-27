@@ -7,13 +7,13 @@ use std::{
 
 use apolysis_contracts::{
     AcceptedRunFinalization, AcceptedRuntimeBinding, AcceptedSourceEnvelope,
-    AgentExecutionRecordFact, AgentExecutionRecordItem, BindRuntimeRequest, BindRuntimeResponse,
-    ContractErrorCode, EnvelopeAck, EnvironmentKind, FinishRunRequest, FinishRunResponse,
-    GatewayOperation, IngestAck, IngestDisposition, IngestRequest, JoinProofKind, OpenRunOutcome,
-    OpenRunRequest, OpenRunResponse, PrincipalKind, RegisteredSource, RunDescriptor, RunId,
-    RunLease, RunPolicySelection, RunState, RunStateTransition, RuntimeAttribution,
-    RuntimeIdentityKind, SequenceGap, SourceCapability, SourceId, SourceKind, SourceManifest,
-    TerminalSourcePosition, TrustProfile,
+    AgentExecutionRecordFact, AgentExecutionRecordItem, AuthenticatedSourceContext,
+    BindRuntimeRequest, BindRuntimeResponse, ContractErrorCode, EnvelopeAck, EnvironmentKind,
+    FinishRunRequest, FinishRunResponse, GatewayOperation, IngestAck, IngestDisposition,
+    IngestRequest, JoinProofKind, OpenRunOutcome, OpenRunRequest, OpenRunResponse, PrincipalKind,
+    RegisteredSource, RunDescriptor, RunId, RunLease, RunPolicySelection, RunState,
+    RunStateTransition, RuntimeAttribution, RuntimeIdentityKind, SequenceGap, SourceCapability,
+    SourceId, SourceKind, SourceManifest, TerminalSourcePosition, TrustProfile,
 };
 
 use crate::{
@@ -34,6 +34,7 @@ pub struct MemoryGatewayRepository {
 
 #[derive(Clone, Default)]
 struct State {
+    current_authorities: HashMap<CurrentAuthorityKey, CurrentAuthorityRecord>,
     operations: HashMap<OperationKey, StoredOperation>,
     client_runs: HashMap<ClientRunKey, RunId>,
     runs: HashMap<RunKey, RunRecord>,
@@ -46,6 +47,38 @@ struct State {
     next_ingest_sequences: HashMap<String, u64>,
     ledger: Vec<AgentExecutionRecordItem>,
     projection_outbox: Vec<(String, RunId, u64)>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CurrentAuthorityKey {
+    organization_id: String,
+    source_registration_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CurrentAuthorityRecord {
+    source_id: SourceId,
+    principal_kind: PrincipalKind,
+    principal_id: String,
+    binding: AuthorityBinding,
+    revoked: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AuthorityBinding {
+    credential_id: String,
+    credential_epoch: u64,
+    policy_revision: u64,
+}
+
+impl AuthorityBinding {
+    fn from_context(context: &AuthenticatedSourceContext) -> Self {
+        Self {
+            credential_id: context.authentication().credential_id().to_string(),
+            credential_epoch: context.authentication().credential_epoch(),
+            policy_revision: context.authentication().policy_revision(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -68,6 +101,7 @@ struct ClientRunKey {
 
 #[derive(Clone)]
 struct StoredOperation {
+    authority: AuthorityBinding,
     request_digest: String,
     outcome: LedgerOutcome,
 }
@@ -126,7 +160,8 @@ struct LeaseRecord {
     source_registration_id: String,
     principal_kind: PrincipalKind,
     principal_id: String,
-    registration_policy_revision: u64,
+    authority: AuthorityBinding,
+    revoked: bool,
     source_id: SourceId,
     source_stream_id: String,
     expires_at_unix_ms: u64,
@@ -267,10 +302,12 @@ struct JoinGrantRecord {
     source_id: SourceId,
     source_kind: SourceKind,
     environment: EnvironmentKind,
+    issuer_source_registration_id: String,
+    issuer_authority: AuthorityBinding,
     source_registration_id: String,
     principal_kind: PrincipalKind,
     principal_id: String,
-    registration_policy_revision: u64,
+    joining_authority: AuthorityBinding,
     expires_at_unix_ms: u64,
     status: JoinGrantStatus,
 }
@@ -279,6 +316,7 @@ struct JoinGrantRecord {
 enum JoinGrantStatus {
     Pending,
     Consumed,
+    Revoked,
 }
 
 struct JoinAuthorizationSpec {
@@ -292,6 +330,128 @@ struct JoinAuthorizationSpec {
 impl MemoryGatewayRepository {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Seed one current source authority for the reference adapter.
+    ///
+    /// This is a narrow test control-plane seam. Lifecycle requests still
+    /// observe authority only through [`GatewayRepository::execute`].
+    pub fn seed_current_authority(
+        &self,
+        current: &AuthenticatedSourceContext,
+    ) -> Result<(), GatewayFailure> {
+        let mut state = self.state.lock().map_err(|_| repository_invariant())?;
+        let key = current_authority_key(current);
+        let record = current_authority_record(current);
+        match state.current_authorities.get(&key) {
+            None => {
+                state.current_authorities.insert(key, record);
+                Ok(())
+            }
+            Some(existing) if existing == &record => Ok(()),
+            Some(_) => Err(authority_control_conflict()),
+        }
+    }
+
+    /// Atomically replace one current source authority and revoke its old leases.
+    pub fn rotate_current_authority(
+        &self,
+        expected_current: &AuthenticatedSourceContext,
+        replacement: &AuthenticatedSourceContext,
+    ) -> Result<(), GatewayFailure> {
+        let mut state = self.state.lock().map_err(|_| repository_invariant())?;
+        let expected_key = current_authority_key(expected_current);
+        if expected_key != current_authority_key(replacement)
+            || expected_current.principal() != replacement.principal()
+        {
+            return Err(authority_control_conflict());
+        }
+        let expected = current_authority_record(expected_current);
+        if state.current_authorities.get(&expected_key) != Some(&expected) {
+            return Err(authority_control_conflict());
+        }
+        let old = &expected.binding;
+        let next = AuthorityBinding::from_context(replacement);
+        let policy_advanced = old
+            .policy_revision
+            .checked_add(1)
+            .is_some_and(|revision| revision == next.policy_revision);
+        let valid_policy_only_rotation = old.credential_id == next.credential_id
+            && old.credential_epoch == next.credential_epoch
+            && policy_advanced;
+        let valid_credential_rotation = old.credential_id != next.credential_id
+            && old
+                .credential_epoch
+                .checked_add(1)
+                .is_some_and(|epoch| epoch == next.credential_epoch)
+            && ((next.policy_revision == old.policy_revision
+                && replacement.registration_policy() == expected_current.registration_policy())
+                || policy_advanced);
+        if !valid_policy_only_rotation && !valid_credential_rotation {
+            return Err(authority_control_conflict());
+        }
+
+        for (key, lease) in &mut state.leases {
+            if key.organization_id == expected_key.organization_id
+                && lease.source_registration_id == expected_key.source_registration_id
+                && lease.authority == expected.binding
+            {
+                lease.revoked = true;
+            }
+        }
+        for (key, grant) in &mut state.join_grants {
+            if key.organization_id == expected_key.organization_id
+                && grant.status == JoinGrantStatus::Pending
+                && ((grant.source_registration_id == expected_key.source_registration_id
+                    && grant.joining_authority == expected.binding)
+                    || (grant.issuer_source_registration_id == expected_key.source_registration_id
+                        && grant.issuer_authority == expected.binding))
+            {
+                grant.status = JoinGrantStatus::Revoked;
+            }
+        }
+        state
+            .current_authorities
+            .insert(expected_key, current_authority_record(replacement));
+        Ok(())
+    }
+
+    /// Revoke one current source authority and all leases issued under it.
+    pub fn revoke_current_authority(
+        &self,
+        expected_current: &AuthenticatedSourceContext,
+    ) -> Result<(), GatewayFailure> {
+        let mut state = self.state.lock().map_err(|_| repository_invariant())?;
+        let key = current_authority_key(expected_current);
+        let expected = current_authority_record(expected_current);
+        if state.current_authorities.get(&key) != Some(&expected) {
+            return Err(authority_control_conflict());
+        }
+        for (lease_key, lease) in &mut state.leases {
+            if lease_key.organization_id == key.organization_id
+                && lease.source_registration_id == key.source_registration_id
+                && lease.authority == expected.binding
+            {
+                lease.revoked = true;
+            }
+        }
+        for (grant_key, grant) in &mut state.join_grants {
+            if grant_key.organization_id == key.organization_id
+                && grant.status == JoinGrantStatus::Pending
+                && ((grant.source_registration_id == key.source_registration_id
+                    && grant.joining_authority == expected.binding)
+                    || (grant.issuer_source_registration_id == key.source_registration_id
+                        && grant.issuer_authority == expected.binding))
+            {
+                grant.status = JoinGrantStatus::Revoked;
+            }
+        }
+        let current = state
+            .current_authorities
+            .get_mut(&key)
+            .ok_or_else(authority_control_conflict)?;
+        current.revoked = true;
+        Ok(())
     }
 
     pub fn snapshot(&self) -> Result<MemoryGatewaySnapshot, GatewayFailure> {
@@ -442,6 +602,8 @@ impl MemoryGatewayRepository {
         }
         let mut committed_state = self.state.lock().map_err(|_| repository_invariant())?;
         let mut state = committed_state.clone();
+        let issuer_authority = require_current_authority(&state, issuer)?;
+        let joining_authority = require_current_authority(&state, joining_source)?;
         if issuer.organization_id() != joining_source.organization_id() {
             return Err(join_forbidden());
         }
@@ -480,10 +642,12 @@ impl MemoryGatewayRepository {
             source_id: joining_source.registration_policy().source_id().clone(),
             source_kind: spec.source_kind,
             environment: run.environment,
+            issuer_source_registration_id: issuer.source_registration_id().to_string(),
+            issuer_authority,
             source_registration_id: joining_source.source_registration_id().to_string(),
             principal_kind: joining_source.principal().kind(),
             principal_id: joining_source.principal().id().to_string(),
-            registration_policy_revision: joining_source.authentication().policy_revision(),
+            joining_authority,
             expires_at_unix_ms: spec.expires_at_unix_ms,
             status: JoinGrantStatus::Pending,
         };
@@ -521,7 +685,11 @@ impl MemoryGatewayRepository {
         };
         let mut committed_state = self.state.lock().map_err(|_| repository_invariant())?;
         let mut state = committed_state.clone();
+        let authority_now_unix_ms = transaction_time(clock, admitted_at_unix_ms)?;
+        let current_authority =
+            require_current_authority_at(&state, &context, authority_now_unix_ms)?;
         if let Some(stored) = state.operations.get(&operation_key) {
+            require_operation_authority(stored, &current_authority)?;
             if stored.request_digest != request.request_digest() {
                 return Err(GatewayFailure::new(
                     ContractErrorCode::IdempotencyConflict,
@@ -573,6 +741,8 @@ impl MemoryGatewayRepository {
                         AuditReason::ClientRunKeyConflict,
                     ));
                 }
+                let transaction_now_unix_ms = transaction_time(clock, authority_now_unix_ms)?;
+                require_current_authority_at(&state, &context, transaction_now_unix_ms)?;
                 let run_id = RunId::try_from(next_id(ids, "run")?).map_err(contract_invariant)?;
                 let source_stream_id = next_id(ids, "stream")?;
                 let run_record = (
@@ -603,7 +773,7 @@ impl MemoryGatewayRepository {
                     Some((client_run_key, run_record)),
                     None,
                     None,
-                    admitted_at_unix_ms,
+                    transaction_now_unix_ms,
                 )
             }
             OpenRunRequest::Join {
@@ -637,17 +807,14 @@ impl MemoryGatewayRepository {
                     || grant.source_registration_id != context.source_registration_id()
                     || grant.principal_kind != context.principal().kind()
                     || grant.principal_id != context.principal().id()
-                    || grant.registration_policy_revision
-                        != context.authentication().policy_revision()
+                    || grant.joining_authority != current_authority
                     || grant.expires_at_unix_ms != join_proof.expires_at_unix_ms()
                     || grant.status != JoinGrantStatus::Pending
                 {
                     return Err(unauthorized_join_not_found());
                 }
-                let transaction_now_unix_ms = clock.transaction_now_unix_ms();
-                if transaction_now_unix_ms == 0 || transaction_now_unix_ms < admitted_at_unix_ms {
-                    return Err(repository_invariant());
-                }
+                let transaction_now_unix_ms = transaction_time(clock, authority_now_unix_ms)?;
+                require_current_authority_at(&state, &context, transaction_now_unix_ms)?;
                 if transaction_now_unix_ms >= grant.expires_at_unix_ms {
                     return Err(unauthorized_join_not_found());
                 }
@@ -859,7 +1026,8 @@ impl MemoryGatewayRepository {
                 source_registration_id: context.source_registration_id().to_string(),
                 principal_kind: context.principal().kind(),
                 principal_id: context.principal().id().to_string(),
-                registration_policy_revision: context.authentication().policy_revision(),
+                authority: current_authority.clone(),
+                revoked: false,
                 source_id: source_manifest.source_id().clone(),
                 source_stream_id,
                 expires_at_unix_ms: lease_expires_at_unix_ms,
@@ -869,6 +1037,7 @@ impl MemoryGatewayRepository {
         state.operations.insert(
             operation_key,
             StoredOperation {
+                authority: current_authority,
                 request_digest: request.request_digest().to_string(),
                 outcome: LedgerOutcome::OpenRun(response.clone()),
             },
@@ -894,7 +1063,11 @@ impl MemoryGatewayRepository {
             operation: "ingest",
             client_operation_id: request.client_operation_id().to_string(),
         };
+        let authority_now_unix_ms = transaction_time(clock, admission_unix_ms)?;
+        let current_authority =
+            require_current_authority_at(&state, &context, authority_now_unix_ms)?;
         if let Some(stored) = state.operations.get(&operation_key) {
+            require_operation_authority(stored, &current_authority)?;
             if stored.request_digest != request.request_digest() {
                 return Err(GatewayFailure::new(
                     ContractErrorCode::IdempotencyConflict,
@@ -908,7 +1081,7 @@ impl MemoryGatewayRepository {
             return Ok(acknowledgement.clone());
         }
         let lease = scoped_lease(&state, &context, request.run_id(), request.lease_id())?;
-        if lease.registration_policy_revision != context.authentication().policy_revision() {
+        if lease.revoked || lease.authority != current_authority {
             return Err(lease_scope_failure(ContractErrorCode::LeaseRevoked));
         }
         if lease.run_id != *request.run_id()
@@ -924,10 +1097,8 @@ impl MemoryGatewayRepository {
             run_id: request.run_id().to_string(),
         };
         let run = state.runs.get(&run_key).cloned().ok_or_else(not_found)?;
-        let now_unix_ms = clock.transaction_now_unix_ms();
-        if now_unix_ms == 0 || now_unix_ms < admission_unix_ms {
-            return Err(repository_invariant());
-        }
+        let now_unix_ms = transaction_time(clock, authority_now_unix_ms)?;
+        require_current_authority_at(&state, &context, now_unix_ms)?;
         let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
         let deadline_elapsed = finalization_deadline_elapsed(&run, now_unix_ms);
         if reconcile_expired_run(&mut state, &context, request.run_id(), now_unix_ms)?.is_some() {
@@ -1175,6 +1346,7 @@ impl MemoryGatewayRepository {
         state.operations.insert(
             operation_key,
             StoredOperation {
+                authority: current_authority,
                 request_digest: request.request_digest().to_string(),
                 outcome: LedgerOutcome::Ingest(acknowledgement.clone()),
             },
@@ -1200,7 +1372,11 @@ impl MemoryGatewayRepository {
             operation: "bind_runtime",
             client_operation_id: request.client_operation_id().to_string(),
         };
+        let authority_now_unix_ms = transaction_time(clock, admitted_at_unix_ms)?;
+        let current_authority =
+            require_current_authority_at(&state, &context, authority_now_unix_ms)?;
         if let Some(stored) = state.operations.get(&operation_key) {
+            require_operation_authority(stored, &current_authority)?;
             if stored.request_digest != request.request_digest() {
                 return Err(GatewayFailure::new(
                     ContractErrorCode::IdempotencyConflict,
@@ -1225,7 +1401,7 @@ impl MemoryGatewayRepository {
             run_id: request.run_id().to_string(),
         };
         let run = state.runs.get(&run_key).cloned().ok_or_else(not_found)?;
-        if lease.registration_policy_revision != context.authentication().policy_revision() {
+        if lease.revoked || lease.authority != current_authority {
             return Err(lease_scope_failure(ContractErrorCode::LeaseRevoked));
         }
         if lease.run_id != *request.run_id()
@@ -1239,10 +1415,8 @@ impl MemoryGatewayRepository {
         {
             return Err(lease_scope_failure(ContractErrorCode::LeaseScopeMismatch));
         }
-        let now_unix_ms = clock.transaction_now_unix_ms();
-        if now_unix_ms == 0 || now_unix_ms < admitted_at_unix_ms {
-            return Err(repository_invariant());
-        }
+        let now_unix_ms = transaction_time(clock, authority_now_unix_ms)?;
+        require_current_authority_at(&state, &context, now_unix_ms)?;
         let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
         let deadline_elapsed = finalization_deadline_elapsed(&run, now_unix_ms);
         if reconcile_expired_run(&mut state, &context, request.run_id(), now_unix_ms)?.is_some() {
@@ -1344,6 +1518,7 @@ impl MemoryGatewayRepository {
             state.operations.insert(
                 operation_key,
                 StoredOperation {
+                    authority: current_authority.clone(),
                     request_digest: request.request_digest().to_string(),
                     outcome: LedgerOutcome::BindRuntime(response.clone()),
                 },
@@ -1412,6 +1587,7 @@ impl MemoryGatewayRepository {
         state.operations.insert(
             operation_key,
             StoredOperation {
+                authority: current_authority,
                 request_digest: request.request_digest().to_string(),
                 outcome: LedgerOutcome::BindRuntime(response.clone()),
             },
@@ -1424,8 +1600,9 @@ impl MemoryGatewayRepository {
         &self,
         context: apolysis_contracts::AuthenticatedSourceContext,
         request: FinishRunRequest,
-        now_unix_ms: u64,
+        admitted_at_unix_ms: u64,
         finalization_deadline_unix_ms: u64,
+        clock: &dyn crate::GatewayClock,
     ) -> Result<FinishRunResponse, GatewayFailure> {
         let mut committed_state = self.state.lock().map_err(|_| repository_invariant())?;
         let mut state = committed_state.clone();
@@ -1437,7 +1614,11 @@ impl MemoryGatewayRepository {
             operation: "finish_run",
             client_operation_id: request.client_operation_id().to_string(),
         };
+        let authority_now_unix_ms = transaction_time(clock, admitted_at_unix_ms)?;
+        let current_authority =
+            require_current_authority_at(&state, &context, authority_now_unix_ms)?;
         if let Some(stored) = state.operations.get(&operation_key) {
+            require_operation_authority(stored, &current_authority)?;
             if stored.request_digest != request.request_digest() {
                 return Err(GatewayFailure::new(
                     ContractErrorCode::IdempotencyConflict,
@@ -1458,7 +1639,7 @@ impl MemoryGatewayRepository {
         }
 
         let lease = scoped_lease(&state, &context, request.run_id(), request.lease_id())?;
-        if lease.registration_policy_revision != context.authentication().policy_revision() {
+        if lease.revoked || lease.authority != current_authority {
             return Err(lease_scope_failure(ContractErrorCode::LeaseRevoked));
         }
         if lease.run_id != *request.run_id()
@@ -1477,6 +1658,8 @@ impl MemoryGatewayRepository {
             run_id: request.run_id().to_string(),
         };
         let run = state.runs.get(&run_key).cloned().ok_or_else(not_found)?;
+        let now_unix_ms = transaction_time(clock, authority_now_unix_ms)?;
+        require_current_authority_at(&state, &context, now_unix_ms)?;
         if run.initiating_source_registration_id != context.source_registration_id()
             && !context.registration_policy().may_finalize_runs()
         {
@@ -1493,6 +1676,7 @@ impl MemoryGatewayRepository {
             state.operations.insert(
                 operation_key,
                 StoredOperation {
+                    authority: current_authority.clone(),
                     request_digest: request.request_digest().to_string(),
                     outcome: LedgerOutcome::FinishRun(response.clone()),
                 },
@@ -1620,7 +1804,7 @@ impl MemoryGatewayRepository {
             context.source_registration_id(),
             lease.source_stream_id.as_str(),
             context.principal().clone(),
-            lease.registration_policy_revision,
+            lease.authority.policy_revision,
             accepted_positions,
             outcome_claim_refs.iter().cloned().collect(),
             accepted_deadline,
@@ -1682,6 +1866,7 @@ impl MemoryGatewayRepository {
         state.operations.insert(
             operation_key,
             StoredOperation {
+                authority: current_authority,
                 request_digest: request.request_digest().to_string(),
                 outcome: LedgerOutcome::FinishRun(response.clone()),
             },
@@ -1740,6 +1925,7 @@ impl GatewayRepository for MemoryGatewayRepository {
                         request.clone(),
                         now_unix_ms,
                         finalization_deadline_unix_ms,
+                        clock,
                     )
                     .map(LedgerOutcome::FinishRun),
             }
@@ -1799,6 +1985,7 @@ fn reconcile_expired_run(
     let has_unexpired_lease = state.leases.iter().any(|(key, lease)| {
         key.organization_id == context.organization_id().as_str()
             && lease.run_id == *run_id
+            && !lease.revoked
             && now_unix_ms < lease.expires_at_unix_ms
     });
     let should_seal = match run.state {
@@ -1878,6 +2065,107 @@ fn sequence_gaps(sequences: &BTreeMap<u64, String>) -> Result<Vec<SequenceGap>, 
         expected = sequence.saturating_add(1);
     }
     Ok(gaps)
+}
+
+fn current_authority_key(context: &AuthenticatedSourceContext) -> CurrentAuthorityKey {
+    CurrentAuthorityKey {
+        organization_id: context.organization_id().to_string(),
+        source_registration_id: context.source_registration_id().to_string(),
+    }
+}
+
+fn current_authority_record(context: &AuthenticatedSourceContext) -> CurrentAuthorityRecord {
+    CurrentAuthorityRecord {
+        source_id: context.registration_policy().source_id().clone(),
+        principal_kind: context.principal().kind(),
+        principal_id: context.principal().id().to_string(),
+        binding: AuthorityBinding::from_context(context),
+        revoked: false,
+    }
+}
+
+fn transaction_time(
+    clock: &dyn crate::GatewayClock,
+    earliest_unix_ms: u64,
+) -> Result<u64, GatewayFailure> {
+    let now_unix_ms = clock.transaction_now_unix_ms();
+    if now_unix_ms == 0 || now_unix_ms < earliest_unix_ms {
+        return Err(repository_invariant());
+    }
+    Ok(now_unix_ms)
+}
+
+fn require_current_authority_at(
+    state: &State,
+    context: &AuthenticatedSourceContext,
+    now_unix_ms: u64,
+) -> Result<AuthorityBinding, GatewayFailure> {
+    if now_unix_ms < context.authentication().authenticated_at_unix_ms()
+        || now_unix_ms >= context.authentication().expires_at_unix_ms()
+    {
+        return Err(authority_unauthenticated());
+    }
+    require_current_authority(state, context)
+}
+
+fn require_current_authority(
+    state: &State,
+    context: &AuthenticatedSourceContext,
+) -> Result<AuthorityBinding, GatewayFailure> {
+    let claimed = AuthorityBinding::from_context(context);
+    let Some(current) = state
+        .current_authorities
+        .get(&current_authority_key(context))
+    else {
+        return Err(authority_unauthenticated());
+    };
+    if current.revoked
+        || current.source_id != *context.registration_policy().source_id()
+        || current.principal_kind != context.principal().kind()
+        || current.principal_id != context.principal().id()
+        || current.binding.credential_id != claimed.credential_id
+        || current.binding.credential_epoch != claimed.credential_epoch
+    {
+        return Err(authority_unauthenticated());
+    }
+    if current.binding.policy_revision != claimed.policy_revision {
+        return Err(authority_forbidden());
+    }
+    Ok(claimed)
+}
+
+fn require_operation_authority(
+    operation: &StoredOperation,
+    current: &AuthorityBinding,
+) -> Result<(), GatewayFailure> {
+    if &operation.authority != current {
+        return Err(lease_scope_failure(ContractErrorCode::LeaseRevoked));
+    }
+    Ok(())
+}
+
+fn authority_unauthenticated() -> GatewayFailure {
+    GatewayFailure::new(
+        ContractErrorCode::Unauthenticated,
+        "Authentication is missing or expired",
+        AuditReason::CurrentAuthorityStale,
+    )
+}
+
+fn authority_forbidden() -> GatewayFailure {
+    GatewayFailure::new(
+        ContractErrorCode::Forbidden,
+        "Authenticated source is not authorized for this operation",
+        AuditReason::CurrentAuthorityStale,
+    )
+}
+
+fn authority_control_conflict() -> GatewayFailure {
+    GatewayFailure::new(
+        ContractErrorCode::IdempotencyConflict,
+        "Current authority state conflicts with the requested change",
+        AuditReason::IdempotencyConflict,
+    )
 }
 
 fn lease_scope_failure(code: ContractErrorCode) -> GatewayFailure {

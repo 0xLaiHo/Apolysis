@@ -600,7 +600,7 @@ impl AuthorityStore {
         .bind(credential_epoch)
         .bind(effective_at_unix_ms)
         .bind(expires_at_unix_ms)
-        .bind(policy_document)
+        .bind(&policy_document)
         .bind(now)
         .execute(&mut *transaction)
         .await
@@ -639,6 +639,22 @@ impl AuthorityStore {
             ));
         }
 
+        record_source_authority_revision(
+            &mut transaction,
+            AuthorityRevisionRecord {
+                organization_id: registration.organization_id.as_str(),
+                source_registration_id: &registration.source_registration_id,
+                credential_id: &credential_id,
+                credential_epoch,
+                policy_revision,
+                policy_document: &policy_document,
+                effective_at_unix_ms,
+                expires_at_unix_ms,
+                recorded_at_unix_ms: now,
+            },
+        )
+        .await?;
+
         sqlx::query(
             "INSERT INTO apolysis_gateway.authority_change_audit ( \
                  occurred_at_unix_ms, action, reason_code, organization_id, \
@@ -662,6 +678,277 @@ impl AuthorityStore {
         Ok(())
     }
 
+    pub(super) async fn rotate_policy(
+        &self,
+        registration: RegistrationDocument,
+        current_certificate: ClientCertificate,
+        reason: &str,
+    ) -> Result<(), GatewayServerError> {
+        let current_fingerprint = current_certificate.fingerprint;
+        let mut prepared =
+            PreparedAuthorityUpdate::new(registration, &current_certificate, reason)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(GatewayServerError::database)?;
+        let current = lock_rotation_authority(
+            &mut transaction,
+            &prepared.registration,
+            &current_fingerprint,
+        )
+        .await?;
+        prepared.refresh_cutover_time(&current_certificate)?;
+
+        let expected_policy_revision = current.policy_revision.checked_add(1).ok_or_else(|| {
+            GatewayServerError::configuration("Policy rotation sequence is invalid")
+        })?;
+        if prepared.policy_revision != expected_policy_revision
+            || prepared.credential_epoch != current.credential_epoch
+        {
+            return Err(GatewayServerError::configuration(
+                "Policy rotation sequence is invalid",
+            ));
+        }
+
+        let registration_update = sqlx::query(
+            "UPDATE apolysis_gateway.source_registrations \
+             SET policy_revision=$1, effective_at_unix_ms=$2, expires_at_unix_ms=$3, \
+                 policy_document=$4, updated_at_unix_ms=$5 \
+             WHERE organization_id=$6 AND source_registration_id=$7 \
+               AND policy_revision=$8 AND credential_epoch=$9 \
+               AND registration_state='active'",
+        )
+        .bind(prepared.policy_revision)
+        .bind(prepared.effective_at_unix_ms)
+        .bind(prepared.expires_at_unix_ms)
+        .bind(&prepared.policy_document)
+        .bind(prepared.now)
+        .bind(prepared.registration.organization_id.as_str())
+        .bind(&prepared.registration.source_registration_id)
+        .bind(current.policy_revision)
+        .bind(current.credential_epoch)
+        .execute(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?;
+        if registration_update.rows_affected() != 1 {
+            return Err(GatewayServerError::configuration(
+                "Source authority updates require the credential rotation gate",
+            ));
+        }
+
+        let credential_update = sqlx::query(
+            "UPDATE apolysis_gateway.transport_credentials \
+             SET effective_at_unix_ms=$1, expires_at_unix_ms=$2, \
+                 updated_at_unix_ms=$3 \
+             WHERE credential_id=$4 AND organization_id=$5 \
+               AND source_registration_id=$6 AND credential_epoch=$7 \
+               AND revoked_at_unix_ms IS NULL",
+        )
+        .bind(prepared.effective_at_unix_ms)
+        .bind(prepared.expires_at_unix_ms)
+        .bind(prepared.now)
+        .bind(&current.credential_id)
+        .bind(prepared.registration.organization_id.as_str())
+        .bind(&prepared.registration.source_registration_id)
+        .bind(current.credential_epoch)
+        .execute(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?;
+        if credential_update.rows_affected() != 1 {
+            return Err(GatewayServerError::configuration(
+                "Source authority updates require the credential rotation gate",
+            ));
+        }
+
+        record_source_authority_revision(
+            &mut transaction,
+            AuthorityRevisionRecord::from_prepared(&current.credential_id, &prepared),
+        )
+        .await?;
+        invalidate_rotated_authority(
+            &mut transaction,
+            prepared.registration.organization_id.as_str(),
+            &prepared.registration.source_registration_id,
+            prepared.now,
+        )
+        .await?;
+        record_authority_change(
+            &mut transaction,
+            "rotate_policy",
+            reason,
+            &current.credential_id,
+            &prepared,
+        )
+        .await?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(GatewayServerError::database)
+    }
+
+    pub(super) async fn rotate_credential(
+        &self,
+        registration: RegistrationDocument,
+        current_certificate: ClientCertificate,
+        replacement_certificate: ClientCertificate,
+        reason: &str,
+    ) -> Result<(), GatewayServerError> {
+        if current_certificate.fingerprint == replacement_certificate.fingerprint {
+            return Err(GatewayServerError::configuration(
+                "Client certificate binding conflicts with current authority",
+            ));
+        }
+        let current_fingerprint = current_certificate.fingerprint;
+        let replacement_credential_id = credential_id(&replacement_certificate.fingerprint);
+        let replacement_fingerprint = replacement_certificate.fingerprint;
+        let mut prepared =
+            PreparedAuthorityUpdate::new(registration, &replacement_certificate, reason)?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(GatewayServerError::database)?;
+        let current = lock_rotation_authority(
+            &mut transaction,
+            &prepared.registration,
+            &current_fingerprint,
+        )
+        .await?;
+        prepared.refresh_cutover_time(&replacement_certificate)?;
+
+        let expected_credential_epoch =
+            current.credential_epoch.checked_add(1).ok_or_else(|| {
+                GatewayServerError::configuration("Credential rotation sequence is invalid")
+            })?;
+        let next_policy_revision = current.policy_revision.checked_add(1).ok_or_else(|| {
+            GatewayServerError::configuration("Credential rotation sequence is invalid")
+        })?;
+        let policy_is_unchanged = prepared.policy_revision == current.policy_revision
+            && prepared.policy_document == current.policy_document;
+        let policy_advances_once = prepared.policy_revision == next_policy_revision;
+        if prepared.credential_epoch != expected_credential_epoch
+            || !(policy_is_unchanged || policy_advances_once)
+        {
+            return Err(GatewayServerError::configuration(
+                "Credential rotation sequence is invalid",
+            ));
+        }
+
+        if sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM apolysis_gateway.transport_credentials \
+                 WHERE certificate_fingerprint=$1 OR credential_id=$2 \
+             )",
+        )
+        .bind(replacement_fingerprint.as_slice())
+        .bind(&replacement_credential_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?
+        {
+            return Err(GatewayServerError::configuration(
+                "Client certificate binding conflicts with current authority",
+            ));
+        }
+
+        let revoked = sqlx::query(
+            "UPDATE apolysis_gateway.transport_credentials \
+             SET revoked_at_unix_ms=$1, revocation_reason=$2, updated_at_unix_ms=$1 \
+             WHERE credential_id=$3 AND organization_id=$4 \
+               AND source_registration_id=$5 AND credential_epoch=$6 \
+               AND revoked_at_unix_ms IS NULL",
+        )
+        .bind(prepared.now)
+        .bind(reason)
+        .bind(&current.credential_id)
+        .bind(prepared.registration.organization_id.as_str())
+        .bind(&prepared.registration.source_registration_id)
+        .bind(current.credential_epoch)
+        .execute(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?;
+        if revoked.rows_affected() != 1 {
+            return Err(GatewayServerError::configuration(
+                "Source authority updates require the credential rotation gate",
+            ));
+        }
+
+        sqlx::query(
+            "INSERT INTO apolysis_gateway.transport_credentials ( \
+                 credential_id, certificate_fingerprint, organization_id, \
+                 source_registration_id, credential_epoch, effective_at_unix_ms, \
+                 expires_at_unix_ms, revoked_at_unix_ms, revocation_reason, \
+                 created_at_unix_ms, updated_at_unix_ms \
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, $8, $8)",
+        )
+        .bind(&replacement_credential_id)
+        .bind(replacement_fingerprint.as_slice())
+        .bind(prepared.registration.organization_id.as_str())
+        .bind(&prepared.registration.source_registration_id)
+        .bind(prepared.credential_epoch)
+        .bind(prepared.effective_at_unix_ms)
+        .bind(prepared.expires_at_unix_ms)
+        .bind(prepared.now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?;
+
+        let registration_update = sqlx::query(
+            "UPDATE apolysis_gateway.source_registrations \
+             SET policy_revision=$1, credential_epoch=$2, effective_at_unix_ms=$3, \
+                 expires_at_unix_ms=$4, policy_document=$5, updated_at_unix_ms=$6 \
+             WHERE organization_id=$7 AND source_registration_id=$8 \
+               AND policy_revision=$9 AND credential_epoch=$10 \
+               AND registration_state='active'",
+        )
+        .bind(prepared.policy_revision)
+        .bind(prepared.credential_epoch)
+        .bind(prepared.effective_at_unix_ms)
+        .bind(prepared.expires_at_unix_ms)
+        .bind(&prepared.policy_document)
+        .bind(prepared.now)
+        .bind(prepared.registration.organization_id.as_str())
+        .bind(&prepared.registration.source_registration_id)
+        .bind(current.policy_revision)
+        .bind(current.credential_epoch)
+        .execute(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?;
+        if registration_update.rows_affected() != 1 {
+            return Err(GatewayServerError::configuration(
+                "Source authority updates require the credential rotation gate",
+            ));
+        }
+
+        record_source_authority_revision(
+            &mut transaction,
+            AuthorityRevisionRecord::from_prepared(&replacement_credential_id, &prepared),
+        )
+        .await?;
+        invalidate_rotated_authority(
+            &mut transaction,
+            prepared.registration.organization_id.as_str(),
+            &prepared.registration.source_registration_id,
+            prepared.now,
+        )
+        .await?;
+        record_authority_change(
+            &mut transaction,
+            "rotate_credential",
+            reason,
+            &replacement_credential_id,
+            &prepared,
+        )
+        .await?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(GatewayServerError::database)
+    }
+
     pub(super) async fn revoke_credential(
         &self,
         fingerprint: [u8; 32],
@@ -674,12 +961,10 @@ impl AuthorityStore {
             .begin()
             .await
             .map_err(GatewayServerError::database)?;
-        let credential = sqlx::query(
-            "SELECT credential_id, organization_id, source_registration_id, \
-                    credential_epoch, revoked_at_unix_ms \
+        let credential_scope = sqlx::query(
+            "SELECT organization_id, source_registration_id \
              FROM apolysis_gateway.transport_credentials \
-             WHERE certificate_fingerprint=$1 \
-             FOR UPDATE",
+             WHERE certificate_fingerprint=$1",
         )
         .bind(fingerprint.as_slice())
         .fetch_optional(&mut *transaction)
@@ -688,15 +973,59 @@ impl AuthorityStore {
         .ok_or_else(|| {
             GatewayServerError::configuration("Transport credential is not registered")
         })?;
-
-        let credential_id: String = credential
-            .try_get("credential_id")
-            .map_err(GatewayServerError::database)?;
-        let organization_id: String = credential
+        let organization_id: String = credential_scope
             .try_get("organization_id")
             .map_err(GatewayServerError::database)?;
-        let source_registration_id: String = credential
+        let source_registration_id: String = credential_scope
             .try_get("source_registration_id")
+            .map_err(GatewayServerError::database)?;
+        lock_authority_advisory_scope(&mut transaction, &organization_id, &source_registration_id)
+            .await?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT organization_id \
+             FROM apolysis_gateway.organizations \
+             WHERE organization_id=$1 \
+             FOR UPDATE",
+        )
+        .bind(&organization_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?
+        .ok_or_else(|| {
+            GatewayServerError::configuration("Transport credential is not registered")
+        })?;
+        let registration_credential_epoch = sqlx::query_scalar::<_, i64>(
+            "SELECT credential_epoch \
+             FROM apolysis_gateway.source_registrations \
+             WHERE organization_id=$1 AND source_registration_id=$2 \
+             FOR UPDATE",
+        )
+        .bind(&organization_id)
+        .bind(&source_registration_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?
+        .ok_or_else(|| {
+            GatewayServerError::configuration("Transport credential is not registered")
+        })?;
+        let credential = sqlx::query(
+            "SELECT credential_id, credential_epoch, revoked_at_unix_ms \
+             FROM apolysis_gateway.transport_credentials \
+             WHERE certificate_fingerprint=$1 AND organization_id=$2 \
+               AND source_registration_id=$3 \
+             FOR UPDATE",
+        )
+        .bind(fingerprint.as_slice())
+        .bind(&organization_id)
+        .bind(&source_registration_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(GatewayServerError::database)?
+        .ok_or_else(|| {
+            GatewayServerError::configuration("Transport credential is not registered")
+        })?;
+        let credential_id: String = credential
+            .try_get("credential_id")
             .map_err(GatewayServerError::database)?;
         let credential_epoch: i64 = credential
             .try_get("credential_epoch")
@@ -705,18 +1034,42 @@ impl AuthorityStore {
             .try_get("revoked_at_unix_ms")
             .map_err(GatewayServerError::database)?;
 
-        if revoked_at_unix_ms.is_none() {
-            sqlx::query(
+        let revoked_current = if revoked_at_unix_ms.is_none() {
+            let revoked = sqlx::query(
                 "UPDATE apolysis_gateway.transport_credentials \
                  SET revoked_at_unix_ms=$1, revocation_reason=$2, updated_at_unix_ms=$1 \
-                 WHERE credential_id=$3 AND revoked_at_unix_ms IS NULL",
+                 WHERE credential_id=$3 AND organization_id=$4 \
+                   AND source_registration_id=$5 AND credential_epoch=$6 \
+                   AND revoked_at_unix_ms IS NULL",
             )
             .bind(now)
             .bind(reason)
             .bind(&credential_id)
+            .bind(&organization_id)
+            .bind(&source_registration_id)
+            .bind(credential_epoch)
             .execute(&mut *transaction)
             .await
             .map_err(GatewayServerError::database)?;
+            if revoked.rows_affected() != 1 {
+                return Err(GatewayServerError::configuration(
+                    "Transport credential is not registered",
+                ));
+            }
+            registration_credential_epoch == credential_epoch
+        } else {
+            false
+        };
+        if revoked_current {
+            invalidate_revoked_credential(
+                &mut transaction,
+                &organization_id,
+                &source_registration_id,
+                &credential_id,
+                credential_epoch,
+                now,
+            )
+            .await?;
         }
 
         sqlx::query(
@@ -741,6 +1094,399 @@ impl AuthorityStore {
             .map_err(GatewayServerError::database)?;
         Ok(())
     }
+}
+
+struct PreparedAuthorityUpdate {
+    registration: RegistrationDocument,
+    policy_document: serde_json::Value,
+    now: i64,
+    policy_revision: i64,
+    credential_epoch: i64,
+    effective_at_unix_ms: i64,
+    expires_at_unix_ms: i64,
+}
+
+impl PreparedAuthorityUpdate {
+    fn new(
+        registration: RegistrationDocument,
+        certificate: &ClientCertificate,
+        reason: &str,
+    ) -> Result<Self, GatewayServerError> {
+        validate_contract_identifier(reason, "Authority change reason is invalid")?;
+        let now_unix_ms = current_unix_ms()?;
+        registration.validate(now_unix_ms, certificate)?;
+        let stored_policy = registration.stored_policy();
+        stored_policy
+            .build_policy()
+            .map_err(|_| GatewayServerError::configuration("Source policy is invalid"))?;
+        let policy_document = serde_json::to_value(stored_policy)
+            .map_err(|_| GatewayServerError::configuration("Source policy serialization failed"))?;
+        Ok(Self {
+            policy_revision: checked_database_integer(
+                registration.policy_revision,
+                "Source policy revision is invalid",
+            )?,
+            credential_epoch: checked_database_integer(
+                registration.credential_epoch,
+                "Transport credential epoch is invalid",
+            )?,
+            effective_at_unix_ms: checked_database_integer(
+                registration.effective_at_unix_ms,
+                "Source registration validity is invalid",
+            )?,
+            expires_at_unix_ms: checked_database_integer(
+                registration.expires_at_unix_ms,
+                "Source registration validity is invalid",
+            )?,
+            now: checked_database_integer(now_unix_ms, "Gateway clock is invalid")?,
+            registration,
+            policy_document,
+        })
+    }
+
+    fn refresh_cutover_time(
+        &mut self,
+        certificate: &ClientCertificate,
+    ) -> Result<(), GatewayServerError> {
+        let now_unix_ms = current_unix_ms()?;
+        self.registration.validate(now_unix_ms, certificate)?;
+        self.now = checked_database_integer(now_unix_ms, "Gateway clock is invalid")?;
+        Ok(())
+    }
+}
+
+struct LockedRotationAuthority {
+    credential_id: String,
+    credential_epoch: i64,
+    policy_revision: i64,
+    policy_document: serde_json::Value,
+}
+
+struct AuthorityRevisionRecord<'a> {
+    organization_id: &'a str,
+    source_registration_id: &'a str,
+    credential_id: &'a str,
+    credential_epoch: i64,
+    policy_revision: i64,
+    policy_document: &'a serde_json::Value,
+    effective_at_unix_ms: i64,
+    expires_at_unix_ms: i64,
+    recorded_at_unix_ms: i64,
+}
+
+impl<'a> AuthorityRevisionRecord<'a> {
+    fn from_prepared(credential_id: &'a str, prepared: &'a PreparedAuthorityUpdate) -> Self {
+        Self {
+            organization_id: prepared.registration.organization_id.as_str(),
+            source_registration_id: &prepared.registration.source_registration_id,
+            credential_id,
+            credential_epoch: prepared.credential_epoch,
+            policy_revision: prepared.policy_revision,
+            policy_document: &prepared.policy_document,
+            effective_at_unix_ms: prepared.effective_at_unix_ms,
+            expires_at_unix_ms: prepared.expires_at_unix_ms,
+            recorded_at_unix_ms: prepared.now,
+        }
+    }
+}
+
+async fn lock_rotation_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    registration: &RegistrationDocument,
+    current_fingerprint: &[u8; 32],
+) -> Result<LockedRotationAuthority, GatewayServerError> {
+    lock_authority_advisory_scope(
+        transaction,
+        registration.organization_id.as_str(),
+        &registration.source_registration_id,
+    )
+    .await?;
+
+    let organization_state = sqlx::query_scalar::<_, String>(
+        "SELECT organization_state \
+         FROM apolysis_gateway.organizations \
+         WHERE organization_id=$1 \
+         FOR UPDATE",
+    )
+    .bind(registration.organization_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(GatewayServerError::database)?
+    .ok_or_else(|| {
+        GatewayServerError::configuration(
+            "Source authority updates require the credential rotation gate",
+        )
+    })?;
+
+    let current_registration = sqlx::query(
+        "SELECT source_id, principal_kind, principal_id, registration_state, \
+                policy_revision, credential_epoch, policy_document \
+         FROM apolysis_gateway.source_registrations \
+         WHERE organization_id=$1 AND source_registration_id=$2 \
+         FOR UPDATE",
+    )
+    .bind(registration.organization_id.as_str())
+    .bind(&registration.source_registration_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(GatewayServerError::database)?
+    .ok_or_else(|| {
+        GatewayServerError::configuration(
+            "Source authority updates require the credential rotation gate",
+        )
+    })?;
+    let current_source_id: String = current_registration
+        .try_get("source_id")
+        .map_err(GatewayServerError::database)?;
+    let current_principal_kind: String = current_registration
+        .try_get("principal_kind")
+        .map_err(GatewayServerError::database)?;
+    let current_principal_id: String = current_registration
+        .try_get("principal_id")
+        .map_err(GatewayServerError::database)?;
+    let current_registration_state: String = current_registration
+        .try_get("registration_state")
+        .map_err(GatewayServerError::database)?;
+    let policy_revision: i64 = current_registration
+        .try_get("policy_revision")
+        .map_err(GatewayServerError::database)?;
+    let registration_credential_epoch: i64 = current_registration
+        .try_get("credential_epoch")
+        .map_err(GatewayServerError::database)?;
+    let policy_document: serde_json::Value = current_registration
+        .try_get("policy_document")
+        .map_err(GatewayServerError::database)?;
+    if organization_state != registration.organization_state.as_str()
+        || current_registration_state != "active"
+        || current_source_id != registration.source_id.as_str()
+        || current_principal_kind != principal_kind_as_str(registration.principal.kind())
+        || current_principal_id != registration.principal.id()
+    {
+        return Err(GatewayServerError::configuration(
+            "Source registration identity is immutable",
+        ));
+    }
+
+    let current_credential = sqlx::query(
+        "SELECT credential_id, certificate_fingerprint, credential_epoch \
+         FROM apolysis_gateway.transport_credentials \
+         WHERE organization_id=$1 AND source_registration_id=$2 \
+           AND revoked_at_unix_ms IS NULL \
+         ORDER BY credential_id \
+         FOR UPDATE",
+    )
+    .bind(registration.organization_id.as_str())
+    .bind(&registration.source_registration_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(GatewayServerError::database)?
+    .ok_or_else(|| GatewayServerError::configuration("Transport credential is not registered"))?;
+    let credential_id: String = current_credential
+        .try_get("credential_id")
+        .map_err(GatewayServerError::database)?;
+    let fingerprint: Vec<u8> = current_credential
+        .try_get("certificate_fingerprint")
+        .map_err(GatewayServerError::database)?;
+    let credential_epoch: i64 = current_credential
+        .try_get("credential_epoch")
+        .map_err(GatewayServerError::database)?;
+    if fingerprint.as_slice() != current_fingerprint
+        || credential_epoch != registration_credential_epoch
+    {
+        return Err(GatewayServerError::configuration(
+            "Transport credential is not registered",
+        ));
+    }
+
+    Ok(LockedRotationAuthority {
+        credential_id,
+        credential_epoch,
+        policy_revision,
+        policy_document,
+    })
+}
+
+async fn lock_authority_advisory_scope(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &str,
+    source_registration_id: &str,
+) -> Result<(), GatewayServerError> {
+    for authority_key in [
+        format!("organization:{organization_id}"),
+        format!("registration:{source_registration_id}"),
+    ] {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 4715382012602313075))")
+            .bind(authority_key)
+            .execute(&mut **transaction)
+            .await
+            .map_err(GatewayServerError::database)?;
+    }
+    Ok(())
+}
+
+async fn record_source_authority_revision(
+    transaction: &mut Transaction<'_, Postgres>,
+    revision: AuthorityRevisionRecord<'_>,
+) -> Result<(), GatewayServerError> {
+    let inserted = sqlx::query(
+        "INSERT INTO apolysis_gateway.source_authority_revisions ( \
+             organization_id, source_registration_id, credential_id, credential_epoch, \
+             registration_policy_revision, policy_document, effective_at_unix_ms, \
+             expires_at_unix_ms, recorded_at_unix_ms \
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) \
+         ON CONFLICT (organization_id, source_registration_id, credential_id, \
+                      credential_epoch, registration_policy_revision) DO NOTHING",
+    )
+    .bind(revision.organization_id)
+    .bind(revision.source_registration_id)
+    .bind(revision.credential_id)
+    .bind(revision.credential_epoch)
+    .bind(revision.policy_revision)
+    .bind(revision.policy_document)
+    .bind(revision.effective_at_unix_ms)
+    .bind(revision.expires_at_unix_ms)
+    .bind(revision.recorded_at_unix_ms)
+    .execute(&mut **transaction)
+    .await
+    .map_err(GatewayServerError::database)?;
+    if inserted.rows_affected() == 0 {
+        let identical = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM apolysis_gateway.source_authority_revisions \
+                 WHERE organization_id=$1 AND source_registration_id=$2 \
+                   AND credential_id=$3 AND credential_epoch=$4 \
+                   AND registration_policy_revision=$5 AND policy_document=$6 \
+                   AND effective_at_unix_ms=$7 AND expires_at_unix_ms=$8 \
+             )",
+        )
+        .bind(revision.organization_id)
+        .bind(revision.source_registration_id)
+        .bind(revision.credential_id)
+        .bind(revision.credential_epoch)
+        .bind(revision.policy_revision)
+        .bind(revision.policy_document)
+        .bind(revision.effective_at_unix_ms)
+        .bind(revision.expires_at_unix_ms)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(GatewayServerError::database)?;
+        if !identical {
+            return Err(GatewayServerError::configuration(
+                "Source authority updates require the credential rotation gate",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn invalidate_rotated_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &str,
+    source_registration_id: &str,
+    cutover_at_unix_ms: i64,
+) -> Result<(), GatewayServerError> {
+    sqlx::query(
+        "UPDATE apolysis_gateway.leases \
+         SET revoked_at_unix_ms=greatest(issued_at_unix_ms, $1) \
+         WHERE organization_id=$2 AND source_registration_id=$3 \
+           AND revoked_at_unix_ms IS NULL",
+    )
+    .bind(cutover_at_unix_ms)
+    .bind(organization_id)
+    .bind(source_registration_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(GatewayServerError::database)?;
+
+    sqlx::query(
+        "UPDATE apolysis_gateway.join_authorizations \
+         SET authorization_state='revoked', \
+             revoked_at_unix_ms=greatest(issued_at_unix_ms, $1) \
+         WHERE organization_id=$2 AND authorization_state='pending' \
+           AND (source_registration_id=$3 OR issued_by_source_registration_id=$3)",
+    )
+    .bind(cutover_at_unix_ms)
+    .bind(organization_id)
+    .bind(source_registration_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(GatewayServerError::database)?;
+    Ok(())
+}
+
+async fn invalidate_revoked_credential(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &str,
+    source_registration_id: &str,
+    credential_id: &str,
+    credential_epoch: i64,
+    revoked_at_unix_ms: i64,
+) -> Result<(), GatewayServerError> {
+    sqlx::query(
+        "UPDATE apolysis_gateway.leases \
+         SET revoked_at_unix_ms=greatest(issued_at_unix_ms, $1) \
+         WHERE organization_id=$2 AND source_registration_id=$3 \
+           AND credential_id=$4 AND credential_epoch=$5 \
+           AND revoked_at_unix_ms IS NULL",
+    )
+    .bind(revoked_at_unix_ms)
+    .bind(organization_id)
+    .bind(source_registration_id)
+    .bind(credential_id)
+    .bind(credential_epoch)
+    .execute(&mut **transaction)
+    .await
+    .map_err(GatewayServerError::database)?;
+
+    sqlx::query(
+        "UPDATE apolysis_gateway.join_authorizations \
+         SET authorization_state='revoked', \
+             revoked_at_unix_ms=greatest(issued_at_unix_ms, $1) \
+         WHERE organization_id=$2 AND authorization_state='pending' \
+           AND ( \
+               (source_registration_id=$3 AND credential_id=$4 \
+                AND credential_epoch=$5) \
+               OR \
+               (issued_by_source_registration_id=$3 AND issued_by_credential_id=$4 \
+                AND issued_by_credential_epoch=$5) \
+           )",
+    )
+    .bind(revoked_at_unix_ms)
+    .bind(organization_id)
+    .bind(source_registration_id)
+    .bind(credential_id)
+    .bind(credential_epoch)
+    .execute(&mut **transaction)
+    .await
+    .map_err(GatewayServerError::database)?;
+    Ok(())
+}
+
+async fn record_authority_change(
+    transaction: &mut Transaction<'_, Postgres>,
+    action: &str,
+    reason: &str,
+    credential_id: &str,
+    prepared: &PreparedAuthorityUpdate,
+) -> Result<(), GatewayServerError> {
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.authority_change_audit ( \
+             occurred_at_unix_ms, action, reason_code, organization_id, \
+             source_registration_id, credential_id, policy_revision, credential_epoch \
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+    )
+    .bind(prepared.now)
+    .bind(action)
+    .bind(reason)
+    .bind(prepared.registration.organization_id.as_str())
+    .bind(&prepared.registration.source_registration_id)
+    .bind(credential_id)
+    .bind(prepared.policy_revision)
+    .bind(prepared.credential_epoch)
+    .execute(&mut **transaction)
+    .await
+    .map_err(GatewayServerError::database)?;
+    Ok(())
 }
 
 struct AuthorityRow {
@@ -807,6 +1553,7 @@ impl AuthorityRow {
         let principal =
             PrincipalRef::new(principal_kind, self.principal_id.clone()).map_err(drop)?;
         let policy_revision = u64::try_from(self.policy_revision).map_err(drop)?;
+        let credential_epoch = u64::try_from(self.transport_credential_epoch).map_err(drop)?;
         let expires_at_unix_ms = u64::try_from(
             self.credential_expires_at_unix_ms
                 .min(self.registration_expires_at_unix_ms),
@@ -814,6 +1561,7 @@ impl AuthorityRow {
         .map_err(drop)?;
         let authentication = AuthenticationSnapshot::new(
             self.credential_id.clone(),
+            credential_epoch,
             policy_revision,
             now_unix_ms,
             expires_at_unix_ms,
@@ -933,199 +1681,73 @@ fn migration_error(error: sqlx::migrate::MigrateError) -> GatewayServerError {
 }
 
 #[cfg(test)]
-mod real_postgres_tests {
-    use std::{error::Error, time::Duration};
-
+mod tests {
     use serde_json::json;
-    use sqlx::postgres::PgPoolOptions;
-    use tokio::time::timeout;
 
     use super::*;
-    use crate::authority::policy::RegistrationDocument;
 
-    type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
-
-    const BOOTSTRAP_ROLES_SQL: &str =
-        include_str!("../../../apolysis-gateway-postgres/deploy/bootstrap_roles.sql");
-    const PRIVILEGES_SQL: &str =
-        include_str!("../../../apolysis-gateway-postgres/deploy/privileges.sql");
-    const APPLICATION_NAME: &str = "apolysis_gateway_register_lock_order";
-    const ORGANIZATION_ID: &str = "org_gateway_register_lock_order";
-    const REGISTRATION_ID: &str = "registration_gateway_lock_order";
-
-    fn registration(now_unix_ms: u64) -> TestResult<RegistrationDocument> {
-        Ok(serde_json::from_value(json!({
-            "organization_id": ORGANIZATION_ID,
+    #[test]
+    fn prepared_rotation_reports_an_authority_change_reason_error() {
+        let registration: RegistrationDocument = serde_json::from_value(json!({
+            "organization_id": "org_rotation_reason",
             "organization_state": "active",
-            "source_registration_id": REGISTRATION_ID,
-            "source_id": "source_gateway_lock_order",
-            "principal": {"kind": "workload", "id": "principal_gateway_lock_order"},
+            "source_registration_id": "registration_rotation_reason",
+            "source_id": "source_rotation_reason",
+            "principal": {"kind": "workload", "id": "principal_rotation_reason"},
             "policy_revision": 1,
             "credential_epoch": 1,
-            "effective_at_unix_ms": now_unix_ms - 60_000,
-            "expires_at_unix_ms": now_unix_ms + 3_600_000,
+            "effective_at_unix_ms": 1,
+            "expires_at_unix_ms": 2,
             "allowed_source_kinds": ["semantic_hook"],
             "allowed_environments": ["ci_runner_or_remote_workspace"],
-            "allowed_operations": ["bind_runtime", "ingest", "finish_run"],
+            "allowed_operations": ["ingest"],
             "effective_trust_profile": "harness_observed",
-            "allowed_capabilities": ["tool_calls", "source_health"],
+            "allowed_capabilities": ["tool_calls"],
             "allowed_privacy_capabilities": ["structure_only"],
-            "allowed_redaction_profile_refs": ["redaction_gateway_lock_order"],
-            "allowed_run_authorities": [
-                {"kind": "service", "id": "authority_gateway_lock_order"}
-            ],
-            "allowed_run_privacy_profile_refs": ["privacy_gateway_lock_order"],
-            "allowed_run_retention_profile_refs": ["retention_gateway_lock_order"],
-            "required_run_source_kinds": ["semantic_hook"],
-            "may_create_runs": true,
+            "allowed_redaction_profile_refs": ["redaction_rotation_reason"],
+            "allowed_run_authorities": [],
+            "allowed_run_privacy_profile_refs": [],
+            "allowed_run_retention_profile_refs": [],
+            "required_run_source_kinds": [],
+            "may_create_runs": false,
             "may_join_runs": false,
-            "may_finalize_runs": true
-        }))?)
+            "may_finalize_runs": false
+        }))
+        .expect("registration fixture");
+        let certificate = ClientCertificate {
+            fingerprint: [0x11; 32],
+            not_before_unix_ms: 1,
+            not_after_unix_ms: 2,
+        };
+
+        let error = match PreparedAuthorityUpdate::new(
+            registration,
+            &certificate,
+            "not a contract identifier",
+        ) {
+            Ok(_) => panic!("invalid rotation reason was accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.to_string(), "Authority change reason is invalid");
     }
 
-    fn certificate(now_unix_ms: u64) -> ClientCertificate {
-        ClientCertificate {
-            fingerprint: [0x5a; 32],
-            not_before_unix_ms: now_unix_ms - 120_000,
-            not_after_unix_ms: now_unix_ms + 7_200_000,
-        }
-    }
+    #[tokio::test]
+    async fn revoke_credential_retains_its_revocation_reason_error() {
+        let store = AuthorityStore {
+            pool: PgPoolOptions::new()
+                .connect_lazy("postgresql://localhost/apolysis")
+                .expect("syntactically valid lazy pool"),
+        };
 
-    async fn wait_until_register_is_blocked_by(
-        pool: &PgPool,
-        blocking_pid: i32,
-    ) -> TestResult<i32> {
-        timeout(Duration::from_secs(10), async {
-            loop {
-                let blocked_pid = sqlx::query_scalar::<_, i32>(
-                    "SELECT activity.pid \
-                     FROM pg_catalog.pg_stat_activity AS activity \
-                     WHERE activity.datname=current_database() \
-                       AND activity.application_name=$1 \
-                       AND activity.state='active' \
-                       AND activity.wait_event_type='Lock' \
-                       AND $2=ANY(pg_catalog.pg_blocking_pids(activity.pid)) \
-                       AND activity.query LIKE '%apolysis_gateway.organizations%'",
-                )
-                .bind(APPLICATION_NAME)
-                .bind(blocking_pid)
-                .fetch_optional(pool)
-                .await?;
-                if let Some(pid) = blocked_pid {
-                    return Ok::<i32, sqlx::Error>(pid);
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(|_| "register_source did not block on the organization row within the bound")?
-        .map_err(Into::into)
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires APOLYSIS_TEST_DATABASE_URL and an explicit real PostgreSQL lock-order gate"]
-    async fn register_source_obeys_organization_registration_credential_lock_order() -> TestResult {
-        if std::env::var("APOLYSIS_TEST_ALLOW_DATABASE_RESET").as_deref() != Ok("1") {
-            return Err(
-                "real lock-order gate requires explicit ephemeral database reset opt-in".into(),
-            );
-        }
-        let database_url = std::env::var("APOLYSIS_TEST_DATABASE_URL")?;
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&database_url)
-            .await?;
-        sqlx::query("DROP SCHEMA IF EXISTS apolysis_gateway CASCADE")
-            .execute(&admin_pool)
-            .await?;
-        sqlx::query("DROP TABLE IF EXISTS public._sqlx_migrations")
-            .execute(&admin_pool)
-            .await?;
-        sqlx::raw_sql(BOOTSTRAP_ROLES_SQL)
-            .execute(&admin_pool)
-            .await?;
-        AuthorityStore::migrate(&database_url).await?;
-        sqlx::raw_sql(PRIVILEGES_SQL).execute(&admin_pool).await?;
-
-        // The ephemeral database owner remains the session identity, while
-        // startup SET ROLE makes every store query execute with the exact
-        // production Gateway-control grants.
-        let query_separator = if database_url.contains('?') { '&' } else { '?' };
-        let named_database_url = format!(
-            "{database_url}{query_separator}application_name={APPLICATION_NAME}\
-             &options=-c%20role%3Dapolysis_gateway_control"
-        );
-        let store = AuthorityStore::connect(&named_database_url).await?;
-        let current_role: String = sqlx::query_scalar("SELECT current_user")
-            .fetch_one(&store.pool)
-            .await?;
-        if current_role != "apolysis_gateway_control" {
-            return Err("register_source test did not use the Gateway-control role".into());
-        }
-        let now_unix_ms = current_unix_ms()?;
-        store
-            .register_source(registration(now_unix_ms)?, certificate(now_unix_ms))
-            .await?;
-
-        let mut evidence_transaction = admin_pool.begin().await?;
-        sqlx::query("SET LOCAL deadlock_timeout='100ms'")
-            .execute(&mut *evidence_transaction)
-            .await?;
-        sqlx::query("SET LOCAL statement_timeout='5s'")
-            .execute(&mut *evidence_transaction)
-            .await?;
-        let evidence_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
-            .fetch_one(&mut *evidence_transaction)
-            .await?;
-        sqlx::query(
-            "SELECT organization_id \
-             FROM apolysis_gateway.organizations \
-             WHERE organization_id=$1 \
-             FOR SHARE",
-        )
-        .bind(ORGANIZATION_ID)
-        .fetch_one(&mut *evidence_transaction)
-        .await?;
-
-        let registering_store = store.clone();
-        let registering = tokio::spawn(async move {
-            registering_store
-                .register_source(registration(now_unix_ms)?, certificate(now_unix_ms))
-                .await?;
-            TestResult::Ok(())
-        });
-
-        let register_pid = wait_until_register_is_blocked_by(&admin_pool, evidence_pid).await?;
-        if register_pid == evidence_pid {
-            return Err("register_source lock observation returned the blocking backend".into());
-        }
-
-        sqlx::query(
-            "SELECT source_registration_id \
-             FROM apolysis_gateway.source_registrations \
-             WHERE source_registration_id=$1 \
-             FOR SHARE",
-        )
-        .bind(REGISTRATION_ID)
-        .fetch_one(&mut *evidence_transaction)
-        .await?;
-        sqlx::query(
-            "SELECT credential_id \
-             FROM apolysis_gateway.transport_credentials \
-             WHERE source_registration_id=$1 \
-             ORDER BY certificate_fingerprint \
-             FOR SHARE",
-        )
-        .bind(REGISTRATION_ID)
-        .fetch_all(&mut *evidence_transaction)
-        .await?;
-        evidence_transaction.commit().await?;
-
-        let register_result = timeout(Duration::from_secs(10), registering)
+        let error = match store
+            .revoke_credential([0x22; 32], "not a contract identifier")
             .await
-            .map_err(|_| "register_source did not finish within the bound")?
-            .map_err(|_| "register_source task did not complete")?;
-        register_result?;
-        Ok(())
+        {
+            Ok(()) => panic!("invalid revocation reason was accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.to_string(), "Revocation reason is invalid");
     }
 }

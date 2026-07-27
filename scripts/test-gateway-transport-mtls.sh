@@ -3640,6 +3640,9 @@ readonly client_key="${secret_directory}/client.key.pem"
 readonly client_csr="${secret_directory}/client.csr.pem"
 readonly client_cert="${secret_directory}/client.cert.pem"
 readonly client_extensions="${secret_directory}/client.ext"
+readonly rotation_client_key="${secret_directory}/rotation-client.key.pem"
+readonly rotation_client_csr="${secret_directory}/rotation-client.csr.pem"
+readonly rotation_client_cert="${secret_directory}/rotation-client.cert.pem"
 readonly untrusted_client_key="${secret_directory}/untrusted-client.key.pem"
 readonly untrusted_client_cert="${secret_directory}/untrusted-client.cert.pem"
 readonly unknown_client_key="${secret_directory}/unknown-client.key.pem"
@@ -3705,6 +3708,19 @@ openssl x509 -req \
     -CAkey "$ca_key" \
     -CAcreateserial \
     -out "$client_cert" \
+    -days 1 \
+    -extfile "$client_extensions" >/dev/null 2>&1
+
+openssl req -newkey ed25519 -nodes \
+    -keyout "$rotation_client_key" \
+    -out "$rotation_client_csr" \
+    -subj "/CN=apolysis-rotated-source-${random_suffix}" >/dev/null 2>&1
+openssl x509 -req \
+    -in "$rotation_client_csr" \
+    -CA "$ca_cert" \
+    -CAkey "$ca_key" \
+    -CAcreateserial \
+    -out "$rotation_client_cert" \
     -days 1 \
     -extfile "$client_extensions" >/dev/null 2>&1
 
@@ -4015,6 +4031,99 @@ timeout 30s docker exec -i "$container_name" \
     psql --username "$database_user" --dbname "$database_name" \
         --set=ON_ERROR_STOP=1 \
     <crates/apolysis-gateway-postgres/deploy/bootstrap_roles.sql
+
+printf 'Checking transaction-authority least-privilege grants...\n'
+transaction_authority_acl="$(timeout 15s docker exec -i "$container_name" \
+    psql --username "$database_user" --dbname "$database_name" \
+        --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+        --set=runtime_login="$gateway_runtime_login" \
+        --set=control_login="$gateway_control_login" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    has_function_privilege(
+        :'runtime_login',
+        'apolysis_gateway.lock_gateway_current_authority(text,text,text)',
+        'EXECUTE'
+    ),
+    has_table_privilege(
+        :'runtime_login',
+        'apolysis_gateway.transaction_authority_audit',
+        'INSERT'
+    ),
+    has_sequence_privilege(
+        :'runtime_login',
+        'apolysis_gateway.transaction_authority_audit_transaction_authority_audit_id_seq',
+        'USAGE'
+    ),
+    has_sequence_privilege(
+        :'runtime_login',
+        'apolysis_gateway.transaction_authority_audit_transaction_authority_audit_id_seq',
+        'SELECT'
+    ),
+    has_table_privilege(
+        :'runtime_login',
+        'apolysis_gateway.transaction_authority_audit',
+        'SELECT'
+    ),
+    has_table_privilege(
+        :'runtime_login',
+        'apolysis_gateway.transaction_authority_audit',
+        'UPDATE'
+    ),
+    has_table_privilege(
+        :'runtime_login',
+        'apolysis_gateway.transaction_authority_audit',
+        'DELETE'
+    ),
+    has_table_privilege(
+        :'runtime_login',
+        'apolysis_gateway.source_authority_revisions',
+        'SELECT'
+    ),
+    has_function_privilege(
+        :'runtime_login',
+        'apolysis_gateway.enforce_gateway_authority_binding()',
+        'EXECUTE'
+    ),
+    has_table_privilege(
+        :'control_login',
+        'apolysis_gateway.source_authority_revisions',
+        'SELECT,INSERT'
+    ),
+    has_column_privilege(
+        :'control_login',
+        'apolysis_gateway.leases',
+        'revoked_at_unix_ms',
+        'UPDATE'
+    ),
+    has_column_privilege(
+        :'control_login',
+        'apolysis_gateway.join_authorizations',
+        'authorization_state',
+        'UPDATE'
+    ),
+    NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc AS procedure
+        CROSS JOIN LATERAL pg_catalog.aclexplode(
+            coalesce(
+                procedure.proacl,
+                pg_catalog.acldefault('f', procedure.proowner)
+            )
+        ) AS privilege
+        WHERE procedure.oid = to_regprocedure(
+            'apolysis_gateway.lock_gateway_current_authority(text,text,text)'
+        )
+          AND privilege.grantee = 0
+          AND privilege.privilege_type = 'EXECUTE'
+    )
+);
+SQL
+)"
+if [[ "$transaction_authority_acl" != \
+    't|t|t|f|f|f|f|f|f|t|t|t|t' ]]; then
+    printf 'error: transaction-authority role grants exceeded or missed the allowlist\n' >&2
+    exit 1
+fi
 
 printf 'Provisioning current mTLS authority through the control-plane login...\n'
 "$authority_bin" register-source \
@@ -5010,6 +5119,329 @@ if [[ "$post_isolation_state" != '9|5|8|0|0|0' ]]; then
     exit 1
 fi
 
+printf 'Qualifying live policy and credential rotation through direct mTLS...\n'
+readonly rotation_baseline_unsigned="${secret_directory}/rotation-baseline.unsigned.json"
+readonly rotation_baseline_signed="${secret_directory}/rotation-baseline.json"
+readonly rotation_baseline_response="${secret_directory}/rotation-baseline.response.json"
+readonly rotation_baseline_headers="${secret_directory}/rotation-baseline.response.headers"
+jq \
+    --arg operation_id "operation_rotation_baseline_${random_suffix}" \
+    --arg client_run_key "client_rotation_baseline_${random_suffix}" \
+    '.client_operation_id = $operation_id
+     | .client_run_key = $client_run_key
+     | .objective_ref = "objective_rotation_baseline"
+     | .request_digest = ("0" * 64)' \
+    "$unsigned_request" >"$rotation_baseline_unsigned"
+"$request_bin" open-run \
+    --input "$rotation_baseline_unsigned" \
+    --output "$rotation_baseline_signed"
+rotation_baseline_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${rotation_baseline_signed}" \
+    --dump-header "$rotation_baseline_headers" \
+    --output "$rotation_baseline_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/open-run")"
+if [[ "$rotation_baseline_status" != "200" ]] || \
+    ! jq -e '.outcome == "created"' "$rotation_baseline_response" >/dev/null; then
+    printf 'error: could not establish the pre-rotation authority baseline\n' >&2
+    exit 1
+fi
+assert_no_store "$rotation_baseline_headers" 'pre-rotation authority baseline'
+readonly rotation_baseline_run_id="$(jq -r '.run_id' "$rotation_baseline_response")"
+readonly rotation_baseline_stream_id="$(jq -r '.source_stream_id' "$rotation_baseline_response")"
+readonly rotation_baseline_lease="$(jq -r '.lease.lease_id' "$rotation_baseline_response")"
+
+readonly policy_rotation_registration="${secret_directory}/source-registration.policy-rotation.json"
+jq '.policy_revision = 2 | .credential_epoch = 1' \
+    "$policy_file" >"$policy_rotation_registration"
+"$authority_bin" rotate-policy \
+    --database-url-file "$gateway_control_database_url_file" \
+    --registration "$policy_rotation_registration" \
+    --current-client-certificate "$client_cert" \
+    --reason "scheduled_policy_rotation_${random_suffix}"
+
+readonly stale_policy_replay="${secret_directory}/rotation-policy-stale-replay.response.json"
+readonly stale_policy_replay_headers="${secret_directory}/rotation-policy-stale-replay.headers"
+stale_policy_replay_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${rotation_baseline_signed}" \
+    --dump-header "$stale_policy_replay_headers" \
+    --output "$stale_policy_replay" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/open-run")"
+if [[ "$stale_policy_replay_status" != "401" ]] || \
+    ! jq -e \
+        '.code == "lease_revoked" and .retryable == false and .retry_after_ms == null' \
+        "$stale_policy_replay" >/dev/null; then
+    printf 'error: policy rotation returned a stale encrypted replay\n' >&2
+    exit 1
+fi
+assert_no_store "$stale_policy_replay_headers" 'policy-rotated replay rejection'
+
+readonly stale_policy_bind_unsigned="${secret_directory}/rotation-policy-stale-bind.unsigned.json"
+readonly stale_policy_bind_signed="${secret_directory}/rotation-policy-stale-bind.json"
+readonly stale_policy_bind_response="${secret_directory}/rotation-policy-stale-bind.response.json"
+readonly stale_policy_bind_headers="${secret_directory}/rotation-policy-stale-bind.headers"
+readonly rotation_binding_from_unix_ms="$(date +%s%3N)"
+readonly rotation_binding_until_unix_ms="$((rotation_binding_from_unix_ms + 300000))"
+jq \
+    --arg operation_id "operation_rotation_stale_bind_${random_suffix}" \
+    --arg run_id "$rotation_baseline_run_id" \
+    --arg lease_id "$rotation_baseline_lease" \
+    --arg binding_id "binding_rotation_stale_${random_suffix}" \
+    --argjson valid_from_unix_ms "$rotation_binding_from_unix_ms" \
+    --argjson valid_until_unix_ms "$rotation_binding_until_unix_ms" \
+    '.client_operation_id = $operation_id
+     | .run_id = $run_id
+     | .lease_id = $lease_id
+     | .binding.binding_id = $binding_id
+     | .binding.valid_from_unix_ms = $valid_from_unix_ms
+     | .binding.valid_until_unix_ms = $valid_until_unix_ms
+     | .request_digest = ("0" * 64)' \
+    "$bind_unsigned_request" >"$stale_policy_bind_unsigned"
+"$request_bin" bind-runtime \
+    --input "$stale_policy_bind_unsigned" \
+    --output "$stale_policy_bind_signed"
+stale_policy_bind_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${stale_policy_bind_signed}" \
+    --dump-header "$stale_policy_bind_headers" \
+    --output "$stale_policy_bind_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/bind-runtime")"
+if [[ "$stale_policy_bind_status" != "401" ]] || \
+    ! jq -e \
+        '.code == "lease_revoked" and .retryable == false and .retry_after_ms == null' \
+        "$stale_policy_bind_response" >/dev/null; then
+    printf 'error: policy rotation left an old lease usable\n' >&2
+    exit 1
+fi
+assert_no_store "$stale_policy_bind_headers" 'policy-rotated lease rejection'
+
+readonly policy_current_unsigned="${secret_directory}/rotation-policy-current.unsigned.json"
+readonly policy_current_signed="${secret_directory}/rotation-policy-current.json"
+readonly policy_current_response="${secret_directory}/rotation-policy-current.response.json"
+readonly policy_current_headers="${secret_directory}/rotation-policy-current.response.headers"
+jq \
+    --arg operation_id "operation_rotation_policy_current_${random_suffix}" \
+    --arg client_run_key "client_rotation_policy_current_${random_suffix}" \
+    '.client_operation_id = $operation_id
+     | .client_run_key = $client_run_key
+     | .objective_ref = "objective_rotation_policy_current"
+     | .request_digest = ("0" * 64)' \
+    "$unsigned_request" >"$policy_current_unsigned"
+"$request_bin" open-run \
+    --input "$policy_current_unsigned" \
+    --output "$policy_current_signed"
+policy_current_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${policy_current_signed}" \
+    --dump-header "$policy_current_headers" \
+    --output "$policy_current_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/open-run")"
+if [[ "$policy_current_status" != "200" ]] || \
+    ! jq -e '.outcome == "created"' "$policy_current_response" >/dev/null; then
+    printf 'error: current policy could not open a replacement source stream\n' >&2
+    exit 1
+fi
+assert_no_store "$policy_current_headers" 'current policy replacement stream'
+readonly policy_current_run_id="$(jq -r '.run_id' "$policy_current_response")"
+readonly policy_current_stream_id="$(jq -r '.source_stream_id' "$policy_current_response")"
+readonly policy_current_lease="$(jq -r '.lease.lease_id' "$policy_current_response")"
+if [[ "$policy_current_stream_id" == "$rotation_baseline_stream_id" ]]; then
+    printf 'error: policy rotation reused the stale source stream\n' >&2
+    exit 1
+fi
+
+readonly credential_rotation_registration="${secret_directory}/source-registration.credential-rotation.json"
+jq '.policy_revision = 2 | .credential_epoch = 2' \
+    "$policy_file" >"$credential_rotation_registration"
+"$authority_bin" rotate-credential \
+    --database-url-file "$gateway_control_database_url_file" \
+    --registration "$credential_rotation_registration" \
+    --current-client-certificate "$client_cert" \
+    --new-client-certificate "$rotation_client_cert" \
+    --reason "scheduled_credential_rotation_${random_suffix}"
+
+readonly stale_transport_response="${secret_directory}/rotation-old-transport.response.json"
+readonly stale_transport_headers="${secret_directory}/rotation-old-transport.headers"
+stale_transport_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$client_cert" \
+    --key "$client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${policy_current_signed}" \
+    --dump-header "$stale_transport_headers" \
+    --output "$stale_transport_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/open-run")"
+if [[ "$stale_transport_status" != "401" ]] || \
+    ! jq -e \
+        '.code == "unauthenticated" and .retryable == false and .retry_after_ms == null' \
+        "$stale_transport_response" >/dev/null; then
+    printf 'error: old mTLS credential remained current after credential rotation\n' >&2
+    exit 1
+fi
+assert_no_store "$stale_transport_headers" 'rotated transport rejection'
+
+readonly stale_epoch_replay="${secret_directory}/rotation-epoch-stale-replay.response.json"
+readonly stale_epoch_replay_headers="${secret_directory}/rotation-epoch-stale-replay.headers"
+stale_epoch_replay_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$rotation_client_cert" \
+    --key "$rotation_client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${policy_current_signed}" \
+    --dump-header "$stale_epoch_replay_headers" \
+    --output "$stale_epoch_replay" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/open-run")"
+if [[ "$stale_epoch_replay_status" != "401" ]] || \
+    ! jq -e \
+        '.code == "lease_revoked" and .retryable == false and .retry_after_ms == null' \
+        "$stale_epoch_replay" >/dev/null; then
+    printf 'error: new credential returned an old-epoch encrypted replay\n' >&2
+    exit 1
+fi
+assert_no_store "$stale_epoch_replay_headers" 'credential-rotated replay rejection'
+
+readonly credential_current_unsigned="${secret_directory}/rotation-credential-current.unsigned.json"
+readonly credential_current_signed="${secret_directory}/rotation-credential-current.json"
+readonly credential_current_response="${secret_directory}/rotation-credential-current.response.json"
+readonly credential_current_headers="${secret_directory}/rotation-credential-current.response.headers"
+jq \
+    --arg operation_id "operation_rotation_credential_current_${random_suffix}" \
+    --arg client_run_key "client_rotation_credential_current_${random_suffix}" \
+    '.client_operation_id = $operation_id
+     | .client_run_key = $client_run_key
+     | .objective_ref = "objective_rotation_credential_current"
+     | .request_digest = ("0" * 64)' \
+    "$unsigned_request" >"$credential_current_unsigned"
+"$request_bin" open-run \
+    --input "$credential_current_unsigned" \
+    --output "$credential_current_signed"
+credential_current_status="$(curl --silent --show-error \
+    --connect-timeout 5 \
+    --max-time 30 \
+    --cacert "$ca_cert" \
+    --cert "$rotation_client_cert" \
+    --key "$rotation_client_key" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@${credential_current_signed}" \
+    --dump-header "$credential_current_headers" \
+    --output "$credential_current_response" \
+    --write-out '%{http_code}' \
+    "${gateway_base_url}/gateway/v0.1/open-run")"
+if [[ "$credential_current_status" != "200" ]] || \
+    ! jq -e '.outcome == "created"' "$credential_current_response" >/dev/null; then
+    printf 'error: replacement mTLS credential could not open a new source stream\n' >&2
+    exit 1
+fi
+assert_no_store "$credential_current_headers" 'replacement credential stream'
+readonly credential_current_run_id="$(jq -r '.run_id' "$credential_current_response")"
+readonly credential_current_stream_id="$(jq -r '.source_stream_id' "$credential_current_response")"
+readonly credential_current_lease="$(jq -r '.lease.lease_id' "$credential_current_response")"
+if [[ "$credential_current_stream_id" == "$policy_current_stream_id" || \
+    "$credential_current_stream_id" == "$rotation_baseline_stream_id" ]]; then
+    printf 'error: credential rotation reused a stale source stream\n' >&2
+    exit 1
+fi
+
+rotation_state="$(timeout 15s docker exec -i "$container_name" \
+    psql --username "$database_user" --dbname "$database_name" \
+        --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+        --set=organization_id="$organization_id" \
+        --set=registration_id="$registration_id" \
+        --set=baseline_run_id="$rotation_baseline_run_id" \
+        --set=policy_run_id="$policy_current_run_id" \
+        --set=credential_run_id="$credential_current_run_id" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT next_ingest_sequence
+       FROM apolysis_gateway.organization_sequences
+      WHERE organization_id=:'organization_id'),
+    (SELECT count(*) FROM apolysis_gateway.runs
+      WHERE organization_id=:'organization_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id'
+        AND run_id IN (:'baseline_run_id', :'policy_run_id', :'credential_run_id')),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id'
+        AND run_id IN (:'baseline_run_id', :'policy_run_id', :'credential_run_id')),
+    (SELECT count(*) FROM apolysis_gateway.source_authority_revisions
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'registration_id'),
+    (SELECT count(*) FROM apolysis_gateway.source_registrations
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'registration_id'
+        AND policy_revision=2 AND credential_epoch=2
+        AND registration_state='active'),
+    (SELECT count(*) FROM apolysis_gateway.transport_credentials
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'registration_id'
+        AND credential_epoch=1 AND revoked_at_unix_ms IS NOT NULL),
+    (SELECT count(*) FROM apolysis_gateway.transport_credentials
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'registration_id'
+        AND credential_epoch=2 AND revoked_at_unix_ms IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id'
+        AND run_id IN (:'baseline_run_id', :'policy_run_id')
+        AND revoked_at_unix_ms IS NOT NULL),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id'
+        AND run_id=:'credential_run_id'
+        AND revoked_at_unix_ms IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.authority_change_audit
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'registration_id'
+        AND action='rotate_policy'),
+    (SELECT count(*) FROM apolysis_gateway.authority_change_audit
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'registration_id'
+        AND action='rotate_credential')
+);
+SQL
+)"
+readonly expected_rotation_state='18|4|3|9|3|1|1|1|2|1|1|1'
+if [[ "$rotation_state" != "$expected_rotation_state" ]]; then
+    printf 'error: live authority rotation violated the atomic state vector\n' >&2
+    exit 1
+fi
+readonly post_rotation_next_ingest_sequence=18
+
 readonly database_dump="${secret_directory}/database.dump.sql"
 readonly replay_key_value="$(<"$replay_key_file")"
 readonly secret_scan_patterns="${secret_directory}/secret-scan.patterns"
@@ -5017,6 +5449,9 @@ readonly response_forbidden_patterns="${secret_directory}/response-forbidden.pat
 {
     printf '%s\n' \
         "$issued_lease" \
+        "$rotation_baseline_lease" \
+        "$policy_current_lease" \
+        "$credential_current_lease" \
         "$database_password" \
         "$schema_owner_password" \
         "$gateway_control_password" \
@@ -5030,6 +5465,9 @@ chmod 600 "$secret_scan_patterns"
 {
     printf '%s\n' \
         "$issued_lease" \
+        "$rotation_baseline_lease" \
+        "$policy_current_lease" \
+        "$credential_current_lease" \
         "$database_password" \
         "$schema_owner_password" \
         "$gateway_control_password" \
@@ -5056,7 +5494,7 @@ rm -f -- "$database_dump"
 printf 'Revoking the current transport credential in PostgreSQL...\n'
 "$authority_bin" revoke-credential \
         --database-url-file "$gateway_control_database_url_file" \
-        --client-certificate "$client_cert" \
+        --client-certificate "$rotation_client_cert" \
         --reason "live_transport_gate_${random_suffix}"
 
 readonly revoked_registration="${secret_directory}/source-registration.revoked.json"
@@ -5065,7 +5503,7 @@ jq '.policy_revision = 3 | .credential_epoch = 3' \
 if "$authority_bin" register-source \
     --database-url-file "$gateway_control_database_url_file" \
     --registration "$revoked_registration" \
-    --client-certificate "$client_cert" \
+    --client-certificate "$rotation_client_cert" \
     >/dev/null 2>&1; then
     printf 'error: a revoked client certificate was registered again\n' >&2
     exit 1
@@ -5085,8 +5523,8 @@ for revoked_route in open-run bind-runtime ingest finish-run; do
         --connect-timeout 5 \
         --max-time 30 \
         --cacert "$ca_cert" \
-        --cert "$client_cert" \
-        --key "$client_key" \
+        --cert "$rotation_client_cert" \
+        --key "$rotation_client_key" \
         --header 'Accept: application/json' \
         --header 'Content-Type: application/json' \
         --header 'X-Organization-Id: attacker_controlled' \
@@ -5128,7 +5566,7 @@ SELECT concat_ws('|',
 );
 SQL
 )"
-if [[ "$post_revocation_state" != '9|5|8' ]]; then
+if [[ "$post_revocation_state" != "${post_rotation_next_ingest_sequence}|5|8" ]]; then
     printf 'error: rejected credential changed durable lifecycle state\n' >&2
     exit 1
 fi

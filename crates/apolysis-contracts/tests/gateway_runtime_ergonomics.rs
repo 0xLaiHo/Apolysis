@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_contracts::{
-    AcceptedSourceEnvelope, AgentExecutionRecordFact, AgentExecutionRecordItem, BindRuntimeRequest,
-    BindRuntimeResponse, ContractErrorCode, EnvelopeAck, EnvironmentKind, FinishRunRequest,
-    FinishRunResponse, GatewayErrorResponse, GatewayOperation, IngestAck, IngestDisposition,
-    IngestRequest, JoinProofKind, OpenRunMode, OpenRunOutcome, OpenRunRequest, OpenRunResponse,
-    OrderingCapability, OrganizationId, PrincipalKind, PrincipalRef, RunId, RunLease, RunState,
-    SchemaVersion, SequenceGap, SourceId, SourceKind, TerminalSourcePosition, TrustProfile,
+    AcceptedSourceEnvelope, AgentExecutionRecordFact, AgentExecutionRecordItem,
+    AuthenticationSnapshot, BindRuntimeRequest, BindRuntimeResponse, ContractErrorCode,
+    EnvelopeAck, EnvironmentKind, FinishRunRequest, FinishRunResponse, GatewayErrorResponse,
+    GatewayOperation, IngestAck, IngestDisposition, IngestRequest, JoinProofKind, OpenRunMode,
+    OpenRunOutcome, OpenRunRequest, OpenRunResponse, OrderingCapability, OrganizationId,
+    PrincipalKind, PrincipalRef, RunId, RunLease, RunState, SchemaVersion, SequenceGap, SourceId,
+    SourceKind, TerminalSourcePosition, TrustProfile,
 };
 use serde::de::DeserializeOwned;
 
@@ -27,6 +28,34 @@ fn run_id() -> RunId {
 
 fn source_id(value: &str) -> SourceId {
     SourceId::try_from(value).expect("source id")
+}
+
+#[test]
+fn authentication_snapshot_retains_the_transport_credential_epoch() {
+    let snapshot = AuthenticationSnapshot::new(
+        "credential_transport_01",
+        7,
+        11,
+        1_783_891_200_000,
+        1_783_894_800_000,
+    )
+    .expect("valid authentication snapshot");
+
+    assert_eq!(snapshot.credential_id(), "credential_transport_01");
+    assert_eq!(snapshot.credential_epoch(), 7);
+    assert_eq!(snapshot.policy_revision(), 11);
+
+    assert!(
+        AuthenticationSnapshot::new(
+            "credential_transport_01",
+            0,
+            11,
+            1_783_891_200_000,
+            1_783_894_800_000,
+        )
+        .is_err(),
+        "epoch zero must never enter a trusted authentication snapshot"
+    );
 }
 
 #[test]

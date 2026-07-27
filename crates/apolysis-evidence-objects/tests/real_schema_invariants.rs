@@ -13,6 +13,8 @@ const RUN_A: &str = "run_schema_a";
 const RUN_B: &str = "run_schema_b";
 const REGISTRATION_A: &str = "registration_schema_a";
 const REGISTRATION_B: &str = "registration_schema_b";
+const CREDENTIAL_A: &str = "credential_schema_a";
+const CREDENTIAL_B: &str = "credential_schema_b";
 const STREAM_A: &str = "stream_schema_a";
 const STREAM_B: &str = "stream_schema_b";
 const SOURCE_A: &str = "source_schema_a";
@@ -26,7 +28,7 @@ const PAYLOAD_VERSION: &str = "1.0.0";
 const BOOTSTRAP_ROLES_SQL: &str =
     include_str!("../../apolysis-gateway-postgres/deploy/bootstrap_roles.sql");
 const SECURITY_DEFINER_SEARCH_PATH: &str = "search_path=pg_catalog, apolysis_gateway, pg_temp";
-const SECURITY_DEFINER_ROUTINES: [&str; 20] = [
+const SECURITY_DEFINER_ROUTINES: [&str; 21] = [
     "acknowledge_evidence_object_deletion",
     "enforce_evidence_object_transition",
     "lock_evidence_object_deletion_target",
@@ -39,6 +41,7 @@ const SECURITY_DEFINER_ROUTINES: [&str; 20] = [
     "lock_evidence_source_authority_shared",
     "lock_gateway_authority_by_fingerprint",
     "lock_gateway_client_run",
+    "lock_gateway_current_authority",
     "lock_gateway_lease",
     "lock_gateway_operation",
     "lock_gateway_runtime_binding",
@@ -170,6 +173,47 @@ async fn seed_gateway_scope(pool: &PgPool, now_unix_ms: i64) -> TestResult {
         .await?;
     }
 
+    for (registration_id, credential_id, fingerprint_seed) in [
+        (REGISTRATION_A, CREDENTIAL_A, 41_u8),
+        (REGISTRATION_B, CREDENTIAL_B, 42_u8),
+    ] {
+        let policy_document = json!({
+            "allowed_operations": ["ingest"],
+            "allowed_capabilities": ["tool_calls"],
+            "allowed_privacy_capabilities": ["authorized_content_reference"]
+        });
+        sqlx::query(
+            "INSERT INTO apolysis_gateway.transport_credentials (\
+                credential_id, certificate_fingerprint, organization_id, \
+                source_registration_id, credential_epoch, effective_at_unix_ms, \
+                expires_at_unix_ms, created_at_unix_ms, updated_at_unix_ms\
+             ) VALUES ($1,$2,$3,$4,1,$5,$6,$5,$5)",
+        )
+        .bind(credential_id)
+        .bind(vec![fingerprint_seed; 32])
+        .bind(ORGANIZATION_ID)
+        .bind(registration_id)
+        .bind(now_unix_ms - 1_000)
+        .bind(now_unix_ms + 600_000)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO apolysis_gateway.source_authority_revisions (\
+                organization_id, source_registration_id, credential_id, credential_epoch, \
+                registration_policy_revision, policy_document, effective_at_unix_ms, \
+                expires_at_unix_ms, recorded_at_unix_ms\
+             ) VALUES ($1,$2,$3,1,1,$4,$5,$6,$5)",
+        )
+        .bind(ORGANIZATION_ID)
+        .bind(registration_id)
+        .bind(credential_id)
+        .bind(policy_document)
+        .bind(now_unix_ms - 1_000)
+        .bind(now_unix_ms + 600_000)
+        .execute(&mut *transaction)
+        .await?;
+    }
+
     for (run_id, registration_id) in [(RUN_A, REGISTRATION_A), (RUN_B, REGISTRATION_B)] {
         sqlx::query(
             "INSERT INTO apolysis_gateway.runs (\
@@ -265,17 +309,32 @@ async fn seed_gateway_scope(pool: &PgPool, now_unix_ms: i64) -> TestResult {
         .await?;
     }
 
-    for (run_id, registration_id, stream_id, source_id, lease_seed) in [
-        (RUN_A, REGISTRATION_A, STREAM_A, SOURCE_A, 31_u8),
-        (RUN_B, REGISTRATION_B, STREAM_B, SOURCE_B, 32_u8),
+    for (run_id, registration_id, credential_id, stream_id, source_id, lease_seed) in [
+        (
+            RUN_A,
+            REGISTRATION_A,
+            CREDENTIAL_A,
+            STREAM_A,
+            SOURCE_A,
+            31_u8,
+        ),
+        (
+            RUN_B,
+            REGISTRATION_B,
+            CREDENTIAL_B,
+            STREAM_B,
+            SOURCE_B,
+            32_u8,
+        ),
     ] {
         let lease_digest = vec![lease_seed; 32];
         sqlx::query(
             "INSERT INTO apolysis_gateway.leases (\
                 organization_id, lease_digest, run_id, source_registration_id, \
                 source_stream_id, source_id, principal_kind, principal_id, \
-                registration_policy_revision, issued_at_unix_ms, expires_at_unix_ms\
-             ) VALUES ($1,$2,$3,$4,$5,$6,'workload','principal_schema',1,$7,$8)",
+                registration_policy_revision, credential_id, credential_epoch, \
+                issued_at_unix_ms, expires_at_unix_ms\
+             ) VALUES ($1,$2,$3,$4,$5,$6,'workload','principal_schema',1,$7,1,$8,$9)",
         )
         .bind(ORGANIZATION_ID)
         .bind(&lease_digest)
@@ -283,6 +342,7 @@ async fn seed_gateway_scope(pool: &PgPool, now_unix_ms: i64) -> TestResult {
         .bind(registration_id)
         .bind(stream_id)
         .bind(source_id)
+        .bind(credential_id)
         .bind(now_unix_ms - 1_000)
         .bind(now_unix_ms + 600_000)
         .execute(&mut *transaction)

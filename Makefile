@@ -1,5 +1,6 @@
 .PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
 	test-evidence-objects-real \
+	test-gateway-authority-rotation \
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
 	test-gateway-https-crash-recovery \
@@ -58,6 +59,13 @@ test-quickstart:
 # the default workspace suite never requires Docker or a database.
 test-gateway-postgres:
 	./scripts/test-gateway-postgres.sh
+
+# Opt-in policy/credential cutover gate. It uses the same disposable,
+# loopback-only PostgreSQL harness while requiring the integration test's
+# explicit schema-reset acknowledgement.
+test-gateway-authority-rotation:
+	APOLYSIS_POSTGRES_TEST_COMMAND='APOLYSIS_TEST_ALLOW_DATABASE_RESET=1 cargo test -p apolysis-gateway-server --test authority_rotation -- --ignored --test-threads=1' \
+		./scripts/test-gateway-postgres.sh
 
 # Opt-in destructive fault-injection gate. It owns one random PostgreSQL
 # container and volume and never targets an operator-provided database.

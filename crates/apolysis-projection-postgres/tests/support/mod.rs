@@ -28,6 +28,7 @@ use apolysis_projection_postgres::{
     migrate_projection_schema, GenerationKey, PostgresRunProjection, ProjectionBatchOutcome,
     ProjectionCommit, ProjectionError,
 };
+use sha2::{Digest, Sha256};
 use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
     PgPool, Postgres, Transaction,
@@ -275,9 +276,10 @@ pub fn source_context(organization_id: &str) -> AuthenticatedSourceContext {
     AuthenticatedSourceContext::new(
         organization_id.try_into().expect("organization fixture"),
         principal,
-        "registration_codex",
+        format!("registration_projection_{organization_id}"),
         AuthenticationSnapshot::new(
-            "credential_ci_runner",
+            format!("credential_projection_{organization_id}"),
+            1,
             7,
             now_unix_ms.saturating_sub(60_000),
             now_unix_ms.saturating_add(86_400_000),
@@ -396,10 +398,141 @@ pub async fn open_run(
     context: &AuthenticatedSourceContext,
     request: OpenRunRequest,
 ) -> TestResult<OpenRunResponse> {
+    let (_, connect_options) = read_gate_owned_database_url()?;
+    let authority_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(connect_options)
+        .await
+        .map_err(|_| io::Error::other("failed to connect the projection authority fixture"))?;
+    seed_current_authority(&authority_pool, context).await?;
+    authority_pool.close().await;
     let gateway = ExecutionEvidenceGateway::new(repository, SystemClock, OsRandomIdGenerator);
     let response = gateway.open_run(context, request).await?;
     record_test_bearer_pattern(response.lease().lease_id())?;
     Ok(response)
+}
+
+async fn seed_current_authority(
+    pool: &PgPool,
+    context: &AuthenticatedSourceContext,
+) -> TestResult<()> {
+    const IJSON_MAX: i64 = 9_007_199_254_740_991;
+
+    let authentication = context.authentication();
+    let policy = context.registration_policy();
+    let credential_fingerprint = Sha256::digest(authentication.credential_id().as_bytes());
+    let policy_document = serde_json::json!({
+        "fixture": "projection_postgres",
+        "source_id": policy.source_id().as_str()
+    });
+    let policy_revision = i64::try_from(authentication.policy_revision())
+        .map_err(|_| io::Error::other("projection policy revision is out of range"))?;
+    let credential_epoch = i64::try_from(authentication.credential_epoch())
+        .map_err(|_| io::Error::other("projection credential epoch is out of range"))?;
+
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.organizations ( \
+             organization_id, organization_state, created_at_unix_ms, updated_at_unix_ms \
+         ) VALUES ($1, 'active', 1, 1) \
+         ON CONFLICT (organization_id) DO NOTHING",
+    )
+    .bind(context.organization_id().as_str())
+    .execute(pool)
+    .await
+    .map_err(|_| io::Error::other("failed to seed the projection organization authority"))?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.source_registrations ( \
+             source_registration_id, organization_id, source_id, principal_kind, \
+             principal_id, registration_state, policy_revision, credential_epoch, \
+             effective_at_unix_ms, expires_at_unix_ms, policy_document, \
+             created_at_unix_ms, updated_at_unix_ms \
+         ) VALUES ($1,$2,$3,'workload',$4,'active',$5,$6,1,$7,$8,1,1) \
+         ON CONFLICT (source_registration_id) DO NOTHING",
+    )
+    .bind(context.source_registration_id())
+    .bind(context.organization_id().as_str())
+    .bind(policy.source_id().as_str())
+    .bind(context.principal().id())
+    .bind(policy_revision)
+    .bind(credential_epoch)
+    .bind(IJSON_MAX)
+    .bind(&policy_document)
+    .execute(pool)
+    .await
+    .map_err(|_| io::Error::other("failed to seed the projection source authority"))?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.transport_credentials ( \
+             credential_id, certificate_fingerprint, organization_id, \
+             source_registration_id, credential_epoch, effective_at_unix_ms, \
+             expires_at_unix_ms, revoked_at_unix_ms, revocation_reason, \
+             created_at_unix_ms, updated_at_unix_ms \
+         ) VALUES ($1,$2,$3,$4,$5,1,$6,NULL,NULL,1,1) \
+         ON CONFLICT (credential_id) DO NOTHING",
+    )
+    .bind(authentication.credential_id())
+    .bind(credential_fingerprint.as_slice())
+    .bind(context.organization_id().as_str())
+    .bind(context.source_registration_id())
+    .bind(credential_epoch)
+    .bind(IJSON_MAX)
+    .execute(pool)
+    .await
+    .map_err(|_| io::Error::other("failed to seed the projection transport authority"))?;
+    sqlx::query(
+        "INSERT INTO apolysis_gateway.source_authority_revisions ( \
+             organization_id, source_registration_id, credential_id, credential_epoch, \
+             registration_policy_revision, policy_document, effective_at_unix_ms, \
+             expires_at_unix_ms, recorded_at_unix_ms \
+         ) VALUES ($1,$2,$3,$4,$5,$6,1,$7,1) \
+         ON CONFLICT (organization_id, source_registration_id, credential_id, \
+                      credential_epoch, registration_policy_revision) DO NOTHING",
+    )
+    .bind(context.organization_id().as_str())
+    .bind(context.source_registration_id())
+    .bind(authentication.credential_id())
+    .bind(credential_epoch)
+    .bind(policy_revision)
+    .bind(policy_document)
+    .bind(IJSON_MAX)
+    .execute(pool)
+    .await
+    .map_err(|_| io::Error::other("failed to seed the projection authority revision"))?;
+
+    let exact_authority = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS ( \
+             SELECT 1 \
+             FROM apolysis_gateway.source_registrations AS registration \
+             JOIN apolysis_gateway.transport_credentials AS credential \
+               ON credential.organization_id=registration.organization_id \
+              AND credential.source_registration_id=registration.source_registration_id \
+             WHERE registration.organization_id=$1 \
+               AND registration.source_registration_id=$2 \
+               AND registration.source_id=$3 \
+               AND registration.principal_kind='workload' \
+               AND registration.principal_id=$4 \
+               AND registration.registration_state='active' \
+               AND registration.policy_revision=$5 \
+               AND registration.credential_epoch=$6 \
+               AND credential.credential_id=$7 \
+               AND credential.certificate_fingerprint=$8 \
+               AND credential.revoked_at_unix_ms IS NULL \
+         )",
+    )
+    .bind(context.organization_id().as_str())
+    .bind(context.source_registration_id())
+    .bind(policy.source_id().as_str())
+    .bind(context.principal().id())
+    .bind(policy_revision)
+    .bind(credential_epoch)
+    .bind(authentication.credential_id())
+    .bind(credential_fingerprint.as_slice())
+    .fetch_one(pool)
+    .await
+    .map_err(|_| io::Error::other("failed to validate the projection authority fixture"))?;
+    if !exact_authority {
+        return Err(io::Error::other("projection authority fixture is inconsistent").into());
+    }
+    Ok(())
 }
 
 fn record_test_bearer_pattern(pattern: &str) -> TestResult<()> {

@@ -166,6 +166,25 @@ pub trait GatewayConformanceHarness: Sized + Send + Sync + 'static {
     /// Inspect content-free counts and trust classifications atomically.
     fn snapshot(&self) -> HarnessFuture<'_, GatewayConformanceSnapshot>;
 
+    /// Seed one current source authority through the adapter's test control plane.
+    fn seed_current_authority<'a>(
+        &'a self,
+        current: &'a AuthenticatedSourceContext,
+    ) -> HarnessAdminFuture<'a>;
+
+    /// Atomically replace one current source authority.
+    fn rotate_current_authority<'a>(
+        &'a self,
+        expected_current: &'a AuthenticatedSourceContext,
+        replacement: &'a AuthenticatedSourceContext,
+    ) -> HarnessAdminFuture<'a>;
+
+    /// Revoke one current source authority without allowing it to be resurrected.
+    fn revoke_current_authority<'a>(
+        &'a self,
+        expected_current: &'a AuthenticatedSourceContext,
+    ) -> HarnessAdminFuture<'a>;
+
     /// Register a trusted, one-use join grant outside the request path.
     fn register_join_grant<'a>(
         &'a self,
@@ -238,6 +257,31 @@ impl GatewayConformanceHarness for MemoryGatewayHarness {
         })
     }
 
+    fn seed_current_authority<'a>(
+        &'a self,
+        current: &'a AuthenticatedSourceContext,
+    ) -> HarnessAdminFuture<'a> {
+        Box::pin(async move { self.repository.seed_current_authority(current) })
+    }
+
+    fn rotate_current_authority<'a>(
+        &'a self,
+        expected_current: &'a AuthenticatedSourceContext,
+        replacement: &'a AuthenticatedSourceContext,
+    ) -> HarnessAdminFuture<'a> {
+        Box::pin(async move {
+            self.repository
+                .rotate_current_authority(expected_current, replacement)
+        })
+    }
+
+    fn revoke_current_authority<'a>(
+        &'a self,
+        expected_current: &'a AuthenticatedSourceContext,
+    ) -> HarnessAdminFuture<'a> {
+        Box::pin(async move { self.repository.revoke_current_authority(expected_current) })
+    }
+
     fn register_join_grant<'a>(
         &'a self,
         issuer: &'a AuthenticatedSourceContext,
@@ -295,6 +339,36 @@ macro_rules! gateway_repository_conformance_tests {
         #[tokio::test]
         async fn source_stream_freezes_trust_and_policy_revision() {
             $crate::scenarios::source_stream_freezes_trust_and_policy_revision::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn current_authority_rotation_rejects_stale_replay_and_preserves_operation_identity() {
+            $crate::scenarios::current_authority_rotation_rejects_stale_replay_and_preserves_operation_identity::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn novel_lifecycle_operations_recheck_authentication_expiry_at_final_transaction_time() {
+            $crate::scenarios::novel_lifecycle_operations_recheck_authentication_expiry_at_final_transaction_time::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn credential_rotation_requires_new_join_authority_and_a_new_source_stream() {
+            $crate::scenarios::credential_rotation_requires_new_join_authority_and_a_new_source_stream::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn revoked_current_authority_rejects_novel_work_and_replay_without_effects() {
+            $crate::scenarios::revoked_current_authority_rejects_novel_work_and_replay_without_effects::<$harness>().await;
+        }
+
+        $(#[$test_attr])*
+        #[tokio::test]
+        async fn every_lifecycle_replay_is_bound_to_its_credential_epoch_and_policy() {
+            $crate::scenarios::every_lifecycle_replay_is_bound_to_its_credential_epoch_and_policy::<$harness>().await;
         }
 
         $(#[$test_attr])*

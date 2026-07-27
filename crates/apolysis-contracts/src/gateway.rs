@@ -327,6 +327,7 @@ fn validate_unique_profile_refs(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticationSnapshot {
     credential_id: String,
+    credential_epoch: u64,
     policy_revision: u64,
     authenticated_at_unix_ms: u64,
     expires_at_unix_ms: u64,
@@ -337,12 +338,14 @@ impl AuthenticationSnapshot {
     /// trusted transport middleware.
     pub fn new(
         credential_id: impl Into<String>,
+        credential_epoch: u64,
         policy_revision: u64,
         authenticated_at_unix_ms: u64,
         expires_at_unix_ms: u64,
     ) -> Result<Self, ContractError> {
         let value = Self {
             credential_id: credential_id.into(),
+            credential_epoch,
             policy_revision,
             authenticated_at_unix_ms,
             expires_at_unix_ms,
@@ -354,6 +357,12 @@ impl AuthenticationSnapshot {
     /// Return the opaque credential identity for protected audit records.
     pub fn credential_id(&self) -> &str {
         &self.credential_id
+    }
+
+    /// Return the monotonic credential generation resolved by trusted
+    /// transport middleware.
+    pub fn credential_epoch(&self) -> u64 {
+        self.credential_epoch
     }
 
     /// Return the server-loaded policy revision used for this decision.
@@ -373,6 +382,12 @@ impl AuthenticationSnapshot {
 
     fn validate(&self) -> Result<(), ContractError> {
         validate_contract_identifier(&self.credential_id, "credential_id")?;
+        if self.credential_epoch == 0 {
+            return Err(ContractError::InvalidField {
+                field: "credential_epoch",
+                reason: "must be greater than zero",
+            });
+        }
         if self.policy_revision == 0 {
             return Err(ContractError::InvalidField {
                 field: "policy_revision",
