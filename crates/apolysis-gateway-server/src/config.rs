@@ -200,6 +200,10 @@ mod tests {
             ("--qualification-now-unix-ms", "123456789"),
             ("--qualification-transaction-now-unix-ms", "123456790"),
             ("--qualification-first-transaction-now-unix-ms", "123456789"),
+            (
+                "--qualification-transaction-time-advance-file",
+                "/run/apolysis/advance",
+            ),
         ] {
             let mut arguments = [
                 "gateway",

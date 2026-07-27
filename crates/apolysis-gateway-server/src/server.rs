@@ -29,7 +29,10 @@ use crate::{
     AuthorityStore, GatewayServerConfig, GatewayServerError,
 };
 #[cfg(feature = "qualification")]
-use crate::{qualification::QualificationBarrier, QualificationOperation};
+use crate::{
+    qualification::{QualificationBarrier, QualificationTimeAdvance},
+    QualificationOperation,
+};
 
 const MAX_DATABASE_URL_BYTES: u64 = 4096;
 const MAX_REPLAY_KEY_BYTES: u64 = 256;
@@ -37,6 +40,33 @@ const MAX_TLS_FILE_BYTES: u64 = 1024 * 1024;
 #[cfg(feature = "qualification")]
 const MAX_IJSON_INTEGER: u64 = 9_007_199_254_740_991;
 pub(crate) const ACTIVE_REPLAY_KEY_ID: &str = "gateway-live-v1";
+
+#[cfg(feature = "qualification")]
+/// Private clock controls accepted only by the local qualification server.
+pub struct QualificationClockConfiguration {
+    fixed_now_unix_ms: Option<u64>,
+    transaction_now_unix_ms: Option<u64>,
+    first_transaction_now_unix_ms: Option<u64>,
+    transaction_time_advance_file: Option<PathBuf>,
+}
+
+#[cfg(feature = "qualification")]
+impl QualificationClockConfiguration {
+    /// Bundle admission, transaction, retry, and dynamic-advance clock inputs.
+    pub fn new(
+        fixed_now_unix_ms: Option<u64>,
+        transaction_now_unix_ms: Option<u64>,
+        first_transaction_now_unix_ms: Option<u64>,
+        transaction_time_advance_file: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            fixed_now_unix_ms,
+            transaction_now_unix_ms,
+            first_transaction_now_unix_ms,
+            transaction_time_advance_file,
+        }
+    }
+}
 
 /// Run the direct-mTLS production Gateway until it receives a shutdown signal.
 pub async fn serve(config: GatewayServerConfig) -> Result<(), GatewayServerError> {
@@ -85,10 +115,14 @@ pub async fn serve_with_pre_operation_barrier(
     operation: QualificationOperation,
     marker: PathBuf,
     release: PathBuf,
-    fixed_now_unix_ms: Option<u64>,
-    transaction_now_unix_ms: Option<u64>,
-    first_transaction_now_unix_ms: Option<u64>,
+    clock_configuration: QualificationClockConfiguration,
 ) -> Result<(), GatewayServerError> {
+    let QualificationClockConfiguration {
+        fixed_now_unix_ms,
+        transaction_now_unix_ms,
+        first_transaction_now_unix_ms,
+        transaction_time_advance_file,
+    } = clock_configuration;
     require_qualification_listener(config.listen())?;
     let barrier = QualificationBarrier::pre_operation(operation, marker, release)?;
     if barrier.marker() == config.ready_file() || barrier.release() == Some(config.ready_file()) {
@@ -96,18 +130,37 @@ pub async fn serve_with_pre_operation_barrier(
             "Gateway qualification control files must differ from the ready file",
         ));
     }
+    let transaction_time_advance = match transaction_time_advance_file {
+        Some(path) => {
+            let release = barrier.release().ok_or_else(|| {
+                GatewayServerError::configuration(
+                    "Gateway qualification time advance requires a pre-operation release",
+                )
+            })?;
+            let advance = QualificationTimeAdvance::new(path, barrier.marker(), release)?;
+            if advance.path() == config.ready_file() {
+                return Err(GatewayServerError::configuration(
+                    "Gateway qualification time advance must differ from the ready file",
+                ));
+            }
+            Some(advance)
+        }
+        None => None,
+    };
     let clock = match (
         fixed_now_unix_ms,
         transaction_now_unix_ms,
         first_transaction_now_unix_ms,
+        transaction_time_advance,
     ) {
-        (Some(now_unix_ms), None, None) if (1..=MAX_IJSON_INTEGER).contains(&now_unix_ms) => {
+        (Some(now_unix_ms), None, None, None) if (1..=MAX_IJSON_INTEGER).contains(&now_unix_ms) => {
             GatewayServerClock::Fixed(now_unix_ms)
         }
         (
             Some(admission_now_unix_ms),
             Some(transaction_now_unix_ms),
             first_transaction_now_unix_ms,
+            None,
         ) if operation.supports_transaction_time_qualification()
             && (1..=MAX_IJSON_INTEGER).contains(&admission_now_unix_ms)
             && transaction_now_unix_ms > admission_now_unix_ms
@@ -120,12 +173,27 @@ pub async fn serve_with_pre_operation_barrier(
                 first_transaction_now_unix_ms,
             )
         }
-        (Some(_), _, _) | (None, Some(_), _) | (None, None, Some(_)) => {
+        (Some(admission_now_unix_ms), Some(transaction_now_unix_ms), None, Some(time_advance))
+            if operation.supports_transaction_time_qualification()
+                && (1..=MAX_IJSON_INTEGER).contains(&admission_now_unix_ms)
+                && transaction_now_unix_ms > admission_now_unix_ms
+                && transaction_now_unix_ms <= MAX_IJSON_INTEGER =>
+        {
+            GatewayServerClock::qualification_after_private_advance(
+                admission_now_unix_ms,
+                transaction_now_unix_ms,
+                time_advance,
+            )
+        }
+        (Some(_), _, _, _)
+        | (None, Some(_), _, _)
+        | (None, None, Some(_), _)
+        | (None, None, None, Some(_)) => {
             return Err(GatewayServerError::configuration(
                 "Gateway qualification time is invalid",
             ))
         }
-        (None, None, None) => GatewayServerClock::System,
+        (None, None, None, None) => GatewayServerClock::System,
     };
     serve_inner(
         config,

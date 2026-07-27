@@ -193,16 +193,25 @@ transition. A retained exact operation replay returns its unchanged stored
 result after current-authority revalidation but before that dynamic
 reconciliation.
 
-A separate real-PostgreSQL repository test, outside the live HTTPS path,
-qualifies exact replay for `open_run`, `bind_runtime`, `ingest`, and
-`finish_run` while the exact operation row is locked. Each route first proves
-two stable positive controls at expiry minus one millisecond. The test then
-proves the replay transaction is waiting on that row, advances transaction time
-to the inclusive replay-TTL expiry, and releases the lock. Deliberately
-corrupted ciphertext proves expiry is decided before decryption: every route
-produces non-retryable `idempotency_conflict`, which the v0.1 HTTP adapter maps
-to `409`, samples transaction time once after the lock wait, and leaves the full
-captured Gateway-state fingerprint unchanged.
+A real-PostgreSQL repository test and a sibling direct-mTLS HTTPS qualification
+cover exact replay for `open_run`, `bind_runtime`, `ingest`, and `finish_run`
+while the exact operation row is locked. Each live route first proves two
+byte-stable positive exact replays at expiry minus one millisecond, with replay
+expiry still inside the current registration and credential validity windows.
+The qualification corrupts only retained replay ciphertext, proves the runtime
+transaction is blocked on the exact holder, advances its private transaction
+clock only after that waiter exists, and releases the holder at inclusive
+replay-TTL expiry. Expiry is therefore decided before decryption: every route
+produces non-retryable `409` `idempotency_conflict`, with
+`Cache-Control: no-store`, no retry hint, and no response bytes before release.
+The 20-table lifecycle fingerprint and operation/replay cardinality remain
+unchanged, while the transport attempt adds exactly one admission-audit row.
+The v0.1 HTTP adapter samples transaction time once after the lock wait. The
+loopback, same-UID, `0600` time-advance file exists only in the qualification
+build; production configuration rejects that control surface. The monotonic
+interval from pre-operation release through confirmed holder termination must
+remain below 1.2 seconds, preserving explicit margin under the production
+two-second lock timeout.
 
 Operations and encrypted replay records carry credential identifier,
 credential epoch, and policy revision. Leases and join authorization carry the
@@ -256,10 +265,10 @@ complete W3–W6. In particular, it has:
   the sibling HTTPS gate qualifies one accepted-novel late-precommit rollback
   seam plus post-commit/pre-ack process death for novel success and exact replay
   on all four routes, and the two-process gate qualifies the bounded
-  writer/lifecycle matrix above. The split-clock
-  transaction-boundary slices qualify the listed join, bind, ingest, and finish
-  cases. The separate repository replay-TTL operation-lock proof is not a live
-  HTTPS qualification. Shared real-PostgreSQL conformance additionally covers
+  writer/lifecycle matrix above. The split-clock transaction-boundary slices
+  qualify the listed join, bind, ingest, and finish cases. The sibling
+  direct-mTLS HTTPS qualification covers the four-route replay-TTL
+  operation-lock race. Shared real-PostgreSQL conformance additionally covers
   join-grant expiry, join at last-lease expiry, invalid transaction time, and
   one staggered requested-lease bind case. They do not qualify the remaining
   earlier or arbitrary network pre-commit/process-death timings, pre-commit
@@ -549,11 +558,11 @@ and returns that same result on an exact retry.
 
 This rule defines the qualified lifecycle decision point; it does not claim
 that the database commit's wall-clock instant precedes the deadline or expiry.
-A separate real-PostgreSQL repository gate qualifies all four routes at
-inclusive replay-TTL expiry after an exact operation-row lock wait, including
-the expiry-before-decryption and unchanged-state oracles. It does not qualify
-that race through live HTTPS. Join-grant expiry and join at last-lease expiry
-also remain unqualified through the live transport, as do broader staggered
+A real-PostgreSQL repository gate and its direct-mTLS HTTPS sibling qualify all
+four routes at inclusive replay-TTL expiry after an exact operation-row lock
+wait, including expiry-before-decryption and unchanged-lifecycle-state oracles.
+Join-grant expiry and join at last-lease expiry remain unqualified through the
+live transport, as do broader staggered
 multi-lease combinations, additional retry depths and operations, and live
 SQLSTATE `40P01` fault coverage.
 

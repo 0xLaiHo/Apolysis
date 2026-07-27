@@ -28,7 +28,7 @@ use axum_server_mtls::PeerCertificates;
 use serde::{de::DeserializeOwned, Serialize};
 
 #[cfg(feature = "qualification")]
-use crate::qualification::QualificationBarrier;
+use crate::qualification::{QualificationBarrier, QualificationTimeAdvance};
 use crate::{error::GatewayServerErrorKind, AuthorityStore, GatewayServerError};
 
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
@@ -65,6 +65,7 @@ pub(crate) struct QualificationClock {
     admission_now_unix_ms: u64,
     transaction_now_unix_ms: u64,
     first_transaction_now_unix_ms: Option<u64>,
+    transaction_time_advance: Option<QualificationTimeAdvance>,
     transaction_calls: AtomicUsize,
 }
 
@@ -79,6 +80,22 @@ impl GatewayServerClock {
             admission_now_unix_ms,
             transaction_now_unix_ms,
             first_transaction_now_unix_ms,
+            transaction_time_advance: None,
+            transaction_calls: AtomicUsize::new(0),
+        }))
+    }
+
+    #[cfg(feature = "qualification")]
+    pub(crate) fn qualification_after_private_advance(
+        admission_now_unix_ms: u64,
+        transaction_now_unix_ms: u64,
+        transaction_time_advance: QualificationTimeAdvance,
+    ) -> Self {
+        Self::Qualification(Arc::new(QualificationClock {
+            admission_now_unix_ms,
+            transaction_now_unix_ms,
+            first_transaction_now_unix_ms: None,
+            transaction_time_advance: Some(transaction_time_advance),
             transaction_calls: AtomicUsize::new(0),
         }))
     }
@@ -99,6 +116,13 @@ impl GatewayClock for GatewayServerClock {
         match self {
             #[cfg(feature = "qualification")]
             Self::Qualification(clock) => {
+                if let Some(time_advance) = &clock.transaction_time_advance {
+                    return if time_advance.has_advanced() {
+                        clock.transaction_now_unix_ms
+                    } else {
+                        clock.admission_now_unix_ms
+                    };
+                }
                 let call = clock.transaction_calls.fetch_add(1, Ordering::SeqCst);
                 match clock.first_transaction_now_unix_ms {
                     // Every novel lifecycle attempt performs an initial and a

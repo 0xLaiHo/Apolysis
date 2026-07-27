@@ -156,15 +156,25 @@ Object-reference ingest uses
 PostgreSQL `clock_timestamp()` through the schema-owned database-time function;
 content-off join, bind, ingest, and finish use the trusted Gateway clock.
 
-A separate real-PostgreSQL repository test, not the live HTTPS gate, covers
-exact replay for `open_run`, `bind_runtime`, `ingest`, and `finish_run` while
-the exact operation row is locked. Each route has stable positive controls at
-expiry minus one millisecond. The test proves the replay transaction is waiting
-on that row, advances transaction time to the inclusive replay-TTL expiry, and
-then releases the lock. Corrupted ciphertext proves TTL is decided before
-decryption: each route produces non-retryable `idempotency_conflict`, which the
-v0.1 HTTP adapter maps to `409`, samples transaction time once after the wait,
-and leaves the full captured Gateway-state fingerprint unchanged.
+A real-PostgreSQL repository test and a sibling direct-mTLS HTTPS qualification
+cover exact replay for `open_run`, `bind_runtime`, `ingest`, and `finish_run`
+while the exact operation row is locked. Each live route first proves two
+byte-stable positive exact replays at expiry minus one millisecond, with replay
+expiry still inside the current registration and credential validity windows.
+The qualification then corrupts only the retained replay ciphertext, proves the
+runtime transaction is waiting on the exact holder, advances its private
+transaction clock only after that waiter exists, and releases the holder at the
+inclusive replay-TTL expiry. Expiry is therefore decided before decryption:
+each route produces a non-retryable `409` `idempotency_conflict`, with
+`Cache-Control: no-store`, no HTTP or body retry hint, no response bytes before
+lock release, an unchanged 20-table lifecycle fingerprint and operation/replay
+cardinality, and exactly one additional admission-audit row. The v0.1 adapter
+samples transaction time once after the wait. The loopback, same-UID, `0600`
+time-advance file is available only in the qualification build; production
+configuration rejects that control surface. The monotonic interval from
+pre-operation release through confirmed holder termination must remain below
+1.2 seconds, preserving explicit margin under the production two-second lock
+timeout.
 
 `AuthenticationSnapshot` binds credential identifier, credential epoch, and
 policy revision. PostgreSQL operations, encrypted replay records, leases, and
@@ -207,11 +217,10 @@ exact-replay or rejection branches, completion of the final `INSERT` statement,
 entry into `COMMIT`, physical or WAL commit timing, and the remaining mixed
 lifecycle/retry matrices, sustained or capacity load, replication/failover,
 backup/restore, and HA are not qualified. The bounded lifecycle decision is not
-a claim about the database commit's wall-clock instant. The repository
-replay-TTL operation-lock proof is
-not qualified through live HTTPS; live join-grant expiry, live join at
-last-lease expiry, remaining novel join/bind cases, broader staggered
-multi-lease combinations, additional retry depths, and live SQLSTATE `40P01`
+a claim about the database commit's wall-clock instant. Live join-grant expiry,
+live join at last-lease expiry, remaining novel join/bind cases, broader
+staggered multi-lease combinations, additional retry depths, and live SQLSTATE
+`40P01`
 fault coverage also remain open. Production KMS/envelope-key integration,
 database RLS deployment, the authorized object-read resolver and downstream
 deletion propagation, background deadline/replay cleanup, and production rate and
