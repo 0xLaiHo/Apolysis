@@ -91,15 +91,17 @@ recovery 已通过资格验证。与之并行的真实 direct-mTLS HTTPS recover
 commit 后/ack 前的 Gateway-server 死亡与精确 replay 收敛。
 另一个有界双进程 mTLS 门禁现已验证 run 创建、one-use join、exact runtime binding、
 event 去重与跨 run organization sequencing、finalization 及终态不可逆等协调 writer/lifecycle
-竞态。同级的有界 direct-mTLS/PostgreSQL 门禁现已覆盖额外的
-transaction-boundary join/bind/ingest/finish 切片，并保持 exact replay 稳定，同时让 novel
-work 经过一次性 SQLSTATE `40001` retry 后失败关闭或确定性收敛为 `incomplete`；另有一个
-聚焦的 `finish_run` 检查补上一次性 SQLSTATE `40P01` retry 对等性。direct-mTLS HTTPS
+竞态。同级的有界 direct-mTLS/PostgreSQL 门禁现已覆盖 one-use join-grant expiry、
+finalization deadline 与 last-lease expiry 上额外的 transaction-boundary
+join/bind/ingest/finish 切片。它在一次性 SQLSTATE `40001` retry 中保持 exact replay
+稳定，并让 novel work 失败关闭或确定性收敛为 `incomplete`；另有一个聚焦的
+`finish_run` 检查补上一次性 SQLSTATE `40P01` retry 对等性。
+direct-mTLS HTTPS
 qualification 及其 repository
 sibling 现已覆盖四条 exact lifecycle route 在精确 operation-row lock wait 后跨过 replay-TTL
 expiry 的竞态。它不代表完整 mixed
 lifecycle/retry matrix 已通过。其余进程死亡与 network pre-commit 时序、
-staggered multi-lease、load、replication、failover、backup/restore
+超出当前 focused two-lease shape 的更广 staggered 组合、load、replication、failover、backup/restore
 与高可用工作仍未验证；production KMS integration、database RLS
 deployment、授权 object-read resolver、evidence-object projection/read view、持续后台 reaper
 运行与通过容量验证的 resource limit

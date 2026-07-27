@@ -1199,26 +1199,42 @@ DO $watcher$
 DECLARE
     deadline timestamptz := clock_timestamp() + interval '30 seconds';
     waiter_count bigint;
-    blocker_pid integer;
+    qualification_blocker_pid integer;
 BEGIN
+    SELECT pid INTO qualification_blocker_pid
+      FROM pg_catalog.pg_stat_activity
+     WHERE application_name=current_setting(
+               'apolysis.blocker_application_name'
+           )
+       AND pid <> pg_backend_pid();
+    IF qualification_blocker_pid IS NULL THEN
+        RAISE EXCEPTION 'race blocker disappeared before overlap observation';
+    END IF;
+
     LOOP
         PERFORM pg_stat_clear_snapshot();
-        SELECT count(*) INTO waiter_count
-          FROM pg_catalog.pg_stat_activity
-         WHERE usename=current_setting('apolysis.runtime_login')
-           AND state='active'
-           AND wait_event_type='Lock';
+        WITH RECURSIVE blocking_chain(waiter_pid, blocking_pid) AS (
+            SELECT activity.pid, blocker.pid
+              FROM pg_catalog.pg_stat_activity AS activity
+              CROSS JOIN LATERAL unnest(
+                  pg_catalog.pg_blocking_pids(activity.pid)
+              ) AS blocker(pid)
+             WHERE activity.usename=current_setting('apolysis.runtime_login')
+               AND activity.state='active'
+               AND activity.wait_event_type='Lock'
+            UNION
+            SELECT chain.waiter_pid, blocker.pid
+              FROM blocking_chain AS chain
+              CROSS JOIN LATERAL unnest(
+                  pg_catalog.pg_blocking_pids(chain.blocking_pid)
+              ) AS blocker(pid)
+             WHERE chain.blocking_pid <> qualification_blocker_pid
+        )
+        SELECT count(DISTINCT waiter_pid) INTO waiter_count
+          FROM blocking_chain
+         WHERE blocking_pid=qualification_blocker_pid;
         IF waiter_count >= 2 THEN
-            SELECT pid INTO blocker_pid
-              FROM pg_catalog.pg_stat_activity
-             WHERE application_name=current_setting(
-                       'apolysis.blocker_application_name'
-                   )
-               AND pid <> pg_backend_pid();
-            IF blocker_pid IS NULL THEN
-                RAISE EXCEPTION 'race blocker disappeared before overlap release';
-            END IF;
-            IF NOT pg_terminate_backend(blocker_pid) THEN
+            IF NOT pg_terminate_backend(qualification_blocker_pid) THEN
                 RAISE EXCEPTION 'race blocker could not be terminated';
             END IF;
             RETURN;
@@ -4113,6 +4129,841 @@ build_deadline_join_request() {
     "$request_bin" open-run --input "$unsigned_file" --output "$signed_file"
 }
 
+prepare_join_boundary_requests() {
+    local case_variable="$1"
+    local accepted_grant_expires_at_unix_ms="$2"
+    local pending_grant_expires_at_unix_ms="$3"
+    local -n join_scenario="$case_variable"
+    local case_prefix="${join_scenario[prefix]}"
+
+    local accepted_proof="${secret_directory}/${case_prefix}.accepted.proof"
+    local pending_proof="${secret_directory}/${case_prefix}.pending.proof"
+    register_deadline_join_grant \
+        "${join_scenario[run_id]}" \
+        "$accepted_proof" "$accepted_grant_expires_at_unix_ms"
+    register_deadline_join_grant \
+        "${join_scenario[run_id]}" \
+        "$pending_proof" "$pending_grant_expires_at_unix_ms"
+
+    local accepted_unsigned="${secret_directory}/${case_prefix}.accepted.unsigned.json"
+    local accepted_signed="${secret_directory}/${case_prefix}.accepted.json"
+    local accepted_operation_id="operation_${case_prefix}_accepted_${random_suffix}"
+    build_deadline_join_request \
+        "$case_variable" "$accepted_operation_id" "$accepted_proof" \
+        "$accepted_grant_expires_at_unix_ms" \
+        "$accepted_unsigned" "$accepted_signed"
+    local -A accepted_request=(
+        [route]="open-run"
+        [request]="$accepted_signed"
+        [certificate]="$deadline_join_client_cert"
+        [key]="$deadline_join_client_key"
+        [artifact_prefix]="${case_prefix}.accepted"
+    )
+    send_deadline_setup_request accepted_request
+    if [[ "${accepted_request[status]}" != "200" ]] || \
+        ! jq -e '.outcome == "joined"' "${accepted_request[response]}" >/dev/null; then
+        printf 'error: %s could not establish accepted join baseline\n' \
+            "$case_prefix" >&2
+        exit 1
+    fi
+
+    join_scenario[accepted_join_operation_id]="$accepted_operation_id"
+    join_scenario[accepted_join_request]="$accepted_signed"
+    join_scenario[accepted_join_stream_id]="$(jq -er \
+        '.source_stream_id' "${accepted_request[response]}")"
+    join_scenario[accepted_join_lease_expires_at_unix_ms]="$(jq -er \
+        '.lease.expires_at_unix_ms' "${accepted_request[response]}")"
+    local accepted_join_lease=""
+    accepted_join_lease="$(jq -er '.lease.lease_id' "${accepted_request[response]}")"
+    join_scenario[accepted_join_lease_file]="${secret_directory}/${case_prefix}.accepted.lease"
+    write_private_race_secret \
+        "$accepted_join_lease" "${join_scenario[accepted_join_lease_file]}"
+    race_lease_files+=("${join_scenario[accepted_join_lease_file]}")
+    race_secret_values+=("$accepted_join_lease")
+    race_expected_lease_file_by_response["${accepted_request[response]}"]="${join_scenario[accepted_join_lease_file]}"
+
+    local -A baseline_replay=(
+        [route]="open-run"
+        [request]="$accepted_signed"
+        [certificate]="$deadline_join_client_cert"
+        [key]="$deadline_join_client_key"
+        [artifact_prefix]="${case_prefix}.baseline-replay"
+    )
+    send_deadline_setup_request baseline_replay
+    join_scenario[baseline_replay_response]="${baseline_replay[response]}"
+    race_expected_lease_file_by_response["${baseline_replay[response]}"]="${join_scenario[accepted_join_lease_file]}"
+    if [[ "${baseline_replay[status]}" != "200" ]] || \
+        ! jq -e \
+            --arg stream_id "${join_scenario[accepted_join_stream_id]}" \
+            --rawfile lease_id "${join_scenario[accepted_join_lease_file]}" \
+            '.outcome == "idempotent_retry"
+             and .source_stream_id == $stream_id
+             and .lease.lease_id == $lease_id' \
+            "${baseline_replay[response]}" >/dev/null; then
+        printf 'error: %s exact join baseline replay was unstable\n' \
+            "$case_prefix" >&2
+        exit 1
+    fi
+
+    local novel_unsigned="${secret_directory}/${case_prefix}.novel.unsigned.json"
+    local novel_signed="${secret_directory}/${case_prefix}.novel.json"
+    local novel_operation_id="operation_${case_prefix}_novel_${random_suffix}"
+    build_deadline_join_request \
+        "$case_variable" "$novel_operation_id" "$pending_proof" \
+        "$pending_grant_expires_at_unix_ms" \
+        "$novel_unsigned" "$novel_signed"
+    join_scenario[novel_join_request]="$novel_signed"
+    join_scenario[rejected_operation_id]="$novel_operation_id"
+}
+
+assert_join_boundary_error() {
+    local status="$1"
+    local response="$2"
+    local headers="$3"
+    local expected_status="$4"
+    local expected_code="$5"
+    local label="$6"
+
+    if [[ "$status" != "$expected_status" ]] || \
+        ! jq -e \
+            --arg code "$expected_code" \
+            '.schema_version == "0.1"
+             and .code == $code
+             and .retryable == false
+             and .retry_after_ms == null' \
+            "$response" >/dev/null || \
+        grep -Eiq '^retry-after:' "$headers"; then
+        printf 'error: %s did not return the exact nonretryable boundary error\n' \
+            "$label" >&2
+        exit 1
+    fi
+}
+
+run_join_boundary_request() {
+    local case_variable="$1"
+    local boundary_mode="$2"
+    local expected_status="$3"
+    local expected_code="$4"
+    local -n join_scenario="$case_variable"
+    local artifact_prefix="${join_scenario[prefix]}-${boundary_mode}"
+    local accepted_join_lease_file="${join_scenario[accepted_join_lease_file]:-${join_scenario[join_lease_file]:-}}"
+    if [[ -z "$accepted_join_lease_file" ]]; then
+        printf 'error: %s omitted its accepted join lease\n' \
+            "${join_scenario[prefix]}" >&2
+        exit 1
+    fi
+
+    case "$boundary_mode" in
+        transaction-wait)
+            local -A timed_race=(
+                [operation]="open_run"
+                [route]="open-run"
+                [organization_id]="${join_scenario[organization_id]}"
+                [left_request]="${join_scenario[accepted_join_request]}"
+                [left_certificate]="$deadline_join_client_cert"
+                [left_key]="$deadline_join_client_key"
+                [right_request]="${join_scenario[novel_join_request]}"
+                [right_certificate]="$deadline_join_client_cert"
+                [right_key]="$deadline_join_client_key"
+                [artifact_prefix]="$artifact_prefix"
+                [admission_now_unix_ms]="${join_scenario[admission_now_unix_ms]}"
+                [transaction_now_unix_ms]="${join_scenario[decision_now_unix_ms]}"
+                [preexisting_operation_count]="1"
+            )
+            run_timed_pre_operation_race timed_race
+            race_expected_lease_file_by_response["${timed_race[left_response]}"]="$accepted_join_lease_file"
+            if [[ "${timed_race[left_status]}" != "200" ]] || \
+                ! cmp -s "${join_scenario[baseline_replay_response]}" \
+                    "${timed_race[left_response]}"; then
+                printf 'error: %s exact join replay changed across transaction wait\n' \
+                    "${join_scenario[prefix]}" >&2
+                exit 1
+            fi
+            assert_join_boundary_error \
+                "${timed_race[right_status]}" \
+                "${timed_race[right_response]}" \
+                "${timed_race[right_headers]}" \
+                "$expected_status" "$expected_code" "${join_scenario[prefix]}"
+            ;;
+        internal-retry)
+            install_gateway_operation_retry_fault \
+                "${join_scenario[organization_id]}" \
+                "${join_scenario[rejected_operation_id]}" open_run 40001
+            local -A retry_request=(
+                [operation]="open_run"
+                [route]="open-run"
+                [organization_id]="${join_scenario[organization_id]}"
+                [request]="${join_scenario[novel_join_request]}"
+                [certificate]="$deadline_join_client_cert"
+                [key]="$deadline_join_client_key"
+                [artifact_prefix]="$artifact_prefix"
+                [admission_now_unix_ms]="${join_scenario[admission_now_unix_ms]}"
+                [transaction_now_unix_ms]="${join_scenario[decision_now_unix_ms]}"
+                [first_transaction_now_unix_ms]="${join_scenario[admission_now_unix_ms]}"
+                [preexisting_operation_count]="0"
+            )
+            run_timed_pre_operation_request retry_request
+            assert_and_remove_gateway_operation_retry_fault 1 40001
+            assert_join_boundary_error \
+                "${retry_request[status]}" \
+                "${retry_request[response]}" \
+                "${retry_request[headers]}" \
+                "$expected_status" "$expected_code" "${join_scenario[prefix]}"
+
+            local -A exact_control=(
+                [route]="open-run"
+                [request]="${join_scenario[accepted_join_request]}"
+                [certificate]="$deadline_join_client_cert"
+                [key]="$deadline_join_client_key"
+                [artifact_prefix]="${artifact_prefix}.exact-control"
+            )
+            send_deadline_setup_request exact_control
+            race_expected_lease_file_by_response["${exact_control[response]}"]="$accepted_join_lease_file"
+            if [[ "${exact_control[status]}" != "200" ]] || \
+                ! cmp -s "${join_scenario[baseline_replay_response]}" \
+                    "${exact_control[response]}"; then
+                printf 'error: %s exact join replay changed across internal retry\n' \
+                    "${join_scenario[prefix]}" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            printf 'error: unsupported join expiry mode: %s\n' "$boundary_mode" >&2
+            exit 1
+            ;;
+    esac
+}
+
+assert_join_boundary_audit_oracle() {
+    local case_variable="$1"
+    local expected_admission_audits="$2"
+    local expected_admission_transaction_audits="$3"
+    local expected_decision_audits="$4"
+    local -n join_scenario="$case_variable"
+    local audit_vector=""
+    audit_vector="$(timeout 15s docker exec -i "$container_name" \
+        psql --username "$database_user" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+            --set=organization_id="${join_scenario[organization_id]}" \
+            --set=source_registration_id="$deadline_join_registration_id" \
+            --set=admission_now_unix_ms="${join_scenario[admission_now_unix_ms]}" \
+            --set=decision_now_unix_ms="${join_scenario[decision_now_unix_ms]}" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM apolysis_gateway.gateway_authority_audit
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'source_registration_id'
+        AND operation='open_run'
+        AND requested_at_unix_ms=:'admission_now_unix_ms'::bigint
+        AND decision='authorized' AND reason_code='current_authority'),
+    (SELECT count(*) FROM apolysis_gateway.transaction_authority_audit
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'source_registration_id'
+        AND operation_kind='open_run'
+        AND checked_at_unix_ms=:'admission_now_unix_ms'::bigint
+        AND decision='authorized' AND reason_code='current_authority'),
+    (SELECT count(*) FROM apolysis_gateway.transaction_authority_audit
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'source_registration_id'
+        AND operation_kind='open_run'
+        AND checked_at_unix_ms=:'decision_now_unix_ms'::bigint
+        AND decision='authorized' AND reason_code='current_authority'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_authority_audit
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'source_registration_id'
+        AND operation='open_run'
+        AND requested_at_unix_ms=:'admission_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.transaction_authority_audit
+      WHERE organization_id=:'organization_id'
+        AND source_registration_id=:'source_registration_id'
+        AND operation_kind='open_run'
+        AND checked_at_unix_ms IN (
+            :'admission_now_unix_ms'::bigint,
+            :'decision_now_unix_ms'::bigint
+        ))
+);
+SQL
+)"
+    local expected_vector=""
+    local expected_transaction_audits=""
+    expected_transaction_audits="$(( \
+        expected_admission_transaction_audits + expected_decision_audits \
+    ))"
+    expected_vector="${expected_admission_audits}"
+    expected_vector+="|${expected_admission_transaction_audits}"
+    expected_vector+="|${expected_decision_audits}"
+    expected_vector+="|${expected_admission_audits}"
+    expected_vector+="|${expected_transaction_audits}"
+    if [[ "$audit_vector" != "$expected_vector" ]]; then
+        printf 'error: %s join boundary authority-audit oracle mismatch: %s\n' \
+            "${join_scenario[prefix]}" "$audit_vector" >&2
+        exit 1
+    fi
+}
+
+assert_join_grant_expiry_database_oracle() {
+    local case_variable="$1"
+    local phase="$2"
+    local -n join_scenario="$case_variable"
+    local database_vector=""
+    database_vector="$(timeout 30s docker exec -i "$container_name" \
+        psql --username "$gateway_runtime_login" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+            --set=organization_id="${join_scenario[organization_id]}" \
+            --set=run_id="${join_scenario[run_id]}" \
+            --set=join_source_id="$deadline_join_source_id" \
+            --set=admission_now_unix_ms="${join_scenario[admission_now_unix_ms]}" \
+            --set=decision_now_unix_ms="${join_scenario[decision_now_unix_ms]}" \
+            --set=original_event_id="${join_scenario[original_event_id]}" \
+            --set=open_operation_id="${join_scenario[open_operation_id]}" \
+            --set=ingest_operation_id="${join_scenario[ingest_operation_id]}" \
+            --set=accepted_operation_id="${join_scenario[accepted_join_operation_id]}" \
+            --set=novel_operation_id="${join_scenario[rejected_operation_id]}" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM apolysis_gateway.runs
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND state='active' AND finalization_deadline_unix_ms IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.source_streams
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND revoked_at_unix_ms IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND revoked_at_unix_ms IS NULL
+        AND expires_at_unix_ms>:'decision_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'
+        AND authorization_kind='grant'),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'
+        AND authorization_kind='grant'
+        AND expires_at_unix_ms=:'decision_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'
+        AND authorization_kind='grant'
+        AND authorization_state='consumed' AND consumed_at_unix_ms IS NOT NULL),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'
+        AND authorization_kind='grant'
+        AND authorization_state='pending' AND consumed_at_unix_ms IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'
+        AND authorization_kind='grant'
+        AND authorization_state='pending'
+        AND expires_at_unix_ms=:'decision_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'
+        AND authorization_kind='grant'
+        AND authorization_state='consumed'
+        AND consumed_at_unix_ms=:'admission_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.source_streams
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'),
+    (SELECT count(*) FROM apolysis_gateway.leases AS lease
+      JOIN apolysis_gateway.source_streams AS stream
+        ON stream.organization_id=lease.organization_id
+       AND stream.run_id=lease.run_id
+       AND stream.source_registration_id=lease.source_registration_id
+       AND stream.source_stream_id=lease.source_stream_id
+      WHERE lease.organization_id=:'organization_id' AND lease.run_id=:'run_id'
+        AND stream.source_id=:'join_source_id'),
+    (SELECT count(*) FROM apolysis_gateway.source_stream_capabilities AS capability
+      JOIN apolysis_gateway.source_streams AS stream
+        ON stream.organization_id=capability.organization_id
+       AND stream.run_id=capability.run_id
+       AND stream.source_registration_id=capability.source_registration_id
+       AND stream.source_stream_id=capability.source_stream_id
+      WHERE stream.organization_id=:'organization_id' AND stream.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.lease_operations AS operation
+      JOIN apolysis_gateway.leases AS lease
+        ON lease.organization_id=operation.organization_id
+       AND lease.lease_digest=operation.lease_digest
+      WHERE lease.organization_id=:'organization_id' AND lease.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.run_id=:'run_id'
+        AND replay.encryption_algorithm='aes-256-gcm'
+        AND octet_length(replay.nonce)=12
+        AND octet_length(replay.authentication_tag)=16
+        AND octet_length(replay.outcome_ciphertext)>0),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id=:'accepted_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id=:'novel_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id=:'open_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id=:'ingest_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id NOT IN (
+            :'open_operation_id',
+            :'ingest_operation_id',
+            :'accepted_operation_id',
+            :'novel_operation_id'
+        )),
+    (SELECT count(*) FROM apolysis_gateway.finalization_declarations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.finalization_terminal_positions
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.finalization_outcome_claims
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.runtime_bindings
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.active_runtime_identities
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.evidence_events
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_event_id=:'original_event_id'),
+    (SELECT count(*) FROM apolysis_gateway.evidence_events
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.projection_outbox AS outbox
+      JOIN apolysis_gateway.record_items AS record
+        ON record.organization_id=outbox.organization_id
+       AND record.ingest_sequence=outbox.ingest_sequence
+      WHERE record.organization_id=:'organization_id' AND record.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items AS record
+      LEFT JOIN apolysis_gateway.projection_outbox AS outbox
+        ON outbox.organization_id=record.organization_id
+       AND outbox.ingest_sequence=record.ingest_sequence
+      WHERE record.organization_id=:'organization_id'
+        AND record.run_id=:'run_id' AND outbox.ingest_sequence IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.projection_outbox AS outbox
+      LEFT JOIN apolysis_gateway.record_items AS record
+        ON record.organization_id=outbox.organization_id
+       AND record.ingest_sequence=outbox.ingest_sequence
+      WHERE outbox.organization_id=:'organization_id'
+        AND record.ingest_sequence IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND fact_kind='run_state_changed'
+        AND fact_json #>> '{fact,fact,from}'='active'
+        AND fact_json #>> '{fact,fact,to}'='incomplete'),
+    (SELECT count(*) FROM apolysis_gateway.organization_sequences
+      WHERE organization_id=:'organization_id'
+        AND next_ingest_sequence=(
+            SELECT count(*) + 1 FROM apolysis_gateway.record_items
+             WHERE organization_id=:'organization_id')),
+    (SELECT count(*) FROM (
+        SELECT min(ingest_sequence)=1
+               AND max(ingest_sequence)=count(*)
+               AND bool_and(outbox_ingest_sequence=ingest_sequence) AS valid
+          FROM apolysis_gateway.record_items
+         WHERE organization_id=:'organization_id'
+    ) AS contiguous WHERE valid),
+    (SELECT array_to_string(array_agg(fact_kind ORDER BY ingest_sequence), ',')
+       FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id')
+);
+SQL
+)"
+
+    local expected_vector=""
+    case "$phase" in
+        rejected)
+            expected_vector="1|2|2|2|2|2|2|2|1|1|1|0|1|1|8|5"
+            expected_vector+="|3|3|3|1|0|1|1|0|0|0|0|0|0|1|1|5|5|0|0|0|1|1"
+            expected_vector+="|run_opened,run_state_changed,source_registered,evidence_accepted"
+            expected_vector+=",source_registered"
+            ;;
+        recovered)
+            expected_vector="1|3|3|3|3|2|2|2|2|0|0|1|2|2|12|7"
+            expected_vector+="|4|4|4|1|1|1|1|0|0|0|0|0|0|1|1|6|6|0|0|0|1|1"
+            expected_vector+="|run_opened,run_state_changed,source_registered,evidence_accepted"
+            expected_vector+=",source_registered,source_registered"
+            ;;
+        *)
+            printf 'error: unsupported join grant-expiry oracle phase: %s\n' \
+                "$phase" >&2
+            exit 1
+            ;;
+    esac
+    if [[ "$database_vector" != "$expected_vector" ]]; then
+        printf 'error: %s join grant-expiry %s database oracle mismatch: %s\n' \
+            "${join_scenario[prefix]}" "$phase" "$database_vector" >&2
+        exit 1
+    fi
+}
+
+recover_join_after_grant_expiry() {
+    local case_variable="$1"
+    local -n join_scenario="$case_variable"
+    local -A recovery_request=(
+        [operation]="open_run"
+        [route]="open-run"
+        [organization_id]="${join_scenario[organization_id]}"
+        [request]="${join_scenario[novel_join_request]}"
+        [certificate]="$deadline_join_client_cert"
+        [key]="$deadline_join_client_key"
+        [artifact_prefix]="${join_scenario[prefix]}.recovery"
+        [admission_now_unix_ms]="${join_scenario[admission_now_unix_ms]}"
+        [transaction_now_unix_ms]="${join_scenario[decision_now_unix_ms]}"
+        [first_transaction_now_unix_ms]="${join_scenario[admission_now_unix_ms]}"
+        [preexisting_operation_count]="0"
+    )
+    run_timed_pre_operation_request recovery_request
+    if [[ "${recovery_request[status]}" != "200" ]] || \
+        ! jq -e \
+            --arg run_id "${join_scenario[run_id]}" \
+            --arg accepted_stream_id "${join_scenario[accepted_join_stream_id]}" \
+            --arg source_id "$deadline_join_source_id" \
+            '.outcome == "joined"
+             and .run_id == $run_id
+             and .source_id == $source_id
+             and .source_stream_id != $accepted_stream_id' \
+            "${recovery_request[response]}" >/dev/null; then
+        printf 'error: %s could not reuse the grant at expiry minus one\n' \
+            "${join_scenario[prefix]}" >&2
+        exit 1
+    fi
+
+    local recovered_lease=""
+    recovered_lease="$(jq -er '.lease.lease_id' "${recovery_request[response]}")"
+    join_scenario[recovered_lease_file]="${secret_directory}/${join_scenario[prefix]}.recovered.lease"
+    write_private_race_secret \
+        "$recovered_lease" "${join_scenario[recovered_lease_file]}"
+    race_lease_files+=("${join_scenario[recovered_lease_file]}")
+    race_secret_values+=("$recovered_lease")
+    race_expected_lease_file_by_response["${recovery_request[response]}"]="${join_scenario[recovered_lease_file]}"
+}
+
+run_join_grant_expiry_scenario() {
+    local boundary_mode="$1"
+    local case_prefix="$2"
+    local -A join_case=(
+        [prefix]="$case_prefix"
+        [organization_id]="$deadline_finalization_organization_id"
+        [registration_id]="$deadline_finalization_registration_id"
+        [principal_id]="$deadline_finalization_principal_id"
+        [source_id]="$deadline_finalization_source_id"
+        [authority_id]="$deadline_finalization_authority_id"
+        [certificate]="$deadline_finalization_client_cert"
+        [key]="$deadline_finalization_client_key"
+    )
+    prepare_deadline_case join_case
+
+    local grant_expires_at_unix_ms="$((join_case[lease_expires_at_unix_ms] - 60000))"
+    if ((grant_expires_at_unix_ms <= $(date +%s%3N) + 30000)) || \
+        ((grant_expires_at_unix_ms >= expires_at_unix_ms)); then
+        printf 'error: join grant expiry escaped its live recovery or authority window\n' >&2
+        exit 1
+    fi
+    prepare_join_boundary_requests \
+        join_case "$grant_expires_at_unix_ms" "$grant_expires_at_unix_ms"
+    if ((grant_expires_at_unix_ms >= join_case[lease_expires_at_unix_ms])) || \
+        ((grant_expires_at_unix_ms >= \
+            join_case[accepted_join_lease_expires_at_unix_ms])); then
+        printf 'error: join grant expiry did not precede both live leases\n' >&2
+        exit 1
+    fi
+    join_case[admission_now_unix_ms]="$((grant_expires_at_unix_ms - 1))"
+    join_case[decision_now_unix_ms]="$grant_expires_at_unix_ms"
+
+    run_join_boundary_request join_case "$boundary_mode" 404 not_found
+    case "$boundary_mode" in
+        transaction-wait)
+            assert_join_boundary_audit_oracle join_case 2 0 1
+            ;;
+        internal-retry)
+            assert_join_boundary_audit_oracle join_case 1 0 0
+            ;;
+        *)
+            printf 'error: unsupported join grant-expiry mode: %s\n' \
+                "$boundary_mode" >&2
+            exit 1
+            ;;
+    esac
+    assert_join_grant_expiry_database_oracle join_case rejected
+    recover_join_after_grant_expiry join_case
+    assert_join_grant_expiry_database_oracle join_case recovered
+    case "$boundary_mode" in
+        transaction-wait)
+            assert_join_boundary_audit_oracle join_case 3 2 1
+            ;;
+        internal-retry)
+            assert_join_boundary_audit_oracle join_case 2 2 0
+            ;;
+    esac
+    printf 'Join grant-expiry %s qualification passed.\n' "$boundary_mode"
+}
+
+assert_join_last_lease_database_oracle() {
+    local case_variable="$1"
+    local -n join_scenario="$case_variable"
+    local database_vector=""
+    database_vector="$(timeout 30s docker exec -i "$container_name" \
+        psql --username "$gateway_runtime_login" --dbname "$database_name" \
+            --no-align --tuples-only --set=ON_ERROR_STOP=1 \
+            --set=organization_id="${join_scenario[organization_id]}" \
+            --set=run_id="${join_scenario[run_id]}" \
+            --set=join_source_id="$deadline_join_source_id" \
+            --set=decision_now_unix_ms="${join_scenario[decision_now_unix_ms]}" \
+            --set=original_event_id="${join_scenario[original_event_id]}" \
+            --set=open_operation_id="${join_scenario[open_operation_id]}" \
+            --set=ingest_operation_id="${join_scenario[ingest_operation_id]}" \
+            --set=accepted_operation_id="${join_scenario[accepted_join_operation_id]}" \
+            --set=rejected_operation_id="${join_scenario[rejected_operation_id]}" <<'SQL' | tr -d '[:space:]'
+SELECT concat_ws('|',
+    (SELECT count(*) FROM apolysis_gateway.runs
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND state='incomplete' AND finalization_deadline_unix_ms IS NULL
+        AND state_changed_at_unix_ms=:'decision_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.source_streams
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND revoked_at_unix_ms IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.leases
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND revoked_at_unix_ms IS NULL
+        AND expires_at_unix_ms>:'decision_now_unix_ms'::bigint),
+    (SELECT count(*) FROM (
+        SELECT max(expires_at_unix_ms)=:'decision_now_unix_ms'::bigint AS valid
+          FROM apolysis_gateway.leases
+         WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+           AND revoked_at_unix_ms IS NULL
+    ) AS boundary WHERE valid),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'
+        AND authorization_kind='grant'),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'
+        AND authorization_kind='grant'
+        AND expires_at_unix_ms>:'decision_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'
+        AND authorization_kind='grant'
+        AND authorization_state='consumed' AND consumed_at_unix_ms IS NOT NULL),
+    (SELECT count(*) FROM apolysis_gateway.join_authorizations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'
+        AND authorization_kind='grant'
+        AND authorization_state='pending' AND consumed_at_unix_ms IS NULL
+        AND expires_at_unix_ms>:'decision_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.source_streams
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_id=:'join_source_id'),
+    (SELECT count(*) FROM apolysis_gateway.leases AS lease
+      JOIN apolysis_gateway.source_streams AS stream
+        ON stream.organization_id=lease.organization_id
+       AND stream.run_id=lease.run_id
+       AND stream.source_registration_id=lease.source_registration_id
+       AND stream.source_stream_id=lease.source_stream_id
+      WHERE lease.organization_id=:'organization_id' AND lease.run_id=:'run_id'
+        AND stream.source_id=:'join_source_id'),
+    (SELECT count(*) FROM apolysis_gateway.source_stream_capabilities AS capability
+      JOIN apolysis_gateway.source_streams AS stream
+        ON stream.organization_id=capability.organization_id
+       AND stream.run_id=capability.run_id
+       AND stream.source_registration_id=capability.source_registration_id
+       AND stream.source_stream_id=capability.source_stream_id
+      WHERE stream.organization_id=:'organization_id' AND stream.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.lease_operations AS operation
+      JOIN apolysis_gateway.leases AS lease
+        ON lease.organization_id=operation.organization_id
+       AND lease.lease_digest=operation.lease_digest
+      WHERE lease.organization_id=:'organization_id' AND lease.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.operation_replays AS replay
+      JOIN apolysis_gateway.gateway_operations AS operation
+        ON operation.organization_id=replay.organization_id
+       AND operation.operation_id=replay.operation_id
+      WHERE operation.organization_id=:'organization_id'
+        AND operation.run_id=:'run_id'
+        AND replay.encryption_algorithm='aes-256-gcm'
+        AND octet_length(replay.nonce)=12
+        AND octet_length(replay.authentication_tag)=16
+        AND octet_length(replay.outcome_ciphertext)>0),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id=:'accepted_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id=:'rejected_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id=:'open_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id=:'ingest_operation_id'),
+    (SELECT count(*) FROM apolysis_gateway.gateway_operations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND client_operation_id NOT IN (
+            :'open_operation_id',
+            :'ingest_operation_id',
+            :'accepted_operation_id',
+            :'rejected_operation_id'
+        )),
+    (SELECT count(*) FROM apolysis_gateway.finalization_declarations
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.finalization_terminal_positions
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.finalization_outcome_claims
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.runtime_bindings
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.active_runtime_identities
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.evidence_events
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND source_event_id=:'original_event_id'),
+    (SELECT count(*) FROM apolysis_gateway.evidence_events
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.projection_outbox AS outbox
+      JOIN apolysis_gateway.record_items AS record
+        ON record.organization_id=outbox.organization_id
+       AND record.ingest_sequence=outbox.ingest_sequence
+      WHERE record.organization_id=:'organization_id' AND record.run_id=:'run_id'),
+    (SELECT count(*) FROM apolysis_gateway.record_items AS record
+      LEFT JOIN apolysis_gateway.projection_outbox AS outbox
+        ON outbox.organization_id=record.organization_id
+       AND outbox.ingest_sequence=record.ingest_sequence
+      WHERE record.organization_id=:'organization_id'
+        AND record.run_id=:'run_id' AND outbox.ingest_sequence IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.projection_outbox AS outbox
+      LEFT JOIN apolysis_gateway.record_items AS record
+        ON record.organization_id=outbox.organization_id
+       AND record.ingest_sequence=outbox.ingest_sequence
+      WHERE outbox.organization_id=:'organization_id'
+        AND record.ingest_sequence IS NULL),
+    (SELECT count(*) FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id'
+        AND fact_kind='run_state_changed'
+        AND fact_json #>> '{fact,fact,from}'='active'
+        AND fact_json #>> '{fact,fact,to}'='incomplete'
+        AND (fact_json #>> '{fact,fact,recorded_at_unix_ms}')::bigint=
+            :'decision_now_unix_ms'::bigint),
+    (SELECT count(*) FROM apolysis_gateway.organization_sequences
+      WHERE organization_id=:'organization_id'
+        AND next_ingest_sequence=(
+            SELECT count(*) + 1 FROM apolysis_gateway.record_items
+             WHERE organization_id=:'organization_id')),
+    (SELECT count(*) FROM (
+        SELECT min(ingest_sequence)=1
+               AND max(ingest_sequence)=count(*)
+               AND bool_and(outbox_ingest_sequence=ingest_sequence) AS valid
+          FROM apolysis_gateway.record_items
+         WHERE organization_id=:'organization_id'
+    ) AS contiguous WHERE valid),
+    (SELECT array_to_string(array_agg(fact_kind ORDER BY ingest_sequence), ',')
+       FROM apolysis_gateway.record_items
+      WHERE organization_id=:'organization_id' AND run_id=:'run_id')
+);
+SQL
+)"
+    local expected_vector=""
+    expected_vector="1|2|2|2|0|1|2|2|2|1|1|1|1|8|5|3|3|3|1|0|1|1|0"
+    expected_vector+="|0|0|0|0|0|1|1|6|6|0|0|1|1|1"
+    expected_vector+="|run_opened,run_state_changed,source_registered,evidence_accepted"
+    expected_vector+=",source_registered,run_state_changed"
+    if [[ "$database_vector" != "$expected_vector" ]]; then
+        printf 'error: %s join last-lease database oracle mismatch: %s\n' \
+            "${join_scenario[prefix]}" "$database_vector" >&2
+        exit 1
+    fi
+}
+
+run_join_last_lease_expiry_scenario() {
+    local boundary_mode="$1"
+    local case_prefix="$2"
+    local -A join_case=(
+        [prefix]="$case_prefix"
+        [organization_id]="$deadline_finalization_organization_id"
+        [registration_id]="$deadline_finalization_registration_id"
+        [principal_id]="$deadline_finalization_principal_id"
+        [source_id]="$deadline_finalization_source_id"
+        [authority_id]="$deadline_finalization_authority_id"
+        [certificate]="$deadline_finalization_client_cert"
+        [key]="$deadline_finalization_client_key"
+    )
+    prepare_deadline_case join_case
+
+    local grant_expires_at_unix_ms="$((join_case[lease_expires_at_unix_ms] + 300000))"
+    if ((grant_expires_at_unix_ms >= expires_at_unix_ms)); then
+        printf 'error: join last-lease grant escaped its authority window\n' >&2
+        exit 1
+    fi
+    prepare_join_boundary_requests \
+        join_case "$grant_expires_at_unix_ms" "$grant_expires_at_unix_ms"
+
+    local last_lease_expiry_unix_ms="${join_case[lease_expires_at_unix_ms]}"
+    if ((join_case[accepted_join_lease_expires_at_unix_ms] > \
+        last_lease_expiry_unix_ms)); then
+        last_lease_expiry_unix_ms="${join_case[accepted_join_lease_expires_at_unix_ms]}"
+    fi
+    if ((last_lease_expiry_unix_ms >= grant_expires_at_unix_ms)); then
+        printf 'error: join authorization did not outlive the last lease\n' >&2
+        exit 1
+    fi
+    join_case[admission_now_unix_ms]="$((last_lease_expiry_unix_ms - 1))"
+    join_case[decision_now_unix_ms]="$last_lease_expiry_unix_ms"
+
+    case "$boundary_mode" in
+        transaction-wait)
+            run_join_boundary_request \
+                join_case "$boundary_mode" 409 invalid_lifecycle_transition
+            assert_join_boundary_audit_oracle join_case 2 0 3
+            ;;
+        internal-retry)
+            run_join_boundary_request \
+                join_case "$boundary_mode" 409 invalid_lifecycle_transition
+            assert_join_boundary_audit_oracle join_case 1 0 2
+            ;;
+        *)
+            printf 'error: unsupported join last-lease mode: %s\n' \
+                "$boundary_mode" >&2
+            exit 1
+            ;;
+    esac
+    assert_join_last_lease_database_oracle join_case
+    printf 'Join last-lease-expiry %s qualification passed.\n' "$boundary_mode"
+}
+
 assert_join_deadline_database_oracle() {
     local case_variable="$1"
     local -n join_scenario="$case_variable"
@@ -4246,97 +5097,8 @@ SQL
 run_join_deadline_boundary_request() {
     local case_variable="$1"
     local boundary_mode="$2"
-    local -n join_scenario="$case_variable"
-    local artifact_prefix="${join_scenario[prefix]}-${boundary_mode}"
-
-    case "$boundary_mode" in
-        transaction-wait)
-            local -A timed_race=(
-                [operation]="open_run"
-                [route]="open-run"
-                [organization_id]="${join_scenario[organization_id]}"
-                [left_request]="${join_scenario[accepted_join_request]}"
-                [left_certificate]="$deadline_join_client_cert"
-                [left_key]="$deadline_join_client_key"
-                [right_request]="${join_scenario[novel_join_request]}"
-                [right_certificate]="$deadline_join_client_cert"
-                [right_key]="$deadline_join_client_key"
-                [artifact_prefix]="$artifact_prefix"
-                [admission_now_unix_ms]="${join_scenario[admission_now_unix_ms]}"
-                [transaction_now_unix_ms]="${join_scenario[decision_now_unix_ms]}"
-                [preexisting_operation_count]="1"
-            )
-            run_timed_pre_operation_race timed_race
-            race_expected_lease_file_by_response["${timed_race[left_response]}"]="${join_scenario[join_lease_file]}"
-            if [[ "${timed_race[left_status]}" != "200" ]] || \
-                ! cmp -s "${join_scenario[baseline_replay_response]}" \
-                    "${timed_race[left_response]}"; then
-                printf 'error: %s exact join replay changed across transaction wait\n' \
-                    "${join_scenario[prefix]}" >&2
-                exit 1
-            fi
-            if [[ "${timed_race[right_status]}" != "409" ]] || \
-                ! jq -e \
-                    '.code == "invalid_lifecycle_transition"
-                     and .retryable == false
-                     and .retry_after_ms == null' \
-                    "${timed_race[right_response]}" >/dev/null; then
-                printf 'error: %s novel join crossed the deadline wait\n' \
-                    "${join_scenario[prefix]}" >&2
-                exit 1
-            fi
-            ;;
-        internal-retry)
-            install_gateway_operation_retry_fault \
-                "${join_scenario[organization_id]}" \
-                "${join_scenario[rejected_operation_id]}" open_run 40001
-            local -A retry_request=(
-                [operation]="open_run"
-                [route]="open-run"
-                [organization_id]="${join_scenario[organization_id]}"
-                [request]="${join_scenario[novel_join_request]}"
-                [certificate]="$deadline_join_client_cert"
-                [key]="$deadline_join_client_key"
-                [artifact_prefix]="$artifact_prefix"
-                [admission_now_unix_ms]="${join_scenario[admission_now_unix_ms]}"
-                [transaction_now_unix_ms]="${join_scenario[decision_now_unix_ms]}"
-                [first_transaction_now_unix_ms]="${join_scenario[admission_now_unix_ms]}"
-                [preexisting_operation_count]="0"
-            )
-            run_timed_pre_operation_request retry_request
-            assert_and_remove_gateway_operation_retry_fault 1 40001
-            if [[ "${retry_request[status]}" != "409" ]] || \
-                ! jq -e \
-                    '.code == "invalid_lifecycle_transition"
-                     and .retryable == false
-                     and .retry_after_ms == null' \
-                    "${retry_request[response]}" >/dev/null; then
-                printf 'error: %s novel join crossed the deadline retry\n' \
-                    "${join_scenario[prefix]}" >&2
-                exit 1
-            fi
-            local -A exact_control=(
-                [route]="open-run"
-                [request]="${join_scenario[accepted_join_request]}"
-                [certificate]="$deadline_join_client_cert"
-                [key]="$deadline_join_client_key"
-                [artifact_prefix]="${artifact_prefix}.exact-control"
-            )
-            send_deadline_setup_request exact_control
-            race_expected_lease_file_by_response["${exact_control[response]}"]="${join_scenario[join_lease_file]}"
-            if [[ "${exact_control[status]}" != "200" ]] || \
-                ! cmp -s "${join_scenario[baseline_replay_response]}" \
-                    "${exact_control[response]}"; then
-                printf 'error: %s exact join replay changed across internal retry\n' \
-                    "${join_scenario[prefix]}" >&2
-                exit 1
-            fi
-            ;;
-        *)
-            printf 'error: unsupported join deadline mode: %s\n' "$boundary_mode" >&2
-            exit 1
-            ;;
-    esac
+    run_join_boundary_request \
+        "$case_variable" "$boundary_mode" 409 invalid_lifecycle_transition
 }
 
 run_join_deadline_scenario() {
@@ -4387,73 +5149,10 @@ run_join_deadline_scenario() {
         exit 1
     fi
 
-    local accepted_proof="${secret_directory}/${case_prefix}.accepted.proof"
-    local pending_proof="${secret_directory}/${case_prefix}.pending.proof"
-    register_deadline_join_grant \
-        "${join_case[run_id]}" "$accepted_proof" "$grant_expires_at_unix_ms"
-    register_deadline_join_grant \
-        "${join_case[run_id]}" "$pending_proof" "$grant_expires_at_unix_ms"
-
-    local accepted_unsigned="${secret_directory}/${case_prefix}.accepted.unsigned.json"
-    local accepted_signed="${secret_directory}/${case_prefix}.accepted.json"
-    local accepted_operation_id="operation_${case_prefix}_accepted_${random_suffix}"
-    build_deadline_join_request \
-        join_case "$accepted_operation_id" "$accepted_proof" \
-        "$grant_expires_at_unix_ms" "$accepted_unsigned" "$accepted_signed"
-    local -A accepted_request=(
-        [route]="open-run"
-        [request]="$accepted_signed"
-        [certificate]="$deadline_join_client_cert"
-        [key]="$deadline_join_client_key"
-        [artifact_prefix]="${case_prefix}.accepted"
-    )
-    send_deadline_setup_request accepted_request
-    if [[ "${accepted_request[status]}" != "200" ]] || \
-        ! jq -e '.outcome == "joined"' "${accepted_request[response]}" >/dev/null; then
-        printf 'error: %s could not establish accepted join baseline\n' "$case_prefix" >&2
-        exit 1
-    fi
-    join_case[accepted_join_operation_id]="$accepted_operation_id"
-    join_case[accepted_join_request]="$accepted_signed"
-    join_case[join_stream_id]="$(jq -er '.source_stream_id' "${accepted_request[response]}")"
-    local join_lease=""
-    join_lease="$(jq -er '.lease.lease_id' "${accepted_request[response]}")"
-    join_case[join_lease_file]="${secret_directory}/${case_prefix}.joined.lease"
-    write_private_race_secret "$join_lease" "${join_case[join_lease_file]}"
-    race_lease_files+=("${join_case[join_lease_file]}")
-    race_secret_values+=("$join_lease")
-    race_expected_lease_file_by_response["${accepted_request[response]}"]="${join_case[join_lease_file]}"
-
-    local -A baseline_replay=(
-        [route]="open-run"
-        [request]="$accepted_signed"
-        [certificate]="$deadline_join_client_cert"
-        [key]="$deadline_join_client_key"
-        [artifact_prefix]="${case_prefix}.baseline-replay"
-    )
-    send_deadline_setup_request baseline_replay
-    join_case[baseline_replay_response]="${baseline_replay[response]}"
-    race_expected_lease_file_by_response["${baseline_replay[response]}"]="${join_case[join_lease_file]}"
-    if [[ "${baseline_replay[status]}" != "200" ]] || \
-        ! jq -e \
-            --arg stream_id "${join_case[join_stream_id]}" \
-            --rawfile lease_id "${join_case[join_lease_file]}" \
-            '.outcome == "idempotent_retry"
-             and .source_stream_id == $stream_id
-             and .lease.lease_id == $lease_id' \
-            "${baseline_replay[response]}" >/dev/null; then
-        printf 'error: %s exact join baseline replay was unstable\n' "$case_prefix" >&2
-        exit 1
-    fi
-
-    local novel_unsigned="${secret_directory}/${case_prefix}.novel.unsigned.json"
-    local novel_signed="${secret_directory}/${case_prefix}.novel.json"
-    local novel_operation_id="operation_${case_prefix}_novel_${random_suffix}"
-    build_deadline_join_request \
-        join_case "$novel_operation_id" "$pending_proof" \
-        "$grant_expires_at_unix_ms" "$novel_unsigned" "$novel_signed"
-    join_case[novel_join_request]="$novel_signed"
-    join_case[rejected_operation_id]="$novel_operation_id"
+    prepare_join_boundary_requests \
+        join_case "$grant_expires_at_unix_ms" "$grant_expires_at_unix_ms"
+    join_case[join_stream_id]="${join_case[accepted_join_stream_id]}"
+    join_case[join_lease_file]="${join_case[accepted_join_lease_file]}"
 
     run_join_deadline_boundary_request join_case "$boundary_mode"
     assert_join_deadline_database_oracle join_case
@@ -5122,6 +5821,14 @@ SQL
 
 run_mixed_lifecycle_deadline_races() {
     printf 'Qualifying the bounded mixed lifecycle/deadline matrix...\n'
+    run_join_grant_expiry_scenario \
+        transaction-wait deadline-join-grant-expiry-wait
+    run_join_grant_expiry_scenario \
+        internal-retry deadline-join-grant-expiry-retry
+    run_join_last_lease_expiry_scenario \
+        transaction-wait deadline-join-last-lease-wait
+    run_join_last_lease_expiry_scenario \
+        internal-retry deadline-join-last-lease-retry
     run_finalization_deadline_scenario \
         transaction-wait deadline-finalization-wait
     run_lease_expiry_scenario \
@@ -5144,7 +5851,7 @@ run_mixed_lifecycle_deadline_races() {
         internal-retry deadline-finish-retry
     run_finish_lease_scenario \
         sqlstate-40p01-retry deadline-finish-sqlstate-40p01-retry
-    printf 'Mixed lifecycle/deadline matrix passed (five transaction waits, five one-shot SQLSTATE 40001 retries, and one focused finish SQLSTATE 40P01 retry across finalization deadline and last-lease expiry).\n'
+    printf 'Mixed lifecycle/deadline matrix passed (seven transaction waits, seven one-shot SQLSTATE 40001 retries, and one focused finish SQLSTATE 40P01 retry across join-grant expiry, finalization deadline, and last-lease expiry).\n'
 }
 
 cleanup() {
