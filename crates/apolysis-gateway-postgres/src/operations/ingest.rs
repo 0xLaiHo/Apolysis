@@ -7,7 +7,9 @@ use apolysis_contracts::{
     ContractErrorCode, EnvelopeAck, GatewayOperation, IngestAck, IngestDisposition, IngestRequest,
     PrivacyCapability, RunState, SequenceGap, SourceManifest, TrustProfile,
 };
-use apolysis_gateway::{canonical_source_envelope_digest, lease_id_digest, LedgerOutcome};
+use apolysis_gateway::{
+    canonical_source_envelope_digest, lease_id_digest, GatewayClock, LedgerOutcome,
+};
 use sqlx::{Postgres, Row, Transaction};
 
 use crate::{
@@ -22,7 +24,8 @@ impl PostgresGatewayRepository {
         transaction: &mut Transaction<'_, Postgres>,
         context: &AuthenticatedSourceContext,
         request: &IngestRequest,
-        process_now_unix_ms: u64,
+        admitted_at_unix_ms: u64,
+        clock: &dyn GatewayClock,
     ) -> TxResult<LedgerOutcome> {
         // PostgreSQL is authoritative whenever an ingest can bind external
         // evidence. A skewed process clock must never seal that run early or
@@ -32,7 +35,7 @@ impl PostgresGatewayRepository {
             .envelopes()
             .iter()
             .any(|envelope| envelope.object_ref().is_some());
-        let now_unix_ms = if includes_object_reference {
+        let replay_now_unix_ms = if includes_object_reference {
             sql_u64(
                 sqlx::query_scalar::<_, i64>(
                     "SELECT apolysis_gateway.evidence_object_db_now_unix_ms()",
@@ -43,7 +46,7 @@ impl PostgresGatewayRepository {
             )
             .map_err(TxFailure::rollback)?
         } else {
-            process_now_unix_ms
+            admitted_at_unix_ms
         };
         // Establish the shared ancestor lock before operation, run, lease,
         // policy, and object locks when this transaction can bind an object.
@@ -69,7 +72,7 @@ impl PostgresGatewayRepository {
                 transaction,
                 &identity,
                 request.request_digest(),
-                now_unix_ms,
+                replay_now_unix_ms,
             )
             .await?
         {
@@ -84,6 +87,30 @@ impl PostgresGatewayRepository {
             .await?;
         let lease = load_lease(transaction, context, request).await?;
         validate_lease(context, request, &lease)?;
+        // HTTP arrival and transaction begin are not lifecycle acceptance
+        // points. Re-read trusted time only after the operation, run, and lease
+        // locks are held so a lock wait or a restarted transaction cannot admit
+        // novel work using a stale pre-boundary timestamp.
+        let now_unix_ms = if includes_object_reference {
+            sql_u64(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT apolysis_gateway.evidence_object_db_now_unix_ms()",
+                )
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(|error| TxFailure::from_sqlx_at("ingest_refresh_database_time", error))?,
+            )
+            .map_err(TxFailure::rollback)?
+        } else {
+            let transaction_now_unix_ms = clock.transaction_now_unix_ms();
+            if transaction_now_unix_ms < admitted_at_unix_ms {
+                return Err(TxFailure::rollback(repository_failure()));
+            }
+            transaction_now_unix_ms
+        };
+        if now_unix_ms == 0 {
+            return Err(TxFailure::rollback(repository_failure()));
+        }
         let requested_lease_expired = now_unix_ms >= lease.expires_at_unix_ms;
         if self
             .reconcile_expired_run(transaction, context, request.run_id(), &run, now_unix_ms)

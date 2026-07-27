@@ -14,6 +14,7 @@ impl GatewayRepository for ExternalAdapter {
     fn execute<'a>(
         &'a self,
         command: LedgerCommand,
+        _clock: &'a dyn apolysis_gateway::GatewayClock,
         _ids: &'a dyn GatewayIdGenerator,
     ) -> RepositoryFuture<'a, Result<LedgerOutcome, GatewayFailure>> {
         let operation_name = match command.operation() {

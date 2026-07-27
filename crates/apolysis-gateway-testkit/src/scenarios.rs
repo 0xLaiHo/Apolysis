@@ -25,6 +25,44 @@ impl GatewayClock for FixedClock {
     }
 }
 
+#[derive(Clone, Copy)]
+struct AdvancingClock {
+    admission_unix_ms: u64,
+    transaction_unix_ms: u64,
+}
+
+impl AdvancingClock {
+    fn new(admission_unix_ms: u64, transaction_unix_ms: u64) -> Self {
+        Self {
+            admission_unix_ms,
+            transaction_unix_ms,
+        }
+    }
+}
+
+impl GatewayClock for AdvancingClock {
+    fn now_unix_ms(&self) -> u64 {
+        self.admission_unix_ms
+    }
+
+    fn transaction_now_unix_ms(&self) -> u64 {
+        self.transaction_unix_ms
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ReplayOnlyClock(u64);
+
+impl GatewayClock for ReplayOnlyClock {
+    fn now_unix_ms(&self) -> u64 {
+        self.0
+    }
+
+    fn transaction_now_unix_ms(&self) -> u64 {
+        panic!("exact operation replay must not sample transaction time")
+    }
+}
+
 struct FixedIds {
     values: Mutex<Vec<String>>,
 }
@@ -2166,6 +2204,280 @@ pub async fn finish_run_deadline_is_frozen_and_expires_to_incomplete<
         replayed.finalization_deadline_unix_ms(),
         Some(accepted_deadline)
     );
+}
+
+pub async fn ingest_rechecks_finalization_deadline_after_admission<H: GatewayConformanceHarness>() {
+    let harness = H::start().await.expect("start isolated Gateway harness");
+    let repository = harness.repository();
+    let admitted_at_unix_ms = 1_783_891_200_000;
+    let deadline_unix_ms = admitted_at_unix_ms + 60_000;
+    let gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admitted_at_unix_ms),
+        FixedIds::new(&[
+            "run_crossing_deadline_01",
+            "stream_crossing_deadline_01",
+            "lease_c123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let context = source_context();
+    let opened = gateway
+        .open_run(&context, create_request())
+        .await
+        .expect("open run");
+    let original_ingest = ingest_request(
+        opened.run_id().as_str(),
+        opened.lease().lease_id(),
+        opened.source_stream_id(),
+    );
+    let original_acknowledgement = gateway
+        .ingest(&context, original_ingest.clone())
+        .await
+        .expect("commit the replay baseline with a source gap");
+    let mut finish_wire = serde_json::to_value(finish_run_request(
+        opened.run_id().as_str(),
+        opened.lease().lease_id(),
+        opened.source_stream_id(),
+        "operation_finish_crossing_deadline_01",
+    ))
+    .expect("serialize crossing-deadline finish request");
+    finish_wire["requested_finalization_deadline_unix_ms"] = serde_json::json!(deadline_unix_ms);
+    let finishing = gateway
+        .finish_run(&context, resign_finish_wire(finish_wire))
+        .await
+        .expect("enter the bounded finishing state");
+    assert_eq!(
+        finishing.finalization_deadline_unix_ms(),
+        Some(deadline_unix_ms)
+    );
+
+    let before_replay = harness
+        .snapshot()
+        .await
+        .expect("snapshot before exact replay at finalization deadline");
+    let replay_gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        ReplayOnlyClock(deadline_unix_ms),
+        FixedIds::new(&[]),
+    );
+    let replayed = replay_gateway
+        .ingest(&context, original_ingest)
+        .await
+        .expect("an exact replay remains stable at the finalization deadline");
+    assert_eq!(
+        serde_json::to_value(replayed).expect("serialize replayed acknowledgement"),
+        serde_json::to_value(original_acknowledgement).expect("serialize original acknowledgement")
+    );
+    let before_rejection = harness
+        .snapshot()
+        .await
+        .expect("snapshot after exact replay at finalization deadline");
+    assert_eq!(before_rejection, before_replay);
+    let crossing_gateway = ExecutionEvidenceGateway::new(
+        repository,
+        AdvancingClock::new(deadline_unix_ms - 1, deadline_unix_ms),
+        FixedIds::new(&[]),
+    );
+    let error = crossing_gateway
+        .ingest(
+            &context,
+            gap_fill_request(
+                opened.run_id().as_str(),
+                opened.lease().lease_id(),
+                opened.source_stream_id(),
+            ),
+        )
+        .await
+        .expect_err("novel ingest cannot commit after its transaction crosses the deadline");
+    assert_eq!(error.code(), ContractErrorCode::InvalidLifecycleTransition);
+
+    let after_rejection = harness
+        .snapshot()
+        .await
+        .expect("snapshot after crossing-deadline rejection");
+    assert_eq!(
+        after_rejection.evidence_event_count(),
+        before_rejection.evidence_event_count()
+    );
+    assert_eq!(
+        after_rejection.operation_count(),
+        before_rejection.operation_count()
+    );
+    assert_eq!(
+        after_rejection.replay_count(),
+        before_rejection.replay_count()
+    );
+    assert_eq!(
+        after_rejection.record_item_count(),
+        before_rejection.record_item_count() + 1
+    );
+    assert_eq!(
+        after_rejection.projection_outbox_count(),
+        before_rejection.projection_outbox_count() + 1
+    );
+    assert_eq!(
+        after_rejection.incomplete_record_item_count(),
+        before_rejection.incomplete_record_item_count() + 1
+    );
+    assert_eq!(
+        after_rejection.incomplete_projection_outbox_count(),
+        before_rejection.incomplete_projection_outbox_count() + 1
+    );
+}
+
+pub async fn ingest_rechecks_last_lease_expiry_after_admission<H: GatewayConformanceHarness>() {
+    let harness = H::start().await.expect("start isolated Gateway harness");
+    let repository = harness.repository();
+    let admitted_at_unix_ms = 1_783_891_200_000;
+    let gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admitted_at_unix_ms),
+        FixedIds::new(&[
+            "run_crossing_lease_expiry_01",
+            "stream_crossing_lease_expiry_01",
+            "lease_d123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let context = source_context();
+    let opened = gateway
+        .open_run(&context, create_request())
+        .await
+        .expect("open run");
+    let lease_expiry_unix_ms = opened.lease().expires_at_unix_ms();
+    let original_ingest = ingest_request(
+        opened.run_id().as_str(),
+        opened.lease().lease_id(),
+        opened.source_stream_id(),
+    );
+    let original_acknowledgement = gateway
+        .ingest(&context, original_ingest.clone())
+        .await
+        .expect("commit the replay baseline with a source gap");
+    let before_replay = harness
+        .snapshot()
+        .await
+        .expect("snapshot before exact replay at last-lease expiry");
+
+    let replay_gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        ReplayOnlyClock(lease_expiry_unix_ms),
+        FixedIds::new(&[]),
+    );
+    let replayed = replay_gateway
+        .ingest(&context, original_ingest)
+        .await
+        .expect("an exact replay remains stable at last-lease expiry");
+    assert_eq!(
+        serde_json::to_value(replayed).expect("serialize replayed acknowledgement"),
+        serde_json::to_value(original_acknowledgement).expect("serialize original acknowledgement")
+    );
+
+    let before_rejection = harness
+        .snapshot()
+        .await
+        .expect("snapshot before crossing-lease rejection");
+    assert_eq!(before_rejection, before_replay);
+    let crossing_gateway = ExecutionEvidenceGateway::new(
+        repository,
+        AdvancingClock::new(lease_expiry_unix_ms - 1, lease_expiry_unix_ms),
+        FixedIds::new(&[]),
+    );
+    let error = crossing_gateway
+        .ingest(
+            &context,
+            gap_fill_request(
+                opened.run_id().as_str(),
+                opened.lease().lease_id(),
+                opened.source_stream_id(),
+            ),
+        )
+        .await
+        .expect_err("novel ingest cannot commit after its transaction crosses last-lease expiry");
+    assert_eq!(error.code(), ContractErrorCode::LeaseExpired);
+
+    let after_rejection = harness
+        .snapshot()
+        .await
+        .expect("snapshot after crossing-lease rejection");
+    assert_eq!(
+        after_rejection.evidence_event_count(),
+        before_rejection.evidence_event_count()
+    );
+    assert_eq!(
+        after_rejection.operation_count(),
+        before_rejection.operation_count()
+    );
+    assert_eq!(
+        after_rejection.replay_count(),
+        before_rejection.replay_count()
+    );
+    assert_eq!(
+        after_rejection.record_item_count(),
+        before_rejection.record_item_count() + 1
+    );
+    assert_eq!(
+        after_rejection.projection_outbox_count(),
+        before_rejection.projection_outbox_count() + 1
+    );
+    assert_eq!(
+        after_rejection.incomplete_record_item_count(),
+        before_rejection.incomplete_record_item_count() + 1
+    );
+    assert_eq!(
+        after_rejection.incomplete_projection_outbox_count(),
+        before_rejection.incomplete_projection_outbox_count() + 1
+    );
+}
+
+pub async fn ingest_rejects_invalid_transaction_time_without_partial_state<
+    H: GatewayConformanceHarness,
+>() {
+    let harness = H::start().await.expect("start isolated Gateway harness");
+    let repository = harness.repository();
+    let admitted_at_unix_ms = 1_783_891_200_000;
+    let gateway = ExecutionEvidenceGateway::new(
+        repository.clone(),
+        FixedClock(admitted_at_unix_ms),
+        FixedIds::new(&[
+            "run_invalid_transaction_time_01",
+            "stream_invalid_transaction_time_01",
+            "lease_e123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ]),
+    );
+    let context = source_context();
+    let opened = gateway
+        .open_run(&context, create_request())
+        .await
+        .expect("open run");
+    let request = ingest_request(
+        opened.run_id().as_str(),
+        opened.lease().lease_id(),
+        opened.source_stream_id(),
+    );
+    let before_rejection = harness
+        .snapshot()
+        .await
+        .expect("snapshot before invalid transaction time");
+
+    for transaction_unix_ms in [0, admitted_at_unix_ms - 1] {
+        let invalid_time_gateway = ExecutionEvidenceGateway::new(
+            repository.clone(),
+            AdvancingClock::new(admitted_at_unix_ms, transaction_unix_ms),
+            FixedIds::new(&[]),
+        );
+        let error = invalid_time_gateway
+            .ingest(&context, request.clone())
+            .await
+            .expect_err("invalid transaction time must fail closed");
+        assert_eq!(error.code(), ContractErrorCode::Backpressure);
+        assert_eq!(
+            harness
+                .snapshot()
+                .await
+                .expect("snapshot after invalid transaction time"),
+            before_rejection
+        );
+    }
 }
 
 pub async fn finish_run_rejects_an_elapsed_requested_deadline_without_extending_it<

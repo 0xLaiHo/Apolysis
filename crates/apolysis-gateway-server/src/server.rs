@@ -86,6 +86,8 @@ pub async fn serve_with_pre_operation_barrier(
     marker: PathBuf,
     release: PathBuf,
     fixed_now_unix_ms: Option<u64>,
+    transaction_now_unix_ms: Option<u64>,
+    first_transaction_now_unix_ms: Option<u64>,
 ) -> Result<(), GatewayServerError> {
     require_qualification_listener(config.listen())?;
     let barrier = QualificationBarrier::pre_operation(operation, marker, release)?;
@@ -94,16 +96,36 @@ pub async fn serve_with_pre_operation_barrier(
             "Gateway qualification control files must differ from the ready file",
         ));
     }
-    let clock = match fixed_now_unix_ms {
-        Some(now_unix_ms) if (1..=MAX_IJSON_INTEGER).contains(&now_unix_ms) => {
+    let clock = match (
+        fixed_now_unix_ms,
+        transaction_now_unix_ms,
+        first_transaction_now_unix_ms,
+    ) {
+        (Some(now_unix_ms), None, None) if (1..=MAX_IJSON_INTEGER).contains(&now_unix_ms) => {
             GatewayServerClock::Fixed(now_unix_ms)
         }
-        Some(_) => {
+        (
+            Some(admission_now_unix_ms),
+            Some(transaction_now_unix_ms),
+            first_transaction_now_unix_ms,
+        ) if operation == QualificationOperation::Ingest
+            && (1..=MAX_IJSON_INTEGER).contains(&admission_now_unix_ms)
+            && transaction_now_unix_ms > admission_now_unix_ms
+            && transaction_now_unix_ms <= MAX_IJSON_INTEGER
+            && first_transaction_now_unix_ms.is_none_or(|first| first == admission_now_unix_ms) =>
+        {
+            GatewayServerClock::qualification(
+                admission_now_unix_ms,
+                transaction_now_unix_ms,
+                first_transaction_now_unix_ms,
+            )
+        }
+        (Some(_), _, _) | (None, Some(_), _) | (None, None, Some(_)) => {
             return Err(GatewayServerError::configuration(
                 "Gateway qualification time is invalid",
             ))
         }
-        None => GatewayServerClock::System,
+        (None, None, None) => GatewayServerClock::System,
     };
     serve_inner(
         config,

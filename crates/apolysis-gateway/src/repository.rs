@@ -7,7 +7,7 @@ use apolysis_contracts::{
     FinishRunResponse, IngestAck, IngestRequest, OpenRunRequest, OpenRunResponse,
 };
 
-use crate::{GatewayFailure, GatewayIdGenerator};
+use crate::{GatewayClock, GatewayFailure, GatewayIdGenerator};
 
 pub type RepositoryFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -192,6 +192,7 @@ pub trait GatewayRepository: Send + Sync {
     fn execute<'a>(
         &'a self,
         command: LedgerCommand,
+        clock: &'a dyn GatewayClock,
         ids: &'a dyn GatewayIdGenerator,
     ) -> RepositoryFuture<'a, Result<LedgerOutcome, GatewayFailure>>;
 }

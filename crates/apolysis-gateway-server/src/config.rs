@@ -198,6 +198,8 @@ mod tests {
             ("--qualification-phase", "pre_operation"),
             ("--qualification-release", "/run/apolysis/release"),
             ("--qualification-now-unix-ms", "123456789"),
+            ("--qualification-transaction-now-unix-ms", "123456790"),
+            ("--qualification-first-transaction-now-unix-ms", "123456789"),
         ] {
             let mut arguments = [
                 "gateway",

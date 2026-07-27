@@ -5,6 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Server clock injected at the application boundary.
 pub trait GatewayClock: Send + Sync {
     fn now_unix_ms(&self) -> u64;
+
+    /// Fresh time sampled at a repository transaction's lifecycle decision
+    /// point. Clocks that do not distinguish admission from transaction time
+    /// retain the production default.
+    fn transaction_now_unix_ms(&self) -> u64 {
+        self.now_unix_ms()
+    }
 }
 
 /// Production wall clock. Persisted timestamps remain server-assigned facts.

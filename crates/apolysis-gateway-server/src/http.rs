@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(feature = "qualification")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use apolysis_contracts::{
@@ -48,11 +50,38 @@ const ALLOWED_REQUEST_HEADERS: [&str; 12] = [
 type GatewayApplication =
     ExecutionEvidenceGateway<PostgresGatewayRepository, GatewayServerClock, OsRandomIdGenerator>;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum GatewayServerClock {
     System,
     #[cfg(feature = "qualification")]
     Fixed(u64),
+    #[cfg(feature = "qualification")]
+    Qualification(Arc<QualificationClock>),
+}
+
+#[cfg(feature = "qualification")]
+#[derive(Debug)]
+pub(crate) struct QualificationClock {
+    admission_now_unix_ms: u64,
+    transaction_now_unix_ms: u64,
+    first_transaction_now_unix_ms: Option<u64>,
+    transaction_calls: AtomicUsize,
+}
+
+impl GatewayServerClock {
+    #[cfg(feature = "qualification")]
+    pub(crate) fn qualification(
+        admission_now_unix_ms: u64,
+        transaction_now_unix_ms: u64,
+        first_transaction_now_unix_ms: Option<u64>,
+    ) -> Self {
+        Self::Qualification(Arc::new(QualificationClock {
+            admission_now_unix_ms,
+            transaction_now_unix_ms,
+            first_transaction_now_unix_ms,
+            transaction_calls: AtomicUsize::new(0),
+        }))
+    }
 }
 
 impl GatewayClock for GatewayServerClock {
@@ -61,6 +90,24 @@ impl GatewayClock for GatewayServerClock {
             Self::System => SystemClock.now_unix_ms(),
             #[cfg(feature = "qualification")]
             Self::Fixed(now_unix_ms) => *now_unix_ms,
+            #[cfg(feature = "qualification")]
+            Self::Qualification(clock) => clock.admission_now_unix_ms,
+        }
+    }
+
+    fn transaction_now_unix_ms(&self) -> u64 {
+        match self {
+            #[cfg(feature = "qualification")]
+            Self::Qualification(clock) => {
+                if clock.transaction_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    clock
+                        .first_transaction_now_unix_ms
+                        .unwrap_or(clock.transaction_now_unix_ms)
+                } else {
+                    clock.transaction_now_unix_ms
+                }
+            }
+            _ => self.now_unix_ms(),
         }
     }
 }
@@ -103,7 +150,7 @@ impl GatewayHttpState {
         Self {
             gateway: Arc::new(ExecutionEvidenceGateway::new(
                 repository,
-                clock,
+                clock.clone(),
                 OsRandomIdGenerator,
             )),
             authority: Arc::new(authority),
@@ -588,6 +635,20 @@ mod tests {
         );
 
         assert!(contains_disallowed_headers(&headers));
+    }
+
+    #[cfg(feature = "qualification")]
+    #[test]
+    fn qualification_clock_separates_admission_wait_and_retry_times() {
+        let wait_clock = GatewayServerClock::qualification(100, 200, None);
+        assert_eq!(wait_clock.now_unix_ms(), 100);
+        assert_eq!(wait_clock.transaction_now_unix_ms(), 200);
+        assert_eq!(wait_clock.transaction_now_unix_ms(), 200);
+
+        let retry_clock = GatewayServerClock::qualification(100, 200, Some(100));
+        assert_eq!(retry_clock.now_unix_ms(), 100);
+        assert_eq!(retry_clock.transaction_now_unix_ms(), 100);
+        assert_eq!(retry_clock.transaction_now_unix_ms(), 200);
     }
 
     #[test]

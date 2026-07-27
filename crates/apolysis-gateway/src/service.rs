@@ -63,6 +63,7 @@ where
                     now_unix_ms,
                     lease_expires_at_unix_ms,
                 ),
+                &self.clock,
                 &self.ids,
             )
             .await?
@@ -89,6 +90,7 @@ where
             .repository
             .execute(
                 LedgerCommand::ingest(context.clone(), request, now_unix_ms),
+                &self.clock,
                 &self.ids,
             )
             .await?
@@ -137,6 +139,7 @@ where
             .repository
             .execute(
                 LedgerCommand::bind_runtime(context.clone(), request, now_unix_ms),
+                &self.clock,
                 &self.ids,
             )
             .await?
@@ -174,6 +177,7 @@ where
                     now_unix_ms,
                     finalization_deadline_unix_ms,
                 ),
+                &self.clock,
                 &self.ids,
             )
             .await?

@@ -101,13 +101,31 @@ and unchanged; the rejected novel operation creates no operation, replay, or
 novel evidence-event effect; the lifecycle transition and its outbox effect
 occur exactly once; and neither competing request can revive the run.
 
+The transaction-boundary extension makes request arrival and transaction begin
+explicitly non-authoritative for novel ingest admission. Each transaction
+attempt locks the operation identity, returns a retained matching exact replay
+when present, locks the run and lease, reads fresh transaction time, reconciles
+deadline or last-lease expiry, and only then admits novel evidence. An internal
+PostgreSQL serialization or deadlock retry repeats the full order and reads
+time again. Object-reference ingest uses PostgreSQL `clock_timestamp()` through
+the schema-owned database-time function; content-off ingest uses the trusted
+Gateway clock passed to the repository.
+
+When the fresh decision time crosses an accepted finalization deadline, the
+novel request returns `409 invalid_lifecycle_transition`; when it crosses the
+last lease's expiry, it returns `401 lease_expired`. Both errors are
+non-retryable. Neither path creates a novel operation, encrypted replay, or
+evidence event. The only durable rejection effect is exactly one transition to
+`incomplete` and its matching record/outbox pair across competing requests.
+Exact stored-operation replay remains prior to dynamic reconciliation and
+returns the unchanged result.
+
 This still does not close the W3–W6 transport gate. Transaction-time authority
 revalidation, credential-epoch binding in leases and replay records,
 policy/credential rotation, the broader network pre-commit/process-death fault
-matrix, requests admitted before a deadline or expiry whose transaction or
-retry crosses it, internal retry fault injection, broader join/bind and
-staggered multi-lease combinations, the remaining mixed lifecycle/retry
-matrix, load/capacity qualification, authorized
+matrix, commit-wall-clock boundary enforcement, replay-TTL expiry during an
+operation-lock wait, broader join/bind and staggered multi-lease combinations,
+the remaining mixed lifecycle/retry matrix, load/capacity qualification, authorized
 object-read resolution and downstream deletion propagation, production KMS and
 tenant RLS integration, replication/failover/recovery, HA, quotas, and rate
 limits remain required.
