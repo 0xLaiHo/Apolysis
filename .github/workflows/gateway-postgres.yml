@@ -60,7 +60,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run real mTLS server post-commit recovery gate
+      - name: Run real mTLS server late-precommit and post-commit recovery gate
         run: make test-gateway-https-crash-recovery
 
   gateway-multiprocess-lifecycle-races:

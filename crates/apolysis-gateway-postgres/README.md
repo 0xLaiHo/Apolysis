@@ -149,24 +149,42 @@ trace secret handling, or HTTP error-body secret handling.
 
 The Gateway-server crate adds a separate real direct-mTLS qualification gate on
 top of this repository. For `open_run`, `bind_runtime`, `ingest`, and
-`finish_run`, it drives both a novel success and its exact replay through the
-production HTTPS listener. A feature-gated qualification-only binary writes a
-static mode-`0600` marker after the PostgreSQL commit and complete response
+`finish_run`, it first drives an accepted novel request through the normal
+production HTTPS listener and stops at one bounded late-precommit seam. A
+qualification-owned ordinary, non-deferred `AFTER INSERT` trigger on
+`operation_replays` targets only that client operation. Because encrypted replay
+insertion is the repository's final write, the trigger advances a
+nontransactional sequence and then waits on an advisory lock. `pg_stat_activity`
+must show the runtime session blocked by the known holder while loopback `curl`
+remains response-silent. Separate inspection requires no externally visible
+target operation or replay. After external `SIGKILL`, loopback `curl` must
+report HTTP `000` with no header or body. Once every runtime database session
+has closed, the logical organization-scoped repository-state fingerprint must
+match its pre-request baseline and the separately committed mTLS
+admission-audit count must be exactly one above its baseline.
+
+The gate then reuses the same signed request for its existing post-commit
+column. A feature-gated qualification-only binary stops both the novel success
+and its exact replay after the PostgreSQL commit and complete response
 construction but before the handler returns the response to Axum, then waits
-for an external `SIGKILL`. Loopback `curl` must report HTTP `000` with no header
-or body. Database inspection requires one durable operation, one encrypted
-replay, and the route's expected ledger/outbox effects; the encrypted replay
-fingerprint must remain unchanged across the replay crash. A third normal
-production server then returns the exact result and continues the lifecycle:
+for external `SIGKILL`. Each killed loopback `curl` must report HTTP `000` with
+no header or body. Database inspection requires one durable operation, one
+encrypted replay, and the route's expected ledger/outbox effects; the encrypted
+replay fingerprint must remain unchanged across the replay crash. A third
+normal production server then returns the exact result and continues the
+lifecycle:
 
 ```bash
 make test-gateway-https-crash-recovery
 ```
 
-The qualification binary requires an ephemeral loopback listener and a private
-local marker. It is built only with the explicit `qualification` feature; the
-production CLI rejects its options, and no remote request, header, or body can
-arm the barrier.
+The late-precommit trigger, schema, and sequence are disposable qualification
+objects in the dedicated database, are removed after each route, and are not
+migrations or production control surfaces. The post-commit qualification binary
+requires an ephemeral loopback listener and a private local marker. It is built
+only with the explicit `qualification` feature; the production CLI rejects its
+options. Neither the production CLI nor remote input can install or configure
+the late-precommit objects or arm the response barrier.
 
 ## Sibling multiprocess lifecycle-race gate
 
@@ -264,17 +282,20 @@ completion of W3–W6. The dedicated gate qualifies graceful PostgreSQL restart,
 PostgreSQL SIGKILL/WAL redo, and application-process death on both sides of the
 commit boundary for one runtime-generated `open_run` shape. It does not qualify
 HTTPS Gateway-server recovery by itself. The sibling Gateway-server gate
-qualifies the bounded post-commit/pre-ack HTTPS seam for all four routes, but
-the additional two-process gate qualifies the bounded writer/lifecycle matrix
-described above. The split-clock transaction-boundary sibling qualifies
+qualifies one accepted-novel late-precommit rollback seam and the bounded
+post-commit/pre-ack novel/replay seam for all four routes, but the additional
+two-process gate qualifies the bounded writer/lifecycle matrix described above.
+The split-clock transaction-boundary sibling qualifies
 only the listed join/bind/ingest/finish deadline/expiry cases. The real
 PostgreSQL suite separately qualifies all four exact replay routes at replay
 TTL after an operation-row lock wait, but not that race through live HTTPS.
 These gates do not qualify the
-broader network pre-commit/process-death or remaining mixed lifecycle/retry
-matrix, commit-wall-clock enforcement, broader staggered multi-lease behavior,
-additional retry depths, sustained or capacity load, replication, failover,
-backup/restore, or high availability.
+remaining earlier or arbitrary network pre-commit/process-death timings,
+pre-commit exact-replay or rejection branches, completion of the final
+`INSERT` statement, entry into `COMMIT`, physical or WAL commit timing, the
+remaining mixed lifecycle/retry matrix, commit-wall-clock enforcement, broader
+staggered multi-lease behavior, additional retry depths, sustained or capacity
+load, replication, failover, backup/restore, or high availability.
 The evidence-object provider gate separately qualifies distinct
 SCRAM logins, schema-owner separation, migration-history ownership, served-path
 role allowlists, and denial of owner assumption, trigger disabling, credential

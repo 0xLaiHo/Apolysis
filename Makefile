@@ -73,8 +73,9 @@ test-gateway-postgres-crash-recovery:
 	./scripts/test-gateway-postgres-crash-recovery.sh
 
 # Opt-in real HTTPS/mTLS server crash qualification. This extends the transport
-# gate with deterministic process death after durable commit and before any
-# HTTP acknowledgement can be handed to the network stack.
+# gate with deterministic process death inside the ordinary AFTER INSERT trigger
+# reached by the final replay write, and after durable commit before any HTTP
+# acknowledgement can be handed to the network stack.
 test-gateway-https-crash-recovery:
 	./scripts/test-gateway-https-crash-recovery.sh
 
