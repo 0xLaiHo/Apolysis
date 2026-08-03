@@ -161,6 +161,8 @@ static __always_inline struct apolysis_kernel_event *reserve_event(unsigned int 
     __builtin_memset(event, 0, sizeof(*event));
     pid_tgid = bpf_get_current_pid_tgid();
     uid_gid = bpf_get_current_uid_gid();
+    event->abi_version = APOLYSIS_KERNEL_ABI_VERSION;
+    event->record_size = sizeof(*event);
     event->timestamp_ns = bpf_ktime_get_ns();
     event->cgroup_id = bpf_get_current_cgroup_id();
     event->pid = pid_tgid >> 32;

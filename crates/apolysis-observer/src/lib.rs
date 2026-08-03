@@ -30,7 +30,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use apolysis_core::{
-    actors, fields::PipeFields, resources, CanonicalEvent, EventSource, EventType, RawKernelEvent,
+    actors, fields::PipeFields, resources, CanonicalEvent, CollectorCapability,
+    CollectorCapabilityManifest, EventSource, EventType, OperationOutcome, RawKernelEvent,
 };
 use apolysis_kubernetes::KubernetesMetadata;
 use apolysis_store::{JsonlRotationPolicy, JsonlStore};
@@ -181,6 +182,148 @@ impl AyaLoaderPlan {
             .insert(1, TracepointAttach::new("sched", "sched_process_fork"));
         plan
     }
+}
+
+type TracepointId = (&'static str, &'static str);
+
+struct CapabilityDeclaration {
+    operation: &'static str,
+    sources: &'static [TracepointId],
+    required_source: Option<TracepointId>,
+    outcome: OperationOutcome,
+}
+
+const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
+    CapabilityDeclaration {
+        operation: "process_fork",
+        sources: &[("sched", "sched_process_fork")],
+        required_source: None,
+        outcome: OperationOutcome::Succeeded,
+    },
+    CapabilityDeclaration {
+        operation: "process_exec",
+        sources: &[
+            ("sched", "sched_process_exec"),
+            ("syscalls", "sys_enter_execve"),
+            ("syscalls", "sys_enter_execveat"),
+        ],
+        required_source: Some(("sched", "sched_process_exec")),
+        outcome: OperationOutcome::Succeeded,
+    },
+    CapabilityDeclaration {
+        operation: "process_exit",
+        sources: &[("sched", "sched_process_exit")],
+        required_source: None,
+        outcome: OperationOutcome::Unknown,
+    },
+    CapabilityDeclaration {
+        operation: "file_open",
+        sources: &[
+            ("syscalls", "sys_enter_openat"),
+            ("syscalls", "sys_enter_openat2"),
+        ],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "file_create",
+        sources: &[
+            ("syscalls", "sys_enter_openat"),
+            ("syscalls", "sys_enter_openat2"),
+            ("syscalls", "sys_enter_creat"),
+        ],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "file_truncate",
+        sources: &[
+            ("syscalls", "sys_enter_openat"),
+            ("syscalls", "sys_enter_openat2"),
+            ("syscalls", "sys_enter_truncate"),
+        ],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "file_unlink",
+        sources: &[("syscalls", "sys_enter_unlinkat")],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "file_rename",
+        sources: &[("syscalls", "sys_enter_renameat2")],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "network_connect",
+        sources: &[("syscalls", "sys_enter_connect")],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "credential_path_access",
+        sources: &[
+            ("syscalls", "sys_enter_openat"),
+            ("syscalls", "sys_enter_openat2"),
+        ],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+];
+
+/// Describe exactly what the configured AuditObserver can report for one Agent Run.
+pub fn audit_observer_capability_manifest(
+    agent_run_id: &str,
+    scope: &LiveScope,
+    loader_plan: &AyaLoaderPlan,
+) -> CollectorCapabilityManifest {
+    let capabilities = AUDIT_OBSERVER_CAPABILITIES
+        .iter()
+        .filter_map(|declaration| {
+            let is_attached = |category: &str, name: &str| {
+                loader_plan
+                    .tracepoints
+                    .iter()
+                    .any(|attach| attach.category == category && attach.name == name)
+            };
+            if declaration
+                .required_source
+                .is_some_and(|(category, name)| !is_attached(category, name))
+            {
+                return None;
+            }
+            let event_sources = declaration
+                .sources
+                .iter()
+                .filter(|(category, name)| is_attached(category, name))
+                .map(|(category, name)| format!("{category}/{name}"))
+                .collect::<Vec<_>>();
+            if event_sources.is_empty() {
+                None
+            } else {
+                Some(CollectorCapability::new(
+                    declaration.operation,
+                    event_sources,
+                    vec![declaration.outcome],
+                ))
+            }
+        })
+        .collect();
+    let observation_scope = match scope {
+        LiveScope::Cgroup(_) => "cgroup",
+        LiveScope::ProcessTree(_) => "process_tree",
+    };
+    CollectorCapabilityManifest::new(
+        agent_run_id,
+        env!("CARGO_PKG_VERSION"),
+        abi::KERNEL_ABI_VERSION,
+        abi::KERNEL_EVENT_RECORD_LEN as u32,
+        observation_scope,
+        capabilities,
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

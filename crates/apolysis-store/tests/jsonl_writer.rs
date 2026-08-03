@@ -31,6 +31,37 @@ fn jsonl_store_appends_one_event_per_line() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[test]
+fn jsonl_store_can_flush_and_sync_a_durable_boundary() {
+    let path = std::env::temp_dir().join(format!(
+        "apolysis-jsonl-store-durable-{}.jsonl",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let mut store = JsonlStore::create(&path).expect("create jsonl store");
+    store
+        .append(&CanonicalEvent::new(
+            "agent-run-durable",
+            EventSource::Manual,
+            EventType::Exec,
+            7,
+            1,
+            "observer",
+            "process",
+            "exec",
+        ))
+        .expect("append event");
+    store
+        .flush_and_sync()
+        .expect("flush and sync durable boundary");
+
+    let contents = std::fs::read_to_string(&path).expect("read durable jsonl output");
+    assert!(contents.contains(r#""session_id":"agent-run-durable""#));
+
+    let _ = std::fs::remove_file(path);
+}
+
 #[tokio::test]
 async fn async_jsonl_store_appends_one_event_per_line() {
     let path = std::env::temp_dir().join(format!(

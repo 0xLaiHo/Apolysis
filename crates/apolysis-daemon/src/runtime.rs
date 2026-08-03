@@ -22,6 +22,7 @@ pub struct ObserverIngestSummary {
     pub submitted: u64,
     pub dropped: u64,
     pub unscoped: u64,
+    pub abi_mismatches: u64,
     pub decode_failures: u64,
     pub truncations: u64,
 }
@@ -104,10 +105,20 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                         return Err(error);
                     }
                 };
+                if batch.abi_mismatches > 0 {
+                    state.set_ebpf(ComponentState::Unavailable).await;
+                    return Err(format!(
+                        "kernel/userspace ABI mismatch: {} incompatible record(s)",
+                        batch.abi_mismatches
+                    ));
+                }
                 let current = ingest_observer_batch(&state, &pipeline, batch).await;
                 summary.submitted = summary.submitted.saturating_add(current.submitted);
                 summary.dropped = summary.dropped.saturating_add(current.dropped);
                 summary.unscoped = summary.unscoped.saturating_add(current.unscoped);
+                summary.abi_mismatches = summary
+                    .abi_mismatches
+                    .saturating_add(current.abi_mismatches);
                 summary.decode_failures = summary
                     .decode_failures
                     .saturating_add(current.decode_failures);
@@ -137,6 +148,7 @@ pub async fn ingest_observer_batch(
     batch: DaemonObserverBatch,
 ) -> ObserverIngestSummary {
     let mut summary = ObserverIngestSummary {
+        abi_mismatches: batch.abi_mismatches,
         decode_failures: batch.decode_failures,
         truncations: batch.truncations,
         ..ObserverIngestSummary::default()

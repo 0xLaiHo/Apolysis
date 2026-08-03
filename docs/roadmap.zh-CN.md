@@ -95,7 +95,8 @@ enforcement。
 
 优先级：
 
-- 版本化 kernel/userspace ABI 与 capability manifest；
+- 维护版本化 kernel/userspace ABI 与 capability manifest 的兼容性，并显式拒绝不兼容
+  record；
 - 为受支持 operation set 加入有界 entry/exit matching；
 - 报告 return value 与 errno，区分 attempted、succeeded、failed、denied、pending 和
   unknown；

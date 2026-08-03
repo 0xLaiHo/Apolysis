@@ -133,8 +133,10 @@ was blocked, rolled back, or contained.
   identity where available.
 - Filter at event origin where possible and keep kernel records fixed and
   bounded.
-- Version the kernel/userspace ABI and reject incompatible records.
-- Declare supported operation and outcome capabilities explicitly.
+- Embed the kernel/userspace ABI version and record size in every ring-buffer
+  record, and reject incompatible records before decoding the current layout.
+- Synchronize the attached operation/source/outcome capability manifest to
+  stable storage before a managed Agent is released.
 - Emit collector start, health/loss checkpoints, terminal state, and stop
   reason; treat missing lifecycle records as gaps.
 - Preserve reserve failure, map pressure, truncation, decode failure, attach

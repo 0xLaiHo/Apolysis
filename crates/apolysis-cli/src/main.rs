@@ -850,7 +850,9 @@ fn observer_evidence_loss(timeline_input: &str) -> (u64, u64) {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         match string_field(value, "kind") {
-            Some("ring_buffer_reserve_failure" | "map_pressure" | "decode_failure") => {
+            Some(
+                "abi_mismatch" | "ring_buffer_reserve_failure" | "map_pressure" | "decode_failure",
+            ) => {
                 dropped += count;
             }
             Some("truncation") => truncated += count,
@@ -1402,11 +1404,13 @@ mod tests {
             "\n",
             r#"{"record_type":"observer_diagnostic","session_id":"s","kind":"decode_failure","count":1,"detail":"x"}"#,
             "\n",
+            r#"{"record_type":"observer_diagnostic","session_id":"s","kind":"abi_mismatch","count":1,"detail":"x"}"#,
+            "\n",
             r#"{"record_type":"event","event_type":"exec","raw_event_id":"s:e:1"}"#,
             "\n",
         );
-        assert_eq!(observer_evidence_loss(timeline), (4, 2));
-        assert!(evidence_loss_warning(4, 2).is_some());
+        assert_eq!(observer_evidence_loss(timeline), (5, 2));
+        assert!(evidence_loss_warning(5, 2).is_some());
         // A whole timeline (no diagnostics) must not warn.
         assert_eq!(observer_evidence_loss(r#"{"record_type":"event"}"#), (0, 0));
         assert!(evidence_loss_warning(0, 0).is_none());

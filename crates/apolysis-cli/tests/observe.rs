@@ -622,6 +622,62 @@ fn observe_live_rejects_agent_run_without_command() {
 
 #[test]
 #[ignore = "requires Linux BTF, tracepoints, cgroup v2, CAP_BPF, and CAP_PERFMON"]
+fn live_managed_agent_starts_after_the_capability_manifest_is_durable() {
+    let output = temp_jsonl("apolysis-live-capability-before-agent");
+    let _ = std::fs::remove_file(&output);
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "agent-run-capability-before-agent",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            "target/ebpf/apolysis_observer.bpf.o",
+            "--workspace-root",
+            workspace_root().to_str().expect("utf-8 workspace root"),
+            "--agent-kind",
+            "test-agent",
+            "--agent-run",
+            "--",
+            "sh",
+            "-c",
+            r#"grep -q '"record_type":"collector_capability_manifest"' "$1""#,
+            "sh",
+            output.to_str().expect("utf-8 output path"),
+        ])
+        .output()
+        .expect("run managed Agent behind live observer gate");
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    if stderr.contains("live observer prerequisite failed") {
+        eprintln!("skipping live managed Agent gate test: {stderr}");
+        let _ = std::fs::remove_file(output);
+        return;
+    }
+    assert!(
+        result.status.success(),
+        "managed Agent ran before its capability manifest was durable: {}",
+        stderr
+    );
+    let timeline = std::fs::read_to_string(&output).expect("read live timeline");
+    let manifest_index = timeline
+        .lines()
+        .position(|line| line.contains(r#""record_type":"collector_capability_manifest""#))
+        .expect("capability manifest record");
+    let first_kernel_event_index = timeline
+        .lines()
+        .position(|line| line.contains(r#""record_type":"raw_kernel_event""#))
+        .expect("managed Agent kernel event");
+    assert!(manifest_index < first_kernel_event_index);
+
+    let _ = std::fs::remove_file(output);
+}
+
+#[test]
+#[ignore = "requires Linux BTF, tracepoints, cgroup v2, CAP_BPF, and CAP_PERFMON"]
 fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     use std::io::Write as _;
     use std::net::TcpListener;

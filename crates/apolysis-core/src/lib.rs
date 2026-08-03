@@ -25,6 +25,143 @@ pub trait JsonLine {
     fn to_json_line(&self) -> String;
 }
 
+pub const COLLECTOR_CAPABILITY_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationOutcome {
+    Attempted,
+    Succeeded,
+    Failed,
+    Denied,
+    Pending,
+    Unknown,
+}
+
+impl OperationOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Attempted => "attempted",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Denied => "denied",
+            Self::Pending => "pending",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectorCapability {
+    pub operation: String,
+    pub event_sources: Vec<String>,
+    pub outcomes: Vec<OperationOutcome>,
+}
+
+impl CollectorCapability {
+    pub fn new<I, S>(
+        operation: impl Into<String>,
+        event_sources: I,
+        outcomes: Vec<OperationOutcome>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            operation: operation.into(),
+            event_sources: event_sources.into_iter().map(Into::into).collect(),
+            outcomes,
+        }
+    }
+
+    fn to_json_object(&self) -> String {
+        let event_sources = json_array(self.event_sources.iter().map(|value| json_string(value)));
+        let outcomes = json_array(
+            self.outcomes
+                .iter()
+                .map(|outcome| json_string(outcome.as_str())),
+        );
+        format!(
+            "{{\"operation\":{},\"event_sources\":{event_sources},\"outcomes\":{outcomes}}}",
+            json_string(&self.operation)
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectorCapabilityManifest {
+    pub schema_version: u32,
+    pub timestamp_unix_ms: u128,
+    pub agent_run_id: String,
+    pub collector: String,
+    pub collector_version: String,
+    pub kernel_abi_version: u32,
+    pub kernel_record_size: u32,
+    pub observation_scope: String,
+    pub privacy_profile: String,
+    pub capabilities: Vec<CollectorCapability>,
+}
+
+impl CollectorCapabilityManifest {
+    pub fn new(
+        agent_run_id: impl Into<String>,
+        collector_version: impl Into<String>,
+        kernel_abi_version: u32,
+        kernel_record_size: u32,
+        observation_scope: impl Into<String>,
+        capabilities: Vec<CollectorCapability>,
+    ) -> Self {
+        Self {
+            schema_version: COLLECTOR_CAPABILITY_SCHEMA_VERSION,
+            timestamp_unix_ms: now_unix_ms(),
+            agent_run_id: agent_run_id.into(),
+            collector: "apolysis_observer".to_string(),
+            collector_version: collector_version.into(),
+            kernel_abi_version,
+            kernel_record_size,
+            observation_scope: observation_scope.into(),
+            privacy_profile: "content_off".to_string(),
+            capabilities,
+        }
+    }
+
+    pub fn with_timestamp(mut self, timestamp_unix_ms: u128) -> Self {
+        self.timestamp_unix_ms = timestamp_unix_ms;
+        self
+    }
+
+    pub fn to_json_line(&self) -> String {
+        <Self as JsonLine>::to_json_line(self)
+    }
+}
+
+impl JsonLine for CollectorCapabilityManifest {
+    fn to_json_line(&self) -> String {
+        let capabilities = json_array(
+            self.capabilities
+                .iter()
+                .map(CollectorCapability::to_json_object),
+        );
+        format!(
+            "{{\"record_type\":{},\"schema_version\":{},\"timestamp_unix_ms\":{},\"agent_run_id\":{},\"collector\":{},\"collector_version\":{},\"kernel_abi_version\":{},\"kernel_record_size\":{},\"observation_scope\":{},\"privacy_profile\":{},\"capabilities\":{capabilities}}}",
+            json_string(records::COLLECTOR_CAPABILITY_MANIFEST),
+            self.schema_version,
+            self.timestamp_unix_ms,
+            json_string(&self.agent_run_id),
+            json_string(&self.collector),
+            json_string(&self.collector_version),
+            self.kernel_abi_version,
+            self.kernel_record_size,
+            json_string(&self.observation_scope),
+            json_string(&self.privacy_profile),
+        )
+    }
+}
+
+fn json_array(values: impl IntoIterator<Item = String>) -> String {
+    format!("[{}]", values.into_iter().collect::<Vec<_>>().join(","))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EventSource {
     Manual,
@@ -411,6 +548,7 @@ impl JsonLine for SessionIntentRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ObserverDiagnosticKind {
+    AbiMismatch,
     RingBufferReserveFailure,
     MapPressure,
     DecodeFailure,
@@ -423,6 +561,7 @@ pub enum ObserverDiagnosticKind {
 impl ObserverDiagnosticKind {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::AbiMismatch => "abi_mismatch",
             Self::RingBufferReserveFailure => "ring_buffer_reserve_failure",
             Self::MapPressure => "map_pressure",
             Self::DecodeFailure => "decode_failure",
