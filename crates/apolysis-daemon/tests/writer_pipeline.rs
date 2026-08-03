@@ -221,6 +221,40 @@ async fn fence_waits_for_the_full_queue_snapshot_without_consuming_capacity() {
     writer.await.unwrap().expect("writer drain");
 }
 
+#[tokio::test]
+async fn fence_reports_failure_from_its_last_target_record() {
+    let pipeline = EventPipeline::new(1);
+    pipeline
+        .submit(record("failing-target", QueuePriority::Ordinary))
+        .expect("admit fence target");
+    let fence = {
+        let pipeline = pipeline.clone();
+        tokio::spawn(async move { pipeline.fence().await })
+    };
+    let (_shutdown, receiver) = oneshot::channel();
+    let writer = {
+        let pipeline = pipeline.clone();
+        tokio::spawn(async move {
+            pipeline
+                .run_writer(receiver, |_record, _delivery_mode| async {
+                    Err("forced sink failure".to_string())
+                })
+                .await
+        })
+    };
+
+    let error = fence
+        .await
+        .unwrap()
+        .expect_err("fence must report the target write failure");
+    assert!(error.contains("forced sink failure"));
+    assert!(writer
+        .await
+        .unwrap()
+        .expect_err("writer must return the sink failure")
+        .contains("forced sink failure"));
+}
+
 fn record(session_id: &str, priority: QueuePriority) -> DaemonRecord {
     DaemonRecord::new(
         session_id,

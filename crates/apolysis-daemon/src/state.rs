@@ -599,14 +599,22 @@ impl DaemonState {
         };
         if let (Some(scope), Ok((intent, cgroup_ids))) = (&self.scope, degraded) {
             for cgroup_id in cgroup_ids {
-                let _ = scope
+                if scope
                     .fail_agent_run(
                         session_id,
                         Some(&intent),
                         cgroup_id,
                         CollectorFailureReason::StorageFailure,
                     )
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    self.health
+                        .write()
+                        .await
+                        .set_ebpf(ComponentState::Unavailable);
+                    break;
+                }
             }
         }
     }
@@ -911,6 +919,7 @@ mod tests {
             ..DaemonConfig::default()
         };
         let (scope, mut requests) = scope_channel(1);
+        let scope_filler = scope.clone();
         let state = Arc::new(
             DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
         );
@@ -933,6 +942,9 @@ mod tests {
         )
         .expect("block timeline path with a directory");
 
+        let filler = tokio::spawn(async move { scope_filler.track(99).await });
+        tokio::task::yield_now().await;
+
         let pipeline = state.pipeline();
         let (shutdown, shutdown_receiver) = oneshot::channel();
         let writer = {
@@ -953,9 +965,17 @@ mod tests {
             .expect("writer fence completes while the registry is locked")
             .expect("writer fence");
         drop(registry_guard);
+        let filler_request =
+            tokio::time::timeout(std::time::Duration::from_secs(1), requests.recv())
+                .await
+                .expect("pre-existing scope request")
+                .expect("scope request channel");
+        assert_eq!(filler_request.operation(), ScopeOperation::Track);
+        filler_request.complete(Ok(()));
+        filler.await.unwrap().expect("complete queue filler");
         let request = tokio::time::timeout(std::time::Duration::from_secs(1), requests.recv())
             .await
-            .expect("scope cleanup signal must not deadlock the writer")
+            .expect("scope cleanup signal waits for channel capacity")
             .expect("scope cleanup request");
         assert_eq!(request.operation(), ScopeOperation::Untrack);
         assert_eq!(

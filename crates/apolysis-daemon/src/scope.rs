@@ -100,14 +100,21 @@ impl ScopeController {
         cgroup_id: u64,
         reason: CollectorFailureReason,
     ) -> Result<(), String> {
-        self.apply(
-            ScopeOperation::Untrack,
-            cgroup_id,
-            Some(agent_run_id),
-            intent,
-            Some(reason),
-        )
-        .await
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ScopeRequest {
+                operation: ScopeOperation::Untrack,
+                cgroup_id,
+                agent_run_id: Some(agent_run_id.to_string()),
+                agent_intent: intent.cloned(),
+                failure_reason: Some(reason),
+                response,
+            })
+            .await
+            .map_err(|error| format!("observer scope failure channel unavailable: {error}"))?;
+        receiver
+            .await
+            .map_err(|_| "observer scope worker stopped before responding".to_string())?
     }
 
     async fn apply(

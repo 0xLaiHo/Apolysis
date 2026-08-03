@@ -209,21 +209,20 @@ impl EventPipeline {
         };
         loop {
             let progress = self.inner.progress.notified();
-            let status = {
+            {
                 let state = self
                     .inner
                     .state
                     .lock()
                     .map_err(|_| "event pipeline queue is unavailable".to_string())?;
+                if let Some(error) = &state.writer_failure {
+                    return Err(format!(
+                        "event pipeline writer stopped before fence: {error}"
+                    ));
+                }
                 if state.pending.range(..=target).next().is_none() {
                     return Ok(());
                 }
-                state.writer_failure.clone()
-            };
-            if let Some(error) = status {
-                return Err(format!(
-                    "event pipeline writer stopped before fence: {error}"
-                ));
             }
             progress.await;
         }
