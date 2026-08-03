@@ -22,6 +22,15 @@ pub enum KernelEventDecodeError {
     DeclaredRecordSizeMismatch { expected: u32, received: u32 },
 }
 
+impl KernelEventDecodeError {
+    pub fn is_abi_mismatch(&self) -> bool {
+        matches!(
+            self,
+            Self::UnsupportedAbiVersion { .. } | Self::DeclaredRecordSizeMismatch { .. }
+        )
+    }
+}
+
 impl fmt::Display for KernelEventDecodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

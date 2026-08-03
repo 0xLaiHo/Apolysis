@@ -300,11 +300,11 @@ Implemented today:
 - `apolysis-daemon`: long-lived observer, bounded queue, local socket, and
   runtime registration prototype.
 
-The live collector flushes its capability manifest after successful attachment
-and before releasing a managed Agent gate. The current file and network hooks
-mostly capture syscall entry and therefore describe attempts. Stable entry/exit
-outcome semantics, complete collector lifecycle records, the saved-run viewer,
-and bounded Kubernetes beta remain targets.
+The live collector synchronizes its capability manifest to stable storage after
+successful attachment and before releasing a managed Agent gate. The current
+file and network hooks mostly capture syscall entry and therefore describe
+attempts. Stable entry/exit outcome semantics, complete collector lifecycle
+records, the saved-run viewer, and bounded Kubernetes beta remain targets.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification

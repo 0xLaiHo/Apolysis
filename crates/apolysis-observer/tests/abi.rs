@@ -73,6 +73,7 @@ fn kernel_event_record_rejects_short_ring_buffer_items() {
             received: 32,
         }
     );
+    assert!(!error.is_abi_mismatch());
 }
 
 #[test]
@@ -90,6 +91,7 @@ fn kernel_event_record_rejects_an_unsupported_abi_version() {
             received: 2,
         }
     );
+    assert!(error.is_abi_mismatch());
 }
 
 #[test]
@@ -124,6 +126,7 @@ fn kernel_event_record_rejects_a_declared_record_size_mismatch() {
             received: 600,
         }
     );
+    assert!(error.is_abi_mismatch());
 }
 
 #[test]

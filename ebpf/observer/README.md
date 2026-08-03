@@ -11,8 +11,8 @@ This directory holds the AuditObserver audit-only observer program. The runtime 
 6. reject incompatible kernel/userspace ABI records and emit typed diagnostics
    for loss, truncation, decode, verifier, attach, ABI, and map-pressure
    failures;
-7. flush a capability manifest after attachment and before a managed Agent is
-   released.
+7. synchronize a capability manifest to stable storage after attachment and
+   before a managed Agent is released.
 
 Normal tests use fixture and ABI records, so they do not require root,
 `CAP_BPF`, or `CAP_PERFMON`. `make test-live` runs the ignored live smoke test

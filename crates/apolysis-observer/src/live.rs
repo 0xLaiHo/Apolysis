@@ -23,8 +23,8 @@ use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
 
 use crate::abi::{
-    KernelEventDecodeError, KernelEventKind, KernelEventRecord, FLAG_ARGV_TRUNCATED,
-    FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
+    KernelEventKind, KernelEventRecord, FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR,
+    FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
 };
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
@@ -595,10 +595,10 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             "failed to write collector capability manifest: {error}"
         ));
     }
-    if let Err(error) = store.flush() {
+    if let Err(error) = store.flush_and_sync() {
         terminate_managed_agent(managed_agent.as_mut()).await;
         return Err(format!(
-            "failed to flush collector capability manifest: {error}"
+            "failed to persist collector capability manifest: {error}"
         ));
     }
 
@@ -681,15 +681,12 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         for bytes in batch {
             let record = match KernelEventRecord::decode(&bytes) {
                 Ok(record) => record,
-                Err(
-                    error @ (KernelEventDecodeError::UnsupportedAbiVersion { .. }
-                    | KernelEventDecodeError::DeclaredRecordSizeMismatch { .. }),
-                ) => {
+                Err(error) if error.is_abi_mismatch() => {
                     abi_mismatches += 1;
                     first_abi_mismatch.get_or_insert_with(|| error.to_string());
                     continue;
                 }
-                Err(KernelEventDecodeError::UnexpectedRecordLength { .. }) => {
+                Err(_) => {
                     decode_failures += 1;
                     continue;
                 }
@@ -1665,14 +1662,11 @@ impl ObserverBatchDecoder {
         for bytes in records {
             let record = match KernelEventRecord::decode(&bytes) {
                 Ok(record) => record,
-                Err(
-                    KernelEventDecodeError::UnsupportedAbiVersion { .. }
-                    | KernelEventDecodeError::DeclaredRecordSizeMismatch { .. },
-                ) => {
+                Err(error) if error.is_abi_mismatch() => {
                     batch.abi_mismatches += 1;
                     continue;
                 }
-                Err(KernelEventDecodeError::UnexpectedRecordLength { .. }) => {
+                Err(_) => {
                     batch.decode_failures += 1;
                     continue;
                 }

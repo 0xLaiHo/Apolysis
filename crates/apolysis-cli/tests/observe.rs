@@ -644,7 +644,7 @@ fn live_managed_agent_starts_after_the_capability_manifest_is_durable() {
             "--",
             "sh",
             "-c",
-            r#"grep -q '\"record_type\":\"collector_capability_manifest\"' \"$1\""#,
+            r#"grep -q '"record_type":"collector_capability_manifest"' "$1""#,
             "sh",
             output.to_str().expect("utf-8 output path"),
         ])

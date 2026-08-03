@@ -92,6 +92,18 @@ impl JsonlStore {
         self.writer.flush()
     }
 
+    /// Flush userspace buffers and synchronize the file and parent directory.
+    pub fn flush_and_sync(&mut self) -> io::Result<()> {
+        self.writer.flush()?;
+        self.writer.get_ref().sync_all()?;
+        let parent = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        File::open(parent)?.sync_all()
+    }
+
     fn should_rotate_before(&self, next_line_bytes: u64) -> bool {
         self.rotation
             .map(|rotation| {

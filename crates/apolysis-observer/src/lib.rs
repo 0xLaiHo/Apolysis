@@ -184,106 +184,120 @@ impl AyaLoaderPlan {
     }
 }
 
+type TracepointId = (&'static str, &'static str);
+
+struct CapabilityDeclaration {
+    operation: &'static str,
+    sources: &'static [TracepointId],
+    required_source: Option<TracepointId>,
+    outcome: OperationOutcome,
+}
+
+const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
+    CapabilityDeclaration {
+        operation: "process_fork",
+        sources: &[("sched", "sched_process_fork")],
+        required_source: None,
+        outcome: OperationOutcome::Succeeded,
+    },
+    CapabilityDeclaration {
+        operation: "process_exec",
+        sources: &[
+            ("sched", "sched_process_exec"),
+            ("syscalls", "sys_enter_execve"),
+            ("syscalls", "sys_enter_execveat"),
+        ],
+        required_source: Some(("sched", "sched_process_exec")),
+        outcome: OperationOutcome::Succeeded,
+    },
+    CapabilityDeclaration {
+        operation: "process_exit",
+        sources: &[("sched", "sched_process_exit")],
+        required_source: None,
+        outcome: OperationOutcome::Unknown,
+    },
+    CapabilityDeclaration {
+        operation: "file_open",
+        sources: &[
+            ("syscalls", "sys_enter_openat"),
+            ("syscalls", "sys_enter_openat2"),
+        ],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "file_create",
+        sources: &[
+            ("syscalls", "sys_enter_openat"),
+            ("syscalls", "sys_enter_openat2"),
+            ("syscalls", "sys_enter_creat"),
+        ],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "file_truncate",
+        sources: &[
+            ("syscalls", "sys_enter_openat"),
+            ("syscalls", "sys_enter_openat2"),
+            ("syscalls", "sys_enter_truncate"),
+        ],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "file_unlink",
+        sources: &[("syscalls", "sys_enter_unlinkat")],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "file_rename",
+        sources: &[("syscalls", "sys_enter_renameat2")],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "network_connect",
+        sources: &[("syscalls", "sys_enter_connect")],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+    CapabilityDeclaration {
+        operation: "credential_path_access",
+        sources: &[
+            ("syscalls", "sys_enter_openat"),
+            ("syscalls", "sys_enter_openat2"),
+        ],
+        required_source: None,
+        outcome: OperationOutcome::Attempted,
+    },
+];
+
 /// Describe exactly what the configured AuditObserver can report for one Agent Run.
 pub fn audit_observer_capability_manifest(
     agent_run_id: &str,
     scope: &LiveScope,
     loader_plan: &AyaLoaderPlan,
 ) -> CollectorCapabilityManifest {
-    let declarations = [
-        (
-            "process_fork",
-            vec![("sched", "sched_process_fork")],
-            None,
-            OperationOutcome::Succeeded,
-        ),
-        (
-            "process_exec",
-            vec![
-                ("sched", "sched_process_exec"),
-                ("syscalls", "sys_enter_execve"),
-                ("syscalls", "sys_enter_execveat"),
-            ],
-            Some(("sched", "sched_process_exec")),
-            OperationOutcome::Succeeded,
-        ),
-        (
-            "process_exit",
-            vec![("sched", "sched_process_exit")],
-            None,
-            OperationOutcome::Unknown,
-        ),
-        (
-            "file_open",
-            vec![
-                ("syscalls", "sys_enter_openat"),
-                ("syscalls", "sys_enter_openat2"),
-            ],
-            None,
-            OperationOutcome::Attempted,
-        ),
-        (
-            "file_create",
-            vec![
-                ("syscalls", "sys_enter_openat"),
-                ("syscalls", "sys_enter_openat2"),
-                ("syscalls", "sys_enter_creat"),
-            ],
-            None,
-            OperationOutcome::Attempted,
-        ),
-        (
-            "file_truncate",
-            vec![
-                ("syscalls", "sys_enter_openat"),
-                ("syscalls", "sys_enter_openat2"),
-                ("syscalls", "sys_enter_truncate"),
-            ],
-            None,
-            OperationOutcome::Attempted,
-        ),
-        (
-            "file_unlink",
-            vec![("syscalls", "sys_enter_unlinkat")],
-            None,
-            OperationOutcome::Attempted,
-        ),
-        (
-            "file_rename",
-            vec![("syscalls", "sys_enter_renameat2")],
-            None,
-            OperationOutcome::Attempted,
-        ),
-        (
-            "network_connect",
-            vec![("syscalls", "sys_enter_connect")],
-            None,
-            OperationOutcome::Attempted,
-        ),
-        (
-            "credential_path_access",
-            vec![
-                ("syscalls", "sys_enter_openat"),
-                ("syscalls", "sys_enter_openat2"),
-            ],
-            None,
-            OperationOutcome::Attempted,
-        ),
-    ];
-    let capabilities = declarations
-        .into_iter()
-        .filter_map(|(operation, sources, required_source, outcome)| {
+    let capabilities = AUDIT_OBSERVER_CAPABILITIES
+        .iter()
+        .filter_map(|declaration| {
             let is_attached = |category: &str, name: &str| {
                 loader_plan
                     .tracepoints
                     .iter()
                     .any(|attach| attach.category == category && attach.name == name)
             };
-            if required_source.is_some_and(|(category, name)| !is_attached(category, name)) {
+            if declaration
+                .required_source
+                .is_some_and(|(category, name)| !is_attached(category, name))
+            {
                 return None;
             }
-            let event_sources = sources
-                .into_iter()
+            let event_sources = declaration
+                .sources
+                .iter()
                 .filter(|(category, name)| is_attached(category, name))
                 .map(|(category, name)| format!("{category}/{name}"))
                 .collect::<Vec<_>>();
@@ -291,9 +305,9 @@ pub fn audit_observer_capability_manifest(
                 None
             } else {
                 Some(CollectorCapability::new(
-                    operation,
+                    declaration.operation,
                     event_sources,
-                    vec![outcome],
+                    vec![declaration.outcome],
                 ))
             }
         })

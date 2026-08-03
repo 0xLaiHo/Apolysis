@@ -271,9 +271,10 @@ Implemented today：
 - `apolysis-daemon`：long-lived observer、有界 queue、本地 socket 与 runtime registration
   prototype。
 
-Live collector 会在成功 attach 后、释放托管 Agent gate 前 flush capability manifest。当前 file
-与 network hook 主要捕获 syscall entry，因此描述 attempt。稳定 entry/exit outcome 语义、完整
-collector lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是 target。
+Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 同步到稳定
+存储。当前 file 与 network hook 主要捕获 syscall entry，因此描述 attempt。稳定 entry/exit
+outcome 语义、完整 collector lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是
+target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃

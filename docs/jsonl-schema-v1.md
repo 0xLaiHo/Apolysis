@@ -43,9 +43,10 @@ The v1 compatibility contract is append-only:
 ### `collector_capability_manifest`
 
 Collector capability manifests declare the observation boundary used for one
-Agent Run. The live collector writes and flushes this record after successful
-attachment and before releasing a managed Agent. Consumers must use it to
-distinguish supported observation semantics from unsupported paths.
+Agent Run. The live collector writes and synchronizes this record to stable
+storage after successful attachment and before releasing a managed Agent.
+Consumers must use it to distinguish supported observation semantics from
+unsupported paths.
 
 Fields:
 
