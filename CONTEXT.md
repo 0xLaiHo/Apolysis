@@ -1,127 +1,85 @@
 # Apolysis Domain
 
-Apolysis describes the evidence, coverage, and accountability of an agent run
-without treating an agent's own report as final truth.
+Apolysis describes bounded runtime observations of Agent execution on
+operator-controlled Linux systems. It reports what its supported collector
+observed without treating missing evidence as proof that an action did not
+occur.
 
-## Runs and actors
+## Runs and scope
 
 **Agent Run**:
-A bounded period in which one authority permits an agent and its delegates to
-pursue a declared objective in one or more execution environments.
+A bounded period in which an Agent and the processes it starts pursue one
+declared task inside an Observation Scope.
 _Avoid_: Session, job, trace
 
-**Agent Execution Record**:
-The aggregate account of an Agent Run, including its actors, actions, evidence,
-coverage, outcomes, findings, and unresolved gaps.
-_Avoid_: Flat event, receipt, timeline
-
-**Authority**:
-The person, service, or policy boundary that permits an Agent Run or action.
-_Avoid_: Owner, initiator
-
-**Principal**:
-An authenticated human or workload identity that acts within an Authority's
-scope.
-_Avoid_: User, account
-
 **Agent**:
-The primary autonomous participant responsible for pursuing an Agent Run's
-objective.
-_Avoid_: Model, bot, process
+The autonomous participant whose runtime activity is being observed.
+_Avoid_: Model, bot, workload process
 
-**Delegate**:
-An agent or remote actor to which another Agent delegates part of its work.
-_Avoid_: Child process, helper
+**Observation Scope**:
+The runtime boundary whose activity belongs to one Agent Run.
+_Avoid_: Tenant, authority scope, global host
 
-**Tool Call**:
-A declared request by an Agent or Delegate to a named tool or protocol endpoint.
-_Avoid_: Command, effect
+**Runtime Identity**:
+The stable identity of a process or workload boundary used to distinguish it
+from reused or coincidentally matching runtime identifiers.
+_Avoid_: PID, process name
 
-## Evidence and outcomes
+## Observations
 
-**Evidence Source**:
-A producer that contributes evidence under a declared identity, capability, and
-trust boundary.
-_Avoid_: Sensor, logger
+**Runtime Observation**:
+A process, file, network, or credential-related operation reported within a
+Collector Capability and Observation Scope.
+_Avoid_: Syscall truth, proven effect, semantic event
 
-**Semantic Evidence**:
-Evidence about declared agent, delegation, approval, tool, or protocol activity.
-_Avoid_: Intent log, agent truth
+**Operation Outcome**:
+The supported status of a Runtime Observation: attempted, succeeded, failed,
+denied, pending, or unknown.
+_Avoid_: Tool result, verified external outcome
 
-**Execution Evidence**:
-Evidence about operations observed at a controlled runtime boundary.
-_Avoid_: Syscall truth, complete execution
+**Agent Observation Record**:
+The aggregate account of one Agent Run, including its scope, runtime
+identities, Runtime Observations, Collector Health, findings, and Observation
+Gaps.
+_Avoid_: Agent Execution Record, evidence plane, flat event stream
 
-**Outcome Evidence**:
-Evidence that independently checks whether a claimed external result exists.
-_Avoid_: Tool response, success message
+**Collector Capability**:
+A versioned declaration of the runtime operations and outcomes a collector can
+observe within a stated environment boundary.
+_Avoid_: Complete coverage, universal syscall support
 
-**Observed Effect**:
-An operation or state transition reported by an Evidence Source, within that
-source's capability and trust boundary.
-_Avoid_: Proven outcome, side effect
+**Collector Health**:
+The reported operating state of a collector during an Agent Run, including
+whether it was healthy, degraded, failed, or stopped unexpectedly.
+_Avoid_: Clean result, host trust
 
-**Claimed Outcome**:
-A result reported by an Agent, tool, protocol, or provider but not necessarily
-independently checked.
-_Avoid_: Verified result, success
+**Observation Gap**:
+An explicit account of activity that may be missing, lost, truncated,
+unsupported, ambiguous, or outside the Observation Scope.
+_Avoid_: Warning, absence proof, successful run
 
-**Verified Outcome**:
-A Claimed Outcome that an appropriate independent source has confirmed.
-_Avoid_: Tool success, observed call
-
-**Coverage Gap**:
-An explicit account of expected evidence that is missing, lost, sampled,
-unsupported, opaque, or incomplete.
-_Avoid_: Warning, clean result
-
-## Coverage and attribution
-
-**Semantic Coverage**:
-The degree to which expected agent, delegation, tool, and protocol lifecycle
-evidence is present.
-_Avoid_: Trace completeness, confidence
-
-**Execution Coverage**:
-The degree to which relevant operations were visible at a controlled runtime
-boundary.
-_Avoid_: Host confidence, overall coverage
-
-**Outcome Coverage**:
-The degree to which claimed external results were independently checked.
-_Avoid_: Success rate, overall coverage
+## Attribution and findings
 
 **Exact Relation**:
-A relationship established by an explicitly propagated identifier within its
-declared trust boundary.
-_Avoid_: Certain relation, causal proof
+A relationship established by a stable runtime identity within its declared
+boundary.
+_Avoid_: Causal proof, certain relation
 
 **Inferred Relation**:
-A relationship supported by correlation evidence but not an authoritative
-identifier.
+A relationship supported by correlation evidence rather than a stable runtime
+identity.
 _Avoid_: Exact relation, causal link
 
 **Ambiguous Relation**:
 A relationship for which more than one plausible target remains.
 _Avoid_: Best match, inferred relation
 
-**Unattributed Evidence**:
-Evidence associated with an Agent Run but not responsibly assignable to a more
-specific actor or action.
-_Avoid_: Unknown agent, orphan event
-
-## Findings and control
+**Unattributed Observation**:
+A Runtime Observation inside an Agent Run that cannot responsibly be assigned
+to a more specific runtime identity.
+_Avoid_: Unknown Agent, orphan event
 
 **Finding**:
-A durable, evidence-backed condition that may change an investigation, review,
-or policy decision.
-_Avoid_: Alert, event, verdict
-
-**Policy Decision**:
-A deterministic allow, warn, deny, or require-approval result returned at a
-supported decision point.
-_Avoid_: Enforcement, finding
-
-**Actuation**:
-Confirmation from an integration that it applied a Policy Decision.
-_Avoid_: Decision, intended enforcement
+A reviewable condition derived from Runtime Observations and their declared
+limits; it does not claim that an operation was prevented.
+_Avoid_: Enforcement, policy decision, verdict

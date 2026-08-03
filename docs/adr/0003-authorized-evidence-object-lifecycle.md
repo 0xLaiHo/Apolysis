@@ -1,6 +1,6 @@
 # Make evidence-object references non-authoritative
 
-Status: accepted
+Status: superseded by ADR-0004
 
 Large or binary evidence is admitted only when the current organization,
 source registration, credential, run, source stream, capability, privacy
