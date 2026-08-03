@@ -17,12 +17,11 @@ pub use adapter::{
     docker_snapshot_from_engine_inspect, docker_workload_from_snapshot,
     kubernetes_marked_pod_snapshots_from_api_list, kubernetes_pod_snapshot_from_api_object,
     kubernetes_workload_from_pod_snapshot, run_runtime_adapter, run_runtime_adapter_with_policy,
-    runtime_guardrails_runtime_adapter_evidence_from_workload, AdapterBackoffPolicy,
-    ContainerdCriRuntimeAdapter, ContainerdTaskSnapshot, CriContainerCandidate, CriRuntimeClient,
-    DockerContainerSnapshot, DockerEngineClient, DockerEnginePollingRuntimeAdapter,
-    DockerEngineRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
-    KubernetesPodSnapshot, RuntimeAdapterBackend, RuntimeAdapterSummary, RuntimeWorkload,
-    APOLYSIS_SESSION_ANNOTATION, APOLYSIS_SESSION_LABEL,
+    AdapterBackoffPolicy, ContainerdCriRuntimeAdapter, ContainerdTaskSnapshot,
+    CriContainerCandidate, CriRuntimeClient, DockerContainerSnapshot, DockerEngineClient,
+    DockerEnginePollingRuntimeAdapter, DockerEngineRuntimeAdapter, KubernetesCliClient,
+    KubernetesCliRuntimeAdapter, KubernetesPodSnapshot, RuntimeAdapterBackend,
+    RuntimeAdapterSummary, RuntimeWorkload, APOLYSIS_SESSION_ANNOTATION, APOLYSIS_SESSION_LABEL,
 };
 pub use config::DaemonConfig;
 pub use metrics::render_prometheus_metrics;

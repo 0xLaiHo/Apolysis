@@ -141,7 +141,7 @@ impl AccountabilityAnalyzer {
                 "workload read a credential-classified resource",
             )),
             EffectKind::FileRead | EffectKind::FileWrite => {
-                if has_path_policy(intent)
+                if has_path_boundary(intent)
                     && !intent.allowed_resources.iter().any(|selector| {
                         matches!(selector.kind, ResourceKind::Workspace | ResourceKind::Path)
                             && path_matches(&selector.value, &effect.resource)
@@ -207,7 +207,7 @@ fn finding(
     }
 }
 
-fn has_path_policy(intent: &SessionIntent) -> bool {
+fn has_path_boundary(intent: &SessionIntent) -> bool {
     intent
         .allowed_resources
         .iter()

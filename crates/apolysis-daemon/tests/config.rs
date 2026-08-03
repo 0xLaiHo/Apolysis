@@ -12,8 +12,6 @@ fn parses_bounded_runtime_configuration() {
         [
             "--bpf-object",
             "/opt/apolysis/apolysis_observer.bpf.o",
-            "--feedback-dir",
-            "/run/apolysis/feedback",
             "--docker-socket",
             "/var/run/docker.sock",
             "--containerd-socket",
@@ -49,10 +47,6 @@ fn parses_bounded_runtime_configuration() {
     assert_eq!(
         config.bpf_object,
         Some(PathBuf::from("/opt/apolysis/apolysis_observer.bpf.o"))
-    );
-    assert_eq!(
-        config.feedback_dir,
-        Some(PathBuf::from("/run/apolysis/feedback"))
     );
     assert_eq!(
         config.docker_socket,

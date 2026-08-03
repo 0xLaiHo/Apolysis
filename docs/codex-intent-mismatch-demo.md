@@ -77,7 +77,6 @@ The public P1 recording should use the same story with real host evidence:
 sudo -E ./target/debug/apolysis observe \
   --backend live \
   --session codex-mismatch-demo \
-  --policy policies/local-dev.yaml \
   --output .apolysis/codex-mismatch-demo/timeline.agent-run.jsonl \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
   --agent-kind codex \

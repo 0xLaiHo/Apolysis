@@ -99,7 +99,6 @@ pub struct SessionIntent {
     pub expires_at_unix_ms: u64,
     pub declared_actions: Vec<ActionClass>,
     pub allowed_resources: Vec<ResourceSelector>,
-    pub policy_ref: String,
     pub workload_selectors: Vec<WorkloadSelector>,
 }
 
@@ -112,9 +111,6 @@ impl SessionIntent {
         validate_session_id(&self.session_id)?;
         if self.expires_at_unix_ms <= now_unix_ms {
             return Err(IntentError::Expired);
-        }
-        if self.policy_ref.trim().is_empty() {
-            return Err(IntentError::EmptyPolicyRef);
         }
         Ok(())
     }
@@ -174,7 +170,6 @@ pub enum IntentError {
     InvalidTenantId,
     EmptySessionId,
     InvalidSessionId,
-    EmptyPolicyRef,
     Expired,
 }
 
@@ -194,7 +189,6 @@ impl std::fmt::Display for IntentError {
             Self::InvalidSessionId => formatter.write_str(
                 "session id must be 1-128 ASCII letters, digits, dots, underscores, or hyphens",
             ),
-            Self::EmptyPolicyRef => formatter.write_str("policy reference must not be empty"),
             Self::Expired => formatter.write_str("intent is expired"),
         }
     }

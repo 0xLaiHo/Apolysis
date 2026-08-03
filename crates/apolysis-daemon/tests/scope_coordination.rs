@@ -138,7 +138,6 @@ fn intent(session_id: &str) -> SessionIntent {
         expires_at_unix_ms: 4_102_444_800_000,
         declared_actions: vec![ActionClass::Test],
         allowed_resources: Vec::new(),
-        policy_ref: "policy.yaml".to_string(),
         workload_selectors: Vec::new(),
     }
 }

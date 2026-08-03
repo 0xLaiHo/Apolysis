@@ -11,8 +11,6 @@ use apolysis_accountability::{
     ResourceKind, RetentionPurgeReport, RetentionTier, RuntimeIdentity, SessionIntent,
     SessionRegistry, SessionState,
 };
-use apolysis_feedback::FeedbackWriter;
-use apolysis_policy::Policy;
 use apolysis_store::HashChainStore;
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
@@ -31,8 +29,6 @@ pub struct DaemonState {
     storage_writable: AtomicBool,
     scope: Option<ScopeController>,
     pipeline: EventPipeline,
-    redaction_policies: RwLock<BTreeMap<String, Option<Policy>>>,
-    feedback: Option<FeedbackWriter>,
 }
 
 impl DaemonState {
@@ -49,7 +45,6 @@ impl DaemonState {
             .map_err(|error| format!("failed to create daemon state directory: {error}"))?;
         let mut registry = SessionRegistry::new(config.max_sessions, config.max_pending);
         let mut stores = BTreeMap::new();
-        let mut redaction_policies = BTreeMap::new();
         let now_unix_ms = current_unix_ms()?;
         let mut recovered_integrity_issue = false;
         for entry in std::fs::read_dir(&sessions_dir)
@@ -82,7 +77,6 @@ impl DaemonState {
                 recovered_integrity_issue = true;
             }
             if let Some(recovered) = replay_active_session(&recovery.records, now_unix_ms)? {
-                let redaction_policy = load_redaction_policy(&recovered.intent.policy_ref);
                 registry
                     .register(recovered.intent, now_unix_ms)
                     .map_err(|error| format!("failed to restore session {session_id}: {error}"))?;
@@ -95,7 +89,6 @@ impl DaemonState {
                             )
                         })?;
                 }
-                redaction_policies.insert(session_id.clone(), redaction_policy);
             }
             stores.insert(session_id, recovery.store);
         }
@@ -116,8 +109,6 @@ impl DaemonState {
             storage_writable: AtomicBool::new(true),
             scope,
             pipeline,
-            redaction_policies: RwLock::new(redaction_policies),
-            feedback: config.feedback_dir.clone().map(FeedbackWriter::new),
         })
     }
 
@@ -126,8 +117,6 @@ impl DaemonState {
         intent: SessionIntent,
         now_unix_ms: u64,
     ) -> Result<RegisterOutcome, String> {
-        let redaction_policy = load_redaction_policy(&intent.policy_ref);
-        let session_id = intent.session_id.clone();
         let mut registry = self.registry.write().await;
         let mut candidate = registry.clone();
         let outcome = candidate
@@ -139,10 +128,6 @@ impl DaemonState {
         )
         .await?;
         *registry = candidate;
-        self.redaction_policies
-            .write()
-            .await
-            .insert(session_id, redaction_policy);
         Ok(outcome)
     }
 
@@ -268,12 +253,6 @@ impl DaemonState {
                 }
             }
             {
-                let mut policies = self.redaction_policies.write().await;
-                for session_id in &purged_session_ids {
-                    policies.remove(session_id);
-                }
-            }
-            {
                 let mut paused = self.paused_sessions.write().await;
                 for session_id in &purged_session_ids {
                     paused.remove(session_id);
@@ -310,16 +289,6 @@ impl DaemonState {
             })
             .map(|selector| PathBuf::from(&selector.value))
             .unwrap_or_else(|| PathBuf::from("/__apolysis_no_workspace__"))
-    }
-
-    pub async fn credential_path_requires_redaction(&self, session_id: &str, path: &str) -> bool {
-        self.redaction_policies
-            .read()
-            .await
-            .get(session_id)
-            .and_then(Option::as_ref)
-            .map(|policy| policy.denies_credential_path(path))
-            .unwrap_or(true)
     }
 
     pub async fn discover_cgroup(
@@ -437,9 +406,6 @@ impl DaemonState {
         };
         let mut payloads = Vec::new();
         for finding in AccountabilityAnalyzer::evaluate(intent.as_ref(), effect) {
-            if let Some(feedback) = &self.feedback {
-                feedback.write_last_accountability_finding(&finding)?;
-            }
             payloads.push(finding_payload(finding)?);
         }
         Ok(payloads)
@@ -691,10 +657,4 @@ fn current_unix_ms() -> Result<u64, String> {
         .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
         .as_millis();
     u64::try_from(millis).map_err(|_| "current Unix timestamp exceeds u64".to_string())
-}
-
-fn load_redaction_policy(path: &str) -> Option<Policy> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|input| Policy::parse(&input).ok())
 }

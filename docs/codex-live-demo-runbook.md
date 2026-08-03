@@ -83,7 +83,6 @@ sudo -E env \
   ./target/debug/apolysis observe \
     --backend live \
     --session codex-live-demo \
-    --policy policies/local-dev.yaml \
     --output .apolysis/codex-live-demo/timeline.agent-run.jsonl \
     --bpf-object target/ebpf/apolysis_observer.bpf.o \
     --agent-kind codex \

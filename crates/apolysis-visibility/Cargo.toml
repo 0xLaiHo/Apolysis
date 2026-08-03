@@ -8,7 +8,6 @@ repository.workspace = true
 [dependencies]
 apolysis-core = { path = "../apolysis-core" }
 apolysis-kubernetes = { path = "../apolysis-kubernetes" }
-apolysis-validation = { path = "../apolysis-validation" }
 
 [lib]
 path = "src/lib.rs"

@@ -206,7 +206,6 @@ fn intent(
         expires_at_unix_ms: u64::MAX,
         declared_actions,
         allowed_resources,
-        policy_ref: "policy.yaml".to_string(),
         workload_selectors: Vec::new(),
     }
 }

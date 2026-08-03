@@ -12,7 +12,7 @@ credential material.
 ## Source Run
 
 - Demo status: `validated_local_live`
-- Source session: `codex-live-demo`
+- Source Agent Run: `codex-live-demo`
 - Agent: Codex
 - Observer backend: live eBPF
 - Timeline size: 79,949 JSONL records
@@ -34,7 +34,7 @@ credential finding target is represented only as a redacted `path_token:*`.
   validated local live run.
 - `docs/assets/codex-live-demo/evidence-excerpt.jsonl`: the smallest useful
   JSONL story showing runtime metadata, the declared workload exec,
-  credential policy evidence, intent correlation, and the `missing_intent`
+  credential-path observations, intent correlation, and the `missing_intent`
   finding.
 - `docs/assets/codex-live-demo/live-ebpf-demo.gif` / `.cast`: the README hero — a
   real `apolysis observe --backend live` run that records a workload, matches its

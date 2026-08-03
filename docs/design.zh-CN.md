@@ -17,8 +17,9 @@ eBPF collector 是必需的主要观测源。Provider hook、Agent log、protoco
 export 都保持 deferred；它们不定义活跃产品，也不能替代 runtime observation。
 
 当前活跃目标是有界 Beta，而不是生产证据平面。Gateway、PostgreSQL、evidence-object、
-projection 与跨 provider contract 原型已经移出活跃 workspace。Policy control 和广泛的
-qualification 原型属于同一被取代方向，只在解除其 observer-side 依赖前暂时保留。
+projection 与跨 provider contract 原型已经移出活跃 workspace。Policy actuation、Agent
+feedback control、sandbox execution 与广泛的 production qualification 也已移出活跃
+build；它们都不是 observer-side 产品依赖。
 
 ### 成熟度标签
 
@@ -193,7 +194,7 @@ failure，不能 best-effort 误解。
 | --- | --- | --- |
 | Process | fork/clone lineage、exec、exit | Process lifecycle，不是逻辑 sub-Agent 语义 |
 | File | 选定 open/create/truncate/rename/unlink path | 只覆盖受支持 operation 与 resolved identity，不是通用 filesystem history |
-| Credential | 配置的 credential-path access | Path access finding，不证明 secret 被使用 |
+| Credential | 内置 credential 类别 path access | Path access finding，不证明 secret 被使用 |
 | Network | Outbound connect tuple 与 outcome | Connection attempt/result，不证明远端 mutation 或 TLS content |
 | Health | Attach、loss、map pressure、decode、truncation、terminal state | Collector condition，不是 host integrity attestation |
 
@@ -205,7 +206,7 @@ filesystem、network、guest 或 runtime path 成为显式 capability gap。
 | 环境 | Runtime observation contract |
 | --- | --- |
 | 本地 Linux CLI | Managed launch 或受保护的 process-tree attach |
-| Linux self-hosted CI | 使用相同 managed-run boundary；runner isolation 由外部提供 |
+| Linux self-hosted CI | 使用相同 CLI managed-run boundary；runner isolation 由外部提供 |
 | Docker/containerd | Host eBPF observation 关联 container 与 cgroup identity |
 | Kubernetes | Node eBPF observation 关联 Pod/container/cgroup identity；有界 Beta |
 | gVisor | Host/runtime boundary visibility，不是每个 guest syscall |
@@ -217,7 +218,7 @@ filesystem、network、guest 或 runtime path 成为显式 capability gap。
 
 Finding 是 post-observation review aid。首个有界集合是：
 
-- 访问配置的 credential 或 secret path；
+- 访问内置 credential 类别 path；
 - 在配置的 workspace boundary 外修改文件；
 - 在可以解析时连接未批准 address 或 domain class；
 - 执行非预期 binary class；
@@ -262,16 +263,18 @@ Implemented today：
   correlation、visibility 与 verification command；
 - `apolysis-core`：当前 JSONL vocabulary 与 record type；
 - `apolysis-store`：rotation 与可选本地 hash-chain envelope；
-- `apolysis-runtime` 与 `apolysis-kubernetes`：runtime metadata prototype；
+- `apolysis-accountability`：可选声明意图对比与面向复查的 finding；
+- `apolysis-kubernetes` 与 `apolysis-visibility`：有界 runtime metadata 与 visibility
+  boundary assessment；
 - `apolysis-daemon`：long-lived observer、有界 queue、本地 socket 与 runtime registration
   prototype。
 
 当前 file 与 network hook 主要捕获 syscall entry，因此描述 attempt。稳定 entry/exit outcome
 语义、完整 collector lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是 target。
 
-中央 contracts、Gateway、PostgreSQL projection 与 evidence-object 集群已经移出活跃
-workspace。剩余 policy-control 与广泛 qualification prototype 只作为历史实现输入，不定义
-本文的目标架构。
+中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
+policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃
+workspace。Git 历史保留它们作为历史实现输入；它们不定义本文架构。
 
 ## 13. 限制
 

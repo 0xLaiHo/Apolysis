@@ -31,7 +31,6 @@ rm -f "$output"
 ./target/debug/apolysis observe \
   --backend live \
   --session local-agent-command-attribution-smoke \
-  --policy policies/local-dev.yaml \
   --output "$output" \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
   --workspace-root "$PWD" \

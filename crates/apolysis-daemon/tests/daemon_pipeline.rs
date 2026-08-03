@@ -106,19 +106,9 @@ async fn timeline_write_failure_degrades_storage_and_writer_continues_other_sess
 #[tokio::test]
 async fn observer_batch_submits_only_records_with_session_ownership() {
     let config = config();
-    let policy_path = config.state_dir.parent().unwrap().join("policy.yaml");
-    std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &policy_path,
-        "version: 1\ncredentials:\n  deny_read:\n    - .env\n",
-    )
-    .unwrap();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
     state
-        .register(
-            intent("observed-session", policy_path.to_str().unwrap()),
-            1_700_000_000_000,
-        )
+        .register(intent("observed-session"), 1_700_000_000_000)
         .await
         .expect("register intent");
     state
@@ -178,10 +168,7 @@ async fn daemon_exec_persistence_is_content_off_by_default() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
     state
-        .register(
-            intent("content-off-session", "policy.yaml"),
-            1_700_000_000_000,
-        )
+        .register(intent("content-off-session"), 1_700_000_000_000)
         .await
         .expect("register intent");
     state
@@ -239,10 +226,7 @@ async fn observer_batch_appends_accountability_findings_for_registered_intent() 
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
     state
-        .register(
-            intent("accountability-session", "policy.yaml"),
-            1_700_000_000_000,
-        )
+        .register(intent("accountability-session"), 1_700_000_000_000)
         .await
         .expect("register intent");
     state
@@ -282,52 +266,6 @@ async fn observer_batch_appends_accountability_findings_for_registered_intent() 
     assert!(timeline.contains(r#""kind":"undeclared_action""#));
     assert!(timeline.contains(r#""kind":"unknown_egress""#));
     assert!(timeline.contains(r#""decision":"review""#));
-
-    cleanup(&config);
-}
-
-#[tokio::test]
-async fn observer_batch_updates_accountability_feedback_output() {
-    let mut config = config();
-    let feedback_dir = config.state_dir.parent().unwrap().join("feedback");
-    config.feedback_dir = Some(feedback_dir.clone());
-    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
-    state
-        .register(intent("feedback-session", "policy.yaml"), 1_700_000_000_000)
-        .await
-        .expect("register intent");
-    state
-        .discover_cgroup("feedback-session", 77)
-        .await
-        .expect("discover cgroup");
-    let pipeline = state.pipeline();
-    let (shutdown, receiver) = oneshot::channel();
-    let writer = {
-        let state = Arc::clone(&state);
-        tokio::spawn(async move { state.run_writer(receiver).await })
-    };
-
-    ingest_observer_batch(
-        &state,
-        &pipeline,
-        DaemonObserverBatch {
-            events: vec![kernel_network_event(77, "1.1.1.1:443")],
-            decode_failures: 0,
-            truncations: 0,
-        },
-    )
-    .await;
-    shutdown.send(()).unwrap();
-    writer.await.unwrap().expect("writer drain");
-
-    let json = std::fs::read_to_string(feedback_dir.join("last-accountability-finding.json"))
-        .expect("accountability feedback JSON");
-    let value: serde_json::Value = serde_json::from_str(&json).expect("valid feedback JSON");
-    assert_eq!(value["session_id"], "feedback-session");
-    assert!(matches!(
-        value["kind"].as_str(),
-        Some("undeclared_action" | "unknown_egress")
-    ));
 
     cleanup(&config);
 }
@@ -379,7 +317,7 @@ fn kernel_file_event(cgroup_id: u64, path: &str) -> DaemonKernelEvent {
     event
 }
 
-fn intent(session_id: &str, policy_ref: &str) -> SessionIntent {
+fn intent(session_id: &str) -> SessionIntent {
     SessionIntent {
         schema_version: 1,
         tenant_id: apolysis_accountability::DEFAULT_TENANT_ID.to_string(),
@@ -391,7 +329,6 @@ fn intent(session_id: &str, policy_ref: &str) -> SessionIntent {
             kind: ResourceKind::Workspace,
             value: "/workspace".to_string(),
         }],
-        policy_ref: policy_ref.to_string(),
         workload_selectors: Vec::new(),
     }
 }

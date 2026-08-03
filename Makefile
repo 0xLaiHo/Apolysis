@@ -1,11 +1,5 @@
 .PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
-	test-local-agent-command-attribution \
-	test-policy-guardrails test-policy-guardrails-bpf-lsm-live test-runtime-guardrails \
-	test-runtime-foundation test-runtime-foundation-runtime \
-	test-runtime-foundation-validation-harness test-runtime-foundation-runtime-registration \
-	test-runtime-foundation-runtime-adapters test-runtime-foundation-runtime-adapter-matrix \
-	test-runtime-foundation-recovery test-runtime-foundation-performance \
-	test-runtime-foundation-visibility-reports test-runtime-foundation-production-qualification
+	test-local-agent-command-attribution
 
 build: build-ebpf
 	cargo build --workspace
@@ -48,43 +42,3 @@ test-quickstart:
 
 test-local-agent-command-attribution:
 	./scripts/test-local-agent-command-attribution.sh
-
-# --- Policy and runtime-foundation gates (privileged / adapter tests; run manually) ---
-
-test-policy-guardrails:
-	./scripts/test-policy-guardrails.sh
-
-test-policy-guardrails-bpf-lsm-live:
-	./scripts/test-policy-guardrails-bpf-lsm-live.sh
-
-test-runtime-guardrails:
-	./scripts/test-runtime-guardrails.sh
-
-test-runtime-foundation:
-	./scripts/test-runtime-foundation.sh
-
-test-runtime-foundation-runtime: build-ebpf
-	./scripts/test-runtime-foundation-runtime.sh
-
-test-runtime-foundation-validation-harness:
-	./scripts/test-runtime-foundation-validation-harness.sh
-
-test-runtime-foundation-runtime-registration:
-	./scripts/test-runtime-foundation-runtime-registration.sh
-
-test-runtime-foundation-runtime-adapters:
-	./scripts/test-runtime-foundation-runtime-adapters.sh
-
-test-runtime-foundation-runtime-adapter-matrix:
-	./scripts/test-runtime-foundation-runtime-adapter-matrix.sh
-
-test-runtime-foundation-recovery:
-	./scripts/test-runtime-foundation-recovery.sh
-
-test-runtime-foundation-performance:
-	./scripts/test-runtime-foundation-performance.sh
-
-test-runtime-foundation-visibility-reports:
-	./scripts/test-runtime-foundation-visibility-reports.sh
-
-test-runtime-foundation-production-qualification: test-runtime-foundation-recovery test-runtime-foundation-performance test-runtime-foundation-visibility-reports

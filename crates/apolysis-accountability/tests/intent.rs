@@ -22,7 +22,6 @@ fn parses_a_v1_register_intent_request() {
                 {"kind":"workspace","value":"/workspace"},
                 {"kind":"egress","value":"api.example.com:443"}
             ],
-            "policy_ref":"policies/local-dev.yaml",
             "workload_selectors":[
                 {
                     "runtime":"docker",
@@ -157,7 +156,6 @@ fn rejects_unknown_schema_versions() {
             "expires_at_unix_ms":1780000060000,
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }
     }"#;
@@ -178,7 +176,6 @@ fn rejects_empty_session_ids_and_expired_intent() {
             "expires_at_unix_ms":1780000060000,
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }
     }"#;
@@ -195,7 +192,6 @@ fn rejects_empty_session_ids_and_expired_intent() {
             "expires_at_unix_ms":1779999999999,
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }
     }"#;

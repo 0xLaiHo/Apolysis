@@ -108,19 +108,18 @@ deferred beyond the bounded beta.
 | Local Linux Agent CLI | First stable workflow |
 | Docker/containerd on operator-controlled Linux | Stable target after local collector correctness |
 | Kubernetes node and Pod attribution | Bounded beta after container identity is stable |
-| Linux self-hosted CI runner | Supported through the same managed-run boundary |
+| Linux self-hosted CI runner | Supported through the CLI managed-run boundary; no maintained composite Action |
 | macOS, Windows, or vendor-managed Agent runtime | Unsupported for eBPF runtime observation |
 
 ## Current repository state
 
 `v0.3.0` remains the latest public research release and demonstrates the live
 collector, managed Agent launch, JSONL timeline, privacy redaction, and release
-packaging. The active Cargo workspace now excludes the superseded contracts,
-Gateway, PostgreSQL projection, and evidence-object cluster together with its
-dedicated CI and integration gates. Policy, feedback, validation, and broad
-production-qualification prototypes remain temporarily while their observer,
-daemon, and runtime dependencies are separated in follow-up scope-reduction
-changes; they do not expand the active product boundary.
+packaging. The active Cargo workspace is now limited to eight crates: core,
+observer, accountability findings, local storage, daemon, CLI, Kubernetes
+metadata, and visibility assessment. Superseded contracts, central services,
+policy actuation, Agent feedback control, sandbox execution, and broad
+production-qualification prototypes have left active builds and default gates.
 
 The scope reset is a roadmap decision, not a retroactive production claim.
 Apolysis remains experimental until the supported collector, attribution,
@@ -155,7 +154,6 @@ required BPF capabilities are unavailable.
 sudo -E ./target/debug/apolysis observe \
   --backend live \
   --session codex-local-observation \
-  --policy policies/local-dev.yaml \
   --output .apolysis/codex-live/timeline.agent-run.jsonl \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
   --workspace-root "$PWD" \
@@ -169,13 +167,11 @@ third-party workload behavior still require a documented threat model.
 
 ## High-level roadmap
 
-1. Freeze the eBPF observability product boundary and remove superseded product
-   commitments from active documentation.
-2. Reduce the active workspace to the collector, runtime scope, storage,
-   daemon, CLI, and bounded runtime-attribution modules.
-3. Complete outcome-aware collector semantics, stable runtime identity,
+1. Keep the active workspace bounded to eBPF collection, Observation Scope,
+   attribution, local storage, daemon, CLI, and operator investigation.
+2. Complete outcome-aware collector semantics, stable runtime identity,
    health/gap reporting, and the local Agent Run investigation workflow.
-4. Qualify container attribution and then a bounded Kubernetes beta before
+3. Qualify container attribution and then a bounded Kubernetes beta before
    considering any central platform expansion.
 
 ## Documentation

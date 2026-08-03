@@ -2,11 +2,10 @@
 
 //! Observer pipeline for kernel-derived events.
 //!
-//! HostObserver established the userspace contract that a future Aya loader will feed:
-//! raw ring-buffer records are preserved, analyzed into canonical events, and
-//! written into the JSONL timeline. PolicyFeedback adds policy evaluation, downgrade
-//! metadata, and agent-facing feedback while keeping real blocking disabled
-//! until BPF-LSM support is proven at runtime.
+//! Raw ring-buffer records are normalized into canonical runtime observations,
+//! redacted at the persistence seam, and written into the bounded JSONL
+//! timeline. The observer reports what happened and where collection degraded;
+//! it does not make or execute policy decisions.
 
 pub mod abi;
 pub mod capabilities;
@@ -31,12 +30,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use apolysis_core::{
-    actors, fields::PipeFields, now_unix_ms, resources, CanonicalEvent, EnforcementMetadata,
-    EventSource, EventType, PolicyViolation, RawKernelEvent,
+    actors, fields::PipeFields, resources, CanonicalEvent, EventSource, EventType, RawKernelEvent,
 };
-use apolysis_feedback::FeedbackWriter;
 use apolysis_kubernetes::KubernetesMetadata;
-use apolysis_policy::{DecisionDowngrade, Policy, PolicyRuntimeCapabilities};
 use apolysis_store::{JsonlRotationPolicy, JsonlStore};
 
 use crate::process_context::ProcessContextTable;
@@ -45,9 +41,7 @@ use crate::process_context::ProcessContextTable;
 pub struct FixtureObserveRequest {
     pub input_path: PathBuf,
     pub output_path: PathBuf,
-    pub policy_path: PathBuf,
     pub session_id: String,
-    pub feedback_dir: Option<PathBuf>,
     pub kubernetes_metadata_path: Option<PathBuf>,
     pub output_rotation: Option<JsonlRotationPolicy>,
 }
@@ -57,24 +51,15 @@ impl FixtureObserveRequest {
     pub fn new(
         input_path: impl Into<PathBuf>,
         output_path: impl Into<PathBuf>,
-        policy_path: impl Into<PathBuf>,
         session_id: impl Into<String>,
     ) -> Self {
         Self {
             input_path: input_path.into(),
             output_path: output_path.into(),
-            policy_path: policy_path.into(),
             session_id: session_id.into(),
-            feedback_dir: None,
             kubernetes_metadata_path: None,
             output_rotation: None,
         }
-    }
-
-    /// Attach an optional feedback directory for agent-facing violation files.
-    pub fn with_feedback_dir(mut self, feedback_dir: Option<impl Into<PathBuf>>) -> Self {
-        self.feedback_dir = feedback_dir.map(Into::into);
-        self
     }
 
     /// Attach optional Kubernetes metadata that should be mirrored into the timeline.
@@ -238,21 +223,17 @@ impl EventIdSequence {
     }
 }
 
-/// Replay a raw observer fixture into raw, canonical, and policy timeline records.
+/// Replay a raw observer fixture into raw and canonical timeline records.
 pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, String> {
-    let policy = load_policy(&request.policy_path)?;
     let mut store =
         JsonlStore::create_with_rotation_policy(&request.output_path, request.output_rotation)
             .map_err(|error| format!("failed to create observer timeline: {error}"))?;
     let runner_plan = ObserverRunnerPlan::host_observer_default();
-    let capabilities = PolicyRuntimeCapabilities::detect();
-    let feedback = request.feedback_dir.clone().map(FeedbackWriter::new);
 
     write_observer_metadata(
         &request.session_id,
         &runner_plan,
         ObserverBackend::FixtureRingBuffer,
-        policy.startup_downgrade(&capabilities),
         request.output_rotation,
         &mut store,
     )?;
@@ -280,7 +261,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
 
         let raw = parse_fixture_raw_event(raw_line, &request.session_id)?
             .with_event_id(event_ids.next_raw_event_id());
-        let canonical = process_context.observe(&raw, canonicalize(&raw, &policy));
+        let canonical = process_context.observe(&raw, canonicalize(&raw));
         let (persisted_raw, persisted_canonical) = RuntimeEvidencePersistence::new(&redactor)
             .persist_event(
                 &raw,
@@ -294,14 +275,6 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
         store
             .append(&persisted_canonical)
             .map_err(|error| format!("failed to write canonical event: {error}"))?;
-        append_policy_evaluation(
-            &canonical,
-            &policy,
-            &capabilities,
-            feedback.as_ref(),
-            Some(&persisted_canonical.resource),
-            &mut store,
-        )?;
         canonical_count += 1;
     }
 
@@ -343,7 +316,6 @@ fn write_observer_metadata(
     session_id: &str,
     runner_plan: &ObserverRunnerPlan,
     backend: ObserverBackend,
-    startup_downgrade: Option<DecisionDowngrade>,
     output_rotation: Option<JsonlRotationPolicy>,
     store: &mut JsonlStore,
 ) -> Result<(), String> {
@@ -381,102 +353,14 @@ fn write_observer_metadata(
             .map_err(|error| format!("failed to write observer metadata: {error}"))?;
     }
 
-    if let Some(downgrade) = startup_downgrade {
-        let event = CanonicalEvent::new(
-            session_id,
-            EventSource::RuntimeMetadata,
-            EventType::RuntimeMetadata,
-            std::process::id(),
-            0,
-            actors::POLICY,
-            resources::BPF_LSM,
-            format!(
-                "unavailable:downgrade:{}->{}",
-                downgrade.from.as_str(),
-                downgrade.to.as_str()
-            ),
-        );
-        store
-            .append(&event)
-            .map_err(|error| format!("failed to write policy metadata: {error}"))?;
-    }
-
     Ok(())
 }
 
-fn append_policy_evaluation(
-    canonical: &CanonicalEvent,
-    policy: &Policy,
-    capabilities: &PolicyRuntimeCapabilities,
-    feedback: Option<&FeedbackWriter>,
-    persisted_target: Option<&str>,
-    store: &mut JsonlStore,
-) -> Result<(), String> {
-    let evaluation = policy.evaluate_event(canonical, capabilities);
-    if evaluation.decision.is_allow() {
-        return Ok(());
-    }
-
-    let rule_id = evaluation
-        .decision
-        .rule_id()
-        .ok_or_else(|| "policy violation missing rule id".to_string())?;
-    let reason = evaluation
-        .decision
-        .reason()
-        .ok_or_else(|| "policy violation missing reason".to_string())?;
-    let mut violation = PolicyViolation::new(
-        &canonical.session_id,
-        rule_id,
-        evaluation.decision.core_decision(),
-        reason,
-        canonical.pid,
-        persisted_target.unwrap_or(&canonical.resource),
-        evaluation.enforcement_backend.clone(),
-    );
-    if let Some(raw_event_id) = canonical.raw_event_id.as_deref() {
-        violation = violation.with_observed_event_id(raw_event_id);
-    }
-    store
-        .append(&violation)
-        .map_err(|error| format!("failed to write policy violation: {error}"))?;
-
-    let downgrade_reason = evaluation
-        .downgrade
-        .as_ref()
-        .map(|downgrade| downgrade.reason.clone());
-    let mut metadata = EnforcementMetadata::new(
-        &canonical.session_id,
-        evaluation.requested.core_decision(),
-        evaluation.effective.core_decision(),
-        evaluation.enforcement_backend,
-        evaluation.timing.as_str(),
-        evaluation.runtime.as_str(),
-        evaluation.action.as_str(),
-        evaluation.preoperation_prevention,
-    )
-    .with_rule_id(rule_id)
-    .with_downgrade_reason(downgrade_reason)
-    .with_measurement(canonical.timestamp_unix_ms, now_unix_ms());
-    if let Some(raw_event_id) = canonical.raw_event_id.as_deref() {
-        metadata = metadata.with_observed_event_id(raw_event_id);
-    }
-    store
-        .append(&metadata)
-        .map_err(|error| format!("failed to write enforcement metadata: {error}"))?;
-
-    if let Some(writer) = feedback {
-        writer.write_last_violation(&violation)?;
-    }
-
-    Ok(())
-}
-
-fn canonicalize(raw: &RawKernelEvent, policy: &Policy) -> CanonicalEvent {
+fn canonicalize(raw: &RawKernelEvent) -> CanonicalEvent {
     let event_type = match raw.event_name.as_str() {
         "exec" | "execve" | "sched_process_exec" => EventType::Exec,
         "open" | "openat" | "openat2" => {
-            if policy.denies_credential_path(&raw.resource) {
+            if is_credential_path(&raw.resource) {
                 EventType::CredentialRead
             } else {
                 EventType::FileOpen
@@ -507,6 +391,20 @@ fn canonicalize(raw: &RawKernelEvent, policy: &Policy) -> CanonicalEvent {
         event = event.with_raw_event_id(raw_event_id);
     }
     event
+}
+
+/// Return whether a path belongs to the observer's built-in credential classes.
+pub fn is_credential_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    normalized == ".env"
+        || normalized.ends_with("/.env")
+        || normalized.contains("/.env.")
+        || normalized.ends_with("/.ssh")
+        || normalized.contains("/.ssh/")
+        || normalized.ends_with("/.aws")
+        || normalized.contains("/.aws/")
+        || normalized == "/var/run/secrets"
+        || normalized.starts_with("/var/run/secrets/")
 }
 
 fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEvent, String> {
@@ -559,12 +457,6 @@ fn parse_raw_u128(fields: &PipeFields, key: &str) -> Result<u128, String> {
     required_raw(fields, key)?
         .parse()
         .map_err(|error| format!("invalid {key}: {error}"))
-}
-
-fn load_policy(path: &Path) -> Result<Policy, String> {
-    let input =
-        fs::read_to_string(path).map_err(|error| format!("failed to read policy: {error}"))?;
-    Policy::parse(&input).map_err(|error| format!("failed to parse policy: {error}"))
 }
 
 fn enabled(value: bool) -> &'static str {
@@ -624,7 +516,6 @@ mod tests {
 
     #[test]
     fn live_process_exit_maps_to_the_canonical_process_exit_type() {
-        let policy = Policy::default();
         let raw = RawKernelEvent::new(
             1,
             "session-live",
@@ -642,8 +533,21 @@ mod tests {
             "",
         );
 
-        let canonical = canonicalize(&raw, &policy);
+        let canonical = canonicalize(&raw);
 
         assert_eq!(canonical.event_type, EventType::ProcessExit);
+    }
+
+    #[test]
+    fn credential_paths_are_classified_without_policy_actuation() {
+        for path in [
+            "/home/agent/.ssh/id_ed25519",
+            "/home/agent/.aws/credentials",
+            "/workspace/.env.local",
+            "/var/run/secrets/kubernetes.io/serviceaccount/token",
+        ] {
+            assert!(is_credential_path(path), "expected credential path: {path}");
+        }
+        assert!(!is_credential_path("/workspace/src/main.rs"));
     }
 }
