@@ -293,6 +293,8 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 - 成功 connect 不证明远端 operation 已 commit。
 - 没有额外传播 identity 时，无法区分同进程中的逻辑 Agent；runtime-only attribution 保持
   process-level。
+- Multi-cgroup daemon 会报告 collector-global network correlation counter，但在具备
+  per-cgroup gap attribution 前，不会把它们持久化为 Agent-Run-scoped Observation Gap。
 - 被攻陷的 kernel 或 privileged host 可以省略或伪造 observation。
 - Kernel version、BTF、hook availability、verifier behavior 与 privilege 限制支持范围。
 

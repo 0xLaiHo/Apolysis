@@ -840,7 +840,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     if dropped_events > 0 || observation_gaps > 0 || truncations > 0 {
         eprintln!(
             "apolysis: ⚠ evidence may be incomplete — {dropped_events} event(s) dropped, \
-             {observation_gaps} network correlation gap(s), {truncations} truncated. \
+             {observation_gaps} network Observation Gap(s), {truncations} truncated. \
              A quiet timeline is not proof of absence."
         );
     }

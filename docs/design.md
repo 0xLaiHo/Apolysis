@@ -327,6 +327,9 @@ them as historical implementation input; they do not define this architecture.
 - A successful connect does not prove that a remote operation committed.
 - Same-process logical Agents cannot be separated without an additional
   propagated identity; runtime-only attribution remains process-level.
+- The multi-cgroup daemon reports collector-global network correlation counters
+  but does not yet persist them as Agent-Run-scoped Observation Gaps; doing so
+  requires per-cgroup gap attribution.
 - A compromised kernel or privileged host can suppress or forge observations.
 - Kernel version, BTF, hook availability, verifier behavior, and privileges
   constrain support.

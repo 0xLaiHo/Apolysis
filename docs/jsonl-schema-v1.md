@@ -271,6 +271,11 @@ Fields:
 - `detail`: bounded diagnostic context. Network missing-exit details distinguish
   kernel-reported losses from entries still pending when the collector stops.
 
+The managed single-Agent-Run live observer persists these records directly.
+The multi-cgroup daemon currently exposes collector-global connect gap counters
+in its runtime summary; it does not assign those aggregate counters to an Agent
+Run until per-cgroup gap attribution is implemented.
+
 ### `observer_diagnostic`
 
 Observer diagnostic records describe observer health, loss, truncation, attach
