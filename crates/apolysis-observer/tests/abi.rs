@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use apolysis_core::{OperationOutcome, OperationResult};
+use apolysis_core::{OperationOutcome, OperationResult, RuntimeRelation};
 use apolysis_observer::abi::{
     KernelEventDecodeError, KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN,
     FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RETURN_VALUE,
@@ -177,6 +177,41 @@ fn live_file_record_converts_to_the_fixture_compatible_raw_schema() {
     assert_eq!(raw.resource, "/workspace/input.txt");
     assert_eq!(raw.action, "read");
     assert_eq!(raw.cgroup_id.as_deref(), Some("901"));
+}
+
+#[test]
+fn live_record_normalizes_a_stable_runtime_identity() {
+    let mut record = empty_record(KernelEventKind::Open);
+    record.cgroup_id = 901;
+    record.scope_generation = 7;
+    record.pid = 44;
+    record.process_generation = 22;
+    record.process_start_time_ns = 33;
+    record.exec_generation = 5;
+    record.ppid = 40;
+    record.parent_process_generation = 11;
+    record.parent_exec_generation = 4;
+
+    let raw = raw_event_from_record(
+        &record,
+        "session-live",
+        1_700_000_000_044,
+        "boot-test",
+    )
+    .expect("convert stable runtime identity");
+
+    assert_eq!(raw.host_boot_id.as_deref(), Some("boot-test"));
+    assert_eq!(raw.scope_generation, Some(7));
+    assert_eq!(raw.process_generation, Some(22));
+    assert_eq!(raw.process_start_time_ns, Some(33));
+    assert_eq!(raw.exec_generation, Some(5));
+    assert_eq!(raw.parent_process_generation, Some(11));
+    assert_eq!(raw.parent_exec_generation, Some(4));
+    assert_eq!(raw.relation_status, RuntimeRelation::Exact);
+    assert_eq!(
+        raw.relation_reason,
+        "host_boot_process_exec_generation"
+    );
 }
 
 #[test]
