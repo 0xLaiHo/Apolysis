@@ -192,6 +192,11 @@ async fn observer_batch_submits_only_records_with_session_ownership() {
     .expect("session timeline");
     assert!(timeline.contains(r#""record_type":"raw_kernel_event""#));
     assert!(timeline.contains(r#""cgroup_id":"77""#));
+    assert!(timeline.contains(r#""host_boot_id":"11111111-2222-3333-4444-555555555555""#));
+    assert!(timeline.contains(r#""scope_generation":1"#));
+    assert!(timeline.contains(r#""process_generation":100"#));
+    assert!(timeline.contains(r#""exec_generation":1"#));
+    assert!(timeline.contains(r#""relation_status":"exact""#));
     assert!(!timeline.contains(r#""cgroup_id":"99""#));
     assert!(timeline.contains("path_token:"));
     assert!(!timeline.contains("/host/private/credential"));

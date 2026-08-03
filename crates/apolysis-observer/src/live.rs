@@ -1790,15 +1790,12 @@ fn track_cgroup_with_observation_counters(
     if cgroup_id == 0 {
         return Err("cgroup id must be non-zero".to_string());
     }
-    match tracked_cgroup_scope(ebpf, cgroup_id)? {
-        Some(scope) => {
-            return Err(format!(
-                "cgroup observer scope {cgroup_id} is already generation {} in state {:?}",
-                scope.generation(),
-                scope.state()?
-            ));
-        }
-        None => {}
+    if let Some(scope) = tracked_cgroup_scope(ebpf, cgroup_id)? {
+        return Err(format!(
+            "cgroup observer scope {cgroup_id} is already generation {} in state {:?}",
+            scope.generation(),
+            scope.state()?
+        ));
     }
 
     set_network_connect_counters(ebpf, cgroup_id, NetworkConnectCountersAbi::default())?;

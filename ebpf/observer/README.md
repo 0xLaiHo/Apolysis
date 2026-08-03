@@ -22,15 +22,20 @@ when the host has the required capabilities and otherwise prints a specific
 skip reason.
 
 The live program filters by cgroup v2 identity or a tracked PID tree before
-submitting records to `APOLYSIS_EVENTS`. ABI v2 carries an optional signed
-syscall return value. Network connect and the selected file operations use
+submitting records to `APOLYSIS_EVENTS`. ABI v3 carries an optional signed
+syscall return value plus scope, process, exec, process-start, and parent
+generations. A bounded process-identity map detects PID reuse and exec
+transitions; userspace attaches the host boot ID and records exact versus
+inferred attribution. Network connect and the selected file operations use
 bounded thread-scoped pending maps and emit only at syscall exit; unmatched
 pairs are reported as operation-specific Observation Gaps. The daemon drains
-already-submitted ring records before completing scope removal and rejects a
-drained numeric cgroup ID for the rest of that observer lifetime until stable
-scope generations are implemented. Process fork, exec, and exit ring producers
-join the same multi-cgroup in-flight drain barrier as paired operation exits.
-The program remains audit-only and does not perform pre-operation blocking.
+already-submitted ring records before completing scope removal. Monotonic
+scope generations allow safe numeric cgroup-ID reuse while rejecting stale
+pending pairs from the drained Agent Run. Process fork, exec, and exit ring
+producers join the same multi-cgroup in-flight drain barrier as paired
+operation exits. Generations are observer-lifetime state and do not claim
+identity continuity across collector restart. The program remains audit-only
+and does not perform pre-operation blocking.
 
 The eBPF source is GPL-2.0-only because it is intended to be loaded into the
 Linux kernel.

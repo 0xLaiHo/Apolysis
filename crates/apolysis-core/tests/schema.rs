@@ -112,8 +112,8 @@ fn collector_capability_manifest_declares_the_versioned_observation_boundary() {
     let manifest = CollectorCapabilityManifest::new(
         "agent-run-capability",
         "0.1.0",
-        2,
-        616,
+        3,
+        656,
         "process_tree",
         vec![
             CollectorCapability::new(
@@ -132,7 +132,7 @@ fn collector_capability_manifest_declares_the_versioned_observation_boundary() {
 
     assert_eq!(
         manifest.to_json_line(),
-        r#"{"record_type":"collector_capability_manifest","schema_version":1,"timestamp_unix_ms":1780328100007,"agent_run_id":"agent-run-capability","collector":"apolysis_observer","collector_version":"0.1.0","kernel_abi_version":2,"kernel_record_size":616,"observation_scope":"process_tree","privacy_profile":"content_off","capabilities":[{"operation":"process_exec","event_sources":["sched/sched_process_exec"],"outcomes":["succeeded"]},{"operation":"file_open","event_sources":["syscalls/sys_enter_openat","syscalls/sys_enter_openat2"],"outcomes":["attempted"]}]}"#
+        r#"{"record_type":"collector_capability_manifest","schema_version":1,"timestamp_unix_ms":1780328100007,"agent_run_id":"agent-run-capability","collector":"apolysis_observer","collector_version":"0.1.0","kernel_abi_version":3,"kernel_record_size":656,"observation_scope":"process_tree","privacy_profile":"content_off","capabilities":[{"operation":"process_exec","event_sources":["sched/sched_process_exec"],"outcomes":["succeeded"]},{"operation":"file_open","event_sources":["syscalls/sys_enter_openat","syscalls/sys_enter_openat2"],"outcomes":["attempted"]}]}"#
     );
 }
 

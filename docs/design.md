@@ -165,9 +165,12 @@ for health diagnosis. Draining a scope prevents new entries, snapshots its
 missing-entry, missing-exit, and pending counts after a bounded in-flight
 collector-update drain, and confirms typed Observation Gaps are durable in the
 owning Agent Run before its ownership is discarded. Already-submitted ring
-records pass through a bounded drain and are confirmed durable first. A drain, snapshot, queue drop
-or shedding event, or storage failure stops the observer runtime and rejects a
-clean run close.
+records pass through a bounded drain and are confirmed durable first. Every
+scope registration receives a monotonic generation. Pending pairs and emitted
+records retain that generation, so a stale pair from a drained scope cannot be
+charged to or emitted into a later Agent Run that reuses the same numeric
+cgroup ID. A drain, snapshot, queue drop or shedding event, or storage failure
+stops the observer runtime and rejects a clean run close.
 
 Every multi-cgroup ring producer, including process fork, exec, and exit,
 participates in the same in-flight scope barrier. Barrier-map read failure
@@ -185,10 +188,21 @@ Userspace decodes the kernel ABI, assigns deterministic source sequence,
 normalizes event types, joins runtime metadata, applies content-off privacy,
 and writes the Agent Observation Record.
 
-A stable process identity must include enough context to survive PID reuse.
-Where available, attribution also carries host boot identity, process start,
-exec generation, PID namespace, cgroup, container, Pod, and node identity.
-Unsupported identity fields remain absent and affect attribution quality.
+Kernel ABI v3 carries a bounded scope generation, process generation, kernel
+process-start timestamp, exec generation, and parent process/exec generations.
+The live userspace boundary attaches the host boot ID read once when the
+collector starts. Process context is keyed by host boot, process generation,
+and exec generation rather than PID; a PID reuse or exec transition therefore
+cannot inherit stale executable context. The process-identity map is bounded
+and reports map pressure instead of silently reusing an older identity.
+
+Attribution is exact only when host boot, process generation, and exec
+generation are present. Missing generations remain inferred with an explicit
+reason; PID-only, command, path, and timestamp joins never become exact. Scope
+generation protects cgroup ownership within one collector lifetime. Collector
+restart remains a visible identity boundary: cross-restart continuity is not
+claimed until lifecycle persistence is implemented. PID namespace, container,
+Pod, and node identity remain additive attribution where available.
 
 ### 5.4 Local store and viewer
 
@@ -312,9 +326,9 @@ A quiet timeline is never proof that the Agent performed no relevant action.
 Implemented today:
 
 - `ebpf/observer` and `apolysis-observer`: CO-RE tracepoints, ring buffer,
-  process-tree/cgroup scopes, ABI v2, outcome-aware selected file operations
-  and network connect, per-cgroup operation gap counters, redaction, and
-  health/gap diagnostics;
+  process-tree/cgroup scopes, ABI v3, bounded process/exec and cgroup scope
+  generations, outcome-aware selected file operations and network connect,
+  per-cgroup operation gap counters, redaction, and health/gap diagnostics;
 - `apolysis-cli`: fixture/live observation, managed Agent launch, optional
   Codex intent correlation, visibility, and verification commands;
 - `apolysis-core`: current JSONL vocabulary, record types, and versioned
@@ -331,9 +345,9 @@ The live collector synchronizes its capability manifest to stable storage after
 successful attachment and before releasing a managed Agent gate. Selected
 file operations and network connect have bounded entry/exit outcome semantics,
 and the daemon persists their pairing gaps to the owning Agent Run at explicit
-scope removal and clean shutdown. Stable scope/process generations, complete
-collector lifecycle records, the saved-run viewer, and bounded Kubernetes beta
-remain targets.
+scope removal and clean shutdown. Stable in-run scope/process generations are
+implemented. Complete collector lifecycle records and restart-gap persistence,
+the saved-run viewer, and bounded Kubernetes beta remain targets.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification
@@ -350,11 +364,10 @@ them as historical implementation input; they do not define this architecture.
 - Same-process logical Agents cannot be separated without an additional
   propagated identity; runtime-only attribution remains process-level.
 - Connect or file entries still pending when a cgroup scope drains remain in
-  bounded pairing maps until syscall or thread exit. To prevent those records
-  from crossing Agent Runs, the daemon keeps a bounded retired-cgroup guard and
-  rejects reuse of that numeric cgroup ID for the rest of the observer
-  lifetime. Stable scope generations remain required before safe reuse can be
-  supported without restarting the observer.
+  bounded pairing maps until syscall or thread exit. Their captured scope
+  generation prevents them from crossing into a later Agent Run after numeric
+  cgroup-ID reuse, but the generation allocator is observer-lifetime state and
+  does not establish identity continuity across collector restart.
 - The exit side cannot reconstruct `openat` or `openat2` flags after a missing
   entry, so such an unmatched exit is conservatively attributed to
   `file_open`, not create or truncate.
