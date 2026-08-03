@@ -412,9 +412,10 @@ async fn ingest_observer_batch_with_delivery(
         let session_id = context.agent_run_id;
         let raw = match raw_event_from_record(&event.record, &session_id, event.timestamp_unix_ms) {
             Ok(raw) => raw,
-            Err(_) => {
-                summary.decode_failures = summary.decode_failures.saturating_add(1);
-                continue;
+            Err(error) => {
+                return Err(format!(
+                    "failed to normalize observer record for Agent Run {session_id}: {error}"
+                ));
             }
         };
         let redactor = Redactor::new(&session_id, context.workspace_root);

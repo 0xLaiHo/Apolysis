@@ -147,6 +147,11 @@ missing-entry、missing-exit 与 pending 计数；快照前会有界等待正在
 record 会先经过有界排空并确认持久化。Drain、快照、queue drop/shedding 或 storage 失败会停止
 observer runtime，并拒绝把该 run 干净关闭。
 
+所有 multi-cgroup ring producer（包括 process fork、exec 与 exit）都参与同一个 in-flight
+scope barrier。Barrier map 读取失败时 scope 会保持 draining 并 fail closed；只有有界等待超时
+才可以尝试恢复其他前置条件完整的 ACTIVE scope。通过 ABI 验证但无法 normalize 的 record 也会
+停止 queued ingest 或 confirmed drain，而不会被跳过。
+
 全 syscall 采集、prompt/response、TLS plaintext 和通用 kernel enforcement 都不是目标。
 
 ### 5.3 Userspace normalization 与 identity

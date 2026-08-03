@@ -169,6 +169,13 @@ records pass through a bounded drain and are confirmed durable first. A drain, s
 or shedding event, or storage failure stops the observer runtime and rejects a
 clean run close.
 
+Every multi-cgroup ring producer, including process fork, exec, and exit,
+participates in the same in-flight scope barrier. Barrier-map read failure
+leaves the scope draining and fails closed; only a bounded wait timeout may
+attempt to restore an otherwise complete ACTIVE scope. ABI-valid records that
+cannot be normalized also stop queued ingest or confirmed drain instead of
+being skipped.
+
 Full-syscall collection, prompt/response capture, TLS plaintext capture, and
 generic kernel enforcement are not targets.
 

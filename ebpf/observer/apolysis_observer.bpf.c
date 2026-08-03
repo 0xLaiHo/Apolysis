@@ -511,6 +511,23 @@ static __always_inline struct apolysis_kernel_event *reserve_event(unsigned int 
     return reserve_event_unchecked(kind);
 }
 
+static __always_inline struct apolysis_kernel_event *
+reserve_process_event(unsigned int kind,
+                      unsigned long long *cgroup_id,
+                      bool *update_scoped)
+{
+    *cgroup_id = 0;
+    *update_scoped = false;
+    if (!multi_cgroup_scope())
+        return reserve_event(kind);
+
+    *cgroup_id = bpf_get_current_cgroup_id();
+    *update_scoped = begin_scope_counter_update(*cgroup_id);
+    if (!*update_scoped)
+        return 0;
+    return reserve_event_unchecked(kind);
+}
+
 static __always_inline void copy_action(struct apolysis_kernel_event *event,
                                         const char *action,
                                         unsigned int length)
@@ -829,6 +846,8 @@ int apolysis_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
 {
     struct apolysis_scope_config *config = scope_config();
     struct apolysis_kernel_event *event;
+    unsigned long long event_cgroup_id;
+    bool update_scoped;
     unsigned int child_pid;
     unsigned char tracked = 1;
 
@@ -845,14 +864,18 @@ int apolysis_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
         return 0;
     }
 
-    event = reserve_event(APOLYSIS_EVENT_FORK);
-    if (!event)
+    event = reserve_process_event(APOLYSIS_EVENT_FORK, &event_cgroup_id,
+                                  &update_scoped);
+    if (!event) {
+        end_scope_counter_update(event_cgroup_id, update_scoped);
         return 0;
+    }
 
     event->pid = ctx->child_pid;
     event->ppid = ctx->parent_pid;
     copy_action(event, "fork", 5);
     bpf_ringbuf_submit(event, 0);
+    end_scope_counter_update(event_cgroup_id, update_scoped);
     return 0;
 }
 
@@ -862,11 +885,16 @@ int apolysis_sched_process_exec(struct trace_event_raw_sched_process_exec *ctx)
     struct apolysis_kernel_event *event;
     struct apolysis_pending_exec *pending;
     const char *filename;
+    unsigned long long event_cgroup_id;
+    bool update_scoped;
     unsigned int pid;
 
-    event = reserve_event(APOLYSIS_EVENT_EXEC);
-    if (!event)
+    event = reserve_process_event(APOLYSIS_EVENT_EXEC, &event_cgroup_id,
+                                  &update_scoped);
+    if (!event) {
+        end_scope_counter_update(event_cgroup_id, update_scoped);
         return 0;
+    }
 
     filename = (const char *)ctx + (ctx->__data_loc_filename & 0xffff);
     pid = event->pid;
@@ -881,6 +909,7 @@ int apolysis_sched_process_exec(struct trace_event_raw_sched_process_exec *ctx)
     }
     copy_action(event, "exec", 5);
     bpf_ringbuf_submit(event, 0);
+    end_scope_counter_update(event_cgroup_id, update_scoped);
     return 0;
 }
 
@@ -909,9 +938,13 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     unsigned long long connect_cgroup_id;
     unsigned long long file_cgroup_id;
     unsigned int file_event_kind;
+    unsigned long long event_cgroup_id;
+    bool event_update_scoped;
     bool update_scoped;
     unsigned int pid;
 
+    event = reserve_process_event(APOLYSIS_EVENT_EXIT, &event_cgroup_id,
+                                  &event_update_scoped);
     pid_tgid = bpf_get_current_pid_tgid();
     pending_connect = bpf_map_lookup_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
     if (pending_connect) {
@@ -933,13 +966,13 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
         end_scope_counter_update(file_cgroup_id, update_scoped);
     }
 
-    event = reserve_event(APOLYSIS_EVENT_EXIT);
     if (event) {
         event->pid = ctx->pid;
         bpf_probe_read_kernel(event->comm, sizeof(event->comm), ctx->comm);
         copy_action(event, "exit", 5);
         bpf_ringbuf_submit(event, 0);
     }
+    end_scope_counter_update(event_cgroup_id, event_update_scoped);
 
     if (config && config->mode == APOLYSIS_SCOPE_PID_TREE) {
         pid = ctx->pid;

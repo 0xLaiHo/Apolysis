@@ -28,8 +28,9 @@ bounded thread-scoped pending maps and emit only at syscall exit; unmatched
 pairs are reported as operation-specific Observation Gaps. The daemon drains
 already-submitted ring records before completing scope removal and rejects a
 drained numeric cgroup ID for the rest of that observer lifetime until stable
-scope generations are implemented. The program remains audit-only and does
-not perform pre-operation blocking.
+scope generations are implemented. Process fork, exec, and exit ring producers
+join the same multi-cgroup in-flight drain barrier as paired operation exits.
+The program remains audit-only and does not perform pre-operation blocking.
 
 The eBPF source is GPL-2.0-only because it is intended to be loaded into the
 Linux kernel.

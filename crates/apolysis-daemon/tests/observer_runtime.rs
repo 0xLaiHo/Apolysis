@@ -390,6 +390,92 @@ async fn dropped_file_outcome_stops_the_observer_runtime() {
 }
 
 #[tokio::test]
+async fn normalization_failure_stops_queued_observer_ingest() {
+    let config = config();
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("agent-run-normalize"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-normalize", 53)
+        .await
+        .expect("associate cgroup");
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: Some(invalid_normalization_batch(53)),
+        drain_batch: None,
+        scoped_counters: BTreeMap::new(),
+    };
+    let (_scope, receiver) = scope_channel(1);
+    let (_shutdown, shutdown_receiver) = oneshot::channel();
+
+    let error = run_observer_runtime(
+        backend,
+        Vec::new(),
+        receiver,
+        Arc::clone(&state),
+        shutdown_receiver,
+    )
+    .await
+    .expect_err("normalization failure must fail queued ingest");
+
+    assert!(error.contains("failed to normalize observer record"));
+    assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn normalization_failure_during_scope_drain_rejects_clean_close() {
+    let config = config();
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        drain_batch: Some(invalid_normalization_batch(54)),
+        scoped_counters: BTreeMap::new(),
+    };
+    let (scope, receiver) = scope_channel(2);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (_observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+    state
+        .register(intent("agent-run-drain-normalize"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-drain-normalize", 54)
+        .await
+        .expect("associate cgroup");
+
+    let close_error = state
+        .close("agent-run-drain-normalize")
+        .await
+        .expect_err("normalization failure must reject clean close");
+    let runtime_error = runtime
+        .await
+        .unwrap()
+        .expect_err("normalization failure must stop observer runtime");
+
+    assert!(close_error.contains("failed to normalize observer record"));
+    assert!(runtime_error.contains("failed to normalize observer record"));
+    assert!(state.query("agent-run-drain-normalize").await.is_some());
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
     let config = config();
     let operations = Arc::new(Mutex::new(Vec::new()));
@@ -399,7 +485,7 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
         fail_track: None,
         fail_untrack: None,
         batch: None,
-        drain_batch: Some(file_outcome_batch_for_path(41, "/sensitive/private.txt")),
+        drain_batch: Some(file_and_process_drain_batch(41, "/sensitive/private.txt")),
         scoped_counters: BTreeMap::from([(
             41,
             ScopeObservationGapCounters {
@@ -460,10 +546,14 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
     let outcome_index = timeline_after_close
         .find(r#""event_name":"openat""#)
         .expect("completed file outcome is durable before close returns");
+    let process_index = timeline_after_close
+        .find(r#""event_name":"sched_process_exec""#)
+        .expect("process event submitted before drain is durable before close returns");
     let close_index = timeline_after_close
         .find(r#""record_type":"session_closed""#)
         .expect("terminal record is durable before close returns");
     assert!(outcome_index < close_index);
+    assert!(process_index < close_index);
     assert!(gap_index < close_index);
     assert!(!timeline_after_close.contains("/sensitive/private.txt"));
     assert!(timeline_after_close.contains("path_token:"));
@@ -768,6 +858,26 @@ fn file_outcome_batch_for_path(cgroup_id: u64, path: &str) -> DaemonObserverBatc
         }],
         ..DaemonObserverBatch::default()
     }
+}
+
+fn invalid_normalization_batch(cgroup_id: u64) -> DaemonObserverBatch {
+    let mut batch = file_outcome_batch(cgroup_id);
+    batch.events[0].record.event_kind = u32::MAX;
+    batch
+}
+
+fn file_and_process_drain_batch(cgroup_id: u64, path: &str) -> DaemonObserverBatch {
+    let mut batch = file_outcome_batch_for_path(cgroup_id, path);
+    let mut process = batch.events[0].clone();
+    process.record.event_kind = KernelEventKind::Exec as u32;
+    process.record.flags = 0;
+    process.record.return_value = 0;
+    process.record.resource = [0; RESOURCE_LEN];
+    process.record.resource[..13].copy_from_slice(b"/usr/bin/test");
+    process.record.action = [0; ACTION_LEN];
+    process.record.action[..4].copy_from_slice(b"exec");
+    batch.events.push(process);
+    batch
 }
 
 fn config() -> DaemonConfig {

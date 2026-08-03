@@ -1998,19 +1998,35 @@ fn remove_scope_updates_inflight(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), 
         .map_err(|error| format!("failed to clean up cgroup in-flight scope counter: {error}"))
 }
 
-fn wait_for_scope_updates_to_drain<F>(mut read_inflight: F) -> Result<(), String>
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ScopeDrainWaitError {
+    Read(String),
+    Timeout,
+}
+
+impl std::fmt::Display for ScopeDrainWaitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(error) => formatter.write_str(error),
+            Self::Timeout => write!(
+                formatter,
+                "cgroup scope updates did not drain after {SCOPE_DRAIN_POLL_LIMIT} polls"
+            ),
+        }
+    }
+}
+
+fn wait_for_scope_updates_to_drain<F>(mut read_inflight: F) -> Result<(), ScopeDrainWaitError>
 where
     F: FnMut() -> Result<u64, String>,
 {
     for _ in 0..SCOPE_DRAIN_POLL_LIMIT {
-        if read_inflight()? == 0 {
+        if read_inflight().map_err(ScopeDrainWaitError::Read)? == 0 {
             return Ok(());
         }
         std::thread::yield_now();
     }
-    Err(format!(
-        "cgroup scope updates did not drain after {SCOPE_DRAIN_POLL_LIMIT} polls"
-    ))
+    Err(ScopeDrainWaitError::Timeout)
 }
 
 fn restore_active_scope(ebpf: &mut Ebpf, cgroup_id: u64, error: String) -> String {
@@ -2066,10 +2082,20 @@ fn drain_tracked_cgroup(
         None => return Err(format!("cgroup observer scope {cgroup_id} is not tracked")),
     }
     set_tracked_cgroup_state(ebpf, cgroup_id, TrackedCgroupState::Draining)?;
-    if let Err(error) =
-        wait_for_scope_updates_to_drain(|| read_scope_updates_inflight(ebpf, cgroup_id))
-    {
-        return Err(restore_active_scope(ebpf, cgroup_id, error));
+    match wait_for_scope_updates_to_drain(|| read_scope_updates_inflight(ebpf, cgroup_id)) {
+        Ok(()) => {}
+        Err(ScopeDrainWaitError::Timeout) => {
+            return Err(restore_active_scope(
+                ebpf,
+                cgroup_id,
+                ScopeDrainWaitError::Timeout.to_string(),
+            ));
+        }
+        Err(ScopeDrainWaitError::Read(error)) => {
+            return Err(format!(
+                "{error}; cgroup scope remains draining because its in-flight update barrier could not be read"
+            ));
+        }
     }
     if let Err(error) = remove_tracked_cgroup(ebpf, cgroup_id) {
         return Err(restore_active_scope(ebpf, cgroup_id, error));
@@ -2445,6 +2471,17 @@ mod tests {
         .expect("in-flight updates drain");
 
         assert!(observed.is_empty());
+    }
+
+    #[test]
+    fn cgroup_drain_does_not_treat_a_barrier_read_failure_as_a_timeout() {
+        let error = wait_for_scope_updates_to_drain(|| Err("barrier map missing".to_string()))
+            .expect_err("barrier read failure must fail closed");
+
+        assert_eq!(
+            error,
+            ScopeDrainWaitError::Read("barrier map missing".to_string())
+        );
     }
 
     #[test]
