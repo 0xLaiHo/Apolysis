@@ -110,9 +110,10 @@ Priorities:
 
 - preserve compatibility for the versioned kernel/userspace ABI and capability
   manifest, and reject incompatible records explicitly;
-- add bounded entry/exit matching for the supported operation set;
-- report return value and errno and distinguish attempted, succeeded, failed,
-  denied, pending, and unknown;
+- extend the bounded `network_connect` entry/exit pattern to the remaining
+  supported operation set;
+- preserve return value and errno semantics while distinguishing attempted,
+  succeeded, failed, denied, pending, and unknown;
 - establish stable process identity across PID reuse and exec;
 - preserve cgroup scope and deterministic process lineage;
 - emit collector start, periodic health, loss checkpoints, terminal state, and

@@ -38,8 +38,19 @@ fn audit_observer_manifest_declares_only_its_current_operation_outcomes() {
         .iter()
         .find(|capability| capability.operation == "network_connect")
         .expect("network connect capability");
-    assert_eq!(connect.event_sources, ["syscalls/sys_enter_connect"]);
-    assert_eq!(connect.outcomes, [OperationOutcome::Attempted]);
+    assert_eq!(
+        connect.event_sources,
+        ["syscalls/sys_enter_connect", "syscalls/sys_exit_connect"]
+    );
+    assert_eq!(
+        connect.outcomes,
+        [
+            OperationOutcome::Succeeded,
+            OperationOutcome::Failed,
+            OperationOutcome::Denied,
+            OperationOutcome::Pending,
+        ]
+    );
 }
 
 #[test]
@@ -58,6 +69,20 @@ fn audit_observer_manifest_omits_exec_when_only_argument_enrichment_is_attached(
         object_path: "target/ebpf/apolysis_observer.bpf.o".into(),
         ring_buffer_map: "EVENTS".to_string(),
         tracepoints: vec![TracepointAttach::new("syscalls", "sys_enter_execve")],
+    };
+
+    let manifest =
+        audit_observer_capability_manifest("agent-run-partial", &LiveScope::ProcessTree(42), &plan);
+
+    assert!(manifest.capabilities.is_empty());
+}
+
+#[test]
+fn audit_observer_manifest_omits_connect_without_its_exit_hook() {
+    let plan = AyaLoaderPlan {
+        object_path: "target/ebpf/apolysis_observer.bpf.o".into(),
+        ring_buffer_map: "EVENTS".to_string(),
+        tracepoints: vec![TracepointAttach::new("syscalls", "sys_enter_connect")],
     };
 
     let manifest =

@@ -19,6 +19,7 @@ pub mod records {
     pub const INTENT: &str = "intent";
     /// Observer loss, truncation, lifecycle, or summary evidence.
     pub const OBSERVER_DIAGNOSTIC: &str = "observer_diagnostic";
+    pub const OBSERVATION_GAP: &str = "observation_gap";
     /// A runtime visibility assessment for strong-isolation backends.
     pub const VISIBILITY_ASSESSMENT: &str = "visibility_assessment";
 }

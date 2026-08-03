@@ -134,6 +134,10 @@ Beta collector target 为每种受支持 operation 加入 entry/exit matching。
 attempted、succeeded、failed、denied、pending 与 unknown outcome，并在 capability 声明
 包含时保留 return value 或 errno。
 
+首条完成 outcome 的路径是 `network_connect`。Collector 保存有界、thread-scoped entry
+record，在 syscall exit 发出 Runtime Observation，并把 Linux return value 映射为
+succeeded、failed、denied 或 pending。无法匹配的 entry 或 exit 会成为显式 Observation Gap。
+
 全 syscall 采集、prompt/response、TLS plaintext 和通用 kernel enforcement 都不是目标。
 
 ### 5.3 Userspace normalization 与 identity
@@ -259,7 +263,8 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 Implemented today：
 
 - `ebpf/observer` 与 `apolysis-observer`：CO-RE tracepoint、ring buffer、
-  process-tree/cgroup scope、版本化 ABI、脱敏和 health diagnostic；
+  process-tree/cgroup scope、ABI v2、outcome-aware network connect、脱敏和 health/gap
+  diagnostic；
 - `apolysis-cli`：fixture/live observation、托管 Agent launch、可选 Codex intent
   correlation、visibility 与 verification command；
 - `apolysis-core`：当前 JSONL vocabulary、record type 与版本化 Collector Capability
@@ -272,9 +277,9 @@ Implemented today：
   prototype。
 
 Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 同步到稳定
-存储。当前 file 与 network hook 主要捕获 syscall entry，因此描述 attempt。稳定 entry/exit
-outcome 语义、完整 collector lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是
-target。
+存储。Network connect 已具备有界 entry/exit outcome 语义；当前 file hook 仍描述 attempt。
+把 outcome 语义扩展到其余 operation set、完整 collector lifecycle record、saved-run viewer
+与有界 Kubernetes Beta 仍是 target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃

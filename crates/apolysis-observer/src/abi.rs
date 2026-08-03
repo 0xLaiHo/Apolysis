@@ -8,12 +8,13 @@ pub const COMM_LEN: usize = 16;
 pub const RESOURCE_LEN: usize = 256;
 pub const ACTION_LEN: usize = 32;
 pub const PAYLOAD_LEN: usize = 256;
-pub const KERNEL_ABI_VERSION: u32 = 1;
-pub const KERNEL_EVENT_RECORD_LEN: usize = 48 + COMM_LEN + RESOURCE_LEN + ACTION_LEN + PAYLOAD_LEN;
+pub const KERNEL_ABI_VERSION: u32 = 2;
+pub const KERNEL_EVENT_RECORD_LEN: usize = 56 + COMM_LEN + RESOURCE_LEN + ACTION_LEN + PAYLOAD_LEN;
 pub const FLAG_RESOURCE_TRUNCATED: u32 = 1 << 0;
 pub const FLAG_PAYLOAD_TRUNCATED: u32 = 1 << 1;
 pub const FLAG_PAYLOAD_SOCKADDR: u32 = 1 << 2;
 pub const FLAG_ARGV_TRUNCATED: u32 = 1 << 3;
+pub const FLAG_RETURN_VALUE: u32 = 1 << 4;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KernelEventDecodeError {
@@ -98,6 +99,7 @@ pub struct KernelEventRecord {
     pub gid: u32,
     pub event_kind: u32,
     pub flags: u32,
+    pub return_value: i64,
     pub comm: [u8; COMM_LEN],
     pub resource: [u8; RESOURCE_LEN],
     pub action: [u8; ACTION_LEN],
@@ -144,13 +146,14 @@ impl KernelEventRecord {
             gid: read_u32(bytes, 36),
             event_kind: read_u32(bytes, 40),
             flags: read_u32(bytes, 44),
+            return_value: read_i64(bytes, 48),
             comm: [0; COMM_LEN],
             resource: [0; RESOURCE_LEN],
             action: [0; ACTION_LEN],
             payload: [0; PAYLOAD_LEN],
         };
 
-        let mut offset = 48;
+        let mut offset = 56;
         copy_fixed(bytes, &mut offset, &mut record.comm);
         copy_fixed(bytes, &mut offset, &mut record.resource);
         copy_fixed(bytes, &mut offset, &mut record.action);
@@ -181,6 +184,10 @@ impl KernelEventRecord {
     pub fn payload_bytes(&self) -> &[u8] {
         &self.payload
     }
+
+    pub fn return_value(&self) -> Option<i64> {
+        (self.flags & FLAG_RETURN_VALUE != 0).then_some(self.return_value)
+    }
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
@@ -193,6 +200,14 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_ne_bytes(
+        bytes[offset..offset + 8]
+            .try_into()
+            .expect("validated kernel event record length"),
+    )
+}
+
+fn read_i64(bytes: &[u8], offset: usize) -> i64 {
+    i64::from_ne_bytes(
         bytes[offset..offset + 8]
             .try_into()
             .expect("validated kernel event record length"),
