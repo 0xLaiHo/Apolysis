@@ -72,5 +72,6 @@ syscalls/sys_enter_truncate
 syscalls/sys_enter_unlinkat
 syscalls/sys_enter_renameat2
 syscalls/sys_enter_connect
+syscalls/sys_exit_connect
 EOF
 fi

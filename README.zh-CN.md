@@ -58,7 +58,7 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
 
 ## 当前能力
 
-- 通过 CO-RE eBPF 观测 fork、exec、exit、选定文件操作和 network connect attempt。
+- 通过 CO-RE eBPF 观测 fork、exec、exit、选定文件操作和 outcome-aware network connect。
 - 提供版本化 kernel/userspace ABI，并为每次 Agent Run 写入 capability manifest，明确实际挂载的
   event source 与支持的 outcome 语义。
 - 支持 PID-tree、单 cgroup 与多 cgroup Observation Scope。
@@ -67,10 +67,13 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
 - Exec 参数与 process command 默认 content-off 持久化，并对凭证和网络内容脱敏。
 - 提供有序 JSONL、输出轮转、可选本地 hash-chain envelope，以及 drop、map pressure、ABI
   mismatch、decode failure 和 truncation 的类型化诊断。
+- 对无法匹配或 collector 停止时仍 pending 的 network connect entry/exit pair 发出显式
+  Observation Gap。
 - 可选摄取 Codex 声明意图并通过启发式关联生成 mismatch finding。
 
-当前 file 与 network syscall-entry 观测通常只表示 attempt，除非某条受支持路径提供 outcome。
-它们尚未形成通用 return value 与 errno contract，collector 也不会观测所有 Linux 操作路径。
+Network connect 现使用有界 entry/exit matching，并报告 return value、errno 以及 succeeded、
+failed、denied 或 pending outcome。选定 file hook 仍描述 syscall-entry attempt；collector 也
+不会观测所有 Linux 操作路径。
 
 ## 目标形态
 

@@ -200,6 +200,7 @@ impl ObserverRuntimeBackend for FakeBackend {
         Ok(DaemonObserverCounters {
             reserve_failures: 3,
             map_pressure: 2,
+            ..DaemonObserverCounters::default()
         })
     }
 }

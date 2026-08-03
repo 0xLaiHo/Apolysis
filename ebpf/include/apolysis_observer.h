@@ -7,8 +7,8 @@
 #define APOLYSIS_RESOURCE_LEN 256
 #define APOLYSIS_ACTION_LEN 32
 #define APOLYSIS_PAYLOAD_LEN 256
-#define APOLYSIS_KERNEL_ABI_VERSION 1
-#define APOLYSIS_KERNEL_EVENT_RECORD_LEN 608
+#define APOLYSIS_KERNEL_ABI_VERSION 2
+#define APOLYSIS_KERNEL_EVENT_RECORD_LEN 616
 
 enum apolysis_kernel_event_kind {
     APOLYSIS_EVENT_EXEC = 1,
@@ -27,6 +27,7 @@ enum apolysis_event_flags {
     APOLYSIS_FLAG_PAYLOAD_TRUNCATED = 1 << 1,
     APOLYSIS_FLAG_PAYLOAD_SOCKADDR = 1 << 2,
     APOLYSIS_FLAG_ARGV_TRUNCATED = 1 << 3,
+    APOLYSIS_FLAG_RETURN_VALUE = 1 << 4,
 };
 
 enum apolysis_scope_mode {
@@ -44,6 +45,9 @@ struct apolysis_scope_config {
 struct apolysis_observer_counters {
     unsigned long long reserve_failures;
     unsigned long long map_pressure;
+    unsigned long long connect_missing_entries;
+    unsigned long long connect_missing_exits;
+    unsigned long long connect_pending;
 };
 
 /*
@@ -62,6 +66,7 @@ struct apolysis_kernel_event {
     unsigned int gid;
     unsigned int event_kind;
     unsigned int flags;
+    long long return_value;
     char comm[APOLYSIS_COMM_LEN];
     char resource[APOLYSIS_RESOURCE_LEN];
     char action[APOLYSIS_ACTION_LEN];

@@ -85,8 +85,8 @@ async fn intent_correlate_command(args: Vec<String>) -> Result<i32, String> {
         .await
         .map_err(|error| format!("failed to read timeline input: {error}"))?;
     let records = correlate_intents(&intent_input, &timeline_input)?;
-    let (dropped, truncated) = observer_evidence_loss(&timeline_input);
-    if let Some(warning) = evidence_loss_warning(dropped, truncated) {
+    let (dropped, truncated, observation_gaps) = observer_evidence_loss(&timeline_input);
+    if let Some(warning) = evidence_loss_warning(dropped, truncated, observation_gaps) {
         eprintln!("{warning}");
     }
     let mut store = apolysis_store::AsyncJsonlStore::create(&request.output_path)
@@ -836,12 +836,20 @@ fn executable_matches(declared: &str, observed: Option<&str>) -> bool {
 }
 
 /// Sum the observer's event-loss diagnostics in a timeline into
-/// (dropped, truncated). Best-effort: a malformed timeline yields (0, 0).
-fn observer_evidence_loss(timeline_input: &str) -> (u64, u64) {
+/// (dropped, truncated, observation gaps). Malformed input yields zeros.
+fn observer_evidence_loss(timeline_input: &str) -> (u64, u64, u64) {
     let records = parse_jsonl(timeline_input, "timeline input").unwrap_or_default();
     let mut dropped = 0;
     let mut truncated = 0;
+    let mut observation_gaps = 0;
     for value in &records {
+        if string_field(value, "record_type") == Some("observation_gap") {
+            observation_gaps += value
+                .get("count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            continue;
+        }
         if string_field(value, "record_type") != Some("observer_diagnostic") {
             continue;
         }
@@ -859,17 +867,18 @@ fn observer_evidence_loss(timeline_input: &str) -> (u64, u64) {
             _ => {}
         }
     }
-    (dropped, truncated)
+    (dropped, truncated, observation_gaps)
 }
 
 /// The fail-loud incompleteness warning, or None when the evidence is whole.
-fn evidence_loss_warning(dropped: u64, truncated: u64) -> Option<String> {
-    if dropped == 0 && truncated == 0 {
+fn evidence_loss_warning(dropped: u64, truncated: u64, observation_gaps: u64) -> Option<String> {
+    if dropped == 0 && truncated == 0 && observation_gaps == 0 {
         return None;
     }
     Some(format!(
         "apolysis: ⚠ evidence may be incomplete — {dropped} event(s) dropped, \
-         {truncated} truncated. A quiet timeline is not proof of absence."
+         {observation_gaps} observation gap(s), {truncated} truncated. \
+         A quiet timeline is not proof of absence."
     ))
 }
 
@@ -1409,11 +1418,14 @@ mod tests {
             r#"{"record_type":"event","event_type":"exec","raw_event_id":"s:e:1"}"#,
             "\n",
         );
-        assert_eq!(observer_evidence_loss(timeline), (5, 2));
-        assert!(evidence_loss_warning(5, 2).is_some());
+        assert_eq!(observer_evidence_loss(timeline), (5, 2, 0));
+        assert!(evidence_loss_warning(5, 2, 0).is_some());
         // A whole timeline (no diagnostics) must not warn.
-        assert_eq!(observer_evidence_loss(r#"{"record_type":"event"}"#), (0, 0));
-        assert!(evidence_loss_warning(0, 0).is_none());
+        assert_eq!(
+            observer_evidence_loss(r#"{"record_type":"event"}"#),
+            (0, 0, 0)
+        );
+        assert!(evidence_loss_warning(0, 0, 0).is_none());
     }
 
     #[test]

@@ -26,6 +26,78 @@ pub trait JsonLine {
 }
 
 pub const COLLECTOR_CAPABILITY_SCHEMA_VERSION: u32 = 1;
+pub const OBSERVATION_GAP_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservationGapKind {
+    MissingEntry,
+    MissingExit,
+}
+
+impl ObservationGapKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingEntry => "missing_entry",
+            Self::MissingExit => "missing_exit",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationGap {
+    pub schema_version: u32,
+    pub timestamp_unix_ms: u128,
+    pub agent_run_id: String,
+    pub operation: String,
+    pub kind: ObservationGapKind,
+    pub count: u64,
+    pub detail: String,
+}
+
+impl ObservationGap {
+    pub fn new(
+        agent_run_id: impl Into<String>,
+        operation: impl Into<String>,
+        kind: ObservationGapKind,
+        count: u64,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: OBSERVATION_GAP_SCHEMA_VERSION,
+            timestamp_unix_ms: now_unix_ms(),
+            agent_run_id: agent_run_id.into(),
+            operation: operation.into(),
+            kind,
+            count,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn with_timestamp(mut self, timestamp_unix_ms: u128) -> Self {
+        self.timestamp_unix_ms = timestamp_unix_ms;
+        self
+    }
+
+    pub fn to_json_line(&self) -> String {
+        <Self as JsonLine>::to_json_line(self)
+    }
+}
+
+impl JsonLine for ObservationGap {
+    fn to_json_line(&self) -> String {
+        format!(
+            "{{\"record_type\":{},\"schema_version\":{},\"timestamp_unix_ms\":{},\"agent_run_id\":{},\"operation\":{},\"kind\":{},\"count\":{},\"detail\":{}}}",
+            json_string(records::OBSERVATION_GAP),
+            self.schema_version,
+            self.timestamp_unix_ms,
+            json_string(&self.agent_run_id),
+            json_string(&self.operation),
+            json_string(self.kind.as_str()),
+            self.count,
+            json_string(&self.detail),
+        )
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationOutcome {
@@ -46,6 +118,23 @@ impl OperationOutcome {
             Self::Denied => "denied",
             Self::Pending => "pending",
             Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationResult {
+    pub outcome: OperationOutcome,
+    pub return_value: i64,
+    pub errno: Option<i32>,
+}
+
+impl OperationResult {
+    pub fn new(outcome: OperationOutcome, return_value: i64, errno: Option<i32>) -> Self {
+        Self {
+            outcome,
+            return_value,
+            errno,
         }
     }
 }
@@ -230,6 +319,7 @@ pub struct CanonicalEvent {
     pub actor: String,
     pub resource: String,
     pub action: String,
+    pub operation_result: Option<OperationResult>,
     pub container_id: Option<String>,
     pub cgroup_id: Option<String>,
     pub process_command: Option<String>,
@@ -261,6 +351,7 @@ impl CanonicalEvent {
             actor: actor.into(),
             resource: resource.into(),
             action: action.into(),
+            operation_result: None,
             container_id: None,
             cgroup_id: None,
             process_command: None,
@@ -278,6 +369,12 @@ impl CanonicalEvent {
     /// Link this canonical record to the raw kernel event that produced it.
     pub fn with_raw_event_id(mut self, raw_event_id: impl Into<String>) -> Self {
         self.raw_event_id = Some(raw_event_id.into());
+        self
+    }
+
+    /// Attach an outcome supported by the active Collector Capability.
+    pub fn with_operation_result(mut self, operation_result: OperationResult) -> Self {
+        self.operation_result = Some(operation_result);
         self
     }
 
@@ -323,9 +420,22 @@ impl JsonLine for CanonicalEvent {
             .as_ref()
             .map(|value| json_string(value))
             .unwrap_or_else(|| "null".to_string());
+        let outcome = self
+            .operation_result
+            .map(|result| json_string(result.outcome.as_str()))
+            .unwrap_or_else(|| "null".to_string());
+        let return_value = self
+            .operation_result
+            .map(|result| result.return_value.to_string())
+            .unwrap_or_else(|| "null".to_string());
+        let errno = self
+            .operation_result
+            .and_then(|result| result.errno)
+            .map(|errno| errno.to_string())
+            .unwrap_or_else(|| "null".to_string());
 
         format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"raw_event_id\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{},\"process_command\":{},\"process_executable\":{},\"process_started_at_unix_ms\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"raw_event_id\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"outcome\":{outcome},\"return_value\":{return_value},\"errno\":{errno},\"container_id\":{},\"cgroup_id\":{},\"process_command\":{},\"process_executable\":{},\"process_started_at_unix_ms\":{}}}",
             json_string(records::EVENT),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
@@ -362,6 +472,7 @@ pub struct RawKernelEvent {
     pub comm: String,
     pub resource: String,
     pub action: String,
+    pub operation_result: Option<OperationResult>,
     pub container_id: Option<String>,
     pub cgroup_id: Option<String>,
     pub raw_payload: String,
@@ -399,6 +510,7 @@ impl RawKernelEvent {
             comm: comm.into(),
             resource: resource.into(),
             action: action.into(),
+            operation_result: None,
             container_id,
             cgroup_id,
             raw_payload: raw_payload.into(),
@@ -408,6 +520,12 @@ impl RawKernelEvent {
     /// Attach a stable event identifier for joining raw and derived records.
     pub fn with_event_id(mut self, event_id: impl Into<String>) -> Self {
         self.event_id = Some(event_id.into());
+        self
+    }
+
+    /// Attach an outcome supported by the active Collector Capability.
+    pub fn with_operation_result(mut self, operation_result: OperationResult) -> Self {
+        self.operation_result = Some(operation_result);
         self
     }
 
@@ -429,9 +547,22 @@ impl JsonLine for RawKernelEvent {
             .as_ref()
             .map(|value| json_string(value))
             .unwrap_or_else(|| "null".to_string());
+        let outcome = self
+            .operation_result
+            .map(|result| json_string(result.outcome.as_str()))
+            .unwrap_or_else(|| "null".to_string());
+        let return_value = self
+            .operation_result
+            .map(|result| result.return_value.to_string())
+            .unwrap_or_else(|| "null".to_string());
+        let errno = self
+            .operation_result
+            .and_then(|result| result.errno)
+            .map(|errno| errno.to_string())
+            .unwrap_or_else(|| "null".to_string());
 
         format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"event_id\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{},\"raw_payload\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"event_id\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"outcome\":{outcome},\"return_value\":{return_value},\"errno\":{errno},\"container_id\":{},\"cgroup_id\":{},\"raw_payload\":{}}}",
             json_string(records::RAW_KERNEL_EVENT),
             self.timestamp_unix_ms,
             json_string(&self.session_id),

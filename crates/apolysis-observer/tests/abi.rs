@@ -1,17 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use apolysis_core::{OperationOutcome, OperationResult};
 use apolysis_observer::abi::{
     KernelEventDecodeError, KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN,
-    FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, KERNEL_ABI_VERSION,
-    KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
+    FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RETURN_VALUE,
+    KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
 };
 use apolysis_observer::raw_event_from_record;
 
 #[test]
 fn kernel_event_record_matches_the_c_abi_size() {
-    assert_eq!(KERNEL_ABI_VERSION, 1);
-    assert_eq!(std::mem::size_of::<KernelEventRecord>(), 608);
-    assert_eq!(KERNEL_EVENT_RECORD_LEN, 608);
+    assert_eq!(KERNEL_ABI_VERSION, 2);
+    assert_eq!(std::mem::size_of::<KernelEventRecord>(), 616);
+    assert_eq!(KERNEL_EVENT_RECORD_LEN, 616);
+}
+
+#[test]
+fn kernel_event_record_decodes_a_signed_syscall_return_value() {
+    let mut bytes = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
+    bytes[0..4].copy_from_slice(&KERNEL_ABI_VERSION.to_ne_bytes());
+    bytes[4..8].copy_from_slice(&(KERNEL_EVENT_RECORD_LEN as u32).to_ne_bytes());
+    bytes[40..44].copy_from_slice(&(KernelEventKind::Connect as u32).to_ne_bytes());
+    bytes[44..48].copy_from_slice(&FLAG_RETURN_VALUE.to_ne_bytes());
+    bytes[48..56].copy_from_slice(&(-13_i64).to_ne_bytes());
+
+    let record = KernelEventRecord::decode(&bytes).expect("decode connect exit record");
+
+    assert_eq!(record.return_value(), Some(-13));
 }
 
 #[test]
@@ -27,13 +42,13 @@ fn kernel_event_record_decodes_native_endian_fields_and_fixed_buffers() {
     bytes[36..40].copy_from_slice(&1001_u32.to_ne_bytes());
     bytes[40..44].copy_from_slice(&(KernelEventKind::Connect as u32).to_ne_bytes());
     bytes[44..48].copy_from_slice(&3_u32.to_ne_bytes());
-    write_fixed(&mut bytes[48..48 + COMM_LEN], b"python3");
+    write_fixed(&mut bytes[56..56 + COMM_LEN], b"python3");
     write_fixed(
-        &mut bytes[48 + COMM_LEN..48 + COMM_LEN + RESOURCE_LEN],
+        &mut bytes[56 + COMM_LEN..56 + COMM_LEN + RESOURCE_LEN],
         b"1.1.1.1:443",
     );
     write_fixed(
-        &mut bytes[48 + COMM_LEN + RESOURCE_LEN..48 + COMM_LEN + RESOURCE_LEN + ACTION_LEN],
+        &mut bytes[56 + COMM_LEN + RESOURCE_LEN..56 + COMM_LEN + RESOURCE_LEN + ACTION_LEN],
         b"connect",
     );
     write_fixed(
@@ -69,7 +84,7 @@ fn kernel_event_record_rejects_short_ring_buffer_items() {
     assert_eq!(
         error,
         KernelEventDecodeError::UnexpectedRecordLength {
-            expected: 608,
+            expected: 616,
             received: 32,
         }
     );
@@ -79,7 +94,7 @@ fn kernel_event_record_rejects_short_ring_buffer_items() {
 #[test]
 fn kernel_event_record_rejects_an_unsupported_abi_version() {
     let mut bytes = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
-    bytes[0..4].copy_from_slice(&2_u32.to_ne_bytes());
+    bytes[0..4].copy_from_slice(&3_u32.to_ne_bytes());
     bytes[4..8].copy_from_slice(&(KERNEL_EVENT_RECORD_LEN as u32).to_ne_bytes());
 
     let error = KernelEventRecord::decode(&bytes).expect_err("unknown ABI must fail");
@@ -88,7 +103,7 @@ fn kernel_event_record_rejects_an_unsupported_abi_version() {
         error,
         KernelEventDecodeError::UnsupportedAbiVersion {
             expected: KERNEL_ABI_VERSION,
-            received: 2,
+            received: 3,
         }
     );
     assert!(error.is_abi_mismatch());
@@ -96,9 +111,9 @@ fn kernel_event_record_rejects_an_unsupported_abi_version() {
 
 #[test]
 fn kernel_event_record_classifies_a_different_sized_future_abi_by_version() {
-    let mut bytes = vec![0_u8; 616];
-    bytes[0..4].copy_from_slice(&2_u32.to_ne_bytes());
-    bytes[4..8].copy_from_slice(&616_u32.to_ne_bytes());
+    let mut bytes = vec![0_u8; 624];
+    bytes[0..4].copy_from_slice(&3_u32.to_ne_bytes());
+    bytes[4..8].copy_from_slice(&624_u32.to_ne_bytes());
 
     let error = KernelEventRecord::decode(&bytes).expect_err("future ABI must fail");
 
@@ -106,7 +121,7 @@ fn kernel_event_record_classifies_a_different_sized_future_abi_by_version() {
         error,
         KernelEventDecodeError::UnsupportedAbiVersion {
             expected: KERNEL_ABI_VERSION,
-            received: 2,
+            received: 3,
         }
     );
 }
@@ -115,7 +130,7 @@ fn kernel_event_record_classifies_a_different_sized_future_abi_by_version() {
 fn kernel_event_record_rejects_a_declared_record_size_mismatch() {
     let mut bytes = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
     bytes[0..4].copy_from_slice(&KERNEL_ABI_VERSION.to_ne_bytes());
-    bytes[4..8].copy_from_slice(&600_u32.to_ne_bytes());
+    bytes[4..8].copy_from_slice(&608_u32.to_ne_bytes());
 
     let error = KernelEventRecord::decode(&bytes).expect_err("wrong ABI size must fail");
 
@@ -123,7 +138,7 @@ fn kernel_event_record_rejects_a_declared_record_size_mismatch() {
         error,
         KernelEventDecodeError::DeclaredRecordSizeMismatch {
             expected: KERNEL_EVENT_RECORD_LEN as u32,
-            received: 600,
+            received: 608,
         }
     );
     assert!(error.is_abi_mismatch());
@@ -169,6 +184,41 @@ fn live_connect_record_decodes_ipv4_sockaddr() {
 }
 
 #[test]
+fn live_connect_record_maps_linux_return_values_to_supported_outcomes() {
+    for (return_value, expected) in [
+        (
+            0,
+            OperationResult::new(OperationOutcome::Succeeded, 0, None),
+        ),
+        (
+            -13,
+            OperationResult::new(OperationOutcome::Denied, -13, Some(13)),
+        ),
+        (
+            -115,
+            OperationResult::new(OperationOutcome::Pending, -115, Some(115)),
+        ),
+        (
+            -114,
+            OperationResult::new(OperationOutcome::Pending, -114, Some(114)),
+        ),
+        (
+            -111,
+            OperationResult::new(OperationOutcome::Failed, -111, Some(111)),
+        ),
+    ] {
+        let mut record = empty_record(KernelEventKind::Connect);
+        record.flags = FLAG_RETURN_VALUE;
+        record.return_value = return_value;
+
+        let raw = raw_event_from_record(&record, "agent-run-connect-result", 1)
+            .expect("convert connect result record");
+
+        assert_eq!(raw.operation_result, Some(expected));
+    }
+}
+
+#[test]
 fn live_exec_record_preserves_argv_payload_and_truncation_markers() {
     let mut record = empty_record(KernelEventKind::Exec);
     record.flags = FLAG_ARGV_TRUNCATED | FLAG_PAYLOAD_TRUNCATED;
@@ -204,6 +254,7 @@ fn empty_record(kind: KernelEventKind) -> KernelEventRecord {
         gid: 0,
         event_kind: kind as u32,
         flags: 0,
+        return_value: 0,
         comm: [0; COMM_LEN],
         resource: [0; RESOURCE_LEN],
         action: [0; ACTION_LEN],

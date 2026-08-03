@@ -749,6 +749,13 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     assert!(timeline.contains(r#""event_type":"exec""#));
     assert!(timeline.contains(r#""event_type":"credential_read""#));
     assert!(timeline.contains(r#""event_type":"network_connect""#));
+    let connect = timeline
+        .lines()
+        .find(|line| line.contains(r#""event_type":"network_connect""#))
+        .expect("network connect event");
+    assert!(connect.contains(r#""outcome":"succeeded""#));
+    assert!(connect.contains(r#""return_value":0"#));
+    assert!(connect.contains(r#""errno":null"#));
     assert!(timeline.contains(r#""kind":"summary""#));
     assert!(!timeline.contains(credential_path.to_str().expect("utf-8 credential path")));
     assert!(!timeline.contains("APOLYSIS_TEST_SECRET"));

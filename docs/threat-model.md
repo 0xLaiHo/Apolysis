@@ -137,6 +137,9 @@ was blocked, rolled back, or contained.
   record, and reject incompatible records before decoding the current layout.
 - Synchronize the attached operation/source/outcome capability manifest to
   stable storage before a managed Agent is released.
+- Pair network connect entry and exit by thread identity, preserve its signed
+  return value and errno, and emit Observation Gaps for unmatched or pending
+  pairs.
 - Emit collector start, health/loss checkpoints, terminal state, and stop
   reason; treat missing lifecycle records as gaps.
 - Preserve reserve failure, map pressure, truncation, decode failure, attach

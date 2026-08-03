@@ -90,7 +90,7 @@ fn intent_correlate_warns_when_the_collector_abi_does_not_match() {
     std::fs::write(&intent_input, "").expect("write empty intent timeline");
     std::fs::write(
         &timeline_input,
-        r#"{"record_type":"observer_diagnostic","timestamp_unix_ms":1780328100007,"session_id":"agent-run-abi-mismatch","kind":"abi_mismatch","count":1,"detail":"expected_version:1,received_version:2"}
+        r#"{"record_type":"observer_diagnostic","timestamp_unix_ms":1780328100007,"session_id":"agent-run-abi-mismatch","kind":"abi_mismatch","count":1,"detail":"expected_version:2,received_version:3"}
 "#,
     )
     .expect("write ABI mismatch timeline");
@@ -114,6 +114,45 @@ fn intent_correlate_warns_when_the_collector_abi_does_not_match() {
     assert!(
         stderr.contains("1 event(s) dropped"),
         "ABI mismatch must fail loud: {stderr}"
+    );
+
+    let _ = std::fs::remove_file(intent_input);
+    let _ = std::fs::remove_file(timeline_input);
+    let _ = std::fs::remove_file(output);
+}
+
+#[test]
+fn intent_correlate_warns_when_network_connect_exits_are_missing() {
+    let intent_input = temp_jsonl("apolysis-intent-empty-for-connect-gap");
+    let timeline_input = temp_jsonl("apolysis-intent-connect-gap-timeline");
+    let output = temp_jsonl("apolysis-intent-connect-gap-output");
+    std::fs::write(&intent_input, "").expect("write empty intent timeline");
+    std::fs::write(
+        &timeline_input,
+        r#"{"record_type":"observation_gap","schema_version":1,"timestamp_unix_ms":1780328100007,"agent_run_id":"agent-run-connect-gap","operation":"network_connect","kind":"missing_exit","count":2,"detail":"pending_at_stop:2"}
+"#,
+    )
+    .expect("write network Observation Gap timeline");
+
+    let result = apolysis_command()
+        .args([
+            "intent",
+            "correlate",
+            "--intent-input",
+            intent_input.to_str().expect("utf-8 intent path"),
+            "--timeline-input",
+            timeline_input.to_str().expect("utf-8 timeline path"),
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+        ])
+        .output()
+        .expect("run intent correlation over network Observation Gap");
+
+    assert!(result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("2 observation gap(s)"),
+        "missing exits must fail loud: {stderr}"
     );
 
     let _ = std::fs::remove_file(intent_input);

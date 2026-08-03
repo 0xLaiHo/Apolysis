@@ -56,8 +56,9 @@ Fields:
 - `agent_run_id`: Agent Run identifier
 - `collector`: collector identifier, currently `apolysis_observer`
 - `collector_version`: userspace collector package version
-- `kernel_abi_version`: supported kernel/userspace event ABI version
-- `kernel_record_size`: event record size for that ABI, currently `608`
+- `kernel_abi_version`: supported kernel/userspace event ABI version, currently
+  `2`
+- `kernel_record_size`: event record size for ABI v2, currently `616`
 - `observation_scope`: `process_tree` or `cgroup`; the manifest does not persist
   the host PID or cgroup ID
 - `privacy_profile`: persistence privacy profile, currently `content_off`
@@ -67,10 +68,11 @@ Fields:
   `failed`, `denied`, `pending`, or `unknown`.
 
 The current AuditObserver declaration includes only capabilities backed by its
-actual attachment plan. Syscall-entry file and network observations declare
-`attempted`; they do not claim a return value or successful outcome. Exec
-declares `succeeded` only when the observation-producing
-`sched/sched_process_exec` hook is attached.
+actual attachment plan. Syscall-entry file observations declare `attempted`;
+they do not claim a return value or successful outcome. Network connect
+declares `succeeded`, `failed`, `denied`, and `pending` only when both entry and
+exit hooks are attached. Exec declares `succeeded` only when the
+observation-producing `sched/sched_process_exec` hook is attached.
 
 ### `event`
 
@@ -94,6 +96,10 @@ Fields:
 - `resource`: target resource, metadata resource, path token, executable, or
   socket token
 - `action`: action or metadata value
+- `outcome`: `attempted`, `succeeded`, `failed`, `denied`, `pending`,
+  `unknown`, or `null` when the active capability does not supply an outcome
+- `return_value`: signed Linux syscall return value, or `null`
+- `errno`: positive Linux errno derived from a negative return value, or `null`
 - `container_id`: container identifier or `null`
 - `cgroup_id`: cgroup identifier or `null`
 - `process_command`: legacy redacted command context, or `null`; current
@@ -130,6 +136,9 @@ Fields:
 - `comm`: kernel command name
 - `resource`: raw resource after persistence-time redaction
 - `action`: raw action label
+- `outcome`: supported operation outcome, or `null`
+- `return_value`: signed Linux syscall return value, or `null`
+- `errno`: positive Linux errno derived from a negative return value, or `null`
 - `container_id`: container identifier or `null`
 - `cgroup_id`: cgroup identifier or `null`
 - `raw_payload`: bounded raw payload after persistence-time redaction
@@ -138,6 +147,10 @@ Persisted exec payloads never contain argv. They contain
 `argv_redacted:true`, `redacted:payload`, and applicable truncation markers such
 as `argv_truncated:true`, `payload_truncated:true`, and
 `resource_truncated:true`.
+
+For `network_connect`, return values greater than or equal to zero map to
+`succeeded`; `EACCES` and `EPERM` map to `denied`; `EINPROGRESS` and `EALREADY`
+map to `pending`; and other negative return values map to `failed`.
 
 ### `intent`
 
@@ -239,6 +252,29 @@ Fields:
 - `runtime`: runtime metadata object when available
 - `evidence_boundary`: `host_boundary` or `guest_semantic`; intent correlation
   currently emits `host_boundary`
+
+### `observation_gap`
+
+Observation Gap records explicitly report runtime observations that may be
+missing or cannot be correlated. Consumers must include their counts when
+deciding whether an Agent Run is complete.
+
+Fields:
+
+- `record_type`: always `observation_gap`
+- `schema_version`: Observation Gap schema version, currently `1`
+- `timestamp_unix_ms`: gap reporting timestamp
+- `agent_run_id`: Agent Run identifier
+- `operation`: affected operation, currently `network_connect`
+- `kind`: `missing_entry` or `missing_exit`
+- `count`: affected operation count
+- `detail`: bounded diagnostic context. Network missing-exit details distinguish
+  kernel-reported losses from entries still pending when the collector stops.
+
+The managed single-Agent-Run live observer persists these records directly.
+The multi-cgroup daemon currently exposes collector-global connect gap counters
+in its runtime summary; it does not assign those aggregate counters to an Agent
+Run until per-cgroup gap attribution is implemented.
 
 ### `observer_diagnostic`
 

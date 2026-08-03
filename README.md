@@ -67,7 +67,7 @@ an exact one.
 ## Current capabilities
 
 - CO-RE eBPF observation of fork, exec, exit, selected file operations, and
-  network connect attempts.
+  outcome-aware network connect operations.
 - A versioned kernel/userspace ABI and per-Agent-Run capability manifest that
   states the attached event sources and supported outcome semantics.
 - PID-tree, single-cgroup, and multi-cgroup observation scopes.
@@ -78,12 +78,14 @@ an exact one.
 - Ordered JSONL output, rotation, optional local hash-chain envelopes, and
   typed diagnostics for drops, map pressure, ABI mismatches, decode failures,
   and truncation.
+- Explicit Observation Gaps for unmatched or still-pending network connect
+  entry/exit pairs.
 - Optional Codex declared-intent ingestion and heuristic mismatch findings.
 
-File and network syscall-entry observations currently describe attempts unless
-a supported path supplies an outcome. They do not yet provide a general return
-value and errno contract, and the collector does not observe every Linux
-operation path.
+Network connect now uses bounded entry/exit matching and reports return value,
+errno, and succeeded, failed, denied, or pending outcome. Selected file hooks
+still describe syscall-entry attempts. The collector does not observe every
+Linux operation path.
 
 ## Target shape
 
