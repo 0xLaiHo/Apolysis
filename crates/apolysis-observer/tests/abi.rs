@@ -5,6 +5,7 @@ use apolysis_observer::abi::{
     KernelEventDecodeError, KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN,
     FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RETURN_VALUE,
     KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
+    TrackedCgroupScopeAbi,
 };
 use apolysis_observer::raw_event_from_record;
 
@@ -13,6 +14,16 @@ fn kernel_event_record_matches_the_c_abi_size() {
     assert_eq!(KERNEL_ABI_VERSION, 3);
     assert_eq!(std::mem::size_of::<KernelEventRecord>(), 656);
     assert_eq!(KERNEL_EVENT_RECORD_LEN, 656);
+}
+
+#[test]
+fn tracked_cgroup_scope_abi_carries_a_nonzero_generation() {
+    let scope = TrackedCgroupScopeAbi::active(7).expect("create active scope generation");
+
+    assert_eq!(std::mem::size_of::<TrackedCgroupScopeAbi>(), 16);
+    assert_eq!(scope.generation(), 7);
+    assert!(scope.is_active());
+    assert!(TrackedCgroupScopeAbi::active(0).is_err());
 }
 
 #[test]
