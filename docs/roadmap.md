@@ -2,6 +2,7 @@
 
 > English | [Simplified Chinese](roadmap.zh-CN.md)
 > Companion document: [design.md](design.md)
+> Execution plan: [beta-qualification-plan.md](beta-qualification-plan.md)
 > Last reviewed: 2026-08-03
 
 This roadmap directs Apolysis toward a bounded eBPF Agent runtime

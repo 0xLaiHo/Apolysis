@@ -2,6 +2,7 @@
 
 > [English](roadmap.md) | 简体中文
 > 配套文档：[design.zh-CN.md](design.zh-CN.md)
+> 执行计划：[beta-qualification-plan.zh-CN.md](beta-qualification-plan.zh-CN.md)
 > 最后审查：2026-08-03
 
 本路线图把 Apolysis 引向一个有界的 eBPF Agent 运行时观测 Beta。它记录交付顺序、后置项、
