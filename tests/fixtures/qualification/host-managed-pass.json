@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "profile": "linux-x86_64-host-managed",
+  "environment": {
+    "architecture": "x86_64",
+    "kernel_release": "6.6.52",
+    "btf_vmlinux": true,
+    "cgroup_v2": true,
+    "tracepoints_complete": true,
+    "capability_mode": "bpf_perfmon",
+    "runtime": "host"
+  },
+  "workload": "representative",
+  "measurements": {
+    "samples": 10,
+    "collector_cpu_percent_p95": 4.0,
+    "collector_peak_rss_mib": 80.0,
+    "workload_latency_overhead_percent_p95": 8.0,
+    "event_loss_count": 0
+  }
+}
