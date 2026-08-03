@@ -20,10 +20,11 @@ The eBPF collector is a required primary source. Provider hooks, Agent logs,
 protocol traces, and remote export are deferred; they do not define the active
 product and cannot replace runtime observation.
 
-The active target is a bounded beta, not a production evidence plane. Existing
-Gateway, PostgreSQL, evidence-object, projection, policy-control, and
-cross-provider contract prototypes belong to a superseded direction and are
-scheduled to leave the active workspace.
+The active target is a bounded beta, not a production evidence plane. Gateway,
+PostgreSQL, evidence-object, projection, and cross-provider contract prototypes
+have left the active workspace. Policy-control and broad qualification
+prototypes belong to the same superseded direction and remain only until their
+observer-side dependencies are separated.
 
 ### Maturity labels
 
@@ -298,9 +299,10 @@ describe attempts. Stable entry/exit outcome semantics, complete collector
 lifecycle records, the saved-run viewer, and bounded Kubernetes beta remain
 targets.
 
-The repository still contains broad evidence-plane prototypes. They are
-historical implementation input only and do not define the target architecture
-in this document.
+The central contracts, Gateway, PostgreSQL projection, and evidence-object
+cluster has been removed from the active workspace. Remaining policy-control
+and broad qualification prototypes are historical implementation input only
+and do not define the target architecture in this document.
 
 ## 13. Limitations
 
