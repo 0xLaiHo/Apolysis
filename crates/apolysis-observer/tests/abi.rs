@@ -215,7 +215,7 @@ fn live_record_normalizes_a_stable_runtime_identity() {
     assert_eq!(raw.relation_status, RuntimeRelation::Exact);
     assert_eq!(
         raw.relation_reason,
-        "host_boot_scope_process_exec_generation"
+        "host_boot_scope_process_start_exec_generation"
     );
 }
 

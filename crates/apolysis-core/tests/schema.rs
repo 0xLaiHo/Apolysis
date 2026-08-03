@@ -317,3 +317,35 @@ fn runtime_identity_without_scope_generation_is_not_exact() {
     assert_eq!(raw.relation_status, RuntimeRelation::Inferred);
     assert_eq!(raw.relation_reason, "runtime_generation_unavailable");
 }
+
+#[test]
+fn runtime_identity_without_process_start_is_not_exact() {
+    let raw = RawKernelEvent::new(
+        124,
+        "session-identity",
+        EventSource::KernelTracepoint,
+        "sched_process_fork",
+        43,
+        42,
+        1000,
+        1000,
+        "worker",
+        "",
+        "fork",
+        None,
+        Some("42".to_string()),
+        "",
+    )
+    .with_process_identity(
+        Some("11111111-2222-3333-4444-555555555555".to_string()),
+        Some(7),
+        Some(101),
+        None,
+        Some(0),
+        Some(100),
+        Some(1),
+    );
+
+    assert_eq!(raw.relation_status, RuntimeRelation::Inferred);
+    assert_eq!(raw.relation_reason, "runtime_generation_unavailable");
+}

@@ -26,7 +26,11 @@ submitting records to `APOLYSIS_EVENTS`. ABI v3 carries an optional signed
 syscall return value plus scope, process, exec, process-start, and parent
 generations. A bounded process-identity map detects PID reuse and exec
 transitions; userspace attaches the host boot ID and records exact versus
-inferred attribution. Network connect and the selected file operations use
+inferred attribution. Fork identities remain provisional until the child
+process start is observed, final cleanup follows the thread group's
+`group_dead` boundary, and a failed exec-generation transition remains
+invalid for that process instance instead of becoming Exact later. Network
+connect and the selected file operations use
 bounded thread-scoped pending maps and emit only at syscall exit; unmatched
 pairs are reported as operation-specific Observation Gaps. The daemon drains
 already-submitted ring records before completing scope removal. Monotonic

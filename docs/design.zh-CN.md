@@ -168,8 +168,10 @@ generation 与 exec generation 键控，而不是只按 PID 键控，因此 PID 
 不会继承陈旧 executable context。Process-identity map 与 userspace context table 保持有界；
 出现 pressure 时会 fail loud，而不会静默复用或丢弃 identity state。
 
-只有 host boot、scope generation、process generation 与 exec generation 都存在时 attribution
-才是 exact。Generation 缺失时保持 inferred 并给出显式 reason；PID-only、command、path 与
+只有 host boot、scope generation、process generation、kernel process-start time 与 exec
+generation 都存在时 attribution 才是 exact。Fork identity 在观测到 child process start 前保持
+provisional；始终未成为 process identity 的 thread-clone candidate 保持 inferred，并在 task exit
+时丢弃。Generation 缺失时保持 inferred 并给出显式 reason；PID-only、command、path 与
 timestamp join 不会升级为 exact。Scope generation 只保护单次 collector 生命周期内的 cgroup
 ownership。Collector restart 仍是可见 identity boundary：在 lifecycle persistence 实现前，
 不声明跨重启 continuity。PID namespace、container、Pod 与 node identity 在可用时仍作为

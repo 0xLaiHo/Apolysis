@@ -85,6 +85,13 @@ struct {
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, unsigned int);
+    __type(value, unsigned long long);
+} APOLYSIS_INVALID_PROCESS_IDENTITIES SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
     __type(key, unsigned int);
     __type(value, struct apolysis_pending_exec);
@@ -537,10 +544,22 @@ static __always_inline bool ensure_current_process_identity(
 {
     struct apolysis_process_identity *existing;
     struct apolysis_process_identity *parent;
+    unsigned long long *invalid_start_time_ns;
     unsigned long long pid_tgid = bpf_get_current_pid_tgid();
     unsigned long long start_time_ns = current_process_start_time_ns();
     unsigned int pid = pid_tgid >> 32;
     unsigned int parent_pid;
+
+    invalid_start_time_ns = bpf_map_lookup_elem(
+        &APOLYSIS_INVALID_PROCESS_IDENTITIES, &pid);
+    if (invalid_start_time_ns) {
+        if (!*invalid_start_time_ns || !start_time_ns ||
+            *invalid_start_time_ns == start_time_ns) {
+            __builtin_memset(identity, 0, sizeof(*identity));
+            return false;
+        }
+        bpf_map_delete_elem(&APOLYSIS_INVALID_PROCESS_IDENTITIES, &pid);
+    }
 
     existing = bpf_map_lookup_elem(&APOLYSIS_PROCESS_IDENTITIES, &pid);
     if (existing && (!start_time_ns || !existing->process_start_time_ns ||
@@ -577,23 +596,36 @@ static __always_inline bool ensure_current_process_identity(
     return true;
 }
 
+static __always_inline void invalidate_current_process_identity(void)
+{
+    unsigned long long start_time_ns = current_process_start_time_ns();
+    unsigned int pid = bpf_get_current_pid_tgid() >> 32;
+
+    bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &pid);
+    if (bpf_map_update_elem(&APOLYSIS_INVALID_PROCESS_IDENTITIES, &pid,
+                            &start_time_ns, BPF_ANY))
+        count_map_pressure();
+}
+
 static __always_inline bool advance_current_exec_generation(void)
 {
     struct apolysis_process_identity identity;
     unsigned int pid = bpf_get_current_pid_tgid() >> 32;
 
-    if (!ensure_current_process_identity(&identity))
+    if (!ensure_current_process_identity(&identity)) {
+        invalidate_current_process_identity();
         return false;
+    }
     if (identity.exec_generation == 0xffffffff) {
         count_map_pressure();
-        bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &pid);
+        invalidate_current_process_identity();
         return false;
     }
     identity.exec_generation++;
     if (bpf_map_update_elem(&APOLYSIS_PROCESS_IDENTITIES, &pid, &identity,
                             BPF_EXIST)) {
         count_map_pressure();
-        bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &pid);
+        invalidate_current_process_identity();
         return false;
     }
     return true;
@@ -641,6 +673,16 @@ static __always_inline void clear_process_identity(
     event->parent_process_generation = 0;
     event->exec_generation = 0;
     event->parent_exec_generation = 0;
+}
+
+static __always_inline bool process_group_is_dead(
+    struct trace_event_raw_sched_process_exit *ctx)
+{
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
+
+    if (bpf_core_field_exists(ctx->group_dead))
+        return BPF_CORE_READ(ctx, group_dead);
+    return BPF_CORE_READ(task, signal, live.counter) == 0;
 }
 
 static __always_inline struct apolysis_kernel_event *reserve_event_unchecked(unsigned int kind)
@@ -1139,12 +1181,16 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     unsigned long long event_cgroup_id;
     bool event_update_scoped;
     bool update_scoped;
+    bool group_dead;
     unsigned int pid;
-    unsigned int identity_pid;
+    unsigned int tgid;
+    unsigned int tid;
 
     pid_tgid = bpf_get_current_pid_tgid();
-    identity_pid = (unsigned int)pid_tgid;
-    if (identity_pid == pid_tgid >> 32) {
+    tgid = pid_tgid >> 32;
+    tid = (unsigned int)pid_tgid;
+    group_dead = process_group_is_dead(ctx);
+    if (group_dead) {
         event = reserve_process_event(APOLYSIS_EVENT_EXIT, &event_cgroup_id,
                                       &event_update_scoped);
     } else {
@@ -1187,7 +1233,14 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
         pid = ctx->pid;
         bpf_map_delete_elem(&APOLYSIS_TRACKED_PIDS, &pid);
     }
-    bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &identity_pid);
+    if (tid != tgid) {
+        bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &tid);
+        bpf_map_delete_elem(&APOLYSIS_INVALID_PROCESS_IDENTITIES, &tid);
+    }
+    if (group_dead) {
+        bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &tgid);
+        bpf_map_delete_elem(&APOLYSIS_INVALID_PROCESS_IDENTITIES, &tgid);
+    }
     return 0;
 }
 

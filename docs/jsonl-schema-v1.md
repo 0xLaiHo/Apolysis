@@ -124,10 +124,12 @@ Fields:
   `process_start_time_ns`
 
 Runtime attribution is `exact` only when `host_boot_id`, `scope_generation`,
-`process_generation`, and `exec_generation` are present. Missing generation
-data remains `inferred` with a reason; PID-only matching is never exact. Scope
-generation prevents numeric cgroup-ID reuse from crossing Agent Runs within
-one observer lifetime, but does not claim continuity across collector restart.
+`process_generation`, `process_start_time_ns`, and `exec_generation` are
+present. A fork identity without a confirmed process-start time remains
+`inferred`. Missing generation data remains `inferred` with a reason; PID-only
+matching is never exact. Scope generation prevents numeric cgroup-ID reuse from
+crossing Agent Runs within one observer lifetime, but does not claim continuity
+across collector restart.
 
 Runtime metadata records are canonical `event` records with
 `event_type:"runtime_metadata"`. Agent supervisor metadata uses resources such

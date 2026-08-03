@@ -198,13 +198,15 @@ process-identity map and userspace context table are bounded and fail loud on
 pressure instead of silently reusing or dropping identity state.
 
 Attribution is exact only when host boot, scope generation, process generation,
-and exec generation are present. Missing generations remain inferred with an
-explicit reason; PID-only, command, path, and timestamp joins never become
-exact. Scope generation protects cgroup ownership within one collector
-lifetime. Collector restart remains a visible identity boundary: cross-restart
-continuity is not claimed until lifecycle persistence is implemented. PID
-namespace, container, Pod, and node identity remain additive attribution where
-available.
+kernel process-start time, and exec generation are present. A fork identity is
+provisional until the child process start is observed; thread-clone candidates
+that never become process identities remain inferred and are discarded at task
+exit. Missing generations remain inferred with an explicit reason; PID-only,
+command, path, and timestamp joins never become exact. Scope generation
+protects cgroup ownership within one collector lifetime. Collector restart
+remains a visible identity boundary: cross-restart continuity is not claimed
+until lifecycle persistence is implemented. PID namespace, container, Pod, and
+node identity remain additive attribution where available.
 
 ### 5.4 Local store and viewer
 
