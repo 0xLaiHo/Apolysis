@@ -56,6 +56,9 @@ struct apolysis_network_connect_counters {
     unsigned long long pending;
 };
 
+_Static_assert(sizeof(struct apolysis_network_connect_counters) == 24,
+               "apolysis network connect counter ABI size mismatch");
+
 /*
  * ABI shared between the observer eBPF program and the Rust userspace loader.
  * Keep fixed-size fields explicit so CO-RE object compatibility and Rust mirror

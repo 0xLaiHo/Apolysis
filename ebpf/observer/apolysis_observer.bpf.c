@@ -92,6 +92,13 @@ struct {
 } APOLYSIS_CONNECT_COUNTERS_BY_CGROUP SEC(".maps");
 
 struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, unsigned long long);
+    __type(value, unsigned long long);
+} APOLYSIS_CONNECT_UPDATES_BY_CGROUP SEC(".maps");
+
+struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
     __type(key, unsigned int);
@@ -135,20 +142,52 @@ network_connect_counters(unsigned long long cgroup_id)
     return bpf_map_lookup_elem(&APOLYSIS_CONNECT_COUNTERS_BY_CGROUP, &cgroup_id);
 }
 
-static __always_inline void count_connect_missing_entry(unsigned long long cgroup_id)
+static __always_inline bool begin_connect_scope_update(unsigned long long cgroup_id)
+{
+    unsigned long long *updates;
+
+    updates = bpf_map_lookup_elem(&APOLYSIS_CONNECT_UPDATES_BY_CGROUP, &cgroup_id);
+    if (!updates)
+        return false;
+    __sync_fetch_and_add(updates, 1);
+    if (cgroup_scope_state(cgroup_id) == APOLYSIS_CGROUP_ACTIVE)
+        return true;
+    __sync_fetch_and_sub(updates, 1);
+    return false;
+}
+
+static __always_inline void end_connect_scope_update(unsigned long long cgroup_id,
+                                                      bool update_scoped)
+{
+    unsigned long long *updates;
+
+    if (update_scoped) {
+        updates = bpf_map_lookup_elem(&APOLYSIS_CONNECT_UPDATES_BY_CGROUP, &cgroup_id);
+        if (!updates)
+            return;
+        __sync_fetch_and_sub(updates, 1);
+    }
+}
+
+static __always_inline void count_connect_missing_entry(
+    unsigned long long cgroup_id,
+    bool update_scoped)
 {
     struct apolysis_observer_counters *counters = observer_counters();
     struct apolysis_network_connect_counters *scoped;
 
     if (counters)
         __sync_fetch_and_add(&counters->connect_missing_entries, 1);
+    if (!update_scoped)
+        return;
     scoped = network_connect_counters(cgroup_id);
     if (scoped)
         __sync_fetch_and_add(&scoped->missing_entries, 1);
 }
 
-static __always_inline void count_connect_missing_exit(unsigned long long cgroup_id,
-                                                       bool update_scoped)
+static __always_inline void count_connect_missing_exit(
+    unsigned long long cgroup_id,
+    bool update_scoped)
 {
     struct apolysis_observer_counters *counters = observer_counters();
     struct apolysis_network_connect_counters *scoped;
@@ -162,20 +201,25 @@ static __always_inline void count_connect_missing_exit(unsigned long long cgroup
         __sync_fetch_and_add(&scoped->missing_exits, 1);
 }
 
-static __always_inline void increment_connect_pending(unsigned long long cgroup_id)
+static __always_inline void increment_connect_pending(
+    unsigned long long cgroup_id,
+    bool update_scoped)
 {
     struct apolysis_observer_counters *counters = observer_counters();
     struct apolysis_network_connect_counters *scoped;
 
     if (counters)
         __sync_fetch_and_add(&counters->connect_pending, 1);
+    if (!update_scoped)
+        return;
     scoped = network_connect_counters(cgroup_id);
     if (scoped)
         __sync_fetch_and_add(&scoped->pending, 1);
 }
 
-static __always_inline void decrement_connect_pending(unsigned long long cgroup_id,
-                                                       bool update_scoped)
+static __always_inline void decrement_connect_pending(
+    unsigned long long cgroup_id,
+    bool update_scoped)
 {
     struct apolysis_observer_counters *counters = observer_counters();
     struct apolysis_network_connect_counters *scoped;
@@ -189,11 +233,27 @@ static __always_inline void decrement_connect_pending(unsigned long long cgroup_
         __sync_fetch_and_sub(&scoped->pending, 1);
 }
 
+static __always_inline void account_stale_connect(unsigned long long cgroup_id)
+{
+    bool update_scoped = begin_connect_scope_update(cgroup_id);
+
+    decrement_connect_pending(cgroup_id, update_scoped);
+    count_connect_missing_exit(cgroup_id, update_scoped);
+    end_connect_scope_update(cgroup_id, update_scoped);
+}
+
 static __always_inline struct apolysis_scope_config *scope_config(void)
 {
     unsigned int key = 0;
 
     return bpf_map_lookup_elem(&APOLYSIS_CONFIG, &key);
+}
+
+static __always_inline bool multi_cgroup_scope(void)
+{
+    struct apolysis_scope_config *config = scope_config();
+
+    return config && config->mode == APOLYSIS_SCOPE_MULTI_CGROUP;
 }
 
 static __always_inline bool pid_is_tracked(unsigned int pid)
@@ -536,10 +596,11 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     pending_connect = bpf_map_lookup_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
     if (pending_connect) {
         connect_cgroup_id = pending_connect->cgroup_id;
-        update_scoped = cgroup_scope_state(connect_cgroup_id) == APOLYSIS_CGROUP_ACTIVE;
+        update_scoped = begin_connect_scope_update(connect_cgroup_id);
         bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
         decrement_connect_pending(connect_cgroup_id, update_scoped);
         count_connect_missing_exit(connect_cgroup_id, update_scoped);
+        end_connect_scope_update(connect_cgroup_id, update_scoped);
     }
 
     event = reserve_event(APOLYSIS_EVENT_EXIT);
@@ -653,6 +714,7 @@ int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
     unsigned long long pid_tgid;
     unsigned long long cgroup_id;
     unsigned long long stale_cgroup_id = 0;
+    bool update_scoped;
     unsigned long long length;
     unsigned int scratch_key = 0;
     unsigned short family = 0;
@@ -660,14 +722,21 @@ int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
 
     if (!current_is_in_scope())
         return 0;
+    cgroup_id = bpf_get_current_cgroup_id();
+    update_scoped = begin_connect_scope_update(cgroup_id);
+    if (multi_cgroup_scope() && !update_scoped) {
+        if (cgroup_scope_state(cgroup_id) == APOLYSIS_CGROUP_ACTIVE)
+            count_map_pressure();
+        return 0;
+    }
     pending = bpf_map_lookup_elem(&APOLYSIS_CONNECT_SCRATCH, &scratch_key);
     if (!pending) {
+        end_connect_scope_update(cgroup_id, update_scoped);
         count_map_pressure();
         return 0;
     }
 
     __builtin_memset(pending, 0, sizeof(*pending));
-    cgroup_id = bpf_get_current_cgroup_id();
     pending->cgroup_id = cgroup_id;
     length = ctx->args[2];
     if (length > sizeof(pending->payload)) {
@@ -691,21 +760,16 @@ int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
     if (bpf_map_update_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid, pending, BPF_ANY)) {
         if (replaces_stale_entry) {
             bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
-            decrement_connect_pending(stale_cgroup_id,
-                                      cgroup_scope_state(stale_cgroup_id) == APOLYSIS_CGROUP_ACTIVE);
-            count_connect_missing_exit(stale_cgroup_id,
-                                       cgroup_scope_state(stale_cgroup_id) == APOLYSIS_CGROUP_ACTIVE);
+            account_stale_connect(stale_cgroup_id);
         }
+        end_connect_scope_update(cgroup_id, update_scoped);
         count_map_pressure();
         return 0;
     }
-    if (replaces_stale_entry) {
-        decrement_connect_pending(stale_cgroup_id,
-                                  cgroup_scope_state(stale_cgroup_id) == APOLYSIS_CGROUP_ACTIVE);
-        count_connect_missing_exit(stale_cgroup_id,
-                                   cgroup_scope_state(stale_cgroup_id) == APOLYSIS_CGROUP_ACTIVE);
-    }
-    increment_connect_pending(cgroup_id);
+    if (replaces_stale_entry)
+        account_stale_connect(stale_cgroup_id);
+    increment_connect_pending(cgroup_id, update_scoped);
+    end_connect_scope_update(cgroup_id, update_scoped);
     return 0;
 }
 
@@ -722,18 +786,26 @@ int apolysis_sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
     pid_tgid = bpf_get_current_pid_tgid();
     pending = bpf_map_lookup_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
     if (!pending) {
-        if (current_is_in_scope()) {
+        if (multi_cgroup_scope()) {
             current_cgroup_id = bpf_get_current_cgroup_id();
-            count_connect_missing_entry(current_cgroup_id);
+            update_scoped = begin_connect_scope_update(current_cgroup_id);
+            if (update_scoped) {
+                count_connect_missing_entry(current_cgroup_id, update_scoped);
+                end_connect_scope_update(current_cgroup_id, update_scoped);
+            }
+        } else if (current_is_in_scope()) {
+            current_cgroup_id = bpf_get_current_cgroup_id();
+            count_connect_missing_entry(current_cgroup_id, 0);
         }
         return 0;
     }
     cgroup_id = pending->cgroup_id;
-    update_scoped = cgroup_scope_state(cgroup_id) == APOLYSIS_CGROUP_ACTIVE;
+    update_scoped = begin_connect_scope_update(cgroup_id);
     if (!connect_pair_is_in_scope(cgroup_id)) {
         bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
         decrement_connect_pending(cgroup_id, update_scoped);
         count_connect_missing_exit(cgroup_id, update_scoped);
+        end_connect_scope_update(cgroup_id, update_scoped);
         return 0;
     }
 
@@ -747,5 +819,6 @@ int apolysis_sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
     }
     bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
     decrement_connect_pending(cgroup_id, update_scoped);
+    end_connect_scope_update(cgroup_id, update_scoped);
     return 0;
 }

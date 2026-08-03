@@ -159,10 +159,10 @@ An unmatched entry or exit becomes an explicit Observation Gap.
 In multi-cgroup daemon mode, connect pairing loss is counted separately for
 each cgroup while collector-global counters remain available for health
 diagnosis. Draining a scope prevents new connect entries, snapshots its
-missing-entry, missing-exit, and pending counts, and submits typed Observation
-Gaps to the owning Agent Run before its ownership is discarded. A snapshot or
-pipeline-submission failure stops the observer runtime and rejects a clean run
-close.
+missing-entry, missing-exit, and pending counts after a bounded in-flight
+collector-update drain, and confirms typed Observation Gaps are durable in the
+owning Agent Run before its ownership is discarded. A drain, snapshot, queue,
+or storage failure stops the observer runtime and rejects a clean run close.
 
 Full-syscall collection, prompt/response capture, TLS plaintext capture, and
 generic kernel enforcement are not targets.

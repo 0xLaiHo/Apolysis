@@ -267,6 +267,14 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
     .await
     .expect("Agent Run close must not deadlock")
     .expect("close Agent Run");
+    let timeline_after_close = timeline(&config, "agent-run-close");
+    let gap_index = timeline_after_close
+        .find(r#""record_type":"observation_gap""#)
+        .expect("gap is durable before close returns");
+    let close_index = timeline_after_close
+        .find(r#""record_type":"session_closed""#)
+        .expect("terminal record is durable before close returns");
+    assert!(gap_index < close_index);
 
     observer_shutdown
         .send(())

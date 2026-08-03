@@ -3,6 +3,18 @@
 use apolysis_accountability::{BoundedPriorityQueue, PushOutcome, QueuePriority, QueueStats};
 
 #[test]
+fn observation_gaps_have_a_distinct_protected_priority() {
+    let mut queue = BoundedPriorityQueue::new(3);
+    queue.push(QueuePriority::Finding, "finding");
+    queue.push(QueuePriority::Gap, "gap");
+    queue.push(QueuePriority::Integrity, "integrity");
+
+    assert_eq!(queue.pop(), Some("integrity"));
+    assert_eq!(queue.pop(), Some("gap"));
+    assert_eq!(queue.pop(), Some("finding"));
+}
+
+#[test]
 fn preserves_fifo_order_within_each_priority() {
     let mut queue = BoundedPriorityQueue::new(5);
     queue.push(QueuePriority::Ordinary, "event-1");

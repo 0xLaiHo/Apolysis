@@ -23,8 +23,8 @@ use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
 
 use crate::abi::{
-    KernelEventKind, KernelEventRecord, FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR,
-    FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
+    KernelEventKind, KernelEventRecord, NetworkConnectCountersAbi, FLAG_ARGV_TRUNCATED,
+    FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
 };
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
@@ -503,16 +503,6 @@ struct ObserverCounters {
 }
 
 unsafe impl Pod for ObserverCounters {}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[repr(C)]
-struct NetworkConnectCountersAbi {
-    missing_entries: u64,
-    missing_exits: u64,
-    pending: u64,
-}
-
-unsafe impl Pod for NetworkConnectCountersAbi {}
 
 impl From<NetworkConnectCountersAbi> for NetworkConnectCounters {
     fn from(counters: NetworkConnectCountersAbi) -> Self {
@@ -1618,52 +1608,89 @@ pub fn update_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64, present: bool) -> 
     }
 }
 
-const APOLYSIS_CGROUP_ACTIVE: u8 = 1;
-const APOLYSIS_CGROUP_DRAINING: u8 = 2;
+const CONNECT_DRAIN_POLL_LIMIT: usize = 4_096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum TrackedCgroupState {
+    Active = 1,
+    Draining = 2,
+}
+
+impl TryFrom<u8> for TrackedCgroupState {
+    type Error = String;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Active),
+            2 => Ok(Self::Draining),
+            state => Err(format!("unknown cgroup observer scope state: {state}")),
+        }
+    }
+}
 
 fn track_cgroup_with_connect_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
     match tracked_cgroup_state(ebpf, cgroup_id)? {
-        Some(APOLYSIS_CGROUP_ACTIVE) => return Ok(()),
+        Some(TrackedCgroupState::Active) => return Ok(()),
         Some(state) => {
             return Err(format!(
-                "cgroup observer scope {cgroup_id} is already in state {state}"
+                "cgroup observer scope {cgroup_id} is already in state {state:?}"
             ));
         }
         None => {}
     }
 
     set_network_connect_counters(ebpf, cgroup_id, NetworkConnectCountersAbi::default())?;
-    if let Err(error) = set_tracked_cgroup_state(ebpf, cgroup_id, APOLYSIS_CGROUP_ACTIVE) {
+    if let Err(error) = set_connect_updates_inflight(ebpf, cgroup_id, 0) {
         let rollback = remove_network_connect_counters(ebpf, cgroup_id);
         return Err(match rollback {
             Ok(()) => error,
             Err(rollback) => format!("{error}; connect-counter rollback failed: {rollback}"),
         });
     }
+    if let Err(error) = set_tracked_cgroup_state(ebpf, cgroup_id, TrackedCgroupState::Active) {
+        let inflight_rollback = remove_connect_updates_inflight(ebpf, cgroup_id);
+        let counter_rollback = remove_network_connect_counters(ebpf, cgroup_id);
+        let mut failures = vec![error];
+        if let Err(rollback) = inflight_rollback {
+            failures.push(format!("in-flight update rollback failed: {rollback}"));
+        }
+        if let Err(rollback) = counter_rollback {
+            failures.push(format!("connect-counter rollback failed: {rollback}"));
+        }
+        return Err(failures.join("; "));
+    }
     Ok(())
 }
 
-fn tracked_cgroup_state(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<Option<u8>, String> {
+fn tracked_cgroup_state(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+) -> Result<Option<TrackedCgroupState>, String> {
     let tracked_map = ebpf
         .map_mut("APOLYSIS_TRACKED_CGROUPS")
         .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_CGROUPS".to_string())?;
     let tracked = HashMap::<_, u64, u8>::try_from(tracked_map)
         .map_err(|error| format!("invalid APOLYSIS_TRACKED_CGROUPS map: {error}"))?;
     match tracked.get(&cgroup_id, 0) {
-        Ok(state) => Ok(Some(state)),
+        Ok(state) => Ok(Some(state.try_into()?)),
         Err(MapError::KeyNotFound) => Ok(None),
         Err(error) => Err(format!("failed to read cgroup observer scope: {error}")),
     }
 }
 
-fn set_tracked_cgroup_state(ebpf: &mut Ebpf, cgroup_id: u64, state: u8) -> Result<(), String> {
+fn set_tracked_cgroup_state(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+    state: TrackedCgroupState,
+) -> Result<(), String> {
     let tracked_map = ebpf
         .map_mut("APOLYSIS_TRACKED_CGROUPS")
         .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_CGROUPS".to_string())?;
     let mut tracked = HashMap::<_, u64, u8>::try_from(tracked_map)
         .map_err(|error| format!("invalid APOLYSIS_TRACKED_CGROUPS map: {error}"))?;
     tracked
-        .insert(cgroup_id, state, 0)
+        .insert(cgroup_id, state as u8, 0)
         .map_err(|error| format!("failed to update cgroup observer scope: {error}"))
 }
 
@@ -1718,8 +1745,56 @@ fn remove_network_connect_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<()
         .map_err(|error| format!("failed to clean up cgroup connect counters: {error}"))
 }
 
+fn set_connect_updates_inflight(ebpf: &mut Ebpf, cgroup_id: u64, value: u64) -> Result<(), String> {
+    let updates_map = ebpf
+        .map_mut("APOLYSIS_CONNECT_UPDATES_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_CONNECT_UPDATES_BY_CGROUP".to_string())?;
+    let mut updates = HashMap::<_, u64, u64>::try_from(updates_map)
+        .map_err(|error| format!("invalid APOLYSIS_CONNECT_UPDATES_BY_CGROUP map: {error}"))?;
+    updates
+        .insert(cgroup_id, value, 0)
+        .map_err(|error| format!("failed to update cgroup in-flight connect counter: {error}"))
+}
+
+fn read_connect_updates_inflight(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<u64, String> {
+    let updates_map = ebpf
+        .map_mut("APOLYSIS_CONNECT_UPDATES_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_CONNECT_UPDATES_BY_CGROUP".to_string())?;
+    let updates = HashMap::<_, u64, u64>::try_from(updates_map)
+        .map_err(|error| format!("invalid APOLYSIS_CONNECT_UPDATES_BY_CGROUP map: {error}"))?;
+    updates
+        .get(&cgroup_id, 0)
+        .map_err(|error| format!("failed to read cgroup in-flight connect counter: {error}"))
+}
+
+fn remove_connect_updates_inflight(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
+    let updates_map = ebpf
+        .map_mut("APOLYSIS_CONNECT_UPDATES_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_CONNECT_UPDATES_BY_CGROUP".to_string())?;
+    let mut updates = HashMap::<_, u64, u64>::try_from(updates_map)
+        .map_err(|error| format!("invalid APOLYSIS_CONNECT_UPDATES_BY_CGROUP map: {error}"))?;
+    updates
+        .remove(&cgroup_id)
+        .map_err(|error| format!("failed to clean up cgroup in-flight connect counter: {error}"))
+}
+
+fn wait_for_connect_updates_to_drain<F>(mut read_inflight: F) -> Result<(), String>
+where
+    F: FnMut() -> Result<u64, String>,
+{
+    for _ in 0..CONNECT_DRAIN_POLL_LIMIT {
+        if read_inflight()? == 0 {
+            return Ok(());
+        }
+        std::thread::yield_now();
+    }
+    Err(format!(
+        "cgroup connect updates did not drain after {CONNECT_DRAIN_POLL_LIMIT} polls"
+    ))
+}
+
 fn restore_active_scope(ebpf: &mut Ebpf, cgroup_id: u64, error: String) -> String {
-    match set_tracked_cgroup_state(ebpf, cgroup_id, APOLYSIS_CGROUP_ACTIVE) {
+    match set_tracked_cgroup_state(ebpf, cgroup_id, TrackedCgroupState::Active) {
         Ok(()) => error,
         Err(rollback) => format!("{error}; cgroup scope rollback failed: {rollback}"),
     }
@@ -1731,15 +1806,20 @@ fn drain_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<NetworkConnec
     }
 
     match tracked_cgroup_state(ebpf, cgroup_id)? {
-        Some(APOLYSIS_CGROUP_ACTIVE) => {}
+        Some(TrackedCgroupState::Active) => {}
         Some(state) => {
             return Err(format!(
-                "cgroup observer scope {cgroup_id} cannot drain from state {state}"
+                "cgroup observer scope {cgroup_id} cannot drain from state {state:?}"
             ));
         }
         None => return Err(format!("cgroup observer scope {cgroup_id} is not tracked")),
     }
-    set_tracked_cgroup_state(ebpf, cgroup_id, APOLYSIS_CGROUP_DRAINING)?;
+    set_tracked_cgroup_state(ebpf, cgroup_id, TrackedCgroupState::Draining)?;
+    if let Err(error) =
+        wait_for_connect_updates_to_drain(|| read_connect_updates_inflight(ebpf, cgroup_id))
+    {
+        return Err(restore_active_scope(ebpf, cgroup_id, error));
+    }
     if let Err(error) = remove_tracked_cgroup(ebpf, cgroup_id) {
         return Err(restore_active_scope(ebpf, cgroup_id, error));
     }
@@ -1749,6 +1829,14 @@ fn drain_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<NetworkConnec
         Err(error) => return Err(restore_active_scope(ebpf, cgroup_id, error)),
     };
     if let Err(error) = remove_network_connect_counters(ebpf, cgroup_id) {
+        return Err(restore_active_scope(ebpf, cgroup_id, error));
+    }
+    if let Err(error) = remove_connect_updates_inflight(ebpf, cgroup_id) {
+        let counter_rollback = set_network_connect_counters(ebpf, cgroup_id, snapshot);
+        let error = match counter_rollback {
+            Ok(()) => error,
+            Err(rollback) => format!("{error}; connect-counter rollback failed: {rollback}"),
+        };
         return Err(restore_active_scope(ebpf, cgroup_id, error));
     }
     Ok(snapshot.into())
@@ -2039,7 +2127,20 @@ fn decode_sockaddr(bytes: &[u8]) -> Result<(String, &'static str), String> {
 mod tests {
     use super::*;
     use apolysis_core::{CanonicalEvent, EventType};
+    use std::collections::VecDeque;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn cgroup_drain_waits_for_inflight_kernel_counter_updates() {
+        let mut observed = VecDeque::from([2, 1, 0]);
+
+        wait_for_connect_updates_to_drain(|| {
+            Ok(observed.pop_front().expect("bounded poll sequence"))
+        })
+        .expect("in-flight updates drain");
+
+        assert!(observed.is_empty());
+    }
 
     #[test]
     fn agent_command_metadata_redacts_credential_paths_in_shell_scripts() {

@@ -211,18 +211,17 @@ async fn submit_network_connect_gaps(
         let payload = serde_json::from_str(&gap.to_json_line())
             .map_err(|error| format!("failed to encode Observation Gap: {error}"))?;
         match pipeline
-            .submit(DaemonRecord::new(
+            .submit_and_wait(DaemonRecord::new(
                 agent_run_id.clone(),
-                QueuePriority::Finding,
+                QueuePriority::Gap,
                 payload,
             ))
-            .map_err(|error| format!("failed to submit Observation Gap: {error}"))?
+            .await
+            .map_err(|error| format!("failed to persist Observation Gap: {error}"))?
         {
-            PushOutcome::Accepted | PushOutcome::AcceptedAfterShedding { .. } => {}
-            PushOutcome::Dropped { dropped } => {
-                return Err(format!(
-                    "Observation Gap was dropped from the {dropped:?} queue"
-                ));
+            crate::RecordWriteOutcome::Written => {}
+            crate::RecordWriteOutcome::Failed => {
+                return Err("failed to persist Observation Gap".to_string());
             }
         }
     }

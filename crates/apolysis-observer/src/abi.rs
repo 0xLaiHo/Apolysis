@@ -4,6 +4,8 @@
 
 use std::fmt;
 
+use aya::Pod;
+
 pub const COMM_LEN: usize = 16;
 pub const RESOURCE_LEN: usize = 256;
 pub const ACTION_LEN: usize = 32;
@@ -15,6 +17,19 @@ pub const FLAG_PAYLOAD_TRUNCATED: u32 = 1 << 1;
 pub const FLAG_PAYLOAD_SOCKADDR: u32 = 1 << 2;
 pub const FLAG_ARGV_TRUNCATED: u32 = 1 << 3;
 pub const FLAG_RETURN_VALUE: u32 = 1 << 4;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub(crate) struct NetworkConnectCountersAbi {
+    pub(crate) missing_entries: u64,
+    pub(crate) missing_exits: u64,
+    pub(crate) pending: u64,
+}
+
+unsafe impl Pod for NetworkConnectCountersAbi {}
+
+const _: [(); 24] = [(); std::mem::size_of::<NetworkConnectCountersAbi>()];
+const _: [(); 8] = [(); std::mem::align_of::<NetworkConnectCountersAbi>()];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KernelEventDecodeError {

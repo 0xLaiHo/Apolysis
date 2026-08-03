@@ -114,6 +114,53 @@ async fn writer_counts_handled_record_failures_and_continues() {
     assert_eq!(*written.lock().unwrap(), vec!["healthy-session"]);
 }
 
+#[tokio::test]
+async fn confirmed_submission_waits_for_the_writer_outcome() {
+    let pipeline = EventPipeline::new(1);
+    let (sink_entered, sink_entered_receiver) = oneshot::channel();
+    let (release_sink, release_sink_receiver) = oneshot::channel();
+    let (shutdown, shutdown_receiver) = oneshot::channel();
+    let writer = {
+        let pipeline = pipeline.clone();
+        tokio::spawn(async move {
+            let mut sink_entered = Some(sink_entered);
+            let mut release_sink_receiver = Some(release_sink_receiver);
+            pipeline
+                .run_writer(shutdown_receiver, move |_record| {
+                    let sink_entered = sink_entered.take();
+                    let release_sink_receiver = release_sink_receiver.take();
+                    async move {
+                        sink_entered.expect("single record").send(()).unwrap();
+                        release_sink_receiver
+                            .expect("single record")
+                            .await
+                            .expect("release writer");
+                        Ok(RecordWriteOutcome::Written)
+                    }
+                })
+                .await
+        })
+    };
+    let confirmation = {
+        let pipeline = pipeline.clone();
+        tokio::spawn(async move {
+            pipeline
+                .submit_and_wait(record("gap", QueuePriority::Gap))
+                .await
+        })
+    };
+
+    sink_entered_receiver.await.expect("writer receives record");
+    assert!(!confirmation.is_finished());
+    release_sink.send(()).expect("release writer");
+    assert_eq!(
+        confirmation.await.unwrap().expect("confirmed write"),
+        RecordWriteOutcome::Written
+    );
+    shutdown.send(()).expect("stop writer");
+    writer.await.unwrap().expect("writer drain");
+}
+
 fn record(session_id: &str, priority: QueuePriority) -> DaemonRecord {
     DaemonRecord::new(
         session_id,

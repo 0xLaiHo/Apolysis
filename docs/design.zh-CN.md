@@ -140,8 +140,9 @@ succeeded、failed、denied 或 pending。无法匹配的 entry 或 exit 会成�
 
 在 multi-cgroup daemon 模式下，connect 配对丢失会按 cgroup 分别计数，同时保留
 collector-global counter 用于健康诊断。Drain 一个 scope 时会阻止新的 connect entry，快照其
-missing-entry、missing-exit 与 pending 计数，并在丢弃归属前把类型化 Observation Gap 提交到
-所属 Agent Run。快照或 pipeline 提交失败会停止 observer runtime，并拒绝把该 run 干净关闭。
+missing-entry、missing-exit 与 pending 计数；快照前会有界等待正在执行的 collector update
+排空，并在丢弃归属前确认类型化 Observation Gap 已持久化到所属 Agent Run。Drain、快照、
+queue 或 storage 失败会停止 observer runtime，并拒绝把该 run 干净关闭。
 
 全 syscall 采集、prompt/response、TLS plaintext 和通用 kernel enforcement 都不是目标。
 
