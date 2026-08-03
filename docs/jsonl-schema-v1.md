@@ -68,11 +68,11 @@ Fields:
   `failed`, `denied`, `pending`, or `unknown`.
 
 The current AuditObserver declaration includes only capabilities backed by its
-actual attachment plan. Syscall-entry file observations declare `attempted`;
-they do not claim a return value or successful outcome. Network connect
-declares `succeeded`, `failed`, `denied`, and `pending` only when both entry and
-exit hooks are attached. Exec declares `succeeded` only when the
-observation-producing `sched/sched_process_exec` hook is attached.
+actual attachment plan. Selected file operations declare `succeeded`,
+`failed`, and `denied` only when their complete supported entry/exit hook set
+is attached. Network connect declares those outcomes plus `pending` only when
+both entry and exit hooks are attached. Exec declares `succeeded` only when
+the observation-producing `sched/sched_process_exec` hook is attached.
 
 ### `event`
 
@@ -151,6 +151,12 @@ as `argv_truncated:true`, `payload_truncated:true`, and
 For `network_connect`, return values greater than or equal to zero map to
 `succeeded`; `EACCES` and `EPERM` map to `denied`; `EINPROGRESS` and `EALREADY`
 map to `pending`; and other negative return values map to `failed`.
+
+For `file_open`, `file_create`, `file_truncate`, `file_unlink`, and
+`file_rename`, return values greater than or equal to zero map to `succeeded`;
+`EACCES` and `EPERM` map to `denied`; and every other negative return value,
+including `EINPROGRESS` and `EALREADY`, maps to `failed` because these supported
+file syscalls are synchronous.
 
 ### `intent`
 
@@ -265,16 +271,20 @@ Fields:
 - `schema_version`: Observation Gap schema version, currently `1`
 - `timestamp_unix_ms`: gap reporting timestamp
 - `agent_run_id`: Agent Run identifier
-- `operation`: affected operation, currently `network_connect`
+- `operation`: affected operation: `network_connect`, `file_open`,
+  `file_create`, `file_truncate`, `file_unlink`, or `file_rename`
 - `kind`: `missing_entry` or `missing_exit`
 - `count`: affected operation count
-- `detail`: bounded diagnostic context. Network missing-exit details distinguish
+- `detail`: bounded diagnostic context. Missing-exit details distinguish
   kernel-reported losses from entries still pending when the collector stops.
 
 The managed single-Agent-Run live observer persists these records directly.
-The multi-cgroup daemon currently exposes collector-global connect gap counters
-in its runtime summary; it does not assign those aggregate counters to an Agent
-Run until per-cgroup gap attribution is implemented.
+The multi-cgroup daemon snapshots connect and file gap counters per cgroup and
+first drains already-submitted ring records with confirmed writes. It then
+persists gaps to only the owning Agent Run before explicit scope removal or
+clean observer shutdown completes. Any queue drop or shedding fails the
+observer runtime. Collector-global counters remain available for diagnostics
+and are not reassigned to an Agent Run.
 
 ### `observer_diagnostic`
 

@@ -169,6 +169,28 @@ async fn confirmed_submission_waits_for_the_writer_outcome() {
     writer.await.unwrap().expect("writer drain");
 }
 
+#[tokio::test]
+async fn confirmed_submission_fails_loud_when_admission_sheds_a_record() {
+    let pipeline = EventPipeline::new(1);
+    pipeline
+        .submit(record("ordinary", QueuePriority::Ordinary))
+        .expect("fill queue");
+
+    let error = pipeline
+        .submit_and_wait(record("gap", QueuePriority::Gap))
+        .await
+        .expect_err("confirmed admission must report shedding");
+
+    assert!(error.contains("shed a Ordinary record"));
+    assert_eq!(
+        pipeline
+            .stats()
+            .expect("queue stats")
+            .dropped(QueuePriority::Ordinary),
+        1
+    );
+}
+
 fn record(session_id: &str, priority: QueuePriority) -> DaemonRecord {
     DaemonRecord::new(
         session_id,

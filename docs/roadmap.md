@@ -111,11 +111,11 @@ Priorities:
 
 - preserve compatibility for the versioned kernel/userspace ABI and capability
   manifest, and reject incompatible records explicitly;
-- extend the bounded `network_connect` entry/exit pattern to the remaining
-  supported operation set;
+- preserve bounded entry/exit matching for `network_connect` and the selected
+  supported file-operation set;
 - preserve return value and errno semantics while distinguishing attempted,
   succeeded, failed, denied, pending, and unknown;
-- preserve per-cgroup network correlation counters and qualify isolated
+- preserve per-cgroup operation correlation counters and qualify isolated
   Agent-Run gap persistence across scope drain, shutdown, and identity churn;
 - establish stable process identity across PID reuse and exec;
 - preserve cgroup scope and deterministic process lineage;

@@ -134,15 +134,23 @@ Beta collector target 为每种受支持 operation 加入 entry/exit matching。
 attempted、succeeded、failed、denied、pending 与 unknown outcome，并在 capability 声明
 包含时保留 return value 或 errno。
 
-首条完成 outcome 的路径是 `network_connect`。Collector 保存有界、thread-scoped entry
-record，在 syscall exit 发出 Runtime Observation，并把 Linux return value 映射为
-succeeded、failed、denied 或 pending。无法匹配的 entry 或 exit 会成为显式 Observation Gap。
+`network_connect` 以及选定的 `file_open`、`file_create`、`file_truncate`、
+`file_unlink` 与 `file_rename` 已具备完整 outcome 路径。Collector 保存有界、
+thread-scoped entry record，并在 syscall exit 发出 Runtime Observation。Linux return value
+映射为 succeeded、failed 或 denied；connect 还支持 pending。无法匹配的 entry 或 exit 会
+成为显式、operation-specific Observation Gap。
 
-在 multi-cgroup daemon 模式下，connect 配对丢失会按 cgroup 分别计数，同时保留
-collector-global counter 用于健康诊断。Drain 一个 scope 时会阻止新的 connect entry，快照其
+在 multi-cgroup daemon 模式下，connect 与文件配对丢失会按 cgroup 分别计数，同时保留
+collector-global counter 用于健康诊断。Drain 一个 scope 时会阻止新的 entry，快照其
 missing-entry、missing-exit 与 pending 计数；快照前会有界等待正在执行的 collector update
-排空，并在丢弃归属前确认类型化 Observation Gap 已持久化到所属 Agent Run。Drain、快照、
-queue 或 storage 失败会停止 observer runtime，并拒绝把该 run 干净关闭。
+排空，并在丢弃归属前确认类型化 Observation Gap 已持久化到所属 Agent Run。已提交的 ring
+record 会先经过有界排空并确认持久化。Drain、快照、queue drop/shedding 或 storage 失败会停止
+observer runtime，并拒绝把该 run 干净关闭。
+
+所有 multi-cgroup ring producer（包括 process fork、exec 与 exit）都参与同一个 in-flight
+scope barrier。Barrier map 读取失败时 scope 会保持 draining 并 fail closed；只有有界等待超时
+才可以尝试恢复其他前置条件完整的 ACTIVE scope。通过 ABI 验证但无法 normalize 的 record 也会
+停止 queued ingest 或 confirmed drain，而不会被跳过。
 
 全 syscall 采集、prompt/response、TLS plaintext 和通用 kernel enforcement 都不是目标。
 
@@ -269,8 +277,8 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 Implemented today：
 
 - `ebpf/observer` 与 `apolysis-observer`：CO-RE tracepoint、ring buffer、
-  process-tree/cgroup scope、ABI v2、outcome-aware network connect、per-cgroup connect
-  gap counter、脱敏和 health/gap diagnostic；
+  process-tree/cgroup scope、ABI v2、outcome-aware 选定文件操作与 network connect、
+  per-cgroup operation gap counter、脱敏和 health/gap diagnostic；
 - `apolysis-cli`：fixture/live observation、托管 Agent launch、可选 Codex intent
   correlation、visibility 与 verification command；
 - `apolysis-core`：当前 JSONL vocabulary、record type 与版本化 Collector Capability
@@ -283,10 +291,10 @@ Implemented today：
   prototype。
 
 Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 同步到稳定
-存储。Network connect 已具备有界 entry/exit outcome 语义，daemon 会在显式移除 scope 与
-正常关闭时把 connect 配对 gap 持久化到所属 Agent Run。当前 file hook 仍描述 attempt。把
-outcome 语义扩展到其余 operation set、稳定 scope/process generation、完整 collector
-lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是 target。
+存储。选定文件操作与 network connect 已具备有界 entry/exit outcome 语义，daemon 会在显式
+移除 scope 与正常关闭时把这些配对 gap 持久化到所属 Agent Run。稳定 scope/process
+generation、完整 collector lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是
+target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃
@@ -300,9 +308,12 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 - 成功 connect 不证明远端 operation 已 commit。
 - 没有额外传播 identity 时，无法区分同进程中的逻辑 Agent；runtime-only attribution 保持
   process-level。
-- Cgroup scope drain 时仍 pending 的 connect entry 会保留在有界配对 map 中，直到 syscall
-  返回或 thread 退出。在这些 entry 完成前把同一 cgroup 重新归属给另一个 Agent Run 尚未经过
-  资格验证；要安全支持 cgroup 复用，仍需稳定的 scope generation。
+- Cgroup scope drain 时仍 pending 的 connect 或 file entry 会保留在有界配对 map 中，直到
+  syscall 返回或 thread 退出。为防止这些 record 跨 Agent Run，daemon 会维护有界的 retired
+  cgroup guard，并在同一 observer 生命周期内拒绝复用该数字 cgroup ID。若不重启 observer
+  也要安全复用，仍需稳定的 scope generation。
+- Entry 缺失后，exit 侧无法重建 `openat` 或 `openat2` flags，因此这类 unmatched exit 会
+  保守归因到 `file_open`，而不是 create 或 truncate。
 - 被攻陷的 kernel 或 privileged host 可以省略或伪造 observation。
 - Kernel version、BTF、hook availability、verifier behavior 与 privilege 限制支持范围。
 

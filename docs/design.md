@@ -151,18 +151,30 @@ operation. A record distinguishes attempted, succeeded, failed, denied,
 pending, and unknown outcomes and preserves return value or errno when that is
 part of the capability.
 
-The first completed outcome path is `network_connect`. The collector keeps a
-bounded thread-scoped entry record, emits the Runtime Observation at syscall
-exit, and maps the Linux return value to succeeded, failed, denied, or pending.
-An unmatched entry or exit becomes an explicit Observation Gap.
+`network_connect` and the selected `file_open`, `file_create`,
+`file_truncate`, `file_unlink`, and `file_rename` operations have completed
+outcome paths. The collector keeps bounded thread-scoped entry records and
+emits Runtime Observations at syscall exit. Linux return values map to
+succeeded, failed, or denied; connect additionally supports pending. An
+unmatched entry or exit becomes an explicit, operation-specific Observation
+Gap.
 
-In multi-cgroup daemon mode, connect pairing loss is counted separately for
-each cgroup while collector-global counters remain available for health
-diagnosis. Draining a scope prevents new connect entries, snapshots its
+In multi-cgroup daemon mode, connect and file pairing loss is counted
+separately for each cgroup while collector-global counters remain available
+for health diagnosis. Draining a scope prevents new entries, snapshots its
 missing-entry, missing-exit, and pending counts after a bounded in-flight
 collector-update drain, and confirms typed Observation Gaps are durable in the
-owning Agent Run before its ownership is discarded. A drain, snapshot, queue,
-or storage failure stops the observer runtime and rejects a clean run close.
+owning Agent Run before its ownership is discarded. Already-submitted ring
+records pass through a bounded drain and are confirmed durable first. A drain, snapshot, queue drop
+or shedding event, or storage failure stops the observer runtime and rejects a
+clean run close.
+
+Every multi-cgroup ring producer, including process fork, exec, and exit,
+participates in the same in-flight scope barrier. Barrier-map read failure
+leaves the scope draining and fails closed; only a bounded wait timeout may
+attempt to restore an otherwise complete ACTIVE scope. ABI-valid records that
+cannot be normalized also stop queued ingest or confirmed drain instead of
+being skipped.
 
 Full-syscall collection, prompt/response capture, TLS plaintext capture, and
 generic kernel enforcement are not targets.
@@ -300,8 +312,9 @@ A quiet timeline is never proof that the Agent performed no relevant action.
 Implemented today:
 
 - `ebpf/observer` and `apolysis-observer`: CO-RE tracepoints, ring buffer,
-  process-tree/cgroup scopes, ABI v2, outcome-aware network connect,
-  per-cgroup connect gap counters, redaction, and health/gap diagnostics;
+  process-tree/cgroup scopes, ABI v2, outcome-aware selected file operations
+  and network connect, per-cgroup operation gap counters, redaction, and
+  health/gap diagnostics;
 - `apolysis-cli`: fixture/live observation, managed Agent launch, optional
   Codex intent correlation, visibility, and verification commands;
 - `apolysis-core`: current JSONL vocabulary, record types, and versioned
@@ -315,13 +328,12 @@ Implemented today:
   runtime registration prototype.
 
 The live collector synchronizes its capability manifest to stable storage after
-successful attachment and before releasing a managed Agent gate. Network
-connect has bounded entry/exit outcome semantics, and the daemon persists
-connect pairing gaps to the owning Agent Run at explicit scope removal and
-clean shutdown. Current file hooks still describe attempts. Extending outcome
-semantics to the remaining operation set, stable scope/process generations,
-complete collector lifecycle records, the saved-run viewer, and bounded
-Kubernetes beta remain targets.
+successful attachment and before releasing a managed Agent gate. Selected
+file operations and network connect have bounded entry/exit outcome semantics,
+and the daemon persists their pairing gaps to the owning Agent Run at explicit
+scope removal and clean shutdown. Stable scope/process generations, complete
+collector lifecycle records, the saved-run viewer, and bounded Kubernetes beta
+remain targets.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification
@@ -337,11 +349,15 @@ them as historical implementation input; they do not define this architecture.
 - A successful connect does not prove that a remote operation committed.
 - Same-process logical Agents cannot be separated without an additional
   propagated identity; runtime-only attribution remains process-level.
-- Connect entries still pending when a cgroup scope drains remain in the
-  bounded pairing map until syscall or thread exit. Reassigning that same
-  cgroup to another Agent Run before those entries settle is not a qualified
-  workflow; stable scope generations remain required before cgroup reuse can
-  be supported safely.
+- Connect or file entries still pending when a cgroup scope drains remain in
+  bounded pairing maps until syscall or thread exit. To prevent those records
+  from crossing Agent Runs, the daemon keeps a bounded retired-cgroup guard and
+  rejects reuse of that numeric cgroup ID for the rest of the observer
+  lifetime. Stable scope generations remain required before safe reuse can be
+  supported without restarting the observer.
+- The exit side cannot reconstruct `openat` or `openat2` flags after a missing
+  entry, so such an unmatched exit is conservatively attributed to
+  `file_open`, not create or truncate.
 - A compromised kernel or privileged host can suppress or forge observations.
 - Kernel version, BTF, hook availability, verifier behavior, and privileges
   constrain support.
