@@ -1137,7 +1137,10 @@ int apolysis_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
 
     event->pid = ctx->child_pid;
     event->ppid = ctx->parent_pid;
-    fill_process_identity(event, &child_identity);
+    if (process_identity_tracking_failed())
+        clear_process_identity(event);
+    else
+        fill_process_identity(event, &child_identity);
     copy_action(event, "fork", 5);
     bpf_ringbuf_submit(event, 0);
     end_scope_counter_update(event_cgroup_id, update_scoped);
