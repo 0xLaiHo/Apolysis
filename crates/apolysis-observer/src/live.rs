@@ -2485,6 +2485,28 @@ mod tests {
     }
 
     #[test]
+    fn host_boot_identity_is_read_once_from_the_kernel_boundary() {
+        let root = std::env::temp_dir().join(format!(
+            "apolysis-host-boot-id-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create boot identity fixture");
+        let boot_id = root.join("boot_id");
+        std::fs::write(&boot_id, "11111111-2222-3333-4444-555555555555\n")
+            .expect("write boot identity fixture");
+
+        assert_eq!(
+            read_host_boot_id_at(&boot_id).expect("read host boot identity"),
+            "11111111-2222-3333-4444-555555555555"
+        );
+
+        std::fs::write(&boot_id, "not a boot id\n").expect("write invalid boot identity fixture");
+        assert!(read_host_boot_id_at(&boot_id).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cgroup_drain_does_not_treat_a_barrier_read_failure_as_a_timeout() {
         let error = wait_for_scope_updates_to_drain(|| Err("barrier map missing".to_string()))
             .expect_err("barrier read failure must fail closed");
