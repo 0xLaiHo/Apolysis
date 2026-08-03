@@ -50,6 +50,12 @@ struct apolysis_observer_counters {
     unsigned long long connect_pending;
 };
 
+struct apolysis_network_connect_counters {
+    unsigned long long missing_entries;
+    unsigned long long missing_exits;
+    unsigned long long pending;
+};
+
 /*
  * ABI shared between the observer eBPF program and the Rust userspace loader.
  * Keep fixed-size fields explicit so CO-RE object compatibility and Rust mirror

@@ -162,9 +162,9 @@ impl DaemonState {
         let mut removed = Vec::new();
         if let Some(scope) = &self.scope {
             for cgroup_id in &closed.cgroup_ids {
-                if let Err(error) = scope.untrack(*cgroup_id).await {
+                if let Err(error) = scope.untrack_agent_run(session_id, *cgroup_id).await {
                     for removed_id in removed {
-                        let _ = scope.track(removed_id).await;
+                        let _ = scope.track_agent_run(session_id, removed_id).await;
                     }
                     return Err(error);
                 }
@@ -180,7 +180,7 @@ impl DaemonState {
         {
             if let Some(scope) = &self.scope {
                 for cgroup_id in removed {
-                    if let Err(rollback) = scope.track(cgroup_id).await {
+                    if let Err(rollback) = scope.track_agent_run(session_id, cgroup_id).await {
                         return Err(format!("{error}; scope rollback failed: {rollback}"));
                     }
                 }
@@ -310,7 +310,7 @@ impl DaemonState {
             .discover_cgroup(session_id, cgroup_id)
             .map_err(registry_error)?;
         if let Some(scope) = &self.scope {
-            scope.track(cgroup_id).await?;
+            scope.track_agent_run(session_id, cgroup_id).await?;
         }
 
         let outcome_name = match outcome {
@@ -330,7 +330,7 @@ impl DaemonState {
             .await
         {
             if let Some(scope) = &self.scope {
-                if let Err(rollback) = scope.untrack(cgroup_id).await {
+                if let Err(rollback) = scope.untrack_agent_run(session_id, cgroup_id).await {
                     return Err(format!("{error}; scope rollback failed: {rollback}"));
                 }
             }
@@ -505,7 +505,7 @@ impl DaemonState {
         };
         if let Some(scope) = &self.scope {
             for cgroup_id in cgroup_ids {
-                let _ = scope.untrack(cgroup_id).await;
+                let _ = scope.untrack_agent_run(session_id, cgroup_id).await;
             }
         }
         self.health

@@ -14,7 +14,7 @@ use apolysis_core::{
 };
 use apolysis_store::JsonlRotationPolicy;
 use apolysis_store::JsonlStore;
-use aya::maps::{Array, HashMap, MapData, RingBuf};
+use aya::maps::{Array, HashMap, MapData, MapError, RingBuf};
 use aya::programs::TracePoint;
 use aya::{Ebpf, EbpfLoader, Pod};
 use serde::Deserialize;
@@ -396,23 +396,28 @@ pub struct DaemonObserverCounters {
     pub connect_pending: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NetworkConnectCounters {
+    pub missing_entries: u64,
+    pub missing_exits: u64,
+    pub pending: u64,
+}
+
 pub fn network_connect_observation_gaps(
     agent_run_id: &str,
-    counters: &DaemonObserverCounters,
+    counters: &NetworkConnectCounters,
 ) -> Vec<ObservationGap> {
     let mut gaps = Vec::new();
-    if counters.connect_missing_entries > 0 {
+    if counters.missing_entries > 0 {
         gaps.push(ObservationGap::new(
             agent_run_id,
             "network_connect",
             ObservationGapKind::MissingEntry,
-            counters.connect_missing_entries,
+            counters.missing_entries,
             "connect exits observed without matching entries",
         ));
     }
-    let missing_exits = counters
-        .connect_missing_exits
-        .saturating_add(counters.connect_pending);
+    let missing_exits = counters.missing_exits.saturating_add(counters.pending);
     if missing_exits > 0 {
         gaps.push(ObservationGap::new(
             agent_run_id,
@@ -421,7 +426,7 @@ pub fn network_connect_observation_gaps(
             missing_exits,
             format!(
                 "kernel_reported:{},pending_at_stop:{}",
-                counters.connect_missing_exits, counters.connect_pending
+                counters.missing_exits, counters.pending
             ),
         ));
     }
@@ -463,8 +468,8 @@ impl DaemonObserver {
         update_tracked_cgroup(&mut self.ebpf, cgroup_id, true)
     }
 
-    pub fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<(), String> {
-        update_tracked_cgroup(&mut self.ebpf, cgroup_id, false)
+    pub fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<NetworkConnectCounters, String> {
+        drain_tracked_cgroup(&mut self.ebpf, cgroup_id)
     }
 
     pub async fn read_batch(&mut self) -> Result<DaemonObserverBatch, String> {
@@ -499,6 +504,26 @@ struct ObserverCounters {
 
 unsafe impl Pod for ObserverCounters {}
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+struct NetworkConnectCountersAbi {
+    missing_entries: u64,
+    missing_exits: u64,
+    pending: u64,
+}
+
+unsafe impl Pod for NetworkConnectCountersAbi {}
+
+impl From<NetworkConnectCountersAbi> for NetworkConnectCounters {
+    fn from(counters: NetworkConnectCountersAbi) -> Self {
+        Self {
+            missing_entries: counters.missing_entries,
+            missing_exits: counters.missing_exits,
+            pending: counters.pending,
+        }
+    }
+}
+
 impl From<ObserverCounters> for DaemonObserverCounters {
     fn from(counters: ObserverCounters) -> Self {
         Self {
@@ -507,6 +532,16 @@ impl From<ObserverCounters> for DaemonObserverCounters {
             connect_missing_entries: counters.connect_missing_entries,
             connect_missing_exits: counters.connect_missing_exits,
             connect_pending: counters.connect_pending,
+        }
+    }
+}
+
+impl From<DaemonObserverCounters> for NetworkConnectCounters {
+    fn from(counters: DaemonObserverCounters) -> Self {
+        Self {
+            missing_entries: counters.connect_missing_entries,
+            missing_exits: counters.connect_missing_exits,
+            pending: counters.connect_pending,
         }
     }
 }
@@ -809,7 +844,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             &mut store,
         )?;
     }
-    for gap in network_connect_observation_gaps(&request.session_id, &public_counters) {
+    for gap in network_connect_observation_gaps(&request.session_id, &public_counters.into()) {
         store
             .append(&gap)
             .map_err(|error| format!("failed to write network Observation Gap: {error}"))?;
@@ -1576,20 +1611,147 @@ pub fn update_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64, present: bool) -> 
     if cgroup_id == 0 {
         return Err("cgroup id must be non-zero".to_string());
     }
+    if present {
+        track_cgroup_with_connect_counters(ebpf, cgroup_id)
+    } else {
+        drain_tracked_cgroup(ebpf, cgroup_id).map(|_| ())
+    }
+}
+
+const APOLYSIS_CGROUP_ACTIVE: u8 = 1;
+const APOLYSIS_CGROUP_DRAINING: u8 = 2;
+
+fn track_cgroup_with_connect_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
+    match tracked_cgroup_state(ebpf, cgroup_id)? {
+        Some(APOLYSIS_CGROUP_ACTIVE) => return Ok(()),
+        Some(state) => {
+            return Err(format!(
+                "cgroup observer scope {cgroup_id} is already in state {state}"
+            ));
+        }
+        None => {}
+    }
+
+    set_network_connect_counters(ebpf, cgroup_id, NetworkConnectCountersAbi::default())?;
+    if let Err(error) = set_tracked_cgroup_state(ebpf, cgroup_id, APOLYSIS_CGROUP_ACTIVE) {
+        let rollback = remove_network_connect_counters(ebpf, cgroup_id);
+        return Err(match rollback {
+            Ok(()) => error,
+            Err(rollback) => format!("{error}; connect-counter rollback failed: {rollback}"),
+        });
+    }
+    Ok(())
+}
+
+fn tracked_cgroup_state(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<Option<u8>, String> {
+    let tracked_map = ebpf
+        .map_mut("APOLYSIS_TRACKED_CGROUPS")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_CGROUPS".to_string())?;
+    let tracked = HashMap::<_, u64, u8>::try_from(tracked_map)
+        .map_err(|error| format!("invalid APOLYSIS_TRACKED_CGROUPS map: {error}"))?;
+    match tracked.get(&cgroup_id, 0) {
+        Ok(state) => Ok(Some(state)),
+        Err(MapError::KeyNotFound) => Ok(None),
+        Err(error) => Err(format!("failed to read cgroup observer scope: {error}")),
+    }
+}
+
+fn set_tracked_cgroup_state(ebpf: &mut Ebpf, cgroup_id: u64, state: u8) -> Result<(), String> {
     let tracked_map = ebpf
         .map_mut("APOLYSIS_TRACKED_CGROUPS")
         .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_CGROUPS".to_string())?;
     let mut tracked = HashMap::<_, u64, u8>::try_from(tracked_map)
         .map_err(|error| format!("invalid APOLYSIS_TRACKED_CGROUPS map: {error}"))?;
-    if present {
-        tracked
-            .insert(cgroup_id, 1, 0)
-            .map_err(|error| format!("failed to add cgroup observer scope: {error}"))
-    } else {
-        tracked
-            .remove(&cgroup_id)
-            .map_err(|error| format!("failed to remove cgroup observer scope: {error}"))
+    tracked
+        .insert(cgroup_id, state, 0)
+        .map_err(|error| format!("failed to update cgroup observer scope: {error}"))
+}
+
+fn remove_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
+    let tracked_map = ebpf
+        .map_mut("APOLYSIS_TRACKED_CGROUPS")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_CGROUPS".to_string())?;
+    let mut tracked = HashMap::<_, u64, u8>::try_from(tracked_map)
+        .map_err(|error| format!("invalid APOLYSIS_TRACKED_CGROUPS map: {error}"))?;
+    tracked
+        .remove(&cgroup_id)
+        .map_err(|error| format!("failed to remove cgroup observer scope: {error}"))
+}
+
+fn set_network_connect_counters(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+    value: NetworkConnectCountersAbi,
+) -> Result<(), String> {
+    let counters_map = ebpf
+        .map_mut("APOLYSIS_CONNECT_COUNTERS_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_CONNECT_COUNTERS_BY_CGROUP".to_string())?;
+    let mut counters = HashMap::<_, u64, NetworkConnectCountersAbi>::try_from(counters_map)
+        .map_err(|error| format!("invalid APOLYSIS_CONNECT_COUNTERS_BY_CGROUP map: {error}"))?;
+    counters
+        .insert(cgroup_id, value, 0)
+        .map_err(|error| format!("failed to update cgroup connect counters: {error}"))
+}
+
+fn read_network_connect_counters(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+) -> Result<NetworkConnectCountersAbi, String> {
+    let counters_map = ebpf
+        .map_mut("APOLYSIS_CONNECT_COUNTERS_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_CONNECT_COUNTERS_BY_CGROUP".to_string())?;
+    let counters = HashMap::<_, u64, NetworkConnectCountersAbi>::try_from(counters_map)
+        .map_err(|error| format!("invalid APOLYSIS_CONNECT_COUNTERS_BY_CGROUP map: {error}"))?;
+    counters
+        .get(&cgroup_id, 0)
+        .map_err(|error| format!("failed to read cgroup connect counters: {error}"))
+}
+
+fn remove_network_connect_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
+    let counters_map = ebpf
+        .map_mut("APOLYSIS_CONNECT_COUNTERS_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_CONNECT_COUNTERS_BY_CGROUP".to_string())?;
+    let mut counters = HashMap::<_, u64, NetworkConnectCountersAbi>::try_from(counters_map)
+        .map_err(|error| format!("invalid APOLYSIS_CONNECT_COUNTERS_BY_CGROUP map: {error}"))?;
+    counters
+        .remove(&cgroup_id)
+        .map_err(|error| format!("failed to clean up cgroup connect counters: {error}"))
+}
+
+fn restore_active_scope(ebpf: &mut Ebpf, cgroup_id: u64, error: String) -> String {
+    match set_tracked_cgroup_state(ebpf, cgroup_id, APOLYSIS_CGROUP_ACTIVE) {
+        Ok(()) => error,
+        Err(rollback) => format!("{error}; cgroup scope rollback failed: {rollback}"),
     }
+}
+
+fn drain_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<NetworkConnectCounters, String> {
+    if cgroup_id == 0 {
+        return Err("cgroup id must be non-zero".to_string());
+    }
+
+    match tracked_cgroup_state(ebpf, cgroup_id)? {
+        Some(APOLYSIS_CGROUP_ACTIVE) => {}
+        Some(state) => {
+            return Err(format!(
+                "cgroup observer scope {cgroup_id} cannot drain from state {state}"
+            ));
+        }
+        None => return Err(format!("cgroup observer scope {cgroup_id} is not tracked")),
+    }
+    set_tracked_cgroup_state(ebpf, cgroup_id, APOLYSIS_CGROUP_DRAINING)?;
+    if let Err(error) = remove_tracked_cgroup(ebpf, cgroup_id) {
+        return Err(restore_active_scope(ebpf, cgroup_id, error));
+    }
+
+    let snapshot = match read_network_connect_counters(ebpf, cgroup_id) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Err(restore_active_scope(ebpf, cgroup_id, error)),
+    };
+    if let Err(error) = remove_network_connect_counters(ebpf, cgroup_id) {
+        return Err(restore_active_scope(ebpf, cgroup_id, error));
+    }
+    Ok(snapshot.into())
 }
 
 fn attach_tracepoints(ebpf: &mut Ebpf, plan: &AyaLoaderPlan) -> Result<(), String> {
