@@ -95,7 +95,7 @@ Agent command / container / Pod
 | 本地 Linux Agent CLI | 首个稳定 workflow |
 | 用户可控 Linux 上的 Docker/containerd | 本地 collector 正确性完成后的稳定目标 |
 | Kubernetes node 与 Pod 归属 | Container identity 稳定后的有界 Beta |
-| Linux self-hosted CI runner | 通过同一 managed-run boundary 支持 |
+| Linux self-hosted CI runner | 通过 CLI managed-run boundary 支持；不维护 composite Action |
 | macOS、Windows 或厂商托管 Agent runtime | 不支持 eBPF runtime observation |
 
 ## 当前仓库状态
@@ -149,7 +149,7 @@ sudo -E ./target/debug/apolysis observe \
 
 ## 高层路线图
 
-1. 保持活跃 workspace 只包含 eBPF collection、runtime scope、attribution、本地 storage、
+1. 保持活跃 workspace 只包含 eBPF collection、Observation Scope、attribution、本地 storage、
    daemon、CLI 与操作者调查能力。
 2. 完成 outcome-aware collector 语义、稳定 runtime identity、health/gap 报告和本地
    Agent Run 调查 workflow。

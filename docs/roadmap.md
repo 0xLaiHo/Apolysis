@@ -217,7 +217,7 @@ Target stable profiles:
 - supported Linux distributions and kernels with BTF, cgroup v2, required
   tracepoints, and documented BPF capabilities;
 - local managed Agent commands;
-- Linux self-hosted CI through the same managed-run boundary;
+- Linux self-hosted CI through the same CLI managed-run boundary;
 - Docker/containerd after runtime attribution qualification.
 
 Target experimental profile:

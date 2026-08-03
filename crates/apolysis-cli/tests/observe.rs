@@ -15,7 +15,7 @@ fn observe_rejects_removed_control_plane_options() {
                 "--input",
                 "tests/fixtures/raw-kernel-events.txt",
                 "--session",
-                "session-host-observer-removed-option",
+                "agent-run-observer-removed-option",
                 "--output",
                 output.to_str().expect("utf-8 output path"),
                 option,

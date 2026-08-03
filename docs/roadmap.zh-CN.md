@@ -191,7 +191,7 @@ API 时，run 仍必须有用。
 - 具有 BTF、cgroup v2、所需 tracepoint 与文档化 BPF capability 的受支持 Linux 发行版和
   kernel；
 - 本地 managed Agent command；
-- 通过同一 managed-run boundary 的 Linux self-hosted CI；
+- 通过同一 CLI managed-run boundary 的 Linux self-hosted CI；
 - 完成 runtime attribution qualification 后的 Docker/containerd。
 
 目标 experimental profile：

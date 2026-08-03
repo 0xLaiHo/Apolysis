@@ -206,7 +206,7 @@ filesystem、network、guest 或 runtime path 成为显式 capability gap。
 | 环境 | Runtime observation contract |
 | --- | --- |
 | 本地 Linux CLI | Managed launch 或受保护的 process-tree attach |
-| Linux self-hosted CI | 使用相同 managed-run boundary；runner isolation 由外部提供 |
+| Linux self-hosted CI | 使用相同 CLI managed-run boundary；runner isolation 由外部提供 |
 | Docker/containerd | Host eBPF observation 关联 container 与 cgroup identity |
 | Kubernetes | Node eBPF observation 关联 Pod/container/cgroup identity；有界 Beta |
 | gVisor | Host/runtime boundary visibility，不是每个 guest syscall |

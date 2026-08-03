@@ -156,7 +156,7 @@ pub async fn ingest_observer_batch(
         let workspace_root = state.workspace_root_for_session(&session_id).await;
         let redactor = Redactor::new(&session_id, workspace_root);
         let credential_read = matches!(raw.event_name.as_str(), "open" | "openat" | "openat2")
-            && state.credential_path_requires_redaction(&raw.resource);
+            && apolysis_observer::is_credential_path(&raw.resource);
         let persisted =
             RuntimeEvidencePersistence::new(&redactor).persist_raw(&raw, credential_read);
         let payload = serde_json::json!({

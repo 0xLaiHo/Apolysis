@@ -231,7 +231,7 @@ network, guest, or runtime paths become explicit capability gaps.
 | Environment | Runtime observation contract |
 | --- | --- |
 | Local Linux CLI | Managed launch or protected process-tree attach |
-| Linux self-hosted CI | Same managed-run boundary; runner isolation remains external |
+| Linux self-hosted CI | Same CLI managed-run boundary; runner isolation remains external |
 | Docker/containerd | Host eBPF observation joined to container and cgroup identity |
 | Kubernetes | Node eBPF observation joined to Pod/container/cgroup identity; bounded beta |
 | gVisor | Host/runtime boundary visibility, not every guest syscall |

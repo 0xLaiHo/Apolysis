@@ -12,7 +12,7 @@ credential material.
 ## Source Run
 
 - Demo status: `validated_local_live`
-- Source session: `codex-live-demo`
+- Source Agent Run: `codex-live-demo`
 - Agent: Codex
 - Observer backend: live eBPF
 - Timeline size: 79,949 JSONL records

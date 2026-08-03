@@ -108,7 +108,7 @@ deferred beyond the bounded beta.
 | Local Linux Agent CLI | First stable workflow |
 | Docker/containerd on operator-controlled Linux | Stable target after local collector correctness |
 | Kubernetes node and Pod attribution | Bounded beta after container identity is stable |
-| Linux self-hosted CI runner | Supported through the same managed-run boundary |
+| Linux self-hosted CI runner | Supported through the CLI managed-run boundary; no maintained composite Action |
 | macOS, Windows, or vendor-managed Agent runtime | Unsupported for eBPF runtime observation |
 
 ## Current repository state
@@ -167,7 +167,7 @@ third-party workload behavior still require a documented threat model.
 
 ## High-level roadmap
 
-1. Keep the active workspace bounded to eBPF collection, runtime scope,
+1. Keep the active workspace bounded to eBPF collection, Observation Scope,
    attribution, local storage, daemon, CLI, and operator investigation.
 2. Complete outcome-aware collector semantics, stable runtime identity,
    health/gap reporting, and the local Agent Run investigation workflow.

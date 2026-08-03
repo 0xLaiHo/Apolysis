@@ -291,10 +291,6 @@ impl DaemonState {
             .unwrap_or_else(|| PathBuf::from("/__apolysis_no_workspace__"))
     }
 
-    pub fn credential_path_requires_redaction(&self, path: &str) -> bool {
-        apolysis_observer::is_credential_path(path)
-    }
-
     pub async fn discover_cgroup(
         &self,
         session_id: &str,
