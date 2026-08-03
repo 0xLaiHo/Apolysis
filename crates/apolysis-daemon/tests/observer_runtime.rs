@@ -160,6 +160,12 @@ async fn observer_shutdown_persists_connect_gaps_to_the_owning_agent_run() {
     assert!(timeline_a.contains(r#""count":2"#));
     assert!(!timeline_a.contains("agent-run-b"));
     assert!(!timeline_a.contains(r#""kind":"missing_exit""#));
+    let gap_a = timeline_a
+        .find(r#""record_type":"observation_gap""#)
+        .unwrap();
+    let stopped_a = timeline_a.find(r#""state":"stopped""#).unwrap();
+    assert!(timeline_a.contains(r#""stop_reason":"daemon_shutdown""#));
+    assert!(gap_a < stopped_a);
 
     let timeline_b = timeline(&config, "agent-run-b");
     assert!(timeline_b.contains(r#""record_type":"observation_gap""#));
@@ -168,6 +174,12 @@ async fn observer_shutdown_persists_connect_gaps_to_the_owning_agent_run() {
     assert!(timeline_b.contains(r#""count":3"#));
     assert!(!timeline_b.contains("agent-run-a"));
     assert!(!timeline_b.contains(r#""kind":"missing_entry""#));
+    let gap_b = timeline_b
+        .find(r#""record_type":"observation_gap""#)
+        .unwrap();
+    let stopped_b = timeline_b.find(r#""state":"stopped""#).unwrap();
+    assert!(timeline_b.contains(r#""stop_reason":"daemon_shutdown""#));
+    assert!(gap_b < stopped_b);
 
     cleanup(&config);
 }

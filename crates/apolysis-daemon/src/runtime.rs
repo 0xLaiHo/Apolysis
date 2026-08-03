@@ -157,11 +157,24 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
         .values()
         .map(|context| context.agent_run_id.clone())
         .collect();
+    let mut summary = ObserverIngestSummary::default();
     for agent_run_id in initial_agent_runs {
-        persist_collector_started(&state, &agent_run_id, &collector_instance_id).await?;
+        if let Err(error) =
+            persist_collector_started(&state, &agent_run_id, &collector_instance_id).await
+        {
+            return Err(fail_collector_lifecycles(
+                &state,
+                &scope_contexts,
+                &collector_instance_id,
+                CollectorFailureReason::StorageFailure,
+                summary,
+                &lifecycle_counters,
+                error,
+            )
+            .await);
+        }
     }
     let pipeline = state.pipeline();
-    let mut summary = ObserverIngestSummary::default();
     let mut scope_open = true;
     let checkpoint_interval = state.collector_checkpoint_interval();
     let mut checkpoint = tokio::time::interval_at(
@@ -384,18 +397,26 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                                                             });
                                                             if final_scope {
                                                                 match backend.counters() {
-                                                                    Ok(global) => persist_collector_stopped(
-                                                                        &state,
-                                                                        agent_run_id,
-                                                                        &collector_instance_id,
-                                                                        CollectorNormalStopReason::AgentRunClosed,
-                                                                        global,
-                                                                        summary,
-                                                                        lifecycle_counters
-                                                                            .remove(agent_run_id)
-                                                                            .unwrap_or_default(),
-                                                                    )
-                                                                    .await,
+                                                                    Ok(global) => {
+                                                                        let counters = lifecycle_counters
+                                                                            .get(agent_run_id)
+                                                                            .copied()
+                                                                            .unwrap_or_default();
+                                                                        let result = persist_collector_stopped(
+                                                                            &state,
+                                                                            agent_run_id,
+                                                                            &collector_instance_id,
+                                                                            CollectorNormalStopReason::AgentRunClosed,
+                                                                            global,
+                                                                            summary,
+                                                                            counters,
+                                                                        )
+                                                                        .await;
+                                                                        if result.is_ok() {
+                                                                            lifecycle_counters.remove(agent_run_id);
+                                                                        }
+                                                                        result
+                                                                    }
                                                                     Err(error) => Err(error),
                                                                 }
                                                             } else {
@@ -609,6 +630,10 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
         }
     };
     for agent_run_id in shutdown_agent_runs {
+        let run_counters = lifecycle_counters
+            .get(&agent_run_id)
+            .copied()
+            .unwrap_or_default();
         if let Err(error) = persist_collector_stopped(
             &state,
             &agent_run_id,
@@ -616,7 +641,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
             CollectorNormalStopReason::DaemonShutdown,
             counters,
             summary,
-            lifecycle_counters.remove(&agent_run_id).unwrap_or_default(),
+            run_counters,
         )
         .await
         {
@@ -631,6 +656,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
             )
             .await);
         }
+        lifecycle_counters.remove(&agent_run_id);
     }
     state.set_ebpf(ComponentState::Unavailable).await;
     Ok(ObserverRuntimeSummary {
