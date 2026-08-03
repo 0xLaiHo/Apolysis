@@ -6,185 +6,107 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Apolysis 当前是面向 AI 智能体工作负载的实验性 Linux 运行时审计遥测与问责层。它记录
-有 scope 的主机观测和 syscall 尝试子集，并把进程、文件、网络、凭证、运行时、策略和
-声明意图记录做启发式关联，形成有序审计时间线。
+Apolysis 是面向用户可控 Linux 环境的实验性 **eBPF Agent 运行时观测平台**。它把受支持的
+进程、文件、网络和凭证相关运行时观测组织到一次 Agent Run 中，将其归属到进程和工作负载
+身份，并明确展示 collector 丢失、截断和不支持的路径。
 
-项目正在演进为 Agent 运行时证据与策略平面，把本地、CI、厂商托管、container 和
-Kubernetes Agent 环境中的 hook、SDK、OTLP、MCP、A2A、provider outcome 与可选 eBPF
-runtime evidence 关联起来。它不是通用 Agent orchestrator、sandbox、MCP gateway 或 SIEM。
+项目正在围绕这条 Linux runtime workflow 重置范围。eBPF 是必需的主要观测源，不再是更大
+跨 provider 证据平台的可选附加项。Apolysis 不是 Agent orchestrator、sandbox、策略执行
+引擎、MCP gateway、SIEM 或多租户证据 SaaS。
 
-![Apolysis 实时 eBPF 审计：智能体声明的 workload 被匹配，一次未声明的凭证路径访问尝试被标记为 missing_intent——录自真实 observe 运行；凭证路径在 timeline 中已脱敏](docs/assets/codex-live-demo/live-ebpf-demo.gif)
+![Apolysis 实时 eBPF 审计：声明的 Agent workload 被匹配，一次未声明的凭证路径访问尝试被标记为 missing_intent；凭证路径在 timeline 中已脱敏](docs/assets/codex-live-demo/live-ebpf-demo.gif)
 
 演示素材：[实时 asciinema cast](docs/assets/codex-live-demo/live-ebpf-demo.cast)、
-[零特权 quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast)
-和[公开证据摘录](docs/codex-live-demo-public-assets.md)。
+[零特权 quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast) 和
+[公开证据摘录](docs/codex-live-demo-public-assets.md)。
 
-## 五分钟试用（无需 root）
+## 五分钟零特权试用
 
 ```bash
 make build && make quickstart
 ```
 
-在一份随包 fixture 上跑完「声明意图 ↔ 观测事件」问责流程——不需要 root、不需要
-eBPF——并打印出声明意图和 fixture 中的 OS 观测事件在哪里出现分歧。见
-[Quickstart](docs/quickstart.md)。
+Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它不需要 root 或 eBPF，用于展示
+当前 record 和调查体验。参见 [Quickstart](docs/quickstart.md)。
 
-## 在 CI 里审计智能体（GitHub Action）
+## 产品问题
 
-```yaml
-# 仅表示 merge 后的评估形态；当前 pre-release ref 仍是 legacy wrapper。
-- uses: 0xLaiHo/Apolysis@pre-release
-  with:
-    run: 'codex exec --json "run the project tests"'
-    session: agent-task
-```
+对于一次受支持的 Agent Run，Apolysis 应帮助操作者回答：
 
-在开放的加固 Pull Request 通过 review 并 merge 前，不要使用该 ref。生产使用必须固定到
-后续不可变的加固 release commit。
+1. Agent 启动了哪些进程？
+2. 观测到了哪些受支持的文件、网络和凭证操作？
+3. 每条观测属于哪个 container、cgroup、Pod 或进程身份？
+4. 操作是成功、失败，还是结果未知？
+5. Collector 是否健康，观测缺口在哪里？
 
-一个 step 就能在 runner 上记录该命令在 session scope 内的内核观测和 syscall 尝试，
-把摘要打进 job summary，并把 JSONL 时间线作为 artifact 上传。见
-[GitHub Action](docs/github-action.md)。
+产品不把“没有观测到”解释为“没有发生”。它只描述声明 scope 与 capability 边界内的活动。
 
-## 当前状态
+## 活跃产品边界
 
-`v0.3.0` 是最新的公开研究版本，包含预构建 Linux CLI、随包 CO-RE eBPF
-对象、release manifest、checksum 和 AWS KMS 发布制品签名证据。该版本修复了快命令
-可能丢失全部事件的观测器竞态，新增关联摘要，并在事件被丢弃或截断时告警。
+| 属于当前范围 | 不属于活跃范围 |
+| --- | --- |
+| 用户可控的 Linux 主机 | 用户无法控制 kernel 的厂商托管 Agent |
+| 托管 Agent 启动、PID-tree 与 cgroup scope | 通用 Agent orchestration 或 sandbox |
+| 进程、选定文件、网络和凭证观测 | 无差别全 syscall 或明文采集 |
+| 本地、Docker/containerd 与有界 Kubernetes 归属 | 跨 provider Hook、OTLP、MCP、A2A 集成矩阵 |
+| Collector 健康、丢失、截断和 capability gap | 远端 outcome 验证和可移植证据托管 |
+| 本地 run 存储、查询和操作者 viewer | 多租户 Gateway、PostgreSQL/S3 平台、计费或 HA |
+| 面向复查的 finding | BPF-LSM 阻断、审批 workflow 或通用 enforcement |
 
-Apolysis 仍是实验性审计遥测：当前文件与网络 tracepoint 在没有结果信息时只描述
-syscall 尝试；CLI timeline 是普通 JSONL，daemon 模式可以使用本地 hash-chain
-envelope。两者都不是已被独立锚定的取证记录。
+未来可以把 provider 或 harness metadata 作为可选上下文，但它不能替代 eBPF runtime source，
+也不能把推断关系静默升级为 exact relation。
 
-26 周 production MVP 方向先交付版本化 Agent Execution Record、带认证的 Execution
-Evidence Gateway、耐久存储，以及展示 run inventory、独立 coverage、timeline、source
-health 和 finding 的 Minimum Console v0；后续 source integration 最终形成带 Agent Run
-Graph、跨 run search 与有限 workflow action 的 Investigation Console v1，再进入受控伙伴
-pilot。每次 run 将分别显示 semantic、execution 与 outcome coverage。
+## 当前能力
 
-W1–W2 现已建立独立的 `apolysis-contracts` 边界、版本化 record、Gateway、coverage 与
-Query/Console wire type、兼容性 fixture 和规范契约文档。当前 `pre-release`
-实现线在该输入之上实现了带认证上下文的 application core、非耐久内存
-reference adapter、一个覆盖四个标准 Gateway 操作且由 migration 管理的初始 PostgreSQL
-write adapter，以及由 PostgreSQL current credential authority 支撑的 direct-mTLS
-完整 lifecycle transport tracer。这些原型验证了服务器端 grant/policy join、RFC 8785
-摘要黄金向量、record append 与 outbox 的原子语义、加密的精确 operation replay，
-每个 novel ingest batch 只更新一次的 sequence-range allocation，以及有界的 finishing
-lifecycle。PostgreSQL path 现会在每个 lifecycle transaction 内复核 current authority，
-把 authentication 与耐久 work 绑定到 credential epoch，并通过显式 policy/credential
-rotation 使旧 lease、join authorization 与 replay 失效。
+- 通过 CO-RE eBPF 观测 fork、exec、exit、选定文件操作和 network connect attempt。
+- 支持 PID-tree、单 cgroup 与多 cgroup Observation Scope。
+- 支持托管本地 Agent 启动，以及 local、Docker/containerd 和 Kubernetes 原型的 runtime
+  metadata 关联。
+- Exec 参数与 process command 默认 content-off 持久化，并对凭证和网络内容脱敏。
+- 提供有序 JSONL、输出轮转、可选本地 hash-chain envelope，以及 drop、map pressure、
+  decode failure 和 truncation 的类型化诊断。
+- 可选摄取 Codex 声明意图并通过启发式关联生成 mismatch finding。
 
-聚焦的耐久 lifecycle projection foundation 还加入 organization-qualified generation、
-严格按 Gateway ingest order 的 projection、精确耐久 watermark、active outbox publication，
-以及 from-zero rebuild 与原子 cutover。其 read surface 只是带有界 membership cursor 的
-lifecycle-only 内部模型，不是 public Query 或 Console contract。
+当前 file 与 network syscall-entry 观测通常只表示 attempt，除非某条受支持路径提供 outcome。
+它们尚未形成通用 return value 与 errno contract，collector 也不会观测所有 Linux 操作路径。
 
-当前 W3 交付还包含带有界 admission、retention、deletion propagation 与 cleanup 的授权加密
-evidence-object 写入 lifecycle。这些切片尚不能投入生产，也不代表 W3–W6 已完成。独立的真实
-PostgreSQL recovery gate 现已覆盖数据库优雅重启、PostgreSQL SIGKILL/WAL
-recovery，以及 Gateway application process 在 commit 前、commit 后和 replay 期间死亡时的
-rollback 或精确收敛，且整个过程都发生在独立 client acknowledgement 发出之前。这只验证
-repository/application-process seam，不代表 HTTPS Gateway server
-recovery 已通过资格验证。与之并行的真实 direct-mTLS HTTPS recovery gate 现已覆盖
-四个 lifecycle route 上 accepted novel work 的一个有界 late-precommit rollback seam，以及
-commit 后/ack 前的 Gateway-server 死亡与精确 replay 收敛。
-另一个有界双进程 mTLS 门禁现已验证 run 创建、one-use join、exact runtime binding、
-event 去重与跨 run organization sequencing、finalization 及终态不可逆等协调 writer/lifecycle
-竞态。同级的有界 direct-mTLS/PostgreSQL 门禁现已覆盖 one-use join-grant expiry、
-finalization deadline 与 last-lease expiry 上额外的 transaction-boundary
-join/bind/ingest/finish 切片。它在一次性 SQLSTATE `40001` retry 中保持 exact replay
-稳定，并让 novel work 失败关闭或确定性收敛为 `incomplete`；另有一个聚焦的
-`finish_run` 检查补上一次性 SQLSTATE `40P01` retry 对等性。
-direct-mTLS HTTPS
-qualification 及其 repository
-sibling 现已覆盖四条 exact lifecycle route 在精确 operation-row lock wait 后跨过 replay-TTL
-expiry 的竞态。它不代表完整 mixed
-lifecycle/retry matrix 已通过。其余进程死亡与 network pre-commit 时序、
-超出当前 focused two-lease shape 的更广 staggered 组合、load、replication、failover、backup/restore
-与高可用工作仍未验证；production KMS integration、database RLS
-deployment、授权 object-read resolver、evidence-object projection/read view、持续后台 reaper
-运行与通过容量验证的 resource limit
-也仍待完成。Projection 尚不提供 public Query authorization、cursor/SSE、
-Console、coverage、finding、source health 或 evidence-object lifecycle view；其 RLS GUC
-只是 defense-in-depth，不是 authorization。JWT/workload-identity transport profile、
-production admission 以及更广的 transport load/race 资格验证也仍待完成。
-外部退出门禁也会保持开启，直到三个合格设计伙伴实际确认其部署和数据边界。受保护的
-`pre-release` 现包含 Action candidate：固定特权 release bundle，
-拒绝调用方选择
-executable/BPF/output path，以 root 封存 evidence artifact，并移除影响安全判断的 workflow
-output。它尚未成为不可变的公开 release；v0.3.0 Action wrapper 仍保留旧接口。即使后续发布，
-当 workload 可能主动修改 same-UID runner state 时，也应使用真正的 sandbox，而不是这个
-审计 wrapper。Candidate 会设置 Linux `no_new_privs`，并在真实门禁中确认直接 sudo 被拒绝，
-但它不是 process 或 CI control-plane 隔离边界。它把顶层 `run` 文本移出 observer launch
-metadata；然而固定的 v0.3.0 executable 早于 content-off persistence seam，仍可能保留子进程
-argv 或重建后的 process-command content。不要在 `run` 或 argv 中放入 secret；不可变发布
-必须改用 post-content-off bundle，
-在该 bundle 存在前这仍是 release no-go。
-
-生产实现现通过受保护的 `pre-release` 分支推进。在当前源码 build 中，首个隐私门禁已把
-所有本地 observer 持久化路径统一为默认 content-off：exec argv 与重建出的 process
-command 不会写入 JSONL 或 daemon hash-chain record。只有把该源码发布为不可变 bundle，
-上述 Action 例外才会结束。后续加入 capture-off control 前，内核侧捕获仍只是瞬时实现细节。
-
-## 核心能力
-
-- 通过离线数据和实时 eBPF 观测采集进程、文件、网络和凭证路径事件；持久化的 exec
-  metadata 默认 content-off，并显式说明 attempt/outcome 局限。
-- 由 Apolysis 托管启动本地智能体命令，并为 Codex 等命令行智能体追踪进程树。
-- 摄入智能体声明的工具调用意图，并与主机侧观测事件做启发式关联。
-- 关联本地进程、Docker/containerd 和 Kubernetes 工作负载的运行时元数据。
-- 提供有序 JSONL timeline、输出轮转、daemon 本地哈希链校验、策略发现和发布验证关卡。
-
-## 当前架构
+## 目标形态
 
 ```text
-智能体 / 工具运行器
-  └─ 声明意图日志
-
-Apolysis 观测器
-  ├─ 实时 eBPF 事件
-  ├─ 进程树归属
-  ├─ 运行时元数据
-  └─ 策略评估
-
-Apolysis 关联层
-  ├─ 意图记录
-  ├─ 主机侧观测事件
-  └─ 问责发现
-
-记录的时间线
-  ├─ JSONL 时间线
-  ├─ 本地轮转文件
-  └─ 可选哈希链校验
+Agent command / container / Pod
+  -> Observation Scope
+  -> eBPF Collector
+     - process lifecycle
+     - selected file operations
+     - network connections
+     - collector health and gaps
+  -> userspace normalization and redaction
+  -> bounded local store
+  -> CLI and saved-run viewer
 ```
 
-设计上分开三类边界：
+特权 collector 与非特权 operator viewer 保持独立 trust boundary。Remote export 和任何中央
+多租户证据平面都后置到有界 Beta 之后。
 
-- 意图：智能体框架或工具运行器声明要做什么。
-- 隔离：运行时允许工作负载触及什么。
-- 证据：主机和运行时实际观测到了什么。
+## 支持环境
 
-核心模块：
+| 环境 | 方向 |
+| --- | --- |
+| 本地 Linux Agent CLI | 首个稳定 workflow |
+| 用户可控 Linux 上的 Docker/containerd | 本地 collector 正确性完成后的稳定目标 |
+| Kubernetes node 与 Pod 归属 | Container identity 稳定后的有界 Beta |
+| Linux self-hosted CI runner | 通过同一 managed-run boundary 支持 |
+| macOS、Windows 或厂商托管 Agent runtime | 不支持 eBPF runtime observation |
 
-- `apolysis-cli`：命令行入口。
-- `apolysis-observer`：离线和实时观测后端。
-- `apolysis-core`：共享 JSONL 记录和模式类型。
-- `apolysis-contracts`：版本化生产 record、Gateway 与 Query wire contract。
-- `apolysis-gateway`：带认证上下文的 Gateway application core 和内存 conformance
-  adapter。
-- `apolysis-gateway-postgres`：初始 PostgreSQL Gateway write adapter，提供由 migration
-  管理的 ledger/outbox 存储与加密 replay record。
-- `apolysis-evidence-objects`：授权加密 evidence-object 写入 lifecycle，提供有界 admission、
-  retention、deletion 与 provider cleanup。
-- `apolysis-gateway-server`：direct-mTLS 完整 lifecycle Gateway tracer、PostgreSQL current source
-  authority 与有界 authority 管理工具。
-- `apolysis-projection-postgres`：generation-scoped PostgreSQL lifecycle projector，提供耐久
-  checkpoint、rebuild/cutover 与内部有界 read model。
-- `apolysis-runtime`：本地、Docker 和运行时元数据适配。
-- `apolysis-policy`：策略解析和决策逻辑。
-- `apolysis-store`：追加式 JSONL 和哈希链存储。
-- `apolysis-daemon`：面向长期运行场景的节点本地服务。
+## 当前仓库状态
+
+`v0.3.0` 仍是最新公开研究版本，展示 live collector、托管 Agent 启动、JSONL timeline、
+隐私脱敏和发布打包。当前 `pre-release` 历史还包含来自已被取代的 evidence-plane 方向的
+Gateway、PostgreSQL、projection、evidence-object、policy 和 production-qualification
+原型。它们不属于活跃产品边界，将在独立的范围收敛变更中移出活跃 Cargo workspace。
+
+范围重置是一项路线图决策，不是追溯性的生产声明。在受支持 collector、归属、失败、性能和
+隐私路径通过新的有界 Beta 门禁前，Apolysis 仍是实验性项目。
 
 ## 构建与测试
 
@@ -200,27 +122,20 @@ make lint
 make build-ebpf
 ```
 
-在已准备好 eBPF 能力的 Linux 主机上运行实时观测测试：
+在准备好的 Linux host 上运行 opt-in live observer test：
 
 ```bash
 make test-live
 ```
 
-## 示例：审计本地智能体命令
+当 Linux BTF、cgroup v2、tracepoint 或所需 BPF capability 不可用时，特权测试会明确跳过。
 
-输入：
-
-- 已构建的二进制：`target/debug/apolysis`
-- 已构建的 BPF 对象：`target/ebpf/apolysis_observer.bpf.o`
-- 策略文件：`policies/local-dev.yaml`
-- 智能体命令：`codex exec --json "run the project tests"`
-
-命令：
+## 托管 Agent 实时观测示例
 
 ```bash
 sudo -E ./target/debug/apolysis observe \
   --backend live \
-  --session codex-local-audit \
+  --session codex-local-observation \
   --policy policies/local-dev.yaml \
   --output .apolysis/codex-live/timeline.agent-run.jsonl \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
@@ -229,70 +144,27 @@ sudo -E ./target/debug/apolysis observe \
   --agent-run -- codex exec --json "run the project tests"
 ```
 
-参数说明：
+不要在托管命令或参数中放置 secret。持久化边界默认关闭原始命令内容，但特权 kernel 内采集
+与第三方 workload 行为仍需要有文档化的 threat model。
 
-- `--backend live`：使用实时 eBPF 观测后端。
-- `--session`：写入每条记录的稳定会话标识。
-- `--policy`：用于生成复查和通知发现的策略文件。
-- `--output`：JSONL 时间线输出路径。
-- `--bpf-object`：实时观测后端加载的 CO-RE BPF 对象。
-- `--workspace-root`：用于路径处理的工作区边界。
-- `--agent-kind`：智能体类型提示，例如 `codex`。
-- `--agent-run -- <command>`：由 Apolysis 启动智能体并掌握根进程树，避免让
-  使用者手动查找进程号。
+## 高层路线图
 
-输出示例：
+1. 冻结 eBPF 观测产品边界，从活跃文档中移除已被取代的产品承诺。
+2. 把活跃 workspace 收敛到 collector、runtime scope、storage、daemon、CLI 和有界
+   runtime-attribution 模块。
+3. 完成 outcome-aware collector 语义、稳定 runtime identity、health/gap 报告和本地
+   Agent Run 调查 workflow。
+4. 先验证 container 归属，再交付有界 Kubernetes Beta；在此之前不扩张中央平台。
 
-```jsonl
-{"record_type":"event","event_type":"exec","resource":"codex"}
-{"record_type":"event","event_type":"file_open","resource":"path_token:..."}
-{"record_type":"policy_violation","rule_id":"credentials.deny_read","decision":"notify"}
-```
+## 文档
 
-## 示例：关联声明意图
-
-输入：
-
-- Codex 响应日志：`.apolysis/codex-live/codex-response-items.jsonl`
-- 主机观测时间线：`.apolysis/codex-live/timeline.agent-run.jsonl`
-- 会话标识：`codex-local-audit`
-
-命令：
-
-```bash
-./target/debug/apolysis intent ingest \
-  --adapter codex-jsonl \
-  --input .apolysis/codex-live/codex-response-items.jsonl \
-  --session codex-local-audit \
-  --output .apolysis/codex-live/intent.codex.jsonl \
-  --workspace-root "$PWD"
-
-./target/debug/apolysis intent correlate \
-  --intent-input .apolysis/codex-live/intent.codex.jsonl \
-  --timeline-input .apolysis/codex-live/timeline.agent-run.jsonl \
-  --output .apolysis/codex-live/intent-correlation.jsonl
-```
-
-输出示例：
-
-```jsonl
-{"record_type":"intent","intent_source":"codex","declared_action":"shell.command"}
-{"record_type":"intent_correlation","match_basis":"process_executable"}
-{"record_type":"accountability_finding","kind":"missing_intent","decision":"review"}
-```
-
-生成的时间线、Codex 日志和报告应放在 `.apolysis/` 或 `target/` 下。不要提交
-捕获到的工作负载数据或凭证。
-
-## 关键文档
-
+- [范围决策](docs/adr/0004-focus-on-ebpf-agent-observability.md)
+- [设计文档](docs/design.zh-CN.md)
+- [路线图](docs/roadmap.zh-CN.md)
 - [Quickstart](docs/quickstart.md)
-- [GitHub Action](docs/github-action.md)
 - [JSONL 模式](docs/jsonl-schema-v1.md)
 - [威胁模型](docs/threat-model.md)
-- [哈希链校验](docs/hash-chain-verification.md)
-- [时间线外运](docs/timeline-shipping.md)
-- [Codex 实时演示运行手册](docs/codex-live-demo-runbook.md)
-- [Codex 实时演示 launch blog 草稿](docs/codex-live-demo-launch-blog.md)
+- [可见性验证](docs/visibility-validation.md)
+- [实时演示运行手册](docs/codex-live-demo-runbook.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)

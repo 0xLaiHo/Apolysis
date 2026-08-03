@@ -1,194 +1,197 @@
 # Apolysis Threat Model
 
-This page defines the narrow security model for the current Apolysis release
-line. It is intentionally short so users can decide whether Apolysis fits their
-environment before reading roadmap history.
+This document defines the security boundary for the active eBPF Agent runtime
+observability product. It covers operator-controlled Linux hosts and the local
+collection, storage, and investigation workflow.
 
-## Product Boundary
+## Product boundary
 
-Apolysis is an operator-owned runtime evidence recorder for AI agent sessions.
-It observes process, file, network, credential-path, runtime metadata, policy,
-and release evidence from outside the agent harness.
+Apolysis observes a bounded set of process, file, network, and
+credential-related operations inside an explicit Agent Run scope. It attributes
+those observations to runtime identities and reports collector health, loss,
+truncation, unsupported paths, and other Observation Gaps.
 
-The W1–W2 contracts additionally specify a future authenticated write Gateway,
-versioned projection plane, organization-scoped Query API, and Web Console.
-Those components are target boundaries, not capabilities of the current
-release. Their requirements below must be implemented and validated before the
-central-plane claim is made.
+The eBPF collector is the required primary source. Apolysis does not claim that
+an unobserved action did not occur, that a successful syscall proves a remote
+effect, or that host observations are independent of a compromised kernel.
 
-## Not A Sandbox
+## Not a security boundary
 
-Apolysis is not a sandbox, approval UI, model gateway, identity provider, SIEM,
-or central query product. Runtime isolation remains the job of Docker, gVisor,
-Kata, Firecracker, Kubernetes, cloud sandboxes, host policy, and platform
-configuration.
+Apolysis is not a sandbox, workload isolation mechanism, approval system,
+identity provider, kernel enforcement engine, MCP gateway, SIEM, or independent
+attestation service. Docker, gVisor, Kata, Firecracker, Kubernetes, host policy,
+and cloud runtime configuration remain responsible for isolation.
 
-## Trust Boundaries
+Findings are review-oriented observations. They do not claim that an operation
+was blocked, rolled back, or contained.
 
-- Agent harness: untrusted for final audit truth.
-- Agent workload: untrusted code and subprocesses.
-- Apolysis userspace: trusted to normalize, redact, correlate, and persist
+## Trust boundaries
+
+- **Agent workload:** untrusted code, tools, and subprocesses whose activity may
+  attempt to evade or overload observation.
+- **Operator:** trusted to select an appropriate scope, install the collector,
+  protect local output, and interpret documented capability limits.
+- **Linux kernel and host root:** trusted only as the source of host runtime
+  observations. A compromised kernel or privileged host can forge, suppress,
+  or modify them.
+- **Privileged eBPF collector:** trusted to load the reviewed object, apply the
+  declared scope, emit bounded records, and expose health and loss counters.
+- **Userspace observer and daemon:** trusted to decode the ABI, join runtime
+  identity, redact sensitive content, preserve gaps, and write bounded local
   records.
-- Kernel observer path: trusted to provide host-side event evidence within the
-  loaded probe scope.
-- Runtime metadata sources: trusted only for identity correlation, not for
-  proving guest semantics when strong isolation collapses host visibility.
-- Operator storage: trusted to protect retained timelines, release manifests,
-  checksums, and evidence packages.
+- **Runtime metadata sources:** trusted only for documented container, cgroup,
+  Pod, and process identity fields. They do not prove guest semantics or remote
+  effects.
+- **Local store:** trusted to protect retained Agent Observation Records with
+  restrictive permissions and bounded retention.
+- **Saved-run viewer:** non-privileged and trusted only to render stored facts.
+  It cannot invent outcome, attribution, health, or completeness verdicts.
 
-### W1–W2 target trust boundaries
+## Primary assets
 
-- Source principal: transport-authenticated and bound to one organization,
-  source registration, capability, and allowed operation; source payload fields
-  are not authority.
-- Execution Evidence Gateway: trusted to authorize sources, enforce privacy and
-  idempotency, assign durable ingest order, and preserve gaps; it is not a read
-  plane.
-- Projection workers: trusted to derive versioned views without upgrading source
-  trust, filling gaps, or erasing ambiguity.
-- Query API: trusted to enforce organization and role authorization for every
-  view, cursor, object reference, stream, and export.
-- Web Console: untrusted for product verdicts and unable to access privileged
-  collectors, Gateway credentials, storage credentials, or internal tables.
-- Provider-controlled host: opaque unless the provider exposes a documented,
-  capability-scoped source; provider claims are not customer-observed kernel
-  evidence.
+- Agent Run and Observation Scope identity.
+- Stable process, cgroup, container, Pod, and node attribution.
+- Kernel/userspace ABI and Collector Capability declarations.
+- Runtime Observations and supported Operation Outcomes.
+- Source sequence, collector lifecycle, health, loss, truncation, and gap
+  records.
+- Content-off persistence and redaction guarantees for argv, paths, socket
+  values, labels, annotations, and payloads.
+- Local timeline integrity, file permissions, retention, and cleanup behavior.
+- Operator credentials and kubeconfigs, which must never be captured, printed,
+  copied into the repository, or committed.
 
-## Primary Assets
+## In-scope threats
 
-- Timeline JSONL records and hash-chain continuity.
-- Session identity, process-tree scope, and event-correlation IDs.
-- Redaction guarantees for argv, paths, socket values, labels, annotations, and
-  payloads.
-- Release artifacts, manifests, checksums, and retained validation evidence.
-- Operator credentials and kubeconfigs, which must never be captured or
-  committed.
+### Scope and attribution confusion
 
-W1–W2 target assets additionally include source registrations, run/join leases,
-organization bindings, accepted source envelopes, deduplication and gap state,
-versioned projections, Query cursors, object grants, live-stream positions, and
-deletion tombstones. These are design assets until their components exist.
+- A malicious or buggy Agent creates descendants that escape the tracked
+  process tree or cgroup.
+- PID or thread-ID reuse attaches another workload's events to the run.
+- Container churn, Pod rescheduling, cgroup reuse, or runtime restart preserves
+  a stale identity relation.
+- Name, command, path, PID, or timing correlation is presented as an exact
+  relation.
+- Late attach omits earlier workload activity without recording a gap.
 
-## In Scope Threats
+### Collector failure and evasion
 
-- A malicious or buggy agent creates subprocesses that are not attributed to the
-  session.
-- PID reuse, thread fork behavior, or cgroup scope drift causes evidence from
-  another workload to enter the session.
-- A runtime adapter claims stronger visibility than host-side evidence can
-  prove.
-- Redaction misses secret-looking command, path, socket, or metadata values.
-- Policy output implies pre-operation blocking when the active backend only
-  supports audit or post-event action.
-- Release artifacts or evidence packages are incomplete, unverifiable, or
-  inconsistent with the build inputs.
+- Ring-buffer pressure, bounded-map exhaustion, truncation, or decode failure
+  silently removes observations.
+- ABI mismatch or unavailable hooks cause records to be misdecoded rather than
+  rejected.
+- The Agent produces enough activity to exhaust CPU, memory, queue, or storage
+  budgets.
+- Collector startup, attach, restart, death, or incomplete terminal flush is
+  omitted from the run record.
+- Unsupported io_uring, guest, filesystem, or network paths are mistaken for
+  absence of activity.
 
-### W1–W2 target threats
+### Outcome and capability overclaim
 
-- **Hook spoofing:** a compromised agent or workspace emits fabricated lifecycle,
-  tool, approval, or outcome records using a hook's name.
-- **Remote-ingest spoofing:** a caller supplies another organization, source,
-  provider, or run identifier in an otherwise valid request.
-- **Cross-run confusion:** reused process, trace, repository, Pod, container,
-  cgroup, or provider identifiers attach evidence to the wrong Agent Run.
-- **Source replay and equivocation:** a source repeats an event, resets sequence,
-  fills one event identity with different content, or hides a sequence gap.
-- **Compromised source:** a validly authenticated agent or source lies, omits
-  terminal records, disables redaction, or attempts to broaden its capability.
-- **Clock manipulation:** source timestamps reorder the display or imply a causal
-  relationship that durable source identity does not support.
-- **False clean projection:** sampling, truncation, loss, expired leases, stale
-  projections, or opaque provider hosts are rendered as complete or successful.
-- **Cross-organization read:** a run identifier, cursor, stream reconnect token,
-  object reference, cache key, or export leaks another organization's data.
-- **Deletion residue:** revoked or deleted content remains reachable through a
-  projection, search index, cache, live stream, object grant, or export.
-- **Privilege inversion:** a browser reaches the write Gateway, privileged
-  daemon, Runtime Witness, host socket, host path, database, or object
-  credential.
-- **Untrusted rendering:** prompt, tool, path, repository, provider, or Finding
-  text causes script execution, unsafe links, or misleading visual semantics in
-  the Console.
+- A syscall-entry attempt is rendered as succeeded without a matched supported
+  outcome.
+- A successful file or network operation is described as a verified remote or
+  application-level effect.
+- gVisor, Kata, Firecracker, or another boundary is described as providing
+  guest process visibility that the host collector cannot supply.
+- A quiet or partial timeline is rendered as clean or complete.
+- A finding is described as prevention or enforcement.
 
-## Out Of Scope
+### Privacy and data exposure
 
-- Preventing all malicious behavior from an agent workload.
-- Proving guest-level process semantics for runtimes that hide them without a
-  guest collector.
+- Raw argv, prompt, response, tool payload, credential, private path, socket,
+  label, annotation, or captured workload data crosses the default persistence
+  seam.
+- Redaction is applied after an unredacted record has already reached local
+  storage, logs, metrics, or an error message.
+- Host-wide collection captures unrelated workloads because scope validation
+  fails open.
+- Viewer content causes script execution, unsafe links, terminal escape
+  injection, or misleading status presentation.
+- Local files, runtime sockets, or cleanup paths expose or modify data outside
+  the selected Agent Run.
+
+### Privilege and supply-chain misuse
+
+- Workspace-controlled executable, BPF object, output path, environment, or
+  loader configuration crosses into a privileged collector launch.
+- The non-privileged viewer gains access to BPF maps, host PID namespace,
+  container runtime sockets, node credentials, or privileged output paths.
+- A substituted BPF object or binary reports capabilities that do not match the
+  loaded implementation.
+- Install, upgrade, rollback, uninstall, retention, or cleanup modifies
+  unrelated host state.
+
+## Default controls
+
+- Require one explicit Observation Scope; do not provide a supported
+  host-wide default.
+- Prefer managed Agent launch so the collector is attached before workload
+  execution begins.
+- Protect process attachment against PID reuse with stable start and runtime
+  identity where available.
+- Filter at event origin where possible and keep kernel records fixed and
+  bounded.
+- Version the kernel/userspace ABI and reject incompatible records.
+- Declare supported operation and outcome capabilities explicitly.
+- Emit collector start, health/loss checkpoints, terminal state, and stop
+  reason; treat missing lifecycle records as gaps.
+- Preserve reserve failure, map pressure, truncation, decode failure, attach
+  failure, restart, and storage failure as explicit degraded or failed states.
+- Keep prompt, response, raw tool payload, and full argv content-off by default.
+- Redact credential, private path, and socket values before persistence.
+- Use restrictive local permissions, bounded retention, safe rotation, and
+  target-specific cleanup.
+- Keep the saved-run viewer non-privileged and render all captured text as
+  untrusted data.
+- Keep privileged live and Kubernetes gates opt-in and document their kernel,
+  capability, runtime, and cleanup assumptions.
+
+## Environment-specific limits
+
+- **Local Linux:** managed launch provides the strongest scope. Manual attach
+  may miss prior activity.
+- **Self-hosted CI:** Apolysis observes the managed workload but does not isolate
+  the runner control plane or same-UID state.
+- **Docker/containerd:** host observations require exact cgroup and container
+  identity; runtime socket access is privileged and separate from the Agent.
+- **Kubernetes:** node observation requires least-privilege deployment and
+  exact Pod/container/cgroup joins. Kubeconfig and workload secrets are never
+  evidence artifacts.
+- **gVisor:** host observation may expose runtime boundary activity rather than
+  each guest syscall.
+- **Kata/Firecracker:** host observation covers VMM, shim, and host boundaries;
+  guest process semantics require a guest collector.
+- **Vendor-managed runtime:** no eBPF claim is made without an
+  operator-controlled Linux kernel.
+
+## Out of scope
+
+- Preventing all malicious Agent behavior.
+- Proving absence of activity outside the declared capability and scope.
+- Proving remote SaaS, cloud, Git, database, or provider mutations from host
+  syscalls.
 - Replacing Kubernetes policy, network policy, IAM, sandbox configuration, or
-  human approval workflows.
-- Centralized long-term log search and alerting; users should ship JSONL to
-  their existing log stack.
+  human approval.
+- Protecting observations from a compromised host root or kernel.
+- Cross-provider semantic ingestion, central multi-tenant custody, remote
+  export, and policy enforcement from the superseded evidence-plane direction.
 
-The current release remains outside centralized long-term search. Bounded,
-organization-scoped run queries and the Minimum Console described in the W1–W2
-target contract are not excluded from the production MVP.
+## Release blockers
 
-## Default Controls
+A supported profile cannot be described as Beta-ready when:
 
-- Prefer Apolysis-managed agent launch over manual PID selection.
-- Fail closed when registration or discovery cannot disambiguate an agent.
-- Keep schema changes append-only within a version.
-- Persist redaction and truncation markers explicitly.
-- Keep privileged live gates opt-in and document their host assumptions.
-- Keep the pre-release GitHub Action candidate's executable, BPF object, and
-  privileged output outside workspace control. Pin the release bundle with an
-  Action-embedded digest, reject already-root and primary-GID-0 runners, disable archive ownership
-  restoration, stage privileged inputs, the managed command, and output in
-  root-owned directories, suppress inherited shell/function/loader startup,
-  invoke the observer without a root shell, launch managed work with
-  `no_new_privs` and cleared supplementary groups, export only an expected
-  root-sealed regular evidence file, and never rely on same-UID workflow command
-  files for privileged paths or command success. Pin the artifact uploader to a
-  reviewed full commit and fail if the verified file is absent.
-- Treat the candidate's pinned v0.3.0 executable as an explicit privacy
-  exception. Staging removes the top-level `run` text from launch metadata, but
-  v0.3.0 may persist child exec arguments and reconstructed process-command
-  content. Do not publish an immutable hardened
-  Action ref until a post-content-off bundle is pinned and the live privacy gate
-  passes.
-- Treat ephemeral trusted workflow definitions as a separate prerequisite.
-  Rejecting privileged path overrides does not make secret-bearing untrusted
-  Pull Requests, `pull_request_target`, or arbitrary self-hosted runners safe.
-  The wrapper blocks direct setuid privilege regain, but same-UID workspace,
-  step-script, command-file, cached-action, and uploader state remains outside
-  its integrity claim. Detached children remain a runner-isolation concern even
-  though a non-sudo child cannot directly write the sealed local artifact.
+- loss, failure, truncation, restart, unsupported paths, or missing terminal
+  state can produce an unmarked clean result;
+- operation outcome or runtime attribution is stronger than the source can
+  prove;
+- sensitive content persists by default;
+- the viewer requires privileged host access;
+- the kernel, capability, runtime, performance, retention, and cleanup envelope
+  is undocumented or untested;
+- an unresolved high-severity issue affects collector privilege, scope,
+  attribution, privacy, local storage, or viewer isolation.
 
-## Required W1–W2 Target Controls
-
-- Derive organization and source authorization from the authenticated transport
-  principal; reject request-supplied authority and cross-organization probes
-  without disclosing resource existence.
-- Separate create from join when opening a run. Each joining semantic, runtime,
-  provider, or outcome source receives its own scoped lease, stream, sequence,
-  capability, and trust profile.
-- Deduplicate by scoped event identity and canonical digest. Preserve source
-  sequence, durable ingest sequence, clock uncertainty, replay conflicts, and
-  gap history independently.
-- Keep exact, inferred, ambiguous, and unattributed relations distinct through
-  storage, projection, display, and export.
-- Derive coverage and outcomes on the server. Semantic partial, opaque, and
-  unavailable; execution partial, opaque, and incomplete; outcome unconfirmed
-  and unknown; comparison mismatch and unresolved; and all lost or stale states
-  never render as success or “no findings.”
-- Disable prompt, response, raw payload, raw argv, and raw object collection by
-  default. Reject or redact content outside the registered privacy policy before
-  durable acceptance.
-- Route fixture, standalone live, and daemon observer output through the same
-  content-off persistence seam. Persist only executable references and explicit
-  argv/truncation markers; never persist reconstructed process commands or
-  managed-agent command fingerprints by default.
-- Authorize object access independently from possession of a reference. Audit
-  raw reads, exports, retention changes, and Finding workflow actions.
-- Propagate revocation, redaction, and deletion through write records,
-  projections, indexes, caches, streams, grants, objects, and exports; deny
-  reads while propagation is uncertain.
-- Serve the Console only through a non-privileged Query API with bounded
-  pagination and resumable, reauthorized streams. The browser never connects to
-  the Gateway or privileged collector.
-- Treat all rendered source text as untrusted; enforce safe text rendering,
-  restrictive content security policy, same-origin or allowlisted cross-origin
-  policy, and non-color-only status semantics.
-
-The normative details are in [`docs/contracts/`](contracts/README.md).
+The detailed product boundary and delivery gates are maintained in
+[Design](design.md) and [Roadmap](roadmap.md).

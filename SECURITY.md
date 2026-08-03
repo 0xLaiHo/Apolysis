@@ -1,8 +1,9 @@
 # Security Policy
 
-Apolysis records evidence. It does not make an unsafe runtime safe by itself,
-and it should not be treated as a replacement for Docker, gVisor, Kata,
-Firecracker, Kubernetes, an MCP gateway, or an approval system.
+Apolysis observes a bounded set of Agent runtime operations. It does not make
+an unsafe runtime safe by itself, and it should not be treated as a replacement
+for Docker, gVisor, Kata, Firecracker, Kubernetes, an MCP gateway, or an
+approval system.
 
 ## Supported Versions
 
@@ -37,14 +38,15 @@ identify a private environment.
 
 In-scope examples:
 
-- Incorrect runtime evidence attribution.
+- Incorrect runtime observation attribution.
 - PID reuse, process-tree, or cgroup scoping failures that mix unrelated
   workload evidence into a session.
 - Redaction failures that persist secret-looking argv, path, socket, payload,
   label, annotation, or credential material.
 - Release artifact, manifest, checksum, signing, or retention bugs that could
   misrepresent what was built or retained.
-- Policy feedback or enforcement metadata that overstates blocking guarantees.
+- Collector, finding, or documentation output that overstates outcome,
+  completeness, or blocking guarantees.
 
 Out-of-scope examples:
 

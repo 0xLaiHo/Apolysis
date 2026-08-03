@@ -1,6 +1,6 @@
 # Require direct mTLS and current PostgreSQL authority for Gateway writes
 
-Status: accepted
+Status: superseded by ADR-0004
 
 The Gateway write listener requires a client certificate issued by its
 configured CA. It derives a domain-separated SHA-256 fingerprint from the

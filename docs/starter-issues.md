@@ -2,7 +2,7 @@
 
 These are small, labeled starter issues that fit the current Apolysis direction.
 They are safe entry points because they improve adoption without expanding the
-product beyond runtime accountability.
+product beyond eBPF Agent runtime observability.
 
 ## Runtime evidence fixtures
 

@@ -1,6 +1,6 @@
 # Keep production contracts independent from legacy JSONL
 
-Status: accepted
+Status: superseded by ADR-0004
 
 The `apolysis-contracts` crate is the single dependency-light seam for
 versioned Gateway, record, coverage, and Query types and their generated
