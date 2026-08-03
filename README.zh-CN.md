@@ -115,6 +115,9 @@ sandbox execution 与广泛的 production-qualification 原型已移出活跃 bu
 
 范围重置是一项路线图决策，不是追溯性的生产声明。在受支持 collector、归属、失败、性能和
 隐私路径通过新的有界 Beta 门禁前，Apolysis 仍是实验性项目。
+首个资格 contract 现仅把 Linux 6.12/x86_64 原生 host 命名为 Candidate；当前尚无
+Supported 环境，数值性能预算仍由证据门禁。详见
+[Beta 资格包络](docs/qualification-envelope.zh-CN.md)。
 
 ## 构建与测试
 

@@ -42,7 +42,7 @@
 | C2 其余 operation outcome | 为受支持 file operation set 增加有界 entry/exit result 与 missing-pair gap | 无 |
 | C3 稳定 Runtime Identity | 抵御 PID reuse 与 exec generation，且不把 heuristic match 提升为 Exact Relation | 无 |
 | C4 Collector lifecycle | 持久化 start、health/loss checkpoint、terminal state 与显式 stop reason；incomplete lifecycle 必须 fail loud | 无 |
-| Q1 验证边界 | 冻结受支持 kernel/runtime profile，以及 workload-specific CPU、memory、latency 与 event-loss budget | 无 |
+| Q1 验证边界 | 冻结候选 kernel/runtime contract 与测量协议；只有保留的 live 证据冻结 CPU、memory、latency 与 event-loss budget 后才授予支持 | 无 |
 | L1 受保护的 existing-process attach | 通过 Runtime Identity 验证 attach，并发出显式 late-attach Observation Gap | C3、C4 |
 | L2 Agent Observation Record projection | 为 observation、capability、identity、health、finding 与 gap record 生成单次 run 的可查询 aggregate 和 summary | C1、C2、C3、C4 |
 | L3 非特权 saved-run viewer | 无需原始 JSONL 或 privileged access 即可完成代表性调查 | L2 |
@@ -96,7 +96,8 @@
 
 以下细节必须由相应聚焦工作项解决，之后才能开始其依赖项：
 
-- Q1 中准确的 supported kernel/runtime matrix 与 performance budget；
+- Q1 Candidate contract 已收敛为 Linux 6.12/x86_64 原生 host，但准确数值 performance
+  budget 与任何 Supported 晋级仍受保留的 privileged live 证据阻塞；
 - L2 冻结可查询 Agent Observation Record 后，saved-run viewer 的 interaction 与展示形态；
 - container identity 与 runtime recovery 验证后，Kubernetes least-privilege deployment
   形态。

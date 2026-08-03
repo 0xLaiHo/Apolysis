@@ -132,6 +132,10 @@ production-qualification prototypes have left active builds and default gates.
 The scope reset is a roadmap decision, not a retroactive production claim.
 Apolysis remains experimental until the supported collector, attribution,
 failure, performance, and privacy paths pass their new bounded beta gates.
+The first qualification contract now names Linux 6.12/x86_64 native host as a
+Candidate only; no environment is yet Supported and numeric performance
+budgets remain evidence-gated. See the
+[Beta qualification envelope](docs/qualification-envelope.md).
 
 ## Build and test
 

@@ -1,5 +1,5 @@
 .PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
-	test-local-agent-command-attribution test-qualification
+	test-local-agent-command-attribution test-qualification qualify-live
 
 build: build-ebpf
 	cargo build --workspace
@@ -45,3 +45,7 @@ test-local-agent-command-attribution:
 
 test-qualification:
 	./scripts/test-qualification-envelope.sh
+
+# Privileged, explicit and non-CI. Produces evidence below target/qualification/.
+qualify-live:
+	./scripts/capture-qualification-preflight.sh

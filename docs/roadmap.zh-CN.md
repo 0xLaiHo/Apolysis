@@ -3,7 +3,7 @@
 > [English](roadmap.md) | 简体中文
 > 配套文档：[design.zh-CN.md](design.zh-CN.md)
 > 执行计划：[beta-qualification-plan.zh-CN.md](beta-qualification-plan.zh-CN.md)
-> 最后审查：2026-08-03
+> 最后审查：2026-08-04
 
 本路线图把 Apolysis 引向一个有界的 eBPF Agent 运行时观测 Beta。它记录交付顺序、后置项、
 no-go 条件和允许项目扩张的条件，不是逐 commit 的进度日志。
@@ -148,8 +148,8 @@ API 时，run 仍必须有用。
 - 每个 viewer fact 都能解析到 observation、capability、health 或 gap record；
 - 空或不完整 timeline 永远不渲染成 successful 或 complete；
 - privilege separation、本地文件权限、retention 与 redaction 通过有界测试；
-- collector 满足在 Beta qualification 前冻结的 workload-specific CPU、memory、latency 和
-  event-loss envelope。
+- collector 满足由保留 live 证据冻结的 workload-specific CPU、memory、latency 与
+  event-loss budget；未设置的 Candidate envelope 是显式 no-go，绝不视作隐式通过。
 
 ### 4. 加入 Container Attribution 与 Kubernetes Beta
 

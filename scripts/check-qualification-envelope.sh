@@ -11,8 +11,8 @@ if [[ "${1:-}" != "--envelope" || -z "${2:-}" ||
     exit 2
 fi
 
-command -v python3 >/dev/null 2>&1 || {
-    printf 'qualification envelope check requires python3\n' >&2
+command -v cargo >/dev/null 2>&1 || {
+    printf 'qualification envelope check requires cargo\n' >&2
     exit 2
 }
 [[ -r "$2" ]] || {
@@ -24,4 +24,5 @@ command -v python3 >/dev/null 2>&1 || {
     exit 2
 }
 
-exec python3 "$repo_root/scripts/check_qualification_envelope.py" "$2" "$4"
+exec cargo run --quiet --manifest-path "$repo_root/Cargo.toml" \
+    -p apolysis-cli --bin apolysis-qualification -- check "$2" "$4"

@@ -2,7 +2,7 @@
 
 > English | [Simplified Chinese](design.zh-CN.md)
 > Companion document: [roadmap.md](roadmap.md)
-> Last reviewed: 2026-08-03
+> Last reviewed: 2026-08-04
 
 This document is the authority for what Apolysis is, how its target system
 works, what exists today, and where its claims stop. Delivery order, deferrals,
@@ -381,6 +381,10 @@ them as historical implementation input; they do not define this architecture.
 - A compromised kernel or privileged host can suppress or forge observations.
 - Kernel version, BTF, hook availability, verifier behavior, and privileges
   constrain support.
+- The current qualification contract grants no Supported profile. Linux 6.12
+  x86_64 native host is Candidate only; other kernels, architectures, and
+  container/Kubernetes runtimes remain Experimental until exact retained live
+  evidence passes. Numeric performance budgets are intentionally unset.
 
 ## 14. Non-goals
 

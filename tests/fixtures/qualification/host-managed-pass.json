@@ -3,19 +3,138 @@
   "profile": "linux-x86_64-host-managed",
   "environment": {
     "architecture": "x86_64",
-    "kernel_release": "6.6.52",
+    "kernel_release": "6.12.8-fixture",
     "btf_vmlinux": true,
+    "btf_vmlinux_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "cgroup_v2": true,
     "tracepoints_complete": true,
+    "tracepoint_manifest_version": 1,
+    "tracepoint_format_sha256": {
+      "sched/sched_process_exec": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sched/sched_process_fork": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sched/sched_process_exit": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_enter_execve": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_enter_execveat": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_enter_openat": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_exit_openat": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_enter_openat2": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_exit_openat2": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_enter_creat": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_exit_creat": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_enter_truncate": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_exit_truncate": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_enter_unlinkat": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_exit_unlinkat": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_enter_renameat2": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_exit_renameat2": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_enter_connect": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "syscalls/sys_exit_connect": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "verifier_load_attach": true,
     "capability_mode": "bpf_perfmon",
     "runtime": "host"
   },
-  "workload": "representative",
-  "measurements": {
-    "samples": 10,
-    "collector_cpu_percent_p95": 4.0,
-    "collector_peak_rss_mib": 80.0,
-    "workload_latency_overhead_percent_p95": 8.0,
-    "event_loss_count": 0
-  }
+  "provenance": {
+    "source_commit": "0000000000000000000000000000000000000000",
+    "bpf_object_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "cargo_lock_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "synthetic_workload_only": true
+  },
+  "measurement_protocol": {
+    "percentile_method": "nearest_rank",
+    "interval_method": "bootstrap_percentile_95",
+    "bootstrap_resamples": 10000,
+    "collector_comparison": "alternating_off_on_same_boot",
+    "clock": "clock_monotonic",
+    "reject_suspend": true
+  },
+  "results": [
+    {
+      "workload": "idle",
+      "workload_manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "raw_samples_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "measurements": {
+        "samples": 10,
+        "event_rate_per_second": 0.0,
+        "collector_cpu_percent_p95": 1.0,
+        "workload_cpu_overhead_percent_p95": 0.0,
+        "collector_peak_rss_mib": 80.0,
+        "collector_cgroup_memory_peak_mib": 90.0,
+        "bpf_memory_mib": 8.0,
+        "workload_latency_overhead_percent_p95": 0.0,
+        "observation_lag_ms_p50": 0.0,
+        "observation_lag_ms_p95": 0.0,
+        "observation_lag_ms_p99": 0.0,
+        "observation_lag_ms_max": 0.0,
+        "append_lag_ms_p50": 0.0,
+        "append_lag_ms_p95": 0.0,
+        "append_lag_ms_p99": 0.0,
+        "append_lag_ms_max": 0.0
+      },
+      "integrity": {
+        "expected_event_counts": {},
+        "observed_event_counts": {},
+        "loss_counters": {"ring_buffer_reserve": 0, "map_pressure": 0, "pairing": 0, "decode": 0, "queue": 0, "writer": 0, "lifecycle_gap": 0},
+        "unexplained_loss_count": 0
+      }
+    },
+    {
+      "workload": "representative",
+      "workload_manifest_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "raw_samples_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "measurements": {
+        "samples": 1000,
+        "event_rate_per_second": 100.0,
+        "collector_cpu_percent_p95": 4.0,
+        "workload_cpu_overhead_percent_p95": 8.0,
+        "collector_peak_rss_mib": 80.0,
+        "collector_cgroup_memory_peak_mib": 90.0,
+        "bpf_memory_mib": 8.0,
+        "workload_latency_overhead_percent_p95": 8.0,
+        "observation_lag_ms_p50": 5.0,
+        "observation_lag_ms_p95": 10.0,
+        "observation_lag_ms_p99": 20.0,
+        "observation_lag_ms_max": 30.0,
+        "append_lag_ms_p50": 8.0,
+        "append_lag_ms_p95": 15.0,
+        "append_lag_ms_p99": 30.0,
+        "append_lag_ms_max": 40.0
+      },
+      "integrity": {
+        "expected_event_counts": {"process": 400, "file": 400, "network": 200},
+        "observed_event_counts": {"process": 400, "file": 400, "network": 200},
+        "loss_counters": {"ring_buffer_reserve": 0, "map_pressure": 0, "pairing": 0, "decode": 0, "queue": 0, "writer": 0, "lifecycle_gap": 0},
+        "unexplained_loss_count": 0
+      }
+    },
+    {
+      "workload": "burst",
+      "workload_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "raw_samples_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "measurements": {
+        "samples": 10000,
+        "event_rate_per_second": 1000.0,
+        "collector_cpu_percent_p95": 4.5,
+        "workload_cpu_overhead_percent_p95": 9.0,
+        "collector_peak_rss_mib": 82.0,
+        "collector_cgroup_memory_peak_mib": 92.0,
+        "bpf_memory_mib": 8.0,
+        "workload_latency_overhead_percent_p95": 9.0,
+        "observation_lag_ms_p50": 6.0,
+        "observation_lag_ms_p95": 12.0,
+        "observation_lag_ms_p99": 24.0,
+        "observation_lag_ms_max": 32.0,
+        "append_lag_ms_p50": 9.0,
+        "append_lag_ms_p95": 18.0,
+        "append_lag_ms_p99": 36.0,
+        "append_lag_ms_max": 45.0
+      },
+      "integrity": {
+        "expected_event_counts": {"process": 4000, "file": 4000, "network": 2000},
+        "observed_event_counts": {"process": 4000, "file": 4000, "network": 2000},
+        "loss_counters": {"ring_buffer_reserve": 0, "map_pressure": 0, "pairing": 0, "decode": 0, "queue": 0, "writer": 0, "lifecycle_gap": 0},
+        "unexplained_loss_count": 0
+      }
+    }
+  ]
 }

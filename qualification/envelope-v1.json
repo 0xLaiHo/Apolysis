@@ -1,27 +1,102 @@
 {
   "schema_version": 1,
+  "technical_kernel_floor": "5.11",
   "profiles": [
     {
       "id": "linux-x86_64-host-managed",
-      "claim": "beta_supported_after_live_pass",
+      "status": "candidate",
+      "support_claim": "none_until_retained_live_evidence",
       "architectures": ["x86_64"],
-      "kernel_lines": ["6.6"],
+      "kernel_lines": ["6.12"],
+      "qualified_tuples": [],
+      "measurement_protocol": {
+        "percentile_method": "nearest_rank",
+        "interval_method": "bootstrap_percentile_95",
+        "bootstrap_resamples": 10000,
+        "collector_comparison": "alternating_off_on_same_boot",
+        "clock": "clock_monotonic",
+        "reject_suspend": true
+      },
       "required_environment": {
         "btf_vmlinux": true,
         "cgroup_v2": true,
         "tracepoints_complete": true,
-        "capability_modes": ["bpf_perfmon", "sys_admin"],
+        "tracepoint_manifest_version": 1,
+        "verifier_load_attach": true,
+        "capability_modes": ["bpf_perfmon"],
         "runtimes": ["host"]
       },
       "workloads": {
+        "idle": {
+          "manifest_sha256": null,
+          "expected_event_counts": {},
+          "minimum_samples": null,
+          "minimum_event_rate_per_second": null,
+          "maximum_collector_cpu_percent_p95": null,
+          "maximum_workload_cpu_overhead_percent_p95": null,
+          "maximum_collector_peak_rss_mib": null,
+          "maximum_collector_cgroup_memory_peak_mib": null,
+          "maximum_bpf_memory_mib": null,
+          "maximum_workload_latency_overhead_percent_p95": null,
+          "maximum_observation_lag_ms_p95": null,
+          "maximum_observation_lag_ms_p99": null,
+          "maximum_append_lag_ms_p95": null,
+          "maximum_append_lag_ms_p99": null,
+          "maximum_known_loss_count": 0,
+          "maximum_unexplained_loss_count": 0
+        },
         "representative": {
-          "minimum_samples": 10,
-          "maximum_collector_cpu_percent_p95": 5.0,
-          "maximum_collector_peak_rss_mib": 96.0,
-          "maximum_workload_latency_overhead_percent_p95": 10.0,
-          "maximum_event_loss_count": 0
+          "manifest_sha256": null,
+          "expected_event_counts": null,
+          "minimum_samples": null,
+          "minimum_event_rate_per_second": null,
+          "maximum_collector_cpu_percent_p95": null,
+          "maximum_workload_cpu_overhead_percent_p95": null,
+          "maximum_collector_peak_rss_mib": null,
+          "maximum_collector_cgroup_memory_peak_mib": null,
+          "maximum_bpf_memory_mib": null,
+          "maximum_workload_latency_overhead_percent_p95": null,
+          "maximum_observation_lag_ms_p95": null,
+          "maximum_observation_lag_ms_p99": null,
+          "maximum_append_lag_ms_p95": null,
+          "maximum_append_lag_ms_p99": null,
+          "maximum_known_loss_count": 0,
+          "maximum_unexplained_loss_count": 0
+        },
+        "burst": {
+          "manifest_sha256": null,
+          "expected_event_counts": null,
+          "minimum_samples": null,
+          "minimum_event_rate_per_second": null,
+          "maximum_collector_cpu_percent_p95": null,
+          "maximum_workload_cpu_overhead_percent_p95": null,
+          "maximum_collector_peak_rss_mib": null,
+          "maximum_collector_cgroup_memory_peak_mib": null,
+          "maximum_bpf_memory_mib": null,
+          "maximum_workload_latency_overhead_percent_p95": null,
+          "maximum_observation_lag_ms_p95": null,
+          "maximum_observation_lag_ms_p99": null,
+          "maximum_append_lag_ms_p95": null,
+          "maximum_append_lag_ms_p99": null,
+          "maximum_known_loss_count": 0,
+          "maximum_unexplained_loss_count": 0
         }
       }
     }
+  ],
+  "experimental": [
+    "other_feature-probed-linux-x86_64-kernels",
+    "linux-aarch64",
+    "docker",
+    "containerd",
+    "kubernetes",
+    "cap_sys_admin_legacy_fallback"
+  ],
+  "unsupported": [
+    "linux-before-5.11-without-required-backports",
+    "cgroup-v1-or-hybrid-agent-run-scope",
+    "missing-btf-or-required-tracepoints",
+    "unprivileged-or-rootless-host-collector",
+    "non-linux"
   ]
 }
