@@ -83,6 +83,45 @@ fn intent_ingest_rejects_unknown_adapter() {
 }
 
 #[test]
+fn intent_correlate_warns_when_the_collector_abi_does_not_match() {
+    let intent_input = temp_jsonl("apolysis-intent-empty-for-abi-mismatch");
+    let timeline_input = temp_jsonl("apolysis-intent-abi-mismatch-timeline");
+    let output = temp_jsonl("apolysis-intent-abi-mismatch-output");
+    std::fs::write(&intent_input, "").expect("write empty intent timeline");
+    std::fs::write(
+        &timeline_input,
+        r#"{"record_type":"observer_diagnostic","timestamp_unix_ms":1780328100007,"session_id":"agent-run-abi-mismatch","kind":"abi_mismatch","count":1,"detail":"expected_version:1,received_version:2"}
+"#,
+    )
+    .expect("write ABI mismatch timeline");
+
+    let result = apolysis_command()
+        .args([
+            "intent",
+            "correlate",
+            "--intent-input",
+            intent_input.to_str().expect("utf-8 intent path"),
+            "--timeline-input",
+            timeline_input.to_str().expect("utf-8 timeline path"),
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+        ])
+        .output()
+        .expect("run intent correlation over ABI mismatch timeline");
+
+    assert!(result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("1 event(s) dropped"),
+        "ABI mismatch must fail loud: {stderr}"
+    );
+
+    let _ = std::fs::remove_file(intent_input);
+    let _ = std::fs::remove_file(timeline_input);
+    let _ = std::fs::remove_file(output);
+}
+
+#[test]
 fn intent_correlate_links_commands_and_reports_mismatches() {
     let intent_input = temp_jsonl("apolysis-intent-correlate-intents");
     let timeline_input = temp_jsonl("apolysis-intent-correlate-timeline");

@@ -59,12 +59,14 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
 ## 当前能力
 
 - 通过 CO-RE eBPF 观测 fork、exec、exit、选定文件操作和 network connect attempt。
+- 提供版本化 kernel/userspace ABI，并为每次 Agent Run 写入 capability manifest，明确实际挂载的
+  event source 与支持的 outcome 语义。
 - 支持 PID-tree、单 cgroup 与多 cgroup Observation Scope。
 - 支持托管本地 Agent 启动，以及 local、Docker/containerd 和 Kubernetes 原型的 runtime
   metadata 关联。
 - Exec 参数与 process command 默认 content-off 持久化，并对凭证和网络内容脱敏。
-- 提供有序 JSONL、输出轮转、可选本地 hash-chain envelope，以及 drop、map pressure、
-  decode failure 和 truncation 的类型化诊断。
+- 提供有序 JSONL、输出轮转、可选本地 hash-chain envelope，以及 drop、map pressure、ABI
+  mismatch、decode failure 和 truncation 的类型化诊断。
 - 可选摄取 Codex 声明意图并通过启发式关联生成 mismatch finding。
 
 当前 file 与 network syscall-entry 观测通常只表示 attempt，除非某条受支持路径提供 outcome。

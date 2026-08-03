@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use apolysis_observer::abi::{KernelEventKind, FLAG_RESOURCE_TRUNCATED, KERNEL_EVENT_RECORD_LEN};
+use apolysis_observer::abi::{
+    KernelEventKind, FLAG_RESOURCE_TRUNCATED, KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN,
+};
 use apolysis_observer::{DaemonObserver, DaemonObserverConfig, ObserverBatchDecoder};
 
 #[test]
@@ -24,14 +26,20 @@ fn daemon_observer_rejects_a_missing_bpf_object_before_loading() {
 fn daemon_batch_decoder_accounts_for_invalid_and_truncated_records() {
     let decoder = ObserverBatchDecoder::new(1_000_000_000, 10_000);
     let mut valid = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
-    valid[0..8].copy_from_slice(&1_002_000_000_u64.to_ne_bytes());
-    valid[32..36].copy_from_slice(&(KernelEventKind::Exec as u32).to_ne_bytes());
-    valid[36..40].copy_from_slice(&FLAG_RESOURCE_TRUNCATED.to_ne_bytes());
+    valid[0..4].copy_from_slice(&KERNEL_ABI_VERSION.to_ne_bytes());
+    valid[4..8].copy_from_slice(&(KERNEL_EVENT_RECORD_LEN as u32).to_ne_bytes());
+    valid[8..16].copy_from_slice(&1_002_000_000_u64.to_ne_bytes());
+    valid[40..44].copy_from_slice(&(KernelEventKind::Exec as u32).to_ne_bytes());
+    valid[44..48].copy_from_slice(&FLAG_RESOURCE_TRUNCATED.to_ne_bytes());
+    let mut abi_mismatch = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
+    abi_mismatch[0..4].copy_from_slice(&2_u32.to_ne_bytes());
+    abi_mismatch[4..8].copy_from_slice(&(KERNEL_EVENT_RECORD_LEN as u32).to_ne_bytes());
 
-    let batch = decoder.decode(vec![valid, vec![0_u8; 8]]);
+    let batch = decoder.decode(vec![valid, abi_mismatch, vec![0_u8; 4]]);
 
     assert_eq!(batch.events.len(), 1);
     assert_eq!(batch.events[0].timestamp_unix_ms, 10_002);
+    assert_eq!(batch.abi_mismatches, 1);
     assert_eq!(batch.decode_failures, 1);
     assert_eq!(batch.truncations, 1);
 }

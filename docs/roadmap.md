@@ -108,7 +108,8 @@ inside its declared capability boundary.
 
 Priorities:
 
-- version the kernel/userspace ABI and capability manifest;
+- preserve compatibility for the versioned kernel/userspace ABI and capability
+  manifest, and reject incompatible records explicitly;
 - add bounded entry/exit matching for the supported operation set;
 - report return value and errno and distinguish attempted, succeeded, failed,
   denied, pending, and unknown;

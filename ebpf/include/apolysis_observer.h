@@ -7,6 +7,8 @@
 #define APOLYSIS_RESOURCE_LEN 256
 #define APOLYSIS_ACTION_LEN 32
 #define APOLYSIS_PAYLOAD_LEN 256
+#define APOLYSIS_KERNEL_ABI_VERSION 1
+#define APOLYSIS_KERNEL_EVENT_RECORD_LEN 608
 
 enum apolysis_kernel_event_kind {
     APOLYSIS_EVENT_EXEC = 1,
@@ -50,6 +52,8 @@ struct apolysis_observer_counters {
  * tests can be added before this becomes a stable external format.
  */
 struct apolysis_kernel_event {
+    unsigned int abi_version;
+    unsigned int record_size;
     unsigned long long timestamp_ns;
     unsigned long long cgroup_id;
     unsigned int pid;
@@ -63,5 +67,8 @@ struct apolysis_kernel_event {
     char action[APOLYSIS_ACTION_LEN];
     char payload[APOLYSIS_PAYLOAD_LEN];
 };
+
+_Static_assert(sizeof(struct apolysis_kernel_event) == APOLYSIS_KERNEL_EVENT_RECORD_LEN,
+               "apolysis kernel event ABI size mismatch");
 
 #endif /* APOLYSIS_OBSERVER_H */

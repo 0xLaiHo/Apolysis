@@ -24,6 +24,7 @@ async fn observer_runtime_processes_scope_commands_and_reports_final_counters() 
         operations: Arc::clone(&operations),
         fail_counters: false,
         fail_track: None,
+        batch: None,
     };
     let (scope, receiver) = scope_channel(4);
     let (shutdown, shutdown_receiver) = oneshot::channel();
@@ -68,6 +69,7 @@ async fn counter_read_failure_marks_ebpf_unavailable() {
         operations: Arc::new(Mutex::new(Vec::new())),
         fail_counters: true,
         fail_track: None,
+        batch: None,
     };
     let (_scope, receiver) = scope_channel(1);
     let (shutdown, shutdown_receiver) = oneshot::channel();
@@ -100,6 +102,7 @@ async fn restored_scope_failure_keeps_ebpf_unavailable() {
         operations: Arc::new(Mutex::new(Vec::new())),
         fail_counters: false,
         fail_track: Some(31),
+        batch: None,
     };
     let (_scope, receiver) = scope_channel(1);
     let (_shutdown, shutdown_receiver) = oneshot::channel();
@@ -119,10 +122,46 @@ async fn restored_scope_failure_keeps_ebpf_unavailable() {
     cleanup(&config);
 }
 
+#[tokio::test]
+async fn abi_mismatch_stops_the_observer_and_marks_ebpf_unavailable() {
+    let config = config();
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        batch: Some(DaemonObserverBatch {
+            abi_mismatches: 1,
+            ..DaemonObserverBatch::default()
+        }),
+    };
+    let (_scope, receiver) = scope_channel(1);
+    let (_shutdown, shutdown_receiver) = oneshot::channel();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        run_observer_runtime(
+            backend,
+            Vec::new(),
+            receiver,
+            Arc::clone(&state),
+            shutdown_receiver,
+        ),
+    )
+    .await
+    .expect("ABI mismatch must stop the observer");
+    let error = result.expect_err("ABI mismatch must fail loud");
+
+    assert!(error.contains("kernel/userspace ABI mismatch"));
+    assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    cleanup(&config);
+}
+
 struct FakeBackend {
     operations: Arc<Mutex<Vec<(ScopeOperation, u64)>>>,
     fail_counters: bool,
     fail_track: Option<u64>,
+    batch: Option<DaemonObserverBatch>,
 }
 
 impl ObserverRuntimeBackend for FakeBackend {
@@ -148,7 +187,10 @@ impl ObserverRuntimeBackend for FakeBackend {
     fn read_batch(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<DaemonObserverBatch, String>> + Send + '_>> {
-        Box::pin(pending())
+        match self.batch.take() {
+            Some(batch) => Box::pin(async move { Ok(batch) }),
+            None => Box::pin(pending()),
+        }
     }
 
     fn counters(&mut self) -> Result<DaemonObserverCounters, String> {

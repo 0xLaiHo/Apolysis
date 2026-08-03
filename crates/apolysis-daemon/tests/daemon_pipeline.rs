@@ -8,7 +8,8 @@ use apolysis_accountability::{
 };
 use apolysis_daemon::{ingest_observer_batch, DaemonConfig, DaemonRecord, DaemonState};
 use apolysis_observer::abi::{
-    KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN, PAYLOAD_LEN, RESOURCE_LEN,
+    KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN, KERNEL_ABI_VERSION,
+    KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
 };
 use apolysis_observer::{DaemonKernelEvent, DaemonObserverBatch};
 use serde_json::json;
@@ -133,6 +134,7 @@ async fn observer_batch_submits_only_records_with_session_ownership() {
                 kernel_file_event(77, "/workspace/.env"),
                 kernel_event(99),
             ],
+            abi_mismatches: 0,
             decode_failures: 2,
             truncations: 1,
         },
@@ -190,6 +192,7 @@ async fn daemon_exec_persistence_is_content_off_by_default() {
                 77,
                 "argv:/usr/bin/codex exec write-the-secret --api-key sk-test-secret /workspace/private.txt,argv_truncated:true",
             )],
+            abi_mismatches: 0,
             decode_failures: 0,
             truncations: 1,
         },
@@ -245,6 +248,7 @@ async fn observer_batch_appends_accountability_findings_for_registered_intent() 
         &pipeline,
         DaemonObserverBatch {
             events: vec![kernel_network_event(77, "1.1.1.1:443")],
+            abi_mismatches: 0,
             decode_failures: 0,
             truncations: 0,
         },
@@ -276,6 +280,8 @@ fn kernel_event(cgroup_id: u64) -> DaemonKernelEvent {
     DaemonKernelEvent {
         timestamp_unix_ms: 1_700_000_000_100,
         record: KernelEventRecord {
+            abi_version: KERNEL_ABI_VERSION,
+            record_size: KERNEL_EVENT_RECORD_LEN as u32,
             timestamp_ns: 1,
             cgroup_id,
             pid: 100,

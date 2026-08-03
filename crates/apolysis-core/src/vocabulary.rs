@@ -9,6 +9,8 @@
 
 /// JSONL record type names used by every storage backend.
 pub mod records {
+    /// The versioned runtime-observation boundary declared at collector start.
+    pub const COLLECTOR_CAPABILITY_MANIFEST: &str = "collector_capability_manifest";
     /// A normalized event emitted by a runtime, observer, or metadata adapter.
     pub const EVENT: &str = "event";
     /// A raw kernel-side event preserved before canonicalization.

@@ -40,6 +40,38 @@ The v1 compatibility contract is append-only:
 
 ## Record Types
 
+### `collector_capability_manifest`
+
+Collector capability manifests declare the observation boundary used for one
+Agent Run. The live collector writes and synchronizes this record to stable
+storage after successful attachment and before releasing a managed Agent.
+Consumers must use it to distinguish supported observation semantics from
+unsupported paths.
+
+Fields:
+
+- `record_type`: always `collector_capability_manifest`
+- `schema_version`: capability manifest schema version, currently `1`
+- `timestamp_unix_ms`: manifest persistence timestamp
+- `agent_run_id`: Agent Run identifier
+- `collector`: collector identifier, currently `apolysis_observer`
+- `collector_version`: userspace collector package version
+- `kernel_abi_version`: supported kernel/userspace event ABI version
+- `kernel_record_size`: event record size for that ABI, currently `608`
+- `observation_scope`: `process_tree` or `cgroup`; the manifest does not persist
+  the host PID or cgroup ID
+- `privacy_profile`: persistence privacy profile, currently `content_off`
+- `capabilities`: ordered operation declarations. Each entry contains an
+  `operation`, the attached `event_sources` used to produce that observation,
+  and supported `outcomes`. Outcome values are `attempted`, `succeeded`,
+  `failed`, `denied`, `pending`, or `unknown`.
+
+The current AuditObserver declaration includes only capabilities backed by its
+actual attachment plan. Syscall-entry file and network observations declare
+`attempted`; they do not claim a return value or successful outcome. Exec
+declares `succeeded` only when the observation-producing
+`sched/sched_process_exec` hook is attached.
+
 ### `event`
 
 Canonical event records describe normalized runtime, metadata, process, file,
@@ -218,8 +250,9 @@ Fields:
 - `record_type`: always `observer_diagnostic`
 - `timestamp_unix_ms`: diagnostic timestamp
 - `session_id`: session identifier
-- `kind`: `ring_buffer_reserve_failure`, `map_pressure`, `decode_failure`,
-  `truncation`, `attach_failure`, `verifier_failure`, or `summary`
+- `kind`: `ring_buffer_reserve_failure`, `map_pressure`, `abi_mismatch`,
+  `decode_failure`, `truncation`, `attach_failure`, `verifier_failure`, or
+  `summary`
 - `count`: diagnostic count
 - `detail`: diagnostic detail string
 

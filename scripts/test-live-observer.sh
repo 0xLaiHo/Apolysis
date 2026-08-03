@@ -12,4 +12,4 @@ set -e
 [[ "$status" == "77" ]] && exit 0
 [[ "$status" == "0" ]] || exit "$status"
 
-cargo test -p apolysis-cli --test observe live_observer -- --ignored --nocapture
+cargo test -p apolysis-cli --test observe -- --ignored --nocapture

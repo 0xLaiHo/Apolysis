@@ -142,7 +142,9 @@ profile.
 The collector uses a small, versioned set of high-signal hooks. It filters at
 event origin where possible, emits fixed and bounded records, and reports map
 pressure, reserve failure, truncation, decode failure, attach failure, and
-unexpected termination.
+unexpected termination. Each record begins with an ABI version and declared
+record size. Userspace rejects an incompatible version or size instead of
+decoding it as the current layout.
 
 The beta collector target adds entry/exit matching for each supported
 operation. A record distinguishes attempted, succeeded, failed, denied,
@@ -285,10 +287,11 @@ A quiet timeline is never proof that the Agent performed no relevant action.
 Implemented today:
 
 - `ebpf/observer` and `apolysis-observer`: CO-RE tracepoints, ring buffer,
-  process-tree/cgroup scopes, fixed ABI, redaction, and health diagnostics;
+  process-tree/cgroup scopes, versioned ABI, redaction, and health diagnostics;
 - `apolysis-cli`: fixture/live observation, managed Agent launch, optional
   Codex intent correlation, visibility, and verification commands;
-- `apolysis-core`: current JSONL vocabulary and record types;
+- `apolysis-core`: current JSONL vocabulary, record types, and versioned
+  Collector Capability manifest;
 - `apolysis-store`: rotation and optional local hash-chain envelopes;
 - `apolysis-accountability`: optional declared-intent comparison and
   review-oriented findings;
@@ -297,10 +300,11 @@ Implemented today:
 - `apolysis-daemon`: long-lived observer, bounded queue, local socket, and
   runtime registration prototype.
 
-The current file and network hooks mostly capture syscall entry and therefore
-describe attempts. Stable entry/exit outcome semantics, complete collector
-lifecycle records, the saved-run viewer, and bounded Kubernetes beta remain
-targets.
+The live collector synchronizes its capability manifest to stable storage after
+successful attachment and before releasing a managed Agent gate. The current
+file and network hooks mostly capture syscall entry and therefore describe
+attempts. Stable entry/exit outcome semantics, complete collector lifecycle
+records, the saved-run viewer, and bounded Kubernetes beta remain targets.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification
