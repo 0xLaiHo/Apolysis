@@ -16,10 +16,12 @@ mod scope;
 
 pub use live::{
     discover_agent_registration, discover_process_tree_scope_pids, enable_multi_cgroup_scope,
-    network_connect_observation_gaps, observe_live, raw_event_from_record, update_tracked_cgroup,
-    AgentDiscoveryRequest, AgentRegistration, AgentRunRequest, DaemonKernelEvent, DaemonObserver,
-    DaemonObserverBatch, DaemonObserverConfig, DaemonObserverCounters, LiveObserveRequest,
-    LiveScope, NetworkConnectCounters, ObserverBatchDecoder,
+    file_operation_observation_gaps, network_connect_observation_gaps, observe_live,
+    raw_event_from_record, scope_observation_gaps, update_tracked_cgroup, AgentDiscoveryRequest,
+    AgentRegistration, AgentRunRequest, DaemonKernelEvent, DaemonObserver, DaemonObserverBatch,
+    DaemonObserverConfig, DaemonObserverCounters, FileOperationCounters, LiveObserveRequest,
+    LiveScope, NetworkConnectCounters, ObserverBatchDecoder, OperationPairCounters,
+    ScopeObservationGapCounters,
 };
 pub use redaction::{
     redact_command_text_for_persistence, RedactedValue, Redactor, RuntimeEvidencePersistence,
@@ -165,11 +167,17 @@ impl AyaLoaderPlan {
                 TracepointAttach::new("syscalls", "sys_enter_execve"),
                 TracepointAttach::new("syscalls", "sys_enter_execveat"),
                 TracepointAttach::new("syscalls", "sys_enter_openat"),
+                TracepointAttach::new("syscalls", "sys_exit_openat"),
                 TracepointAttach::new("syscalls", "sys_enter_openat2"),
+                TracepointAttach::new("syscalls", "sys_exit_openat2"),
                 TracepointAttach::new("syscalls", "sys_enter_creat"),
+                TracepointAttach::new("syscalls", "sys_exit_creat"),
                 TracepointAttach::new("syscalls", "sys_enter_truncate"),
+                TracepointAttach::new("syscalls", "sys_exit_truncate"),
                 TracepointAttach::new("syscalls", "sys_enter_unlinkat"),
+                TracepointAttach::new("syscalls", "sys_exit_unlinkat"),
                 TracepointAttach::new("syscalls", "sys_enter_renameat2"),
+                TracepointAttach::new("syscalls", "sys_exit_renameat2"),
                 TracepointAttach::new("syscalls", "sys_enter_connect"),
                 TracepointAttach::new("syscalls", "sys_exit_connect"),
             ],
@@ -193,6 +201,42 @@ struct CapabilityDeclaration {
     required_sources: &'static [TracepointId],
     outcomes: &'static [OperationOutcome],
 }
+
+const FILE_OPERATION_OUTCOMES: &[OperationOutcome] = &[
+    OperationOutcome::Succeeded,
+    OperationOutcome::Failed,
+    OperationOutcome::Denied,
+];
+const FILE_OPEN_SOURCES: &[TracepointId] = &[
+    ("syscalls", "sys_enter_openat"),
+    ("syscalls", "sys_exit_openat"),
+    ("syscalls", "sys_enter_openat2"),
+    ("syscalls", "sys_exit_openat2"),
+];
+const FILE_CREATE_SOURCES: &[TracepointId] = &[
+    ("syscalls", "sys_enter_openat"),
+    ("syscalls", "sys_exit_openat"),
+    ("syscalls", "sys_enter_openat2"),
+    ("syscalls", "sys_exit_openat2"),
+    ("syscalls", "sys_enter_creat"),
+    ("syscalls", "sys_exit_creat"),
+];
+const FILE_TRUNCATE_SOURCES: &[TracepointId] = &[
+    ("syscalls", "sys_enter_openat"),
+    ("syscalls", "sys_exit_openat"),
+    ("syscalls", "sys_enter_openat2"),
+    ("syscalls", "sys_exit_openat2"),
+    ("syscalls", "sys_enter_truncate"),
+    ("syscalls", "sys_exit_truncate"),
+];
+const FILE_UNLINK_SOURCES: &[TracepointId] = &[
+    ("syscalls", "sys_enter_unlinkat"),
+    ("syscalls", "sys_exit_unlinkat"),
+];
+const FILE_RENAME_SOURCES: &[TracepointId] = &[
+    ("syscalls", "sys_enter_renameat2"),
+    ("syscalls", "sys_exit_renameat2"),
+];
 
 const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
     CapabilityDeclaration {
@@ -219,44 +263,33 @@ const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
     },
     CapabilityDeclaration {
         operation: "file_open",
-        sources: &[
-            ("syscalls", "sys_enter_openat"),
-            ("syscalls", "sys_enter_openat2"),
-        ],
-        required_sources: &[],
-        outcomes: &[OperationOutcome::Attempted],
+        sources: FILE_OPEN_SOURCES,
+        required_sources: FILE_OPEN_SOURCES,
+        outcomes: FILE_OPERATION_OUTCOMES,
     },
     CapabilityDeclaration {
         operation: "file_create",
-        sources: &[
-            ("syscalls", "sys_enter_openat"),
-            ("syscalls", "sys_enter_openat2"),
-            ("syscalls", "sys_enter_creat"),
-        ],
-        required_sources: &[],
-        outcomes: &[OperationOutcome::Attempted],
+        sources: FILE_CREATE_SOURCES,
+        required_sources: FILE_CREATE_SOURCES,
+        outcomes: FILE_OPERATION_OUTCOMES,
     },
     CapabilityDeclaration {
         operation: "file_truncate",
-        sources: &[
-            ("syscalls", "sys_enter_openat"),
-            ("syscalls", "sys_enter_openat2"),
-            ("syscalls", "sys_enter_truncate"),
-        ],
-        required_sources: &[],
-        outcomes: &[OperationOutcome::Attempted],
+        sources: FILE_TRUNCATE_SOURCES,
+        required_sources: FILE_TRUNCATE_SOURCES,
+        outcomes: FILE_OPERATION_OUTCOMES,
     },
     CapabilityDeclaration {
         operation: "file_unlink",
-        sources: &[("syscalls", "sys_enter_unlinkat")],
-        required_sources: &[],
-        outcomes: &[OperationOutcome::Attempted],
+        sources: FILE_UNLINK_SOURCES,
+        required_sources: FILE_UNLINK_SOURCES,
+        outcomes: FILE_OPERATION_OUTCOMES,
     },
     CapabilityDeclaration {
         operation: "file_rename",
-        sources: &[("syscalls", "sys_enter_renameat2")],
-        required_sources: &[],
-        outcomes: &[OperationOutcome::Attempted],
+        sources: FILE_RENAME_SOURCES,
+        required_sources: FILE_RENAME_SOURCES,
+        outcomes: FILE_OPERATION_OUTCOMES,
     },
     CapabilityDeclaration {
         operation: "network_connect",
@@ -277,12 +310,9 @@ const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
     },
     CapabilityDeclaration {
         operation: "credential_path_access",
-        sources: &[
-            ("syscalls", "sys_enter_openat"),
-            ("syscalls", "sys_enter_openat2"),
-        ],
-        required_sources: &[],
-        outcomes: &[OperationOutcome::Attempted],
+        sources: FILE_OPEN_SOURCES,
+        required_sources: FILE_OPEN_SOURCES,
+        outcomes: FILE_OPERATION_OUTCOMES,
     },
 ];
 
@@ -635,7 +665,7 @@ mod tests {
         let plan = AyaLoaderPlan::audit_observer_default("target/ebpf/apolysis_observer.bpf.o");
 
         assert_eq!(plan.ring_buffer_map, "APOLYSIS_EVENTS");
-        assert_eq!(plan.tracepoints.len(), 13);
+        assert_eq!(plan.tracepoints.len(), 19);
         assert_eq!(
             plan.tracepoints
                 .iter()
@@ -664,6 +694,21 @@ mod tests {
         assert!(plan
             .tracepoints
             .contains(&TracepointAttach::new("syscalls", "sys_enter_execveat")));
+        for syscall in [
+            "openat",
+            "openat2",
+            "creat",
+            "truncate",
+            "unlinkat",
+            "renameat2",
+        ] {
+            for direction in ["enter", "exit"] {
+                assert!(plan.tracepoints.contains(&TracepointAttach::new(
+                    "syscalls",
+                    format!("sys_{direction}_{syscall}"),
+                )));
+            }
+        }
     }
 
     #[test]

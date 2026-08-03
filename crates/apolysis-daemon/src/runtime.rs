@@ -11,8 +11,8 @@ use apolysis_accountability::{
 };
 use apolysis_core::RawKernelEvent;
 use apolysis_observer::{
-    network_connect_observation_gaps, raw_event_from_record, DaemonObserver, DaemonObserverBatch,
-    DaemonObserverCounters, NetworkConnectCounters, Redactor, RuntimeEvidencePersistence,
+    raw_event_from_record, scope_observation_gaps, DaemonObserver, DaemonObserverBatch,
+    DaemonObserverCounters, Redactor, RuntimeEvidencePersistence, ScopeObservationGapCounters,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -36,7 +36,7 @@ pub struct ObserverRuntimeSummary {
 
 pub trait ObserverRuntimeBackend: Send + 'static {
     fn track_cgroup(&mut self, cgroup_id: u64) -> Result<(), String>;
-    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<NetworkConnectCounters, String>;
+    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String>;
     fn read_batch(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<DaemonObserverBatch, String>> + Send + '_>>;
@@ -48,7 +48,7 @@ impl ObserverRuntimeBackend for DaemonObserver {
         DaemonObserver::track_cgroup(self, cgroup_id)
     }
 
-    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<NetworkConnectCounters, String> {
+    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
         DaemonObserver::untrack_cgroup(self, cgroup_id)
     }
 
@@ -101,7 +101,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                             ScopeOperation::Untrack => match backend.untrack_cgroup(cgroup_id) {
                                 Ok(counters) => {
                                     tracked_cgroups.remove(&cgroup_id);
-                                    submit_network_connect_gaps(
+                                    submit_scope_observation_gaps(
                                         &state,
                                         &pipeline,
                                         cgroup_id,
@@ -169,7 +169,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
             }
         };
         if let Err(error) =
-            submit_network_connect_gaps(&state, &pipeline, cgroup_id, counters, None).await
+            submit_scope_observation_gaps(&state, &pipeline, cgroup_id, counters, None).await
         {
             state.set_ebpf(ComponentState::Unavailable).await;
             return Err(error);
@@ -190,14 +190,14 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
     })
 }
 
-async fn submit_network_connect_gaps(
+async fn submit_scope_observation_gaps(
     state: &DaemonState,
     pipeline: &EventPipeline,
     cgroup_id: u64,
-    counters: NetworkConnectCounters,
+    counters: ScopeObservationGapCounters,
     known_agent_run_id: Option<&str>,
 ) -> Result<(), String> {
-    if counters == NetworkConnectCounters::default() {
+    if counters == ScopeObservationGapCounters::default() {
         return Ok(());
     }
     let agent_run_id = match known_agent_run_id {
@@ -207,7 +207,7 @@ async fn submit_network_connect_gaps(
             .await
             .ok_or_else(|| format!("no Agent Run owns observer scope cgroup {cgroup_id}"))?,
     };
-    for gap in network_connect_observation_gaps(&agent_run_id, &counters) {
+    for gap in scope_observation_gaps(&agent_run_id, &counters) {
         let payload = serde_json::from_str(&gap.to_json_line())
             .map_err(|error| format!("failed to encode Observation Gap: {error}"))?;
         match pipeline

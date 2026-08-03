@@ -168,6 +168,45 @@ fn live_file_record_converts_to_the_fixture_compatible_raw_schema() {
 }
 
 #[test]
+fn live_file_records_map_linux_return_values_to_synchronous_outcomes() {
+    for kind in [
+        KernelEventKind::Open,
+        KernelEventKind::Create,
+        KernelEventKind::Truncate,
+        KernelEventKind::Unlink,
+        KernelEventKind::Rename,
+    ] {
+        for (return_value, expected) in [
+            (
+                3,
+                OperationResult::new(OperationOutcome::Succeeded, 3, None),
+            ),
+            (
+                -13,
+                OperationResult::new(OperationOutcome::Denied, -13, Some(13)),
+            ),
+            (
+                -2,
+                OperationResult::new(OperationOutcome::Failed, -2, Some(2)),
+            ),
+            (
+                -115,
+                OperationResult::new(OperationOutcome::Failed, -115, Some(115)),
+            ),
+        ] {
+            let mut record = empty_record(kind);
+            record.flags = FLAG_RETURN_VALUE;
+            record.return_value = return_value;
+
+            let raw = raw_event_from_record(&record, "agent-run-file-result", 1)
+                .expect("convert file result record");
+
+            assert_eq!(raw.operation_result, Some(expected), "kind: {kind:?}");
+        }
+    }
+}
+
+#[test]
 fn live_connect_record_decodes_ipv4_sockaddr() {
     let mut record = empty_record(KernelEventKind::Connect);
     record.flags = FLAG_PAYLOAD_SOCKADDR;

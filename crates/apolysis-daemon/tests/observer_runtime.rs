@@ -11,7 +11,10 @@ use apolysis_daemon::{
     run_observer_runtime, scope_channel, DaemonConfig, DaemonRecord, DaemonState,
     ObserverRuntimeBackend, ScopeOperation,
 };
-use apolysis_observer::{DaemonObserverBatch, DaemonObserverCounters, NetworkConnectCounters};
+use apolysis_observer::{
+    DaemonObserverBatch, DaemonObserverCounters, FileOperationCounters, NetworkConnectCounters,
+    OperationPairCounters, ScopeObservationGapCounters,
+};
 use tokio::sync::oneshot;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -96,17 +99,23 @@ async fn observer_shutdown_persists_connect_gaps_to_the_owning_agent_run() {
         scoped_counters: BTreeMap::from([
             (
                 31,
-                NetworkConnectCounters {
-                    missing_entries: 2,
-                    ..NetworkConnectCounters::default()
+                ScopeObservationGapCounters {
+                    network_connect: NetworkConnectCounters {
+                        missing_entries: 2,
+                        ..NetworkConnectCounters::default()
+                    },
+                    ..ScopeObservationGapCounters::default()
                 },
             ),
             (
                 32,
-                NetworkConnectCounters {
-                    missing_exits: 1,
-                    pending: 2,
-                    ..NetworkConnectCounters::default()
+                ScopeObservationGapCounters {
+                    network_connect: NetworkConnectCounters {
+                        missing_exits: 1,
+                        pending: 2,
+                        ..NetworkConnectCounters::default()
+                    },
+                    ..ScopeObservationGapCounters::default()
                 },
             ),
         ]),
@@ -156,6 +165,105 @@ async fn observer_shutdown_persists_connect_gaps_to_the_owning_agent_run() {
 }
 
 #[tokio::test]
+async fn observer_shutdown_persists_file_gaps_to_the_owning_agent_runs() {
+    let config = config();
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("agent-run-file-a"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run A");
+    state
+        .register(intent("agent-run-file-b"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run B");
+    state
+        .discover_cgroup("agent-run-file-a", 71)
+        .await
+        .expect("associate cgroup 71");
+    state
+        .discover_cgroup("agent-run-file-b", 72)
+        .await
+        .expect("associate cgroup 72");
+
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        scoped_counters: BTreeMap::from([
+            (
+                71,
+                ScopeObservationGapCounters {
+                    file_operations: FileOperationCounters {
+                        open: OperationPairCounters {
+                            missing_entries: 2,
+                            ..OperationPairCounters::default()
+                        },
+                        ..FileOperationCounters::default()
+                    },
+                    ..ScopeObservationGapCounters::default()
+                },
+            ),
+            (
+                72,
+                ScopeObservationGapCounters {
+                    file_operations: FileOperationCounters {
+                        rename: OperationPairCounters {
+                            missing_exits: 1,
+                            pending: 2,
+                            ..OperationPairCounters::default()
+                        },
+                        ..FileOperationCounters::default()
+                    },
+                    ..ScopeObservationGapCounters::default()
+                },
+            ),
+        ]),
+    };
+    let (_scope, receiver) = scope_channel(2);
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (shutdown, shutdown_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, vec![71, 72], receiver, state, shutdown_receiver).await
+        })
+    };
+
+    for _ in 0..100 {
+        if state.health().await.ebpf() == ComponentState::Ready {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    shutdown.send(()).expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
+
+    let timeline_a = timeline(&config, "agent-run-file-a");
+    assert!(timeline_a.contains(r#""operation":"file_open""#));
+    assert!(timeline_a.contains(r#""kind":"missing_entry""#));
+    assert!(timeline_a.contains(r#""count":2"#));
+    assert!(!timeline_a.contains("file_rename"));
+    assert!(!timeline_a.contains("agent-run-file-b"));
+
+    let timeline_b = timeline(&config, "agent-run-file-b");
+    assert!(timeline_b.contains(r#""operation":"file_rename""#));
+    assert!(timeline_b.contains(r#""kind":"missing_exit""#));
+    assert!(timeline_b.contains(r#""count":3"#));
+    assert!(!timeline_b.contains("file_open"));
+    assert!(!timeline_b.contains("agent-run-file-a"));
+
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn dropped_observation_gap_makes_scope_drain_fail_loud() {
     let mut config = config();
     config.queue_capacity = 1;
@@ -185,9 +293,12 @@ async fn dropped_observation_gap_makes_scope_drain_fail_loud() {
         batch: None,
         scoped_counters: BTreeMap::from([(
             51,
-            NetworkConnectCounters {
-                missing_entries: 1,
-                ..NetworkConnectCounters::default()
+            ScopeObservationGapCounters {
+                network_connect: NetworkConnectCounters {
+                    missing_entries: 1,
+                    ..NetworkConnectCounters::default()
+                },
+                ..ScopeObservationGapCounters::default()
             },
         )]),
     };
@@ -229,9 +340,15 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
         batch: None,
         scoped_counters: BTreeMap::from([(
             41,
-            NetworkConnectCounters {
-                missing_entries: 1,
-                ..NetworkConnectCounters::default()
+            ScopeObservationGapCounters {
+                file_operations: FileOperationCounters {
+                    open: OperationPairCounters {
+                        missing_entries: 1,
+                        ..OperationPairCounters::default()
+                    },
+                    ..FileOperationCounters::default()
+                },
+                ..ScopeObservationGapCounters::default()
             },
         )]),
     };
@@ -290,6 +407,7 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
     let timeline = timeline(&config, "agent-run-close");
     assert!(timeline.contains(r#""record_type":"observation_gap""#));
     assert!(timeline.contains(r#""agent_run_id":"agent-run-close""#));
+    assert!(timeline.contains(r#""operation":"file_open""#));
     assert!(timeline.contains(r#""kind":"missing_entry""#));
     assert!(timeline.contains(r#""count":1"#));
 
@@ -452,7 +570,7 @@ struct FakeBackend {
     fail_track: Option<u64>,
     fail_untrack: Option<u64>,
     batch: Option<DaemonObserverBatch>,
-    scoped_counters: BTreeMap<u64, NetworkConnectCounters>,
+    scoped_counters: BTreeMap<u64, ScopeObservationGapCounters>,
 }
 
 impl ObserverRuntimeBackend for FakeBackend {
@@ -467,7 +585,7 @@ impl ObserverRuntimeBackend for FakeBackend {
         Ok(())
     }
 
-    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<NetworkConnectCounters, String> {
+    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
         self.operations
             .lock()
             .unwrap()

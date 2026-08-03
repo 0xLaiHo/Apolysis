@@ -23,8 +23,9 @@ use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
 
 use crate::abi::{
-    KernelEventKind, KernelEventRecord, NetworkConnectCountersAbi, TrackedCgroupState,
-    FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
+    FileOperationCountersAbi, KernelEventKind, KernelEventRecord, NetworkConnectCountersAbi,
+    ObserverCountersAbi, OperationPairCountersAbi, TrackedCgroupState, FLAG_ARGV_TRUNCATED,
+    FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
 };
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
@@ -394,6 +395,7 @@ pub struct DaemonObserverCounters {
     pub connect_missing_entries: u64,
     pub connect_missing_exits: u64,
     pub connect_pending: u64,
+    pub file_operations: FileOperationCounters,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -403,25 +405,117 @@ pub struct NetworkConnectCounters {
     pub pending: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OperationPairCounters {
+    pub missing_entries: u64,
+    pub missing_exits: u64,
+    pub pending: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FileOperationCounters {
+    pub open: OperationPairCounters,
+    pub create: OperationPairCounters,
+    pub truncate: OperationPairCounters,
+    pub unlink: OperationPairCounters,
+    pub rename: OperationPairCounters,
+}
+
+impl FileOperationCounters {
+    fn totals(&self) -> OperationPairCounters {
+        [
+            self.open,
+            self.create,
+            self.truncate,
+            self.unlink,
+            self.rename,
+        ]
+        .into_iter()
+        .fold(OperationPairCounters::default(), |totals, counters| {
+            OperationPairCounters {
+                missing_entries: totals
+                    .missing_entries
+                    .saturating_add(counters.missing_entries),
+                missing_exits: totals.missing_exits.saturating_add(counters.missing_exits),
+                pending: totals.pending.saturating_add(counters.pending),
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ScopeObservationGapCounters {
+    pub network_connect: NetworkConnectCounters,
+    pub file_operations: FileOperationCounters,
+}
+
 pub fn network_connect_observation_gaps(
     agent_run_id: &str,
     counters: &NetworkConnectCounters,
+) -> Vec<ObservationGap> {
+    operation_pair_observation_gaps(
+        agent_run_id,
+        "network_connect",
+        "connect",
+        &OperationPairCounters {
+            missing_entries: counters.missing_entries,
+            missing_exits: counters.missing_exits,
+            pending: counters.pending,
+        },
+    )
+}
+
+pub fn file_operation_observation_gaps(
+    agent_run_id: &str,
+    counters: &FileOperationCounters,
+) -> Vec<ObservationGap> {
+    [
+        ("file_open", "open", &counters.open),
+        ("file_create", "create", &counters.create),
+        ("file_truncate", "truncate", &counters.truncate),
+        ("file_unlink", "unlink", &counters.unlink),
+        ("file_rename", "rename", &counters.rename),
+    ]
+    .into_iter()
+    .flat_map(|(operation, subject, counters)| {
+        operation_pair_observation_gaps(agent_run_id, operation, subject, counters)
+    })
+    .collect()
+}
+
+pub fn scope_observation_gaps(
+    agent_run_id: &str,
+    counters: &ScopeObservationGapCounters,
+) -> Vec<ObservationGap> {
+    let mut gaps = network_connect_observation_gaps(agent_run_id, &counters.network_connect);
+    gaps.extend(file_operation_observation_gaps(
+        agent_run_id,
+        &counters.file_operations,
+    ));
+    gaps
+}
+
+fn operation_pair_observation_gaps(
+    agent_run_id: &str,
+    operation: &str,
+    subject: &str,
+    counters: &OperationPairCounters,
 ) -> Vec<ObservationGap> {
     let mut gaps = Vec::new();
     if counters.missing_entries > 0 {
         gaps.push(ObservationGap::new(
             agent_run_id,
-            "network_connect",
+            operation,
             ObservationGapKind::MissingEntry,
             counters.missing_entries,
-            "connect exits observed without matching entries",
+            format!("{subject} exits observed without matching entries"),
         ));
     }
     let missing_exits = counters.missing_exits.saturating_add(counters.pending);
     if missing_exits > 0 {
         gaps.push(ObservationGap::new(
             agent_run_id,
-            "network_connect",
+            operation,
             ObservationGapKind::MissingExit,
             missing_exits,
             format!(
@@ -468,7 +562,10 @@ impl DaemonObserver {
         update_tracked_cgroup(&mut self.ebpf, cgroup_id, true)
     }
 
-    pub fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<NetworkConnectCounters, String> {
+    pub fn untrack_cgroup(
+        &mut self,
+        cgroup_id: u64,
+    ) -> Result<ScopeObservationGapCounters, String> {
         drain_tracked_cgroup(&mut self.ebpf, cgroup_id)
     }
 
@@ -492,18 +589,6 @@ struct ScopeConfig {
 
 unsafe impl Pod for ScopeConfig {}
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[repr(C)]
-struct ObserverCounters {
-    reserve_failures: u64,
-    map_pressure: u64,
-    connect_missing_entries: u64,
-    connect_missing_exits: u64,
-    connect_pending: u64,
-}
-
-unsafe impl Pod for ObserverCounters {}
-
 impl From<NetworkConnectCountersAbi> for NetworkConnectCounters {
     fn from(counters: NetworkConnectCountersAbi) -> Self {
         Self {
@@ -514,14 +599,37 @@ impl From<NetworkConnectCountersAbi> for NetworkConnectCounters {
     }
 }
 
-impl From<ObserverCounters> for DaemonObserverCounters {
-    fn from(counters: ObserverCounters) -> Self {
+impl From<OperationPairCountersAbi> for OperationPairCounters {
+    fn from(counters: OperationPairCountersAbi) -> Self {
+        Self {
+            missing_entries: counters.missing_entries,
+            missing_exits: counters.missing_exits,
+            pending: counters.pending,
+        }
+    }
+}
+
+impl From<FileOperationCountersAbi> for FileOperationCounters {
+    fn from(counters: FileOperationCountersAbi) -> Self {
+        Self {
+            open: counters.open.into(),
+            create: counters.create.into(),
+            truncate: counters.truncate.into(),
+            unlink: counters.unlink.into(),
+            rename: counters.rename.into(),
+        }
+    }
+}
+
+impl From<ObserverCountersAbi> for DaemonObserverCounters {
+    fn from(counters: ObserverCountersAbi) -> Self {
         Self {
             reserve_failures: counters.reserve_failures,
             map_pressure: counters.map_pressure,
             connect_missing_entries: counters.connect_missing_entries,
             connect_missing_exits: counters.connect_missing_exits,
             connect_pending: counters.connect_pending,
+            file_operations: counters.file_operations.into(),
         }
     }
 }
@@ -839,17 +947,28 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             .append(&gap)
             .map_err(|error| format!("failed to write network Observation Gap: {error}"))?;
     }
+    for gap in
+        file_operation_observation_gaps(&request.session_id, &public_counters.file_operations)
+    {
+        store
+            .append(&gap)
+            .map_err(|error| format!("failed to write file Observation Gap: {error}"))?;
+    }
+    let file_totals = public_counters.file_operations.totals();
     append_diagnostic(
         &request.session_id,
         ObserverDiagnosticKind::Summary,
         raw_count as u64,
         format!(
-            "raw_events:{raw_count},canonical_events:{canonical_count},reserve_failures:{},map_pressure:{},connect_missing_entries:{},connect_missing_exits:{},connect_pending:{},abi_mismatches:{abi_mismatches},decode_failures:{decode_failures},truncations:{truncations}",
+            "raw_events:{raw_count},canonical_events:{canonical_count},reserve_failures:{},map_pressure:{},connect_missing_entries:{},connect_missing_exits:{},connect_pending:{},file_missing_entries:{},file_missing_exits:{},file_pending:{},abi_mismatches:{abi_mismatches},decode_failures:{decode_failures},truncations:{truncations}",
             counters.reserve_failures,
             counters.map_pressure,
             counters.connect_missing_entries,
             counters.connect_missing_exits,
             counters.connect_pending,
+            file_totals.missing_entries,
+            file_totals.missing_exits,
+            file_totals.pending,
         ),
         &mut store,
     )?;
@@ -861,11 +980,14 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     let observation_gaps = counters
         .connect_missing_entries
         .saturating_add(counters.connect_missing_exits)
-        .saturating_add(counters.connect_pending);
+        .saturating_add(counters.connect_pending)
+        .saturating_add(file_totals.missing_entries)
+        .saturating_add(file_totals.missing_exits)
+        .saturating_add(file_totals.pending);
     if dropped_events > 0 || observation_gaps > 0 || truncations > 0 {
         eprintln!(
             "apolysis: ⚠ evidence may be incomplete — {dropped_events} event(s) dropped, \
-             {observation_gaps} network Observation Gap(s), {truncations} truncated. \
+             {observation_gaps} pairing Observation Gap(s), {truncations} truncated. \
              A quiet timeline is not proof of absence."
         );
     }
@@ -1602,15 +1724,15 @@ pub fn update_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64, present: bool) -> 
         return Err("cgroup id must be non-zero".to_string());
     }
     if present {
-        track_cgroup_with_connect_counters(ebpf, cgroup_id)
+        track_cgroup_with_observation_counters(ebpf, cgroup_id)
     } else {
         drain_tracked_cgroup(ebpf, cgroup_id).map(|_| ())
     }
 }
 
-const CONNECT_DRAIN_POLL_LIMIT: usize = 4_096;
+const SCOPE_DRAIN_POLL_LIMIT: usize = 4_096;
 
-fn track_cgroup_with_connect_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
+fn track_cgroup_with_observation_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
     match tracked_cgroup_state(ebpf, cgroup_id)? {
         Some(TrackedCgroupState::Active) => return Ok(()),
         Some(state) => {
@@ -1622,21 +1744,39 @@ fn track_cgroup_with_connect_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result
     }
 
     set_network_connect_counters(ebpf, cgroup_id, NetworkConnectCountersAbi::default())?;
-    if let Err(error) = set_connect_updates_inflight(ebpf, cgroup_id, 0) {
+    if let Err(error) =
+        set_file_operation_counters(ebpf, cgroup_id, FileOperationCountersAbi::default())
+    {
         let rollback = remove_network_connect_counters(ebpf, cgroup_id);
         return Err(match rollback {
             Ok(()) => error,
             Err(rollback) => format!("{error}; connect-counter rollback failed: {rollback}"),
         });
     }
+    if let Err(error) = set_scope_updates_inflight(ebpf, cgroup_id, 0) {
+        let file_rollback = remove_file_operation_counters(ebpf, cgroup_id);
+        let connect_rollback = remove_network_connect_counters(ebpf, cgroup_id);
+        let mut failures = vec![error];
+        if let Err(rollback) = file_rollback {
+            failures.push(format!("file-counter rollback failed: {rollback}"));
+        }
+        if let Err(rollback) = connect_rollback {
+            failures.push(format!("connect-counter rollback failed: {rollback}"));
+        }
+        return Err(failures.join("; "));
+    }
     if let Err(error) = set_tracked_cgroup_state(ebpf, cgroup_id, TrackedCgroupState::Active) {
-        let inflight_rollback = remove_connect_updates_inflight(ebpf, cgroup_id);
-        let counter_rollback = remove_network_connect_counters(ebpf, cgroup_id);
+        let inflight_rollback = remove_scope_updates_inflight(ebpf, cgroup_id);
+        let file_rollback = remove_file_operation_counters(ebpf, cgroup_id);
+        let connect_rollback = remove_network_connect_counters(ebpf, cgroup_id);
         let mut failures = vec![error];
         if let Err(rollback) = inflight_rollback {
             failures.push(format!("in-flight update rollback failed: {rollback}"));
         }
-        if let Err(rollback) = counter_rollback {
+        if let Err(rollback) = file_rollback {
+            failures.push(format!("file-counter rollback failed: {rollback}"));
+        }
+        if let Err(rollback) = connect_rollback {
             failures.push(format!("connect-counter rollback failed: {rollback}"));
         }
         return Err(failures.join("; "));
@@ -1726,51 +1866,91 @@ fn remove_network_connect_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<()
         .map_err(|error| format!("failed to clean up cgroup connect counters: {error}"))
 }
 
-fn set_connect_updates_inflight(ebpf: &mut Ebpf, cgroup_id: u64, value: u64) -> Result<(), String> {
+fn set_file_operation_counters(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+    value: FileOperationCountersAbi,
+) -> Result<(), String> {
+    let counters_map = ebpf
+        .map_mut("APOLYSIS_FILE_COUNTERS_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_FILE_COUNTERS_BY_CGROUP".to_string())?;
+    let mut counters = HashMap::<_, u64, FileOperationCountersAbi>::try_from(counters_map)
+        .map_err(|error| format!("invalid APOLYSIS_FILE_COUNTERS_BY_CGROUP map: {error}"))?;
+    counters
+        .insert(cgroup_id, value, 0)
+        .map_err(|error| format!("failed to update cgroup file counters: {error}"))
+}
+
+fn read_file_operation_counters(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+) -> Result<FileOperationCountersAbi, String> {
+    let counters_map = ebpf
+        .map_mut("APOLYSIS_FILE_COUNTERS_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_FILE_COUNTERS_BY_CGROUP".to_string())?;
+    let counters = HashMap::<_, u64, FileOperationCountersAbi>::try_from(counters_map)
+        .map_err(|error| format!("invalid APOLYSIS_FILE_COUNTERS_BY_CGROUP map: {error}"))?;
+    counters
+        .get(&cgroup_id, 0)
+        .map_err(|error| format!("failed to read cgroup file counters: {error}"))
+}
+
+fn remove_file_operation_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
+    let counters_map = ebpf
+        .map_mut("APOLYSIS_FILE_COUNTERS_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_FILE_COUNTERS_BY_CGROUP".to_string())?;
+    let mut counters = HashMap::<_, u64, FileOperationCountersAbi>::try_from(counters_map)
+        .map_err(|error| format!("invalid APOLYSIS_FILE_COUNTERS_BY_CGROUP map: {error}"))?;
+    counters
+        .remove(&cgroup_id)
+        .map_err(|error| format!("failed to clean up cgroup file counters: {error}"))
+}
+
+fn set_scope_updates_inflight(ebpf: &mut Ebpf, cgroup_id: u64, value: u64) -> Result<(), String> {
     let updates_map = ebpf
-        .map_mut("APOLYSIS_CONNECT_UPDATES_BY_CGROUP")
-        .ok_or_else(|| "missing BPF map: APOLYSIS_CONNECT_UPDATES_BY_CGROUP".to_string())?;
+        .map_mut("APOLYSIS_SCOPE_UPDATES_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_SCOPE_UPDATES_BY_CGROUP".to_string())?;
     let mut updates = HashMap::<_, u64, u64>::try_from(updates_map)
-        .map_err(|error| format!("invalid APOLYSIS_CONNECT_UPDATES_BY_CGROUP map: {error}"))?;
+        .map_err(|error| format!("invalid APOLYSIS_SCOPE_UPDATES_BY_CGROUP map: {error}"))?;
     updates
         .insert(cgroup_id, value, 0)
-        .map_err(|error| format!("failed to update cgroup in-flight connect counter: {error}"))
+        .map_err(|error| format!("failed to update cgroup in-flight scope counter: {error}"))
 }
 
-fn read_connect_updates_inflight(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<u64, String> {
+fn read_scope_updates_inflight(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<u64, String> {
     let updates_map = ebpf
-        .map_mut("APOLYSIS_CONNECT_UPDATES_BY_CGROUP")
-        .ok_or_else(|| "missing BPF map: APOLYSIS_CONNECT_UPDATES_BY_CGROUP".to_string())?;
+        .map_mut("APOLYSIS_SCOPE_UPDATES_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_SCOPE_UPDATES_BY_CGROUP".to_string())?;
     let updates = HashMap::<_, u64, u64>::try_from(updates_map)
-        .map_err(|error| format!("invalid APOLYSIS_CONNECT_UPDATES_BY_CGROUP map: {error}"))?;
+        .map_err(|error| format!("invalid APOLYSIS_SCOPE_UPDATES_BY_CGROUP map: {error}"))?;
     updates
         .get(&cgroup_id, 0)
-        .map_err(|error| format!("failed to read cgroup in-flight connect counter: {error}"))
+        .map_err(|error| format!("failed to read cgroup in-flight scope counter: {error}"))
 }
 
-fn remove_connect_updates_inflight(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
+fn remove_scope_updates_inflight(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
     let updates_map = ebpf
-        .map_mut("APOLYSIS_CONNECT_UPDATES_BY_CGROUP")
-        .ok_or_else(|| "missing BPF map: APOLYSIS_CONNECT_UPDATES_BY_CGROUP".to_string())?;
+        .map_mut("APOLYSIS_SCOPE_UPDATES_BY_CGROUP")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_SCOPE_UPDATES_BY_CGROUP".to_string())?;
     let mut updates = HashMap::<_, u64, u64>::try_from(updates_map)
-        .map_err(|error| format!("invalid APOLYSIS_CONNECT_UPDATES_BY_CGROUP map: {error}"))?;
+        .map_err(|error| format!("invalid APOLYSIS_SCOPE_UPDATES_BY_CGROUP map: {error}"))?;
     updates
         .remove(&cgroup_id)
-        .map_err(|error| format!("failed to clean up cgroup in-flight connect counter: {error}"))
+        .map_err(|error| format!("failed to clean up cgroup in-flight scope counter: {error}"))
 }
 
-fn wait_for_connect_updates_to_drain<F>(mut read_inflight: F) -> Result<(), String>
+fn wait_for_scope_updates_to_drain<F>(mut read_inflight: F) -> Result<(), String>
 where
     F: FnMut() -> Result<u64, String>,
 {
-    for _ in 0..CONNECT_DRAIN_POLL_LIMIT {
+    for _ in 0..SCOPE_DRAIN_POLL_LIMIT {
         if read_inflight()? == 0 {
             return Ok(());
         }
         std::thread::yield_now();
     }
     Err(format!(
-        "cgroup connect updates did not drain after {CONNECT_DRAIN_POLL_LIMIT} polls"
+        "cgroup scope updates did not drain after {SCOPE_DRAIN_POLL_LIMIT} polls"
     ))
 }
 
@@ -1781,7 +1961,27 @@ fn restore_active_scope(ebpf: &mut Ebpf, cgroup_id: u64, error: String) -> Strin
     }
 }
 
-fn drain_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<NetworkConnectCounters, String> {
+fn restore_scope_with_counters(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+    network: NetworkConnectCountersAbi,
+    files: FileOperationCountersAbi,
+    error: String,
+) -> String {
+    let mut failures = vec![error];
+    if let Err(rollback) = set_network_connect_counters(ebpf, cgroup_id, network) {
+        failures.push(format!("connect-counter rollback failed: {rollback}"));
+    }
+    if let Err(rollback) = set_file_operation_counters(ebpf, cgroup_id, files) {
+        failures.push(format!("file-counter rollback failed: {rollback}"));
+    }
+    restore_active_scope(ebpf, cgroup_id, failures.join("; "))
+}
+
+fn drain_tracked_cgroup(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+) -> Result<ScopeObservationGapCounters, String> {
     if cgroup_id == 0 {
         return Err("cgroup id must be non-zero".to_string());
     }
@@ -1797,7 +1997,7 @@ fn drain_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<NetworkConnec
     }
     set_tracked_cgroup_state(ebpf, cgroup_id, TrackedCgroupState::Draining)?;
     if let Err(error) =
-        wait_for_connect_updates_to_drain(|| read_connect_updates_inflight(ebpf, cgroup_id))
+        wait_for_scope_updates_to_drain(|| read_scope_updates_inflight(ebpf, cgroup_id))
     {
         return Err(restore_active_scope(ebpf, cgroup_id, error));
     }
@@ -1805,22 +2005,39 @@ fn drain_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<NetworkConnec
         return Err(restore_active_scope(ebpf, cgroup_id, error));
     }
 
-    let snapshot = match read_network_connect_counters(ebpf, cgroup_id) {
+    let network_snapshot = match read_network_connect_counters(ebpf, cgroup_id) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return Err(restore_active_scope(ebpf, cgroup_id, error)),
+    };
+    let file_snapshot = match read_file_operation_counters(ebpf, cgroup_id) {
         Ok(snapshot) => snapshot,
         Err(error) => return Err(restore_active_scope(ebpf, cgroup_id, error)),
     };
     if let Err(error) = remove_network_connect_counters(ebpf, cgroup_id) {
         return Err(restore_active_scope(ebpf, cgroup_id, error));
     }
-    if let Err(error) = remove_connect_updates_inflight(ebpf, cgroup_id) {
-        let counter_rollback = set_network_connect_counters(ebpf, cgroup_id, snapshot);
-        let error = match counter_rollback {
-            Ok(()) => error,
-            Err(rollback) => format!("{error}; connect-counter rollback failed: {rollback}"),
-        };
-        return Err(restore_active_scope(ebpf, cgroup_id, error));
+    if let Err(error) = remove_file_operation_counters(ebpf, cgroup_id) {
+        return Err(restore_scope_with_counters(
+            ebpf,
+            cgroup_id,
+            network_snapshot,
+            file_snapshot,
+            error,
+        ));
     }
-    Ok(snapshot.into())
+    if let Err(error) = remove_scope_updates_inflight(ebpf, cgroup_id) {
+        return Err(restore_scope_with_counters(
+            ebpf,
+            cgroup_id,
+            network_snapshot,
+            file_snapshot,
+            error,
+        ));
+    }
+    Ok(ScopeObservationGapCounters {
+        network_connect: network_snapshot.into(),
+        file_operations: file_snapshot.into(),
+    })
 }
 
 fn attach_tracepoints(ebpf: &mut Ebpf, plan: &AyaLoaderPlan) -> Result<(), String> {
@@ -1847,11 +2064,11 @@ fn attach_tracepoints(ebpf: &mut Ebpf, plan: &AyaLoaderPlan) -> Result<(), Strin
     Ok(())
 }
 
-fn read_observer_counters(ebpf: &mut Ebpf) -> Result<ObserverCounters, String> {
+fn read_observer_counters(ebpf: &mut Ebpf) -> Result<ObserverCountersAbi, String> {
     let counters_map = ebpf
         .map_mut("APOLYSIS_COUNTERS")
         .ok_or_else(|| "missing BPF map: APOLYSIS_COUNTERS".to_string())?;
-    let counters = Array::<_, ObserverCounters>::try_from(counters_map)
+    let counters = Array::<_, ObserverCountersAbi>::try_from(counters_map)
         .map_err(|error| format!("invalid APOLYSIS_COUNTERS map: {error}"))?;
     counters
         .get(&0, 0)
@@ -2061,13 +2278,16 @@ pub fn raw_event_from_record(
     );
     Ok(match record.return_value() {
         Some(return_value) => {
-            raw.with_operation_result(operation_result_from_syscall_return(return_value))
+            raw.with_operation_result(operation_result_from_syscall_return(kind, return_value))
         }
         None => raw,
     })
 }
 
-fn operation_result_from_syscall_return(return_value: i64) -> OperationResult {
+fn operation_result_from_syscall_return(
+    kind: KernelEventKind,
+    return_value: i64,
+) -> OperationResult {
     if return_value >= 0 {
         return OperationResult::new(OperationOutcome::Succeeded, return_value, None);
     }
@@ -2076,7 +2296,9 @@ fn operation_result_from_syscall_return(return_value: i64) -> OperationResult {
         .and_then(|value| i32::try_from(value).ok());
     let outcome = match errno {
         Some(libc::EACCES | libc::EPERM) => OperationOutcome::Denied,
-        Some(libc::EINPROGRESS | libc::EALREADY) => OperationOutcome::Pending,
+        Some(libc::EINPROGRESS | libc::EALREADY) if kind == KernelEventKind::Connect => {
+            OperationOutcome::Pending
+        }
         _ => OperationOutcome::Failed,
     };
     OperationResult::new(outcome, return_value, errno)
@@ -2115,7 +2337,7 @@ mod tests {
     fn cgroup_drain_waits_for_inflight_kernel_counter_updates() {
         let mut observed = VecDeque::from([2, 1, 0]);
 
-        wait_for_connect_updates_to_drain(|| {
+        wait_for_scope_updates_to_drain(|| {
             Ok(observed.pop_front().expect("bounded poll sequence"))
         })
         .expect("in-flight updates drain");

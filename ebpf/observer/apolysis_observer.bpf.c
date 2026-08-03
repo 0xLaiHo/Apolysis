@@ -28,6 +28,25 @@ struct apolysis_pending_connect {
     unsigned char payload[APOLYSIS_PAYLOAD_LEN];
 };
 
+enum apolysis_file_syscall_source {
+    APOLYSIS_FILE_SOURCE_OPENAT = 1,
+    APOLYSIS_FILE_SOURCE_OPENAT2 = 2,
+    APOLYSIS_FILE_SOURCE_CREAT = 3,
+    APOLYSIS_FILE_SOURCE_TRUNCATE = 4,
+    APOLYSIS_FILE_SOURCE_UNLINKAT = 5,
+    APOLYSIS_FILE_SOURCE_RENAMEAT2 = 6,
+};
+
+struct apolysis_pending_file {
+    unsigned long long cgroup_id;
+    unsigned int event_kind;
+    unsigned int source;
+    unsigned int flags;
+    char resource[APOLYSIS_RESOURCE_LEN];
+    char action[APOLYSIS_ACTION_LEN];
+    char payload[APOLYSIS_PAYLOAD_LEN];
+};
+
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 20);
@@ -77,6 +96,20 @@ struct {
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, unsigned long long);
+    __type(value, struct apolysis_pending_file);
+} APOLYSIS_PENDING_FILES SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, unsigned int);
+    __type(value, struct apolysis_pending_file);
+} APOLYSIS_FILE_SCRATCH SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 16384);
     __type(key, unsigned long long);
     __type(value, unsigned char);
@@ -93,8 +126,15 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 16384);
     __type(key, unsigned long long);
+    __type(value, struct apolysis_file_operation_counters);
+} APOLYSIS_FILE_COUNTERS_BY_CGROUP SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, unsigned long long);
     __type(value, unsigned long long);
-} APOLYSIS_CONNECT_UPDATES_BY_CGROUP SEC(".maps");
+} APOLYSIS_SCOPE_UPDATES_BY_CGROUP SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -140,11 +180,11 @@ network_connect_counters(unsigned long long cgroup_id)
     return bpf_map_lookup_elem(&APOLYSIS_CONNECT_COUNTERS_BY_CGROUP, &cgroup_id);
 }
 
-static __always_inline bool begin_connect_scope_update(unsigned long long cgroup_id)
+static __always_inline bool begin_scope_counter_update(unsigned long long cgroup_id)
 {
     unsigned long long *updates;
 
-    updates = bpf_map_lookup_elem(&APOLYSIS_CONNECT_UPDATES_BY_CGROUP, &cgroup_id);
+    updates = bpf_map_lookup_elem(&APOLYSIS_SCOPE_UPDATES_BY_CGROUP, &cgroup_id);
     if (!updates)
         return false;
     __sync_fetch_and_add(updates, 1);
@@ -154,13 +194,13 @@ static __always_inline bool begin_connect_scope_update(unsigned long long cgroup
     return false;
 }
 
-static __always_inline void end_connect_scope_update(unsigned long long cgroup_id,
+static __always_inline void end_scope_counter_update(unsigned long long cgroup_id,
                                                       bool update_scoped)
 {
     unsigned long long *updates;
 
     if (update_scoped) {
-        updates = bpf_map_lookup_elem(&APOLYSIS_CONNECT_UPDATES_BY_CGROUP, &cgroup_id);
+        updates = bpf_map_lookup_elem(&APOLYSIS_SCOPE_UPDATES_BY_CGROUP, &cgroup_id);
         if (!updates)
             return;
         __sync_fetch_and_sub(updates, 1);
@@ -233,11 +273,129 @@ static __always_inline void decrement_connect_pending(
 
 static __always_inline void account_stale_connect(unsigned long long cgroup_id)
 {
-    bool update_scoped = begin_connect_scope_update(cgroup_id);
+    bool update_scoped = begin_scope_counter_update(cgroup_id);
 
     decrement_connect_pending(cgroup_id, update_scoped);
     count_connect_missing_exit(cgroup_id, update_scoped);
-    end_connect_scope_update(cgroup_id, update_scoped);
+    end_scope_counter_update(cgroup_id, update_scoped);
+}
+
+static __always_inline struct apolysis_operation_pair_counters *
+file_pair_counters(struct apolysis_file_operation_counters *counters,
+                   unsigned int event_kind)
+{
+    if (!counters)
+        return 0;
+    switch (event_kind) {
+    case APOLYSIS_EVENT_OPEN:
+        return &counters->open;
+    case APOLYSIS_EVENT_CREATE:
+        return &counters->create;
+    case APOLYSIS_EVENT_TRUNCATE:
+        return &counters->truncate;
+    case APOLYSIS_EVENT_UNLINK:
+        return &counters->unlink;
+    case APOLYSIS_EVENT_RENAME:
+        return &counters->rename;
+    default:
+        return 0;
+    }
+}
+
+static __always_inline struct apolysis_file_operation_counters *
+file_operation_counters(unsigned long long cgroup_id)
+{
+    return bpf_map_lookup_elem(&APOLYSIS_FILE_COUNTERS_BY_CGROUP, &cgroup_id);
+}
+
+static __always_inline void count_file_missing_entry(
+    unsigned long long cgroup_id,
+    unsigned int event_kind,
+    bool update_scoped)
+{
+    struct apolysis_observer_counters *counters = observer_counters();
+    struct apolysis_operation_pair_counters *pair;
+
+    if (counters) {
+        pair = file_pair_counters(&counters->file_operations, event_kind);
+        if (pair)
+            __sync_fetch_and_add(&pair->missing_entries, 1);
+    }
+    if (!update_scoped)
+        return;
+    pair = file_pair_counters(file_operation_counters(cgroup_id), event_kind);
+    if (pair)
+        __sync_fetch_and_add(&pair->missing_entries, 1);
+}
+
+static __always_inline void count_file_missing_exit(
+    unsigned long long cgroup_id,
+    unsigned int event_kind,
+    bool update_scoped)
+{
+    struct apolysis_observer_counters *counters = observer_counters();
+    struct apolysis_operation_pair_counters *pair;
+
+    if (counters) {
+        pair = file_pair_counters(&counters->file_operations, event_kind);
+        if (pair)
+            __sync_fetch_and_add(&pair->missing_exits, 1);
+    }
+    if (!update_scoped)
+        return;
+    pair = file_pair_counters(file_operation_counters(cgroup_id), event_kind);
+    if (pair)
+        __sync_fetch_and_add(&pair->missing_exits, 1);
+}
+
+static __always_inline void increment_file_pending(
+    unsigned long long cgroup_id,
+    unsigned int event_kind,
+    bool update_scoped)
+{
+    struct apolysis_observer_counters *counters = observer_counters();
+    struct apolysis_operation_pair_counters *pair;
+
+    if (counters) {
+        pair = file_pair_counters(&counters->file_operations, event_kind);
+        if (pair)
+            __sync_fetch_and_add(&pair->pending, 1);
+    }
+    if (!update_scoped)
+        return;
+    pair = file_pair_counters(file_operation_counters(cgroup_id), event_kind);
+    if (pair)
+        __sync_fetch_and_add(&pair->pending, 1);
+}
+
+static __always_inline void decrement_file_pending(
+    unsigned long long cgroup_id,
+    unsigned int event_kind,
+    bool update_scoped)
+{
+    struct apolysis_observer_counters *counters = observer_counters();
+    struct apolysis_operation_pair_counters *pair;
+
+    if (counters) {
+        pair = file_pair_counters(&counters->file_operations, event_kind);
+        if (pair)
+            __sync_fetch_and_sub(&pair->pending, 1);
+    }
+    if (!update_scoped)
+        return;
+    pair = file_pair_counters(file_operation_counters(cgroup_id), event_kind);
+    if (pair)
+        __sync_fetch_and_sub(&pair->pending, 1);
+}
+
+static __always_inline void account_stale_file(unsigned long long cgroup_id,
+                                                unsigned int event_kind)
+{
+    bool update_scoped = begin_scope_counter_update(cgroup_id);
+
+    decrement_file_pending(cgroup_id, event_kind, update_scoped);
+    count_file_missing_exit(cgroup_id, event_kind, update_scoped);
+    end_scope_counter_update(cgroup_id, update_scoped);
 }
 
 static __always_inline struct apolysis_scope_config *scope_config(void)
@@ -293,7 +451,7 @@ static __always_inline bool current_is_in_scope(void)
     return current_pid_tree_is_tracked();
 }
 
-static __always_inline bool connect_pair_is_in_scope(unsigned long long cgroup_id)
+static __always_inline bool pair_is_in_scope(unsigned long long cgroup_id)
 {
     struct apolysis_scope_config *config = scope_config();
 
@@ -358,16 +516,6 @@ static __always_inline void copy_action(struct apolysis_kernel_event *event,
                                         unsigned int length)
 {
     __builtin_memcpy(event->action, action, length);
-}
-
-static __always_inline void read_user_path(struct apolysis_kernel_event *event,
-                                           const char *path)
-{
-    long length;
-
-    length = bpf_probe_read_user_str(event->resource, sizeof(event->resource), path);
-    if (length == sizeof(event->resource))
-        event->flags |= APOLYSIS_FLAG_RESOURCE_TRUNCATED;
 }
 
 static __always_inline void read_kernel_path(struct apolysis_kernel_event *event,
@@ -497,17 +645,183 @@ static __always_inline unsigned int open_event_kind(unsigned long long flags)
     return APOLYSIS_EVENT_OPEN;
 }
 
-static __always_inline void copy_open_action(struct apolysis_kernel_event *event,
-                                             unsigned long long flags)
+static __always_inline void copy_pending_file_action(
+    struct apolysis_pending_file *pending,
+    unsigned int event_kind,
+    unsigned long long open_flags)
 {
-    if (flags & APOLYSIS_O_CREAT)
-        copy_action(event, "create", 7);
-    else if (flags & APOLYSIS_O_TRUNC)
-        copy_action(event, "truncate", 9);
-    else if (flags & APOLYSIS_O_ACCMODE)
-        copy_action(event, "write", 6);
-    else
-        copy_action(event, "read", 5);
+    switch (event_kind) {
+    case APOLYSIS_EVENT_CREATE:
+        __builtin_memcpy(pending->action, "create", 7);
+        break;
+    case APOLYSIS_EVENT_TRUNCATE:
+        __builtin_memcpy(pending->action, "truncate", 9);
+        break;
+    case APOLYSIS_EVENT_UNLINK:
+        __builtin_memcpy(pending->action, "unlink", 7);
+        break;
+    case APOLYSIS_EVENT_RENAME:
+        __builtin_memcpy(pending->action, "rename", 7);
+        break;
+    case APOLYSIS_EVENT_OPEN:
+        if (open_flags & APOLYSIS_O_ACCMODE)
+            __builtin_memcpy(pending->action, "write", 6);
+        else
+            __builtin_memcpy(pending->action, "read", 5);
+        break;
+    }
+}
+
+static __always_inline void read_pending_file_path(
+    struct apolysis_pending_file *pending,
+    const char *path)
+{
+    long length;
+
+    length = bpf_probe_read_user_str(pending->resource,
+                                     sizeof(pending->resource), path);
+    if (length == sizeof(pending->resource))
+        pending->flags |= APOLYSIS_FLAG_RESOURCE_TRUNCATED;
+}
+
+static __always_inline int capture_file_enter(unsigned int event_kind,
+                                              unsigned int source,
+                                              unsigned long long open_flags,
+                                              const char *path,
+                                              const char *second_path)
+{
+    struct apolysis_pending_file *pending;
+    struct apolysis_pending_file *stale;
+    unsigned long long pid_tgid;
+    unsigned long long cgroup_id;
+    unsigned long long stale_cgroup_id = 0;
+    unsigned int stale_event_kind = 0;
+    unsigned int scratch_key = 0;
+    bool replaces_stale_entry;
+    bool update_scoped;
+    long length;
+
+    if (!current_is_in_scope())
+        return 0;
+    cgroup_id = bpf_get_current_cgroup_id();
+    update_scoped = begin_scope_counter_update(cgroup_id);
+    if (multi_cgroup_scope() && !update_scoped) {
+        if (cgroup_scope_state(cgroup_id) == APOLYSIS_CGROUP_ACTIVE)
+            count_map_pressure();
+        return 0;
+    }
+
+    pending = bpf_map_lookup_elem(&APOLYSIS_FILE_SCRATCH, &scratch_key);
+    if (!pending) {
+        count_file_missing_exit(cgroup_id, event_kind, update_scoped);
+        end_scope_counter_update(cgroup_id, update_scoped);
+        count_map_pressure();
+        return 0;
+    }
+    __builtin_memset(pending, 0, sizeof(*pending));
+    pending->cgroup_id = cgroup_id;
+    pending->event_kind = event_kind;
+    pending->source = source;
+    read_pending_file_path(pending, path);
+    if (second_path) {
+        length = bpf_probe_read_user_str(pending->payload,
+                                         sizeof(pending->payload), second_path);
+        if (length == sizeof(pending->payload))
+            pending->flags |= APOLYSIS_FLAG_PAYLOAD_TRUNCATED;
+    }
+    copy_pending_file_action(pending, event_kind, open_flags);
+
+    pid_tgid = bpf_get_current_pid_tgid();
+    stale = bpf_map_lookup_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
+    replaces_stale_entry = stale != 0;
+    if (stale) {
+        stale_cgroup_id = stale->cgroup_id;
+        stale_event_kind = stale->event_kind;
+    }
+    if (bpf_map_update_elem(&APOLYSIS_PENDING_FILES, &pid_tgid, pending, BPF_ANY)) {
+        if (replaces_stale_entry) {
+            bpf_map_delete_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
+            account_stale_file(stale_cgroup_id, stale_event_kind);
+        }
+        count_file_missing_exit(cgroup_id, event_kind, update_scoped);
+        end_scope_counter_update(cgroup_id, update_scoped);
+        count_map_pressure();
+        return 0;
+    }
+    if (replaces_stale_entry)
+        account_stale_file(stale_cgroup_id, stale_event_kind);
+    increment_file_pending(cgroup_id, event_kind, update_scoped);
+    end_scope_counter_update(cgroup_id, update_scoped);
+    return 0;
+}
+
+static __always_inline void account_file_missing_entry_for_current(
+    unsigned int event_kind)
+{
+    unsigned long long cgroup_id = bpf_get_current_cgroup_id();
+    bool update_scoped;
+
+    if (multi_cgroup_scope()) {
+        update_scoped = begin_scope_counter_update(cgroup_id);
+        if (update_scoped) {
+            count_file_missing_entry(cgroup_id, event_kind, update_scoped);
+            end_scope_counter_update(cgroup_id, update_scoped);
+        }
+    } else if (current_is_in_scope()) {
+        count_file_missing_entry(cgroup_id, event_kind, 0);
+    }
+}
+
+static __always_inline int capture_file_exit(struct trace_event_raw_sys_exit *ctx,
+                                             unsigned int source,
+                                             unsigned int fallback_event_kind)
+{
+    struct apolysis_pending_file *pending;
+    struct apolysis_kernel_event *event;
+    unsigned long long pid_tgid;
+    unsigned long long cgroup_id;
+    unsigned int event_kind;
+    bool update_scoped;
+
+    pid_tgid = bpf_get_current_pid_tgid();
+    pending = bpf_map_lookup_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
+    if (!pending) {
+        account_file_missing_entry_for_current(fallback_event_kind);
+        return 0;
+    }
+    cgroup_id = pending->cgroup_id;
+    event_kind = pending->event_kind;
+    if (pending->source != source) {
+        bpf_map_delete_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
+        account_stale_file(cgroup_id, event_kind);
+        account_file_missing_entry_for_current(fallback_event_kind);
+        return 0;
+    }
+
+    update_scoped = begin_scope_counter_update(cgroup_id);
+    if (!pair_is_in_scope(cgroup_id)) {
+        bpf_map_delete_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
+        decrement_file_pending(cgroup_id, event_kind, update_scoped);
+        count_file_missing_exit(cgroup_id, event_kind, update_scoped);
+        end_scope_counter_update(cgroup_id, update_scoped);
+        return 0;
+    }
+
+    event = reserve_event_unchecked(event_kind);
+    if (event) {
+        __builtin_memcpy(event->resource, pending->resource, sizeof(event->resource));
+        __builtin_memcpy(event->action, pending->action, sizeof(event->action));
+        __builtin_memcpy(event->payload, pending->payload, sizeof(event->payload));
+        event->flags |= pending->flags | APOLYSIS_FLAG_RETURN_VALUE;
+        event->return_value = ctx->ret;
+        bpf_ringbuf_submit(event, 0);
+    } else {
+        count_file_missing_exit(cgroup_id, event_kind, update_scoped);
+    }
+    bpf_map_delete_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
+    decrement_file_pending(cgroup_id, event_kind, update_scoped);
+    end_scope_counter_update(cgroup_id, update_scoped);
+    return 0;
 }
 
 SEC("tracepoint/sched/sched_process_fork")
@@ -591,7 +905,10 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     struct apolysis_kernel_event *event;
     unsigned long long pid_tgid;
     struct apolysis_pending_connect *pending_connect;
+    struct apolysis_pending_file *pending_file;
     unsigned long long connect_cgroup_id;
+    unsigned long long file_cgroup_id;
+    unsigned int file_event_kind;
     bool update_scoped;
     unsigned int pid;
 
@@ -599,11 +916,21 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     pending_connect = bpf_map_lookup_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
     if (pending_connect) {
         connect_cgroup_id = pending_connect->cgroup_id;
-        update_scoped = begin_connect_scope_update(connect_cgroup_id);
+        update_scoped = begin_scope_counter_update(connect_cgroup_id);
         bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
         decrement_connect_pending(connect_cgroup_id, update_scoped);
         count_connect_missing_exit(connect_cgroup_id, update_scoped);
-        end_connect_scope_update(connect_cgroup_id, update_scoped);
+        end_scope_counter_update(connect_cgroup_id, update_scoped);
+    }
+    pending_file = bpf_map_lookup_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
+    if (pending_file) {
+        file_cgroup_id = pending_file->cgroup_id;
+        file_event_kind = pending_file->event_kind;
+        update_scoped = begin_scope_counter_update(file_cgroup_id);
+        bpf_map_delete_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
+        decrement_file_pending(file_cgroup_id, file_event_kind, update_scoped);
+        count_file_missing_exit(file_cgroup_id, file_event_kind, update_scoped);
+        end_scope_counter_update(file_cgroup_id, update_scoped);
     }
 
     event = reserve_event(APOLYSIS_EVENT_EXIT);
@@ -625,88 +952,93 @@ SEC("tracepoint/syscalls/sys_enter_openat")
 int apolysis_sys_enter_openat(struct trace_event_raw_sys_enter *ctx)
 {
     unsigned long long flags = ctx->args[2];
-    struct apolysis_kernel_event *event = reserve_event(open_event_kind(flags));
 
-    if (!event)
-        return 0;
-    read_user_path(event, (const char *)ctx->args[1]);
-    copy_open_action(event, flags);
-    bpf_ringbuf_submit(event, 0);
-    return 0;
+    return capture_file_enter(open_event_kind(flags), APOLYSIS_FILE_SOURCE_OPENAT,
+                              flags, (const char *)ctx->args[1], 0);
+}
+
+SEC("tracepoint/syscalls/sys_exit_openat")
+int apolysis_sys_exit_openat(struct trace_event_raw_sys_exit *ctx)
+{
+    return capture_file_exit(ctx, APOLYSIS_FILE_SOURCE_OPENAT,
+                             APOLYSIS_EVENT_OPEN);
 }
 
 SEC("tracepoint/syscalls/sys_enter_openat2")
 int apolysis_sys_enter_openat2(struct trace_event_raw_sys_enter *ctx)
 {
     unsigned long long flags = 0;
-    struct apolysis_kernel_event *event;
 
     bpf_probe_read_user(&flags, sizeof(flags), (const void *)ctx->args[2]);
-    event = reserve_event(open_event_kind(flags));
+    return capture_file_enter(open_event_kind(flags), APOLYSIS_FILE_SOURCE_OPENAT2,
+                              flags, (const char *)ctx->args[1], 0);
+}
 
-    if (!event)
-        return 0;
-    read_user_path(event, (const char *)ctx->args[1]);
-    copy_open_action(event, flags);
-    bpf_ringbuf_submit(event, 0);
-    return 0;
+SEC("tracepoint/syscalls/sys_exit_openat2")
+int apolysis_sys_exit_openat2(struct trace_event_raw_sys_exit *ctx)
+{
+    return capture_file_exit(ctx, APOLYSIS_FILE_SOURCE_OPENAT2,
+                             APOLYSIS_EVENT_OPEN);
 }
 
 SEC("tracepoint/syscalls/sys_enter_creat")
 int apolysis_sys_enter_creat(struct trace_event_raw_sys_enter *ctx)
 {
-    struct apolysis_kernel_event *event = reserve_event(APOLYSIS_EVENT_CREATE);
+    return capture_file_enter(APOLYSIS_EVENT_CREATE, APOLYSIS_FILE_SOURCE_CREAT,
+                              APOLYSIS_O_CREAT, (const char *)ctx->args[0], 0);
+}
 
-    if (!event)
-        return 0;
-    read_user_path(event, (const char *)ctx->args[0]);
-    copy_action(event, "create", 7);
-    bpf_ringbuf_submit(event, 0);
-    return 0;
+SEC("tracepoint/syscalls/sys_exit_creat")
+int apolysis_sys_exit_creat(struct trace_event_raw_sys_exit *ctx)
+{
+    return capture_file_exit(ctx, APOLYSIS_FILE_SOURCE_CREAT,
+                             APOLYSIS_EVENT_CREATE);
 }
 
 SEC("tracepoint/syscalls/sys_enter_truncate")
 int apolysis_sys_enter_truncate(struct trace_event_raw_sys_enter *ctx)
 {
-    struct apolysis_kernel_event *event = reserve_event(APOLYSIS_EVENT_TRUNCATE);
+    return capture_file_enter(APOLYSIS_EVENT_TRUNCATE,
+                              APOLYSIS_FILE_SOURCE_TRUNCATE, APOLYSIS_O_TRUNC,
+                              (const char *)ctx->args[0], 0);
+}
 
-    if (!event)
-        return 0;
-    read_user_path(event, (const char *)ctx->args[0]);
-    copy_action(event, "truncate", 9);
-    bpf_ringbuf_submit(event, 0);
-    return 0;
+SEC("tracepoint/syscalls/sys_exit_truncate")
+int apolysis_sys_exit_truncate(struct trace_event_raw_sys_exit *ctx)
+{
+    return capture_file_exit(ctx, APOLYSIS_FILE_SOURCE_TRUNCATE,
+                             APOLYSIS_EVENT_TRUNCATE);
 }
 
 SEC("tracepoint/syscalls/sys_enter_unlinkat")
 int apolysis_sys_enter_unlinkat(struct trace_event_raw_sys_enter *ctx)
 {
-    struct apolysis_kernel_event *event = reserve_event(APOLYSIS_EVENT_UNLINK);
+    return capture_file_enter(APOLYSIS_EVENT_UNLINK,
+                              APOLYSIS_FILE_SOURCE_UNLINKAT, 0,
+                              (const char *)ctx->args[1], 0);
+}
 
-    if (!event)
-        return 0;
-    read_user_path(event, (const char *)ctx->args[1]);
-    copy_action(event, "unlink", 7);
-    bpf_ringbuf_submit(event, 0);
-    return 0;
+SEC("tracepoint/syscalls/sys_exit_unlinkat")
+int apolysis_sys_exit_unlinkat(struct trace_event_raw_sys_exit *ctx)
+{
+    return capture_file_exit(ctx, APOLYSIS_FILE_SOURCE_UNLINKAT,
+                             APOLYSIS_EVENT_UNLINK);
 }
 
 SEC("tracepoint/syscalls/sys_enter_renameat2")
 int apolysis_sys_enter_renameat2(struct trace_event_raw_sys_enter *ctx)
 {
-    struct apolysis_kernel_event *event = reserve_event(APOLYSIS_EVENT_RENAME);
-    long length;
+    return capture_file_enter(APOLYSIS_EVENT_RENAME,
+                              APOLYSIS_FILE_SOURCE_RENAMEAT2, 0,
+                              (const char *)ctx->args[1],
+                              (const char *)ctx->args[3]);
+}
 
-    if (!event)
-        return 0;
-    read_user_path(event, (const char *)ctx->args[1]);
-    length = bpf_probe_read_user_str(event->payload, sizeof(event->payload),
-                                     (const char *)ctx->args[3]);
-    if (length == sizeof(event->payload))
-        event->flags |= APOLYSIS_FLAG_PAYLOAD_TRUNCATED;
-    copy_action(event, "rename", 7);
-    bpf_ringbuf_submit(event, 0);
-    return 0;
+SEC("tracepoint/syscalls/sys_exit_renameat2")
+int apolysis_sys_exit_renameat2(struct trace_event_raw_sys_exit *ctx)
+{
+    return capture_file_exit(ctx, APOLYSIS_FILE_SOURCE_RENAMEAT2,
+                             APOLYSIS_EVENT_RENAME);
 }
 
 SEC("tracepoint/syscalls/sys_enter_connect")
@@ -726,7 +1058,7 @@ int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
     if (!current_is_in_scope())
         return 0;
     cgroup_id = bpf_get_current_cgroup_id();
-    update_scoped = begin_connect_scope_update(cgroup_id);
+    update_scoped = begin_scope_counter_update(cgroup_id);
     if (multi_cgroup_scope() && !update_scoped) {
         if (cgroup_scope_state(cgroup_id) == APOLYSIS_CGROUP_ACTIVE)
             count_map_pressure();
@@ -734,7 +1066,7 @@ int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
     }
     pending = bpf_map_lookup_elem(&APOLYSIS_CONNECT_SCRATCH, &scratch_key);
     if (!pending) {
-        end_connect_scope_update(cgroup_id, update_scoped);
+        end_scope_counter_update(cgroup_id, update_scoped);
         count_map_pressure();
         return 0;
     }
@@ -765,14 +1097,14 @@ int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
             bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
             account_stale_connect(stale_cgroup_id);
         }
-        end_connect_scope_update(cgroup_id, update_scoped);
+        end_scope_counter_update(cgroup_id, update_scoped);
         count_map_pressure();
         return 0;
     }
     if (replaces_stale_entry)
         account_stale_connect(stale_cgroup_id);
     increment_connect_pending(cgroup_id, update_scoped);
-    end_connect_scope_update(cgroup_id, update_scoped);
+    end_scope_counter_update(cgroup_id, update_scoped);
     return 0;
 }
 
@@ -791,10 +1123,10 @@ int apolysis_sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
     if (!pending) {
         if (multi_cgroup_scope()) {
             current_cgroup_id = bpf_get_current_cgroup_id();
-            update_scoped = begin_connect_scope_update(current_cgroup_id);
+            update_scoped = begin_scope_counter_update(current_cgroup_id);
             if (update_scoped) {
                 count_connect_missing_entry(current_cgroup_id, update_scoped);
-                end_connect_scope_update(current_cgroup_id, update_scoped);
+                end_scope_counter_update(current_cgroup_id, update_scoped);
             }
         } else if (current_is_in_scope()) {
             current_cgroup_id = bpf_get_current_cgroup_id();
@@ -803,17 +1135,17 @@ int apolysis_sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
         return 0;
     }
     cgroup_id = pending->cgroup_id;
-    update_scoped = begin_connect_scope_update(cgroup_id);
-    if (!connect_pair_is_in_scope(cgroup_id)) {
+    update_scoped = begin_scope_counter_update(cgroup_id);
+    if (!pair_is_in_scope(cgroup_id)) {
         bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
         decrement_connect_pending(cgroup_id, update_scoped);
         count_connect_missing_exit(cgroup_id, update_scoped);
-        end_connect_scope_update(cgroup_id, update_scoped);
+        end_scope_counter_update(cgroup_id, update_scoped);
         return 0;
     }
 
     /*
-     * connect_pair_is_in_scope made the scope decision while update_scoped
+     * pair_is_in_scope made the scope decision while update_scoped
      * holds the per-cgroup drain barrier. Do not re-read the ACTIVE/DRAINING
      * state here: userspace may switch it after that decision and waits for
      * this handler before snapshotting the counters.
@@ -828,6 +1160,6 @@ int apolysis_sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
     }
     bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
     decrement_connect_pending(cgroup_id, update_scoped);
-    end_connect_scope_update(cgroup_id, update_scoped);
+    end_scope_counter_update(cgroup_id, update_scoped);
     return 0;
 }
