@@ -16,9 +16,9 @@ Apolysis 是面向用户可控 Linux 环境的实验性 **eBPF Agent 运行时�
 eBPF collector 是必需的主要观测源。Provider hook、Agent log、protocol trace 和 remote
 export 都保持 deferred；它们不定义活跃产品，也不能替代 runtime observation。
 
-当前活跃目标是有界 Beta，而不是生产证据平面。已有 Gateway、PostgreSQL、
-evidence-object、projection、policy control 和跨 provider contract 原型属于已被取代的方向，
-计划移出活跃 workspace。
+当前活跃目标是有界 Beta，而不是生产证据平面。Gateway、PostgreSQL、evidence-object、
+projection 与跨 provider contract 原型已经移出活跃 workspace。Policy control 和广泛的
+qualification 原型属于同一被取代方向，只在解除其 observer-side 依赖前暂时保留。
 
 ### 成熟度标签
 
@@ -269,7 +269,9 @@ Implemented today：
 当前 file 与 network hook 主要捕获 syscall entry，因此描述 attempt。稳定 entry/exit outcome
 语义、完整 collector lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是 target。
 
-仓库仍包含广泛的 evidence-plane prototype。它们只作为历史实现输入，不定义本文的目标架构。
+中央 contracts、Gateway、PostgreSQL projection 与 evidence-object 集群已经移出活跃
+workspace。剩余 policy-control 与广泛 qualification prototype 只作为历史实现输入，不定义
+本文的目标架构。
 
 ## 13. 限制
 
