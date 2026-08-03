@@ -518,27 +518,13 @@ impl DaemonState {
         match self.persist_inner(&record.session_id, record.payload).await {
             Ok(()) => Ok(RecordWriteOutcome::Written),
             Err(error) => {
-                let degraded = self
-                    .mark_session_degraded_state(&record.session_id, &error)
-                    .await;
-                if delivery_mode == RecordDeliveryMode::Queued {
-                    if let (Some(scope), Some((intent, cgroup_ids))) =
-                        (self.scope.clone(), degraded)
-                    {
-                        let session_id = record.session_id.clone();
-                        tokio::spawn(async move {
-                            for cgroup_id in cgroup_ids {
-                                let _ = scope
-                                    .fail_agent_run(
-                                        &session_id,
-                                        Some(&intent),
-                                        cgroup_id,
-                                        CollectorFailureReason::StorageFailure,
-                                    )
-                                    .await;
-                            }
-                        });
-                    }
+                let first_failure = self.pause_session(&record.session_id, &error).await;
+                if delivery_mode == RecordDeliveryMode::Queued && first_failure {
+                    let state = std::sync::Arc::clone(self);
+                    let session_id = record.session_id.clone();
+                    tokio::spawn(async move {
+                        state.degrade_session_and_fail_scopes(&session_id).await;
+                    });
                 }
                 Ok(RecordWriteOutcome::Failed)
             }
@@ -590,31 +576,39 @@ impl DaemonState {
         Ok(())
     }
 
-    async fn mark_session_degraded_state(
-        &self,
-        session_id: &str,
-        reason: &str,
-    ) -> Option<(SessionIntent, Vec<u64>)> {
+    async fn pause_session(&self, session_id: &str, reason: &str) -> bool {
         let first_failure = self
             .paused_sessions
             .write()
             .await
             .insert(session_id.to_string(), reason.to_string())
             .is_none();
-        if !first_failure {
-            return None;
-        }
+        self.health
+            .write()
+            .await
+            .set_storage(ComponentState::Degraded);
+        first_failure
+    }
+
+    async fn degrade_session_and_fail_scopes(&self, session_id: &str) {
         let degraded = {
             let mut registry = self.registry.write().await;
             registry
                 .degrade(session_id)
                 .map(|state| (state.intent, state.cgroup_ids))
         };
-        self.health
-            .write()
-            .await
-            .set_storage(ComponentState::Degraded);
-        degraded.ok()
+        if let (Some(scope), Ok((intent, cgroup_ids))) = (&self.scope, degraded) {
+            for cgroup_id in cgroup_ids {
+                let _ = scope
+                    .fail_agent_run(
+                        session_id,
+                        Some(&intent),
+                        cgroup_id,
+                        CollectorFailureReason::StorageFailure,
+                    )
+                    .await;
+            }
+        }
     }
 
     async fn persist_inner(&self, session_id: &str, payload: Value) -> Result<(), String> {
@@ -945,6 +939,7 @@ mod tests {
             let state = Arc::clone(&state);
             tokio::spawn(async move { state.run_writer(shutdown_receiver).await })
         };
+        let registry_guard = state.registry.write().await;
         pipeline
             .submit(DaemonRecord::new(
                 agent_run_id,
@@ -953,6 +948,11 @@ mod tests {
             ))
             .expect("admit failing record");
 
+        tokio::time::timeout(std::time::Duration::from_secs(1), pipeline.fence())
+            .await
+            .expect("writer fence completes while the registry is locked")
+            .expect("writer fence");
+        drop(registry_guard);
         let request = tokio::time::timeout(std::time::Duration::from_secs(1), requests.recv())
             .await
             .expect("scope cleanup signal must not deadlock the writer")
@@ -962,11 +962,6 @@ mod tests {
             request.failure_reason(),
             Some(CollectorFailureReason::StorageFailure)
         );
-        tokio::time::timeout(std::time::Duration::from_secs(1), pipeline.fence())
-            .await
-            .expect("writer fence completes while scope cleanup is pending")
-            .expect("writer fence");
-
         request.complete(Err("test scope worker stopped".to_string()));
         shutdown.send(()).expect("request writer shutdown");
         assert_eq!(writer.await.unwrap().expect("writer drain").failed, 1);
