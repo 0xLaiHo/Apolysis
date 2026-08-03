@@ -8,8 +8,11 @@ This directory holds the AuditObserver audit-only observer program. The runtime 
 4. read `APOLYSIS_EVENTS` as a ring buffer;
 5. preserve redacted raw records and analyze them into canonical JSONL timeline
    events;
-6. emit typed diagnostics for loss, truncation, decode, verifier, attach, and
-   map-pressure failures.
+6. reject incompatible kernel/userspace ABI records and emit typed diagnostics
+   for loss, truncation, decode, verifier, attach, ABI, and map-pressure
+   failures;
+7. flush a capability manifest after attachment and before a managed Agent is
+   released.
 
 Normal tests use fixture and ABI records, so they do not require root,
 `CAP_BPF`, or `CAP_PERFMON`. `make test-live` runs the ignored live smoke test

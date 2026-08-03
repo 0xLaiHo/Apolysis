@@ -68,13 +68,16 @@ an exact one.
 
 - CO-RE eBPF observation of fork, exec, exit, selected file operations, and
   network connect attempts.
+- A versioned kernel/userspace ABI and per-Agent-Run capability manifest that
+  states the attached event sources and supported outcome semantics.
 - PID-tree, single-cgroup, and multi-cgroup observation scopes.
 - Managed local Agent launch and runtime metadata correlation for local,
   Docker/containerd, and Kubernetes prototypes.
 - Content-off persistence for exec arguments and process commands, with
   credential and network redaction.
 - Ordered JSONL output, rotation, optional local hash-chain envelopes, and
-  typed diagnostics for drops, map pressure, decode failures, and truncation.
+  typed diagnostics for drops, map pressure, ABI mismatches, decode failures,
+  and truncation.
 - Optional Codex declared-intent ingestion and heuristic mismatch findings.
 
 File and network syscall-entry observations currently describe attempts unless

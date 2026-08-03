@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_core::{
-    actors, records, resources, CanonicalEvent, EventSource, EventType, ObserverDiagnostic,
-    ObserverDiagnosticKind, RawKernelEvent, SessionIntentRecord,
+    actors, records, resources, CanonicalEvent, CollectorCapability, CollectorCapabilityManifest,
+    EventSource, EventType, ObserverDiagnostic, ObserverDiagnosticKind, OperationOutcome,
+    RawKernelEvent, SessionIntentRecord,
 };
 
 #[test]
@@ -11,6 +12,10 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
     assert_eq!(records::RAW_KERNEL_EVENT, "raw_kernel_event");
     assert_eq!(records::INTENT, "intent");
     assert_eq!(records::OBSERVER_DIAGNOSTIC, "observer_diagnostic");
+    assert_eq!(
+        records::COLLECTOR_CAPABILITY_MANIFEST,
+        "collector_capability_manifest"
+    );
     assert_eq!(actors::OBSERVER, "observer");
     assert_eq!(resources::PROCESS, "process");
     assert_eq!(
@@ -66,6 +71,51 @@ fn observer_diagnostic_json_line_records_typed_loss_evidence() {
     assert!(line.contains(r#""kind":"ring_buffer_reserve_failure""#));
     assert!(line.contains(r#""count":7"#));
     assert!(line.contains(r#""detail":"kernel counter""#));
+}
+
+#[test]
+fn observer_diagnostic_records_an_abi_mismatch_as_an_observation_gap() {
+    let diagnostic = ObserverDiagnostic::new(
+        "agent-run-abi-mismatch",
+        ObserverDiagnosticKind::AbiMismatch,
+        1,
+        "expected_version:1,received_version:2",
+    );
+
+    let line = diagnostic.to_json_line();
+
+    assert!(line.contains(r#""kind":"abi_mismatch""#));
+    assert!(line.contains(r#""count":1"#));
+    assert!(line.contains("expected_version:1,received_version:2"));
+}
+
+#[test]
+fn collector_capability_manifest_declares_the_versioned_observation_boundary() {
+    let manifest = CollectorCapabilityManifest::new(
+        "agent-run-capability",
+        "0.1.0",
+        1,
+        608,
+        "process_tree",
+        vec![
+            CollectorCapability::new(
+                "process_exec",
+                ["sched/sched_process_exec"],
+                vec![OperationOutcome::Succeeded],
+            ),
+            CollectorCapability::new(
+                "file_open",
+                ["syscalls/sys_enter_openat", "syscalls/sys_enter_openat2"],
+                vec![OperationOutcome::Attempted],
+            ),
+        ],
+    )
+    .with_timestamp(1_780_328_100_007);
+
+    assert_eq!(
+        manifest.to_json_line(),
+        r#"{"record_type":"collector_capability_manifest","schema_version":1,"timestamp_unix_ms":1780328100007,"agent_run_id":"agent-run-capability","collector":"apolysis_observer","collector_version":"0.1.0","kernel_abi_version":1,"kernel_record_size":608,"observation_scope":"process_tree","privacy_profile":"content_off","capabilities":[{"operation":"process_exec","event_sources":["sched/sched_process_exec"],"outcomes":["succeeded"]},{"operation":"file_open","event_sources":["syscalls/sys_enter_openat","syscalls/sys_enter_openat2"],"outcomes":["attempted"]}]}"#
+    );
 }
 
 #[test]

@@ -2,15 +2,46 @@
 
 //! Stable userspace mirror of the observer ring-buffer ABI.
 
+use std::fmt;
+
 pub const COMM_LEN: usize = 16;
 pub const RESOURCE_LEN: usize = 256;
 pub const ACTION_LEN: usize = 32;
 pub const PAYLOAD_LEN: usize = 256;
-pub const KERNEL_EVENT_RECORD_LEN: usize = 40 + COMM_LEN + RESOURCE_LEN + ACTION_LEN + PAYLOAD_LEN;
+pub const KERNEL_ABI_VERSION: u32 = 1;
+pub const KERNEL_EVENT_RECORD_LEN: usize = 48 + COMM_LEN + RESOURCE_LEN + ACTION_LEN + PAYLOAD_LEN;
 pub const FLAG_RESOURCE_TRUNCATED: u32 = 1 << 0;
 pub const FLAG_PAYLOAD_TRUNCATED: u32 = 1 << 1;
 pub const FLAG_PAYLOAD_SOCKADDR: u32 = 1 << 2;
 pub const FLAG_ARGV_TRUNCATED: u32 = 1 << 3;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum KernelEventDecodeError {
+    UnexpectedRecordLength { expected: usize, received: usize },
+    UnsupportedAbiVersion { expected: u32, received: u32 },
+    DeclaredRecordSizeMismatch { expected: u32, received: u32 },
+}
+
+impl fmt::Display for KernelEventDecodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnexpectedRecordLength { expected, received } => write!(
+                formatter,
+                "invalid kernel event record: expected {expected} bytes, received {received}"
+            ),
+            Self::UnsupportedAbiVersion { expected, received } => write!(
+                formatter,
+                "unsupported kernel event ABI version: expected {expected}, received {received}"
+            ),
+            Self::DeclaredRecordSizeMismatch { expected, received } => write!(
+                formatter,
+                "kernel event ABI record-size mismatch: expected {expected}, received {received}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for KernelEventDecodeError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -48,6 +79,8 @@ impl TryFrom<u32> for KernelEventKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct KernelEventRecord {
+    pub abi_version: u32,
+    pub record_size: u32,
     pub timestamp_ns: u64,
     pub cgroup_id: u64,
     pub pid: u32,
@@ -63,30 +96,52 @@ pub struct KernelEventRecord {
 }
 
 impl KernelEventRecord {
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() != KERNEL_EVENT_RECORD_LEN {
-            return Err(format!(
-                "invalid kernel event record: expected {KERNEL_EVENT_RECORD_LEN} bytes, received {}",
-                bytes.len()
-            ));
+    pub fn decode(bytes: &[u8]) -> Result<Self, KernelEventDecodeError> {
+        if bytes.len() < 8 {
+            return Err(KernelEventDecodeError::UnexpectedRecordLength {
+                expected: 8,
+                received: bytes.len(),
+            });
+        }
+        let abi_version = read_u32(bytes, 0);
+        if abi_version != KERNEL_ABI_VERSION {
+            return Err(KernelEventDecodeError::UnsupportedAbiVersion {
+                expected: KERNEL_ABI_VERSION,
+                received: abi_version,
+            });
+        }
+        let record_size = read_u32(bytes, 4);
+        if record_size != KERNEL_EVENT_RECORD_LEN as u32 {
+            return Err(KernelEventDecodeError::DeclaredRecordSizeMismatch {
+                expected: KERNEL_EVENT_RECORD_LEN as u32,
+                received: record_size,
+            });
+        }
+        if bytes.len() != record_size as usize {
+            return Err(KernelEventDecodeError::UnexpectedRecordLength {
+                expected: record_size as usize,
+                received: bytes.len(),
+            });
         }
 
         let mut record = Self {
-            timestamp_ns: read_u64(bytes, 0),
-            cgroup_id: read_u64(bytes, 8),
-            pid: read_u32(bytes, 16),
-            ppid: read_u32(bytes, 20),
-            uid: read_u32(bytes, 24),
-            gid: read_u32(bytes, 28),
-            event_kind: read_u32(bytes, 32),
-            flags: read_u32(bytes, 36),
+            abi_version,
+            record_size,
+            timestamp_ns: read_u64(bytes, 8),
+            cgroup_id: read_u64(bytes, 16),
+            pid: read_u32(bytes, 24),
+            ppid: read_u32(bytes, 28),
+            uid: read_u32(bytes, 32),
+            gid: read_u32(bytes, 36),
+            event_kind: read_u32(bytes, 40),
+            flags: read_u32(bytes, 44),
             comm: [0; COMM_LEN],
             resource: [0; RESOURCE_LEN],
             action: [0; ACTION_LEN],
             payload: [0; PAYLOAD_LEN],
         };
 
-        let mut offset = 40;
+        let mut offset = 48;
         copy_fixed(bytes, &mut offset, &mut record.comm);
         copy_fixed(bytes, &mut offset, &mut record.resource);
         copy_fixed(bytes, &mut offset, &mut record.action);

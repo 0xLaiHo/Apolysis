@@ -127,7 +127,8 @@ Managed launch 是首选本地 workflow，因为 collector 可以在 Agent 启�
 
 Collector 使用少量、版本化、高信噪比 hook。它尽可能在 event origin 过滤，发出固定有界
 record，并报告 map pressure、reserve failure、truncation、decode failure、attach failure
-和异常终止。
+和异常终止。每条 record 以 ABI version 和声明的 record size 开头；userspace 会拒绝不兼容
+version 或 size，不会按当前 layout 勉强解码。
 
 Beta collector target 为每种受支持 operation 加入 entry/exit matching。Record 区分
 attempted、succeeded、failed、denied、pending 与 unknown outcome，并在 capability 声明
@@ -258,10 +259,11 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 Implemented today：
 
 - `ebpf/observer` 与 `apolysis-observer`：CO-RE tracepoint、ring buffer、
-  process-tree/cgroup scope、固定 ABI、脱敏和 health diagnostic；
+  process-tree/cgroup scope、版本化 ABI、脱敏和 health diagnostic；
 - `apolysis-cli`：fixture/live observation、托管 Agent launch、可选 Codex intent
   correlation、visibility 与 verification command；
-- `apolysis-core`：当前 JSONL vocabulary 与 record type；
+- `apolysis-core`：当前 JSONL vocabulary、record type 与版本化 Collector Capability
+  manifest；
 - `apolysis-store`：rotation 与可选本地 hash-chain envelope；
 - `apolysis-accountability`：可选声明意图对比与面向复查的 finding；
 - `apolysis-kubernetes` 与 `apolysis-visibility`：有界 runtime metadata 与 visibility
@@ -269,8 +271,9 @@ Implemented today：
 - `apolysis-daemon`：long-lived observer、有界 queue、本地 socket 与 runtime registration
   prototype。
 
-当前 file 与 network hook 主要捕获 syscall entry，因此描述 attempt。稳定 entry/exit outcome
-语义、完整 collector lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是 target。
+Live collector 会在成功 attach 后、释放托管 Agent gate 前 flush capability manifest。当前 file
+与 network hook 主要捕获 syscall entry，因此描述 attempt。稳定 entry/exit outcome 语义、完整
+collector lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是 target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃

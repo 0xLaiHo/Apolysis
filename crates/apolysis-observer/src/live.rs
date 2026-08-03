@@ -23,14 +23,15 @@ use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
 
 use crate::abi::{
-    KernelEventKind, KernelEventRecord, FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR,
-    FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
+    KernelEventDecodeError, KernelEventKind, KernelEventRecord, FLAG_ARGV_TRUNCATED,
+    FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
 };
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
 use crate::{
-    canonicalize, write_observer_metadata, AyaLoaderPlan, EventIdSequence, ObserveResult,
-    ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor, RuntimeEvidencePersistence,
+    audit_observer_capability_manifest, canonicalize, write_observer_metadata, AyaLoaderPlan,
+    EventIdSequence, ObserveResult, ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor,
+    RuntimeEvidencePersistence,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -381,6 +382,7 @@ pub struct DaemonKernelEvent {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DaemonObserverBatch {
     pub events: Vec<DaemonKernelEvent>,
+    pub abi_mismatches: u64,
     pub decode_failures: u64,
     pub truncations: u64,
 }
@@ -585,8 +587,23 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         return Err(error);
     }
 
-    // Tracepoints are attached and the pid tree is registered; release the
-    // gated workload so every side effect from here on is captured.
+    let capability_manifest =
+        audit_observer_capability_manifest(&request.session_id, &scope, &loader_plan);
+    if let Err(error) = store.append(&capability_manifest) {
+        terminate_managed_agent(managed_agent.as_mut()).await;
+        return Err(format!(
+            "failed to write collector capability manifest: {error}"
+        ));
+    }
+    if let Err(error) = store.flush() {
+        terminate_managed_agent(managed_agent.as_mut()).await;
+        return Err(format!(
+            "failed to flush collector capability manifest: {error}"
+        ));
+    }
+
+    // Tracepoints are attached, the pid tree is registered, and the declared
+    // Collector Capability is durable; release the gated Agent now.
     if let Some(agent) = managed_agent.as_mut() {
         agent.release_gate();
     }
@@ -606,6 +623,8 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     tokio::pin!(shutdown);
     let mut raw_count = 0;
     let mut canonical_count = 0;
+    let mut abi_mismatches = 0_u64;
+    let mut first_abi_mismatch = None;
     let mut decode_failures = 0_u64;
     let mut truncations = 0_u64;
     let mut event_ids = EventIdSequence::new(&request.session_id);
@@ -662,7 +681,15 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         for bytes in batch {
             let record = match KernelEventRecord::decode(&bytes) {
                 Ok(record) => record,
-                Err(_) => {
+                Err(
+                    error @ (KernelEventDecodeError::UnsupportedAbiVersion { .. }
+                    | KernelEventDecodeError::DeclaredRecordSizeMismatch { .. }),
+                ) => {
+                    abi_mismatches += 1;
+                    first_abi_mismatch.get_or_insert_with(|| error.to_string());
+                    continue;
+                }
+                Err(KernelEventDecodeError::UnexpectedRecordLength { .. }) => {
                     decode_failures += 1;
                     continue;
                 }
@@ -711,6 +738,15 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             &mut store,
         )?;
     }
+    if abi_mismatches > 0 {
+        append_diagnostic(
+            &request.session_id,
+            ObserverDiagnosticKind::AbiMismatch,
+            abi_mismatches,
+            first_abi_mismatch.unwrap_or_else(|| "kernel/userspace ABI mismatch".to_string()),
+            &mut store,
+        )?;
+    }
     if decode_failures > 0 {
         append_diagnostic(
             &request.session_id,
@@ -734,7 +770,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         ObserverDiagnosticKind::Summary,
         raw_count as u64,
         format!(
-            "raw_events:{raw_count},canonical_events:{canonical_count},reserve_failures:{},map_pressure:{},decode_failures:{decode_failures},truncations:{truncations}",
+            "raw_events:{raw_count},canonical_events:{canonical_count},reserve_failures:{},map_pressure:{},abi_mismatches:{abi_mismatches},decode_failures:{decode_failures},truncations:{truncations}",
             counters.reserve_failures, counters.map_pressure
         ),
         &mut store,
@@ -742,7 +778,8 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
 
     // Fail loud: silent event loss would let a quiet timeline pass for proof of
     // absence, which is the one thing an evidence tool must never do.
-    let dropped_events = counters.reserve_failures + counters.map_pressure + decode_failures;
+    let dropped_events =
+        counters.reserve_failures + counters.map_pressure + abi_mismatches + decode_failures;
     if dropped_events > 0 || truncations > 0 {
         eprintln!(
             "apolysis: ⚠ evidence may be incomplete — {dropped_events} event(s) dropped, \
@@ -1626,9 +1663,19 @@ impl ObserverBatchDecoder {
     pub fn decode(&self, records: Vec<Vec<u8>>) -> DaemonObserverBatch {
         let mut batch = DaemonObserverBatch::default();
         for bytes in records {
-            let Ok(record) = KernelEventRecord::decode(&bytes) else {
-                batch.decode_failures += 1;
-                continue;
+            let record = match KernelEventRecord::decode(&bytes) {
+                Ok(record) => record,
+                Err(
+                    KernelEventDecodeError::UnsupportedAbiVersion { .. }
+                    | KernelEventDecodeError::DeclaredRecordSizeMismatch { .. },
+                ) => {
+                    batch.abi_mismatches += 1;
+                    continue;
+                }
+                Err(KernelEventDecodeError::UnexpectedRecordLength { .. }) => {
+                    batch.decode_failures += 1;
+                    continue;
+                }
             };
             if record.flags & (FLAG_RESOURCE_TRUNCATED | FLAG_PAYLOAD_TRUNCATED) != 0 {
                 batch.truncations += 1;
