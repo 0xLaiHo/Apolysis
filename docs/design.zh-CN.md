@@ -166,7 +166,9 @@ timestamp、exec generation 以及 parent process/exec generation。Live userspa
 附加 collector 启动时读取一次的 host boot ID。Process context 按 host boot、PID、process
 generation 与 exec generation 键控，而不是只按 PID 键控，因此 PID reuse 或 exec transition
 不会继承陈旧 executable context。Process-identity map 与 userspace context table 保持有界；
-出现 pressure 时会 fail loud，而不会静默复用或丢弃 identity state。
+出现 pressure 时会 fail loud，而不会静默复用或丢弃 identity state。Kernel identity-map 或
+exec-generation 失败会设置预分配的 fail-closed latch；此后直到 collector 重启，所有 record
+都保持 inferred，因此 pressure 不会静默恢复 exact attribution。
 
 只有 host boot、scope generation、process generation、kernel process-start time 与 exec
 generation 都存在时 attribution 才是 exact。Fork identity 在观测到 child process start 前保持

@@ -28,8 +28,9 @@ generations. A bounded process-identity map detects PID reuse and exec
 transitions; userspace attaches the host boot ID and records exact versus
 inferred attribution. Fork identities remain provisional until the child
 process start is observed, final cleanup follows the thread group's
-`group_dead` boundary, and a failed exec-generation transition remains
-invalid for that process instance instead of becoming Exact later. Network
+`group_dead` boundary, and any identity-map or exec-generation failure latches
+identity attribution as unavailable for the rest of that collector lifetime
+instead of allowing a later event to become Exact. Network
 connect and the selected file operations use
 bounded thread-scoped pending maps and emit only at syscall exit; unmatched
 pairs are reported as operation-specific Observation Gaps. The daemon drains

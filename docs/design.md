@@ -195,7 +195,10 @@ collector starts. Process context is keyed by host boot, PID, process
 generation, and exec generation rather than PID alone; a PID reuse or exec
 transition therefore cannot inherit stale executable context. The
 process-identity map and userspace context table are bounded and fail loud on
-pressure instead of silently reusing or dropping identity state.
+pressure instead of silently reusing or dropping identity state. A kernel
+identity-map or exec-generation failure sets a preallocated fail-closed latch;
+all later records remain inferred until the collector restarts, so pressure
+cannot silently restore exact attribution.
 
 Attribution is exact only when host boot, scope generation, process generation,
 kernel process-start time, and exec generation are present. A fork identity is
