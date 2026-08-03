@@ -668,6 +668,14 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
 async fn counter_read_failure_marks_ebpf_unavailable() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("agent-run-counter-failure"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-counter-failure", 31)
+        .await
+        .expect("associate cgroup");
     let backend = FakeBackend {
         operations: Arc::new(Mutex::new(Vec::new())),
         fail_counters: true,
@@ -682,7 +690,7 @@ async fn counter_read_failure_marks_ebpf_unavailable() {
     let runtime = {
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            run_observer_runtime(backend, Vec::new(), receiver, state, shutdown_receiver).await
+            run_observer_runtime(backend, vec![31], receiver, state, shutdown_receiver).await
         })
     };
 
@@ -697,6 +705,11 @@ async fn counter_read_failure_marks_ebpf_unavailable() {
 
     assert!(error.contains("counter read failed"));
     assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    let timeline = timeline(&config, "agent-run-counter-failure");
+    assert!(timeline.contains(r#""state":"started""#));
+    assert!(timeline.contains(r#""state":"failed""#));
+    assert!(timeline.contains(r#""health":"failed""#));
+    assert!(timeline.contains(r#""stop_reason":"counter_read_failure""#));
     cleanup(&config);
 }
 
@@ -853,6 +866,14 @@ async fn reused_cgroup_rejects_records_from_the_drained_scope_generation() {
 async fn abi_mismatch_stops_the_observer_and_marks_ebpf_unavailable() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("agent-run-abi-mismatch"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-abi-mismatch", 31)
+        .await
+        .expect("associate cgroup");
     let backend = FakeBackend {
         operations: Arc::new(Mutex::new(Vec::new())),
         fail_counters: false,
@@ -872,7 +893,7 @@ async fn abi_mismatch_stops_the_observer_and_marks_ebpf_unavailable() {
         std::time::Duration::from_millis(100),
         run_observer_runtime(
             backend,
-            Vec::new(),
+            vec![31],
             receiver,
             Arc::clone(&state),
             shutdown_receiver,
@@ -884,6 +905,12 @@ async fn abi_mismatch_stops_the_observer_and_marks_ebpf_unavailable() {
 
     assert!(error.contains("kernel/userspace ABI mismatch"));
     assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    let timeline = timeline(&config, "agent-run-abi-mismatch");
+    assert!(timeline.contains(r#""state":"started""#));
+    assert!(timeline.contains(r#""state":"failed""#));
+    assert!(timeline.contains(r#""health":"failed""#));
+    assert!(timeline.contains(r#""stop_reason":"abi_mismatch""#));
+    assert!(timeline.contains(r#""global_abi_mismatches":1"#));
     cleanup(&config);
 }
 

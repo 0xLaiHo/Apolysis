@@ -9,7 +9,9 @@ use std::process::ExitStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apolysis_core::{
-    actors, resources, CanonicalEvent, EventSource, EventType, ObservationGap, ObservationGapKind,
+    actors, new_collector_instance_id, resources, CanonicalEvent, CollectorFailureReason,
+    CollectorHealthState, CollectorLifecycleCounters, CollectorLifecycleRecord,
+    CollectorNormalStopReason, EventSource, EventType, ObservationGap, ObservationGapKind,
     ObserverDiagnostic, ObserverDiagnosticKind, OperationOutcome, OperationResult, RawKernelEvent,
 };
 use apolysis_store::JsonlRotationPolicy;
@@ -21,6 +23,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
+
+const LIVE_COLLECTOR_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
 
 use crate::abi::{
     FileOperationCountersAbi, KernelEventKind, KernelEventRecord, NetworkConnectCountersAbi,
@@ -723,6 +727,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     let mut store =
         JsonlStore::create_with_rotation_policy(&request.output_path, request.output_rotation)
             .map_err(|error| format!("failed to create live observer timeline: {error}"))?;
+    let collector_instance_id = new_collector_instance_id()?;
 
     write_observer_metadata(
         &request.session_id,
@@ -741,9 +746,13 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 &error,
                 &mut store,
             )?;
-            store.flush().map_err(|flush| {
-                format!("failed to flush agent registration diagnostic: {flush}")
-            })?;
+            append_failed_collector_lifecycle(
+                &request.session_id,
+                &collector_instance_id,
+                CollectorFailureReason::AttachFailure,
+                CollectorLifecycleCounters::default(),
+                &mut store,
+            )?;
             return Err(error);
         }
     };
@@ -765,14 +774,37 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             &error,
             &mut store,
         )?;
-        store
-            .flush()
-            .map_err(|flush| format!("failed to flush prerequisite diagnostic: {flush}"))?;
+        append_failed_collector_lifecycle(
+            &request.session_id,
+            &collector_instance_id,
+            CollectorFailureReason::AttachFailure,
+            CollectorLifecycleCounters::default(),
+            &mut store,
+        )?;
         return Err(format!("live observer prerequisite failed: {error}"));
     }
 
     let mut managed_agent = if let Some(agent_run) = request.agent_run.as_ref() {
-        let managed = spawn_managed_agent(agent_run, &request.workspace_root)?;
+        let managed = match spawn_managed_agent(agent_run, &request.workspace_root) {
+            Ok(managed) => managed,
+            Err(error) => {
+                append_diagnostic(
+                    &request.session_id,
+                    ObserverDiagnosticKind::AttachFailure,
+                    1,
+                    &error,
+                    &mut store,
+                )?;
+                append_failed_collector_lifecycle(
+                    &request.session_id,
+                    &collector_instance_id,
+                    CollectorFailureReason::AttachFailure,
+                    CollectorLifecycleCounters::default(),
+                    &mut store,
+                )?;
+                return Err(error);
+            }
+        };
         write_agent_supervisor_metadata(&request.session_id, &managed.metadata, &mut store)?;
         Some(managed)
     } else {
@@ -804,9 +836,13 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 format!("{error:#}"),
                 &mut store,
             )?;
-            store
-                .flush()
-                .map_err(|flush| format!("failed to flush verifier diagnostic: {flush}"))?;
+            append_failed_collector_lifecycle(
+                &request.session_id,
+                &collector_instance_id,
+                CollectorFailureReason::VerifierFailure,
+                CollectorLifecycleCounters::default(),
+                &mut store,
+            )?;
             return Err(format!("BPF load or verifier failure: {error:#}"));
         }
     };
@@ -819,22 +855,36 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             &error,
             &mut store,
         )?;
-        store
-            .flush()
-            .map_err(|flush| format!("failed to flush scope diagnostic: {flush}"))?;
+        append_failed_collector_lifecycle(
+            &request.session_id,
+            &collector_instance_id,
+            CollectorFailureReason::AttachFailure,
+            CollectorLifecycleCounters::default(),
+            &mut store,
+        )?;
         return Err(error);
     }
     if let Err(error) = attach_tracepoints(&mut ebpf, &loader_plan) {
         terminate_managed_agent(managed_agent.as_mut()).await;
-        let kind = if error.contains("verifier") {
-            ObserverDiagnosticKind::VerifierFailure
+        let (kind, reason) = if error.contains("verifier") {
+            (
+                ObserverDiagnosticKind::VerifierFailure,
+                CollectorFailureReason::VerifierFailure,
+            )
         } else {
-            ObserverDiagnosticKind::AttachFailure
+            (
+                ObserverDiagnosticKind::AttachFailure,
+                CollectorFailureReason::AttachFailure,
+            )
         };
         append_diagnostic(&request.session_id, kind, 1, &error, &mut store)?;
-        store
-            .flush()
-            .map_err(|flush| format!("failed to flush attach diagnostic: {flush}"))?;
+        append_failed_collector_lifecycle(
+            &request.session_id,
+            &collector_instance_id,
+            reason,
+            CollectorLifecycleCounters::default(),
+            &mut store,
+        )?;
         return Err(error);
     }
 
@@ -846,19 +896,31 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             "failed to write collector capability manifest: {error}"
         ));
     }
+    if let Err(error) = store.append(&CollectorLifecycleRecord::started(
+        &request.session_id,
+        &collector_instance_id,
+    )) {
+        terminate_managed_agent(managed_agent.as_mut()).await;
+        return Err(format!(
+            "failed to write collector lifecycle start: {error}"
+        ));
+    }
     if let Err(error) = store.flush_and_sync() {
         terminate_managed_agent(managed_agent.as_mut()).await;
         return Err(format!(
-            "failed to persist collector capability manifest: {error}"
+            "failed to persist collector capability manifest and lifecycle start: {error}"
         ));
     }
 
     // Tracepoints are attached, the pid tree is registered, and the declared
-    // Collector Capability is durable; release the gated Agent now.
+    // Collector Capability and lifecycle start are durable; release the gated
+    // Agent now.
     if let Some(agent) = managed_agent.as_mut() {
         agent.release_gate();
     }
 
+    let mut last_lifecycle_counters = CollectorLifecycleCounters::default();
+    let run_result: Result<ObserveResult, String> = async {
     let ring_map = ebpf
         .take_map(&loader_plan.ring_buffer_map)
         .ok_or_else(|| format!("missing BPF map: {}", loader_plan.ring_buffer_map))?;
@@ -883,6 +945,12 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     let redactor = Redactor::new(&request.session_id, &request.workspace_root);
     let mut agent_exit_status: Option<ExitStatus> = None;
     let mut agent_drain_deadline: Option<tokio::time::Instant> = None;
+    let mut stop_reason = CollectorNormalStopReason::ShutdownSignal;
+    let mut checkpoint = tokio::time::interval_at(
+        tokio::time::Instant::now() + LIVE_COLLECTOR_CHECKPOINT_INTERVAL,
+        LIVE_COLLECTOR_CHECKPOINT_INTERVAL,
+    );
+    checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         if agent_exit_status.is_none() {
@@ -900,26 +968,44 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         }
 
         let effective_deadline = earliest_deadline(deadline, agent_drain_deadline);
+        let mut checkpoint_due = false;
         let batch = if let Some(deadline) = effective_deadline {
             tokio::select! {
                 result = read_ring_batch(&mut async_ring) => Some(result?),
                 result = &mut shutdown => {
                     result?;
+                    stop_reason = CollectorNormalStopReason::ShutdownSignal;
                     None
                 },
                 _ = tokio::time::sleep(Duration::from_millis(100)), if managed_agent.is_some() && agent_exit_status.is_none() => {
                     Some(Vec::new())
                 },
-                _ = tokio::time::sleep_until(deadline) => None,
+                _ = checkpoint.tick() => {
+                    checkpoint_due = true;
+                    Some(Vec::new())
+                },
+                _ = tokio::time::sleep_until(deadline) => {
+                    stop_reason = if agent_drain_deadline == Some(deadline) {
+                        CollectorNormalStopReason::AgentExited
+                    } else {
+                        CollectorNormalStopReason::DurationElapsed
+                    };
+                    None
+                },
             }
         } else {
             tokio::select! {
                 result = read_ring_batch(&mut async_ring) => Some(result?),
                 result = &mut shutdown => {
                     result?;
+                    stop_reason = CollectorNormalStopReason::ShutdownSignal;
                     None
                 },
                 _ = tokio::time::sleep(Duration::from_millis(100)), if managed_agent.is_some() && agent_exit_status.is_none() => {
+                    Some(Vec::new())
+                },
+                _ = checkpoint.tick() => {
+                    checkpoint_due = true;
                     Some(Vec::new())
                 }
             }
@@ -962,6 +1048,28 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             raw_count += 1;
             canonical_count += 1;
         }
+
+        if checkpoint_due {
+            let counters = DaemonObserverCounters::from(read_observer_counters(&mut ebpf)?);
+            last_lifecycle_counters = live_collector_lifecycle_counters(
+                counters,
+                abi_mismatches,
+                decode_failures,
+                truncations,
+            );
+            let health = collector_health(last_lifecycle_counters);
+            store
+                .append(&CollectorLifecycleRecord::checkpoint(
+                    &request.session_id,
+                    &collector_instance_id,
+                    health,
+                    last_lifecycle_counters,
+                ))
+                .map_err(|error| format!("failed to write collector lifecycle checkpoint: {error}"))?;
+            store.flush().map_err(|error| {
+                format!("failed to flush collector lifecycle checkpoint: {error}")
+            })?;
+        }
     }
 
     if let Some(status) = agent_exit_status {
@@ -970,6 +1078,12 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
 
     let counters = read_observer_counters(&mut ebpf)?;
     let public_counters = DaemonObserverCounters::from(counters);
+    last_lifecycle_counters = live_collector_lifecycle_counters(
+        public_counters,
+        abi_mismatches,
+        decode_failures,
+        truncations,
+    );
     if counters.reserve_failures > 0 {
         append_diagnostic(
             &request.session_id,
@@ -1045,6 +1159,15 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         ),
         &mut store,
     )?;
+    store
+        .append(&CollectorLifecycleRecord::stopped(
+            &request.session_id,
+            &collector_instance_id,
+            collector_health(last_lifecycle_counters),
+            stop_reason,
+            last_lifecycle_counters,
+        ))
+        .map_err(|error| format!("failed to write collector lifecycle stop: {error}"))?;
 
     // Fail loud: silent event loss would let a quiet timeline pass for proof of
     // absence, which is the one thing an evidence tool must never do.
@@ -1076,6 +1199,26 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         mode: ObserverMode::AuditOnly,
         agent_exit_code: agent_exit_status.map(status_exit_code),
     })
+    }
+    .await;
+
+    if let Err(error) = &run_result {
+        terminate_managed_agent(managed_agent.as_mut()).await;
+        let failure_reason = live_collector_failure_reason(error);
+        if let Err(lifecycle_error) = append_failed_collector_lifecycle(
+            &request.session_id,
+            &collector_instance_id,
+            failure_reason,
+            last_lifecycle_counters,
+            &mut store,
+        ) {
+            return Err(format!(
+                "{error}; additionally failed to persist collector failure lifecycle: {lifecycle_error}"
+            ));
+        }
+    }
+
+    run_result
 }
 
 fn resolve_registered_agent(
@@ -2328,6 +2471,76 @@ fn append_diagnostic(
         .map_err(|error| format!("failed to write observer diagnostic: {error}"))
 }
 
+fn live_collector_lifecycle_counters(
+    counters: DaemonObserverCounters,
+    abi_mismatches: u64,
+    decode_failures: u64,
+    truncations: u64,
+) -> CollectorLifecycleCounters {
+    let file_totals = counters.file_operations.totals();
+    CollectorLifecycleCounters {
+        global_reserve_failures: counters.reserve_failures,
+        global_map_pressure: counters.map_pressure,
+        global_abi_mismatches: abi_mismatches,
+        global_decode_failures: decode_failures,
+        global_truncations: truncations,
+        scope_missing_entries: counters
+            .connect_missing_entries
+            .saturating_add(file_totals.missing_entries),
+        scope_missing_exits: counters
+            .connect_missing_exits
+            .saturating_add(file_totals.missing_exits),
+        scope_pending: counters.connect_pending.saturating_add(file_totals.pending),
+    }
+}
+
+fn collector_health(counters: CollectorLifecycleCounters) -> CollectorHealthState {
+    if counters.has_loss() {
+        CollectorHealthState::Degraded
+    } else {
+        CollectorHealthState::Healthy
+    }
+}
+
+fn live_collector_failure_reason(error: &str) -> CollectorFailureReason {
+    let error = error.to_ascii_lowercase();
+    if error.contains("counter") || error.contains("apolysis_counters") {
+        CollectorFailureReason::CounterReadFailure
+    } else if error.contains("abi") {
+        CollectorFailureReason::AbiMismatch
+    } else if error.contains("decode") || error.contains("canonical") {
+        CollectorFailureReason::DecodeFailure
+    } else if error.contains("write")
+        || error.contains("flush")
+        || error.contains("persist")
+        || error.contains("timeline")
+    {
+        CollectorFailureReason::StorageFailure
+    } else {
+        CollectorFailureReason::ObserverFailure
+    }
+}
+
+fn append_failed_collector_lifecycle(
+    agent_run_id: &str,
+    collector_instance_id: &str,
+    reason: CollectorFailureReason,
+    counters: CollectorLifecycleCounters,
+    store: &mut JsonlStore,
+) -> Result<(), String> {
+    store
+        .append(&CollectorLifecycleRecord::failed(
+            agent_run_id,
+            collector_instance_id,
+            reason,
+            counters,
+        ))
+        .map_err(|error| format!("failed to write collector failure lifecycle: {error}"))?;
+    store
+        .flush()
+        .map_err(|error| format!("failed to flush collector failure lifecycle: {error}"))
+}
+
 fn append_content_off_runtime_event(
     raw: &RawKernelEvent,
     canonical: &CanonicalEvent,
@@ -2581,6 +2794,56 @@ mod tests {
     use apolysis_core::{CanonicalEvent, EventType};
     use std::collections::VecDeque;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn standalone_lifecycle_checkpoint_keeps_global_and_scope_loss_explicit() {
+        let counters = live_collector_lifecycle_counters(
+            DaemonObserverCounters {
+                reserve_failures: 2,
+                map_pressure: 3,
+                connect_missing_entries: 5,
+                connect_missing_exits: 7,
+                connect_pending: 11,
+                file_operations: FileOperationCounters {
+                    open: OperationPairCounters {
+                        missing_entries: 13,
+                        missing_exits: 17,
+                        pending: 19,
+                    },
+                    ..FileOperationCounters::default()
+                },
+            },
+            23,
+            29,
+            31,
+        );
+
+        assert_eq!(counters.global_reserve_failures, 2);
+        assert_eq!(counters.global_map_pressure, 3);
+        assert_eq!(counters.global_abi_mismatches, 23);
+        assert_eq!(counters.global_decode_failures, 29);
+        assert_eq!(counters.global_truncations, 31);
+        assert_eq!(counters.scope_missing_entries, 18);
+        assert_eq!(counters.scope_missing_exits, 24);
+        assert_eq!(counters.scope_pending, 30);
+        assert_eq!(collector_health(counters), CollectorHealthState::Degraded);
+    }
+
+    #[test]
+    fn standalone_lifecycle_failure_reason_preserves_counter_and_storage_boundaries() {
+        assert_eq!(
+            live_collector_failure_reason("failed to read observer counters"),
+            CollectorFailureReason::CounterReadFailure
+        );
+        assert_eq!(
+            live_collector_failure_reason("failed to write live raw event"),
+            CollectorFailureReason::StorageFailure
+        );
+        assert_eq!(
+            live_collector_failure_reason("ring-buffer poll failure"),
+            CollectorFailureReason::ObserverFailure
+        );
+    }
 
     #[test]
     fn cgroup_drain_waits_for_inflight_kernel_counter_updates() {

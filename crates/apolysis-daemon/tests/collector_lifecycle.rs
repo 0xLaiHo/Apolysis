@@ -3,7 +3,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use apolysis_accountability::{ActionClass, RetentionTier, SessionIntent, DEFAULT_TENANT_ID};
-use apolysis_core::CollectorLifecycleRecord;
+use apolysis_core::{
+    CollectorHealthState, CollectorLifecycleCounters, CollectorLifecycleRecord,
+    CollectorNormalStopReason,
+};
 use apolysis_daemon::{DaemonConfig, DaemonState};
 use apolysis_store::HashChainStore;
 use serde_json::{json, Value};
@@ -58,6 +61,97 @@ fn daemon_recovery_reports_and_closes_an_unfinished_collector_instance() {
             && payload["health"] == "failed"
             && payload["stop_reason"] == "collector_restart"
     }));
+
+    let state = DaemonState::new(&config).expect("recover daemon state again");
+    drop(state);
+    let payloads = timeline_payloads(&timeline);
+    assert_eq!(
+        payloads
+            .iter()
+            .filter(|payload| {
+                payload["record_type"] == "observation_gap"
+                    && payload["kind"] == "collector_restart"
+            })
+            .count(),
+        1,
+        "a recovered lifecycle must not emit another restart gap"
+    );
+    assert_eq!(
+        payloads
+            .iter()
+            .filter(|payload| {
+                payload["record_type"] == "collector_lifecycle"
+                    && payload["collector_instance_id"] == "collector-instance-before-crash"
+                    && payload["state"] == "failed"
+                    && payload["stop_reason"] == "collector_restart"
+            })
+            .count(),
+        1,
+        "a recovered lifecycle must receive exactly one terminal record"
+    );
+
+    cleanup(&config);
+}
+
+#[test]
+fn daemon_recovery_does_not_report_a_completed_collector_instance() {
+    let config = config("completed");
+    let agent_run_id = "agent-run-completed";
+    let timeline = timeline_path(&config, agent_run_id);
+    let mut recovery = HashChainStore::create_or_recover(&timeline).expect("create timeline");
+    recovery
+        .store
+        .append_json(
+            1,
+            &serde_json::to_string(&json!({
+                "record_type": "intent_registered",
+                "intent": intent(agent_run_id),
+            }))
+            .expect("serialize intent"),
+        )
+        .expect("append intent");
+    recovery
+        .store
+        .append_json(
+            1,
+            &CollectorLifecycleRecord::started(agent_run_id, "collector-instance-completed")
+                .to_json_line(),
+        )
+        .expect("append lifecycle start");
+    recovery
+        .store
+        .append_json(
+            1,
+            &CollectorLifecycleRecord::stopped(
+                agent_run_id,
+                "collector-instance-completed",
+                CollectorHealthState::Healthy,
+                CollectorNormalStopReason::AgentRunClosed,
+                CollectorLifecycleCounters::default(),
+            )
+            .to_json_line(),
+        )
+        .expect("append lifecycle stop");
+    recovery.store.flush().expect("flush timeline");
+    drop(recovery);
+
+    let state = DaemonState::new(&config).expect("recover daemon state");
+    drop(state);
+
+    let payloads = timeline_payloads(&timeline);
+    assert!(!payloads.iter().any(|payload| {
+        payload["record_type"] == "observation_gap" && payload["kind"] == "collector_restart"
+    }));
+    assert_eq!(
+        payloads
+            .iter()
+            .filter(|payload| {
+                payload["record_type"] == "collector_lifecycle"
+                    && payload["collector_instance_id"] == "collector-instance-completed"
+            })
+            .count(),
+        2
+    );
 
     cleanup(&config);
 }
