@@ -207,9 +207,10 @@ that never become process identities remain inferred and are discarded at task
 exit. Missing generations remain inferred with an explicit reason; PID-only,
 command, path, and timestamp joins never become exact. Scope generation
 protects cgroup ownership within one collector lifetime. Collector restart
-remains a visible identity boundary: cross-restart continuity is not claimed
-until lifecycle persistence is implemented. PID namespace, container, Pod, and
-node identity remain additive attribution where available.
+remains a visible identity boundary: lifecycle recovery records the unfinished
+instance and its restart gap, but does not claim identity continuity across the
+boundary. PID namespace, container, Pod, and node identity remain additive
+attribution where available.
 
 ### 5.4 Local store and viewer
 
@@ -252,9 +253,24 @@ Each Runtime Observation carries, when supported:
 - truncation and decoding state;
 - relation status and reason.
 
-Collector lifecycle records carry start, capability manifest, periodic health,
-loss counters, terminal state, and stop reason. A missing terminal record is an
-Observation Gap.
+Collector lifecycle records use one opaque instance ID per collector process
+and one record stream per Agent Run. `started` is durable before a managed
+Agent is released or a daemon scope registration completes. Periodic
+`checkpoint` records are cumulative and are emitted even for quiet workloads.
+Their `global_*` counters describe collector-wide loss and retain that name
+when copied into each active run; `scope_*` counters contain only the owning
+Observation Scope's entry/exit pairing state. For the daemon, that is the sum
+of only the cgroups owned by the Agent Run. A non-zero loss counter makes the
+checkpoint or normal terminal `degraded`.
+
+After confirmed event drain and Observation Gap persistence, a normal path
+writes `stopped` with an explicit reason. A fatal attach, verifier, ABI,
+decoder, counter, observer, or writable-storage path writes `failed` when the
+timeline remains writable. On daemon recovery, a `started` or `checkpoint`
+instance without `stopped` or `failed` receives one `collector_restart`
+Observation Gap and one recovered failed terminal. The repair is idempotent.
+A standalone timeline with a missing terminal is still incomplete, even when
+no process remains available to append the gap.
 
 Consumers ignore unknown additive fields. Incompatible ABI or schema changes
 require a new version and an explicit decoder failure rather than best-effort
@@ -335,26 +351,29 @@ Implemented today:
 - `ebpf/observer` and `apolysis-observer`: CO-RE tracepoints, ring buffer,
   process-tree/cgroup scopes, ABI v3, bounded process/exec and cgroup scope
   generations, outcome-aware selected file operations and network connect,
-  per-cgroup operation gap counters, redaction, and health/gap diagnostics;
+  per-cgroup operation gap counters, redaction, lifecycle checkpoints and
+  terminals, and health/gap diagnostics;
 - `apolysis-cli`: fixture/live observation, managed Agent launch, optional
   Codex intent correlation, visibility, and verification commands;
-- `apolysis-core`: current JSONL vocabulary, record types, and versioned
-  Collector Capability manifest;
+- `apolysis-core`: current JSONL vocabulary, record types, versioned Collector
+  Capability manifest, and collector lifecycle schema;
 - `apolysis-store`: rotation and optional local hash-chain envelopes;
 - `apolysis-accountability`: optional declared-intent comparison and
   review-oriented findings;
 - `apolysis-kubernetes` and `apolysis-visibility`: bounded runtime metadata and
   visibility-boundary assessment;
-- `apolysis-daemon`: long-lived observer, bounded queue, local socket, and
-  runtime registration prototype.
+- `apolysis-daemon`: long-lived observer, bounded queue, local socket, runtime
+  registration prototype, scoped lifecycle persistence, and idempotent
+  unfinished-instance recovery.
 
-The live collector synchronizes its capability manifest to stable storage after
-successful attachment and before releasing a managed Agent gate. Selected
-file operations and network connect have bounded entry/exit outcome semantics,
-and the daemon persists their pairing gaps to the owning Agent Run at explicit
-scope removal and clean shutdown. Stable in-run scope/process generations are
-implemented. Complete collector lifecycle records and restart-gap persistence,
-the saved-run viewer, and bounded Kubernetes beta remain targets.
+The live collector synchronizes its capability manifest and lifecycle start to
+stable storage after successful attachment and before releasing a managed
+Agent gate. Selected file operations and network connect have bounded
+entry/exit outcome semantics, and the daemon persists their pairing gaps to the
+owning Agent Run at explicit scope removal and clean shutdown. Stable in-run
+scope/process generations, periodic cumulative lifecycle checkpoints, explicit
+terminal reasons, and restart-gap recovery are implemented. The saved-run
+viewer and bounded Kubernetes beta remain targets.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification
