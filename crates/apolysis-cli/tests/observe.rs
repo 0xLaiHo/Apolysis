@@ -651,10 +651,16 @@ fn live_managed_agent_starts_after_the_capability_manifest_is_durable() {
         .output()
         .expect("run managed Agent behind live observer gate");
 
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    if stderr.contains("live observer prerequisite failed") {
+        eprintln!("skipping live managed Agent gate test: {stderr}");
+        let _ = std::fs::remove_file(output);
+        return;
+    }
     assert!(
         result.status.success(),
         "managed Agent ran before its capability manifest was durable: {}",
-        String::from_utf8_lossy(&result.stderr)
+        stderr
     );
     let timeline = std::fs::read_to_string(&output).expect("read live timeline");
     let manifest_index = timeline
