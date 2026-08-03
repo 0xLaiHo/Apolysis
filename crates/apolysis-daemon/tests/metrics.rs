@@ -28,6 +28,7 @@ fn prometheus_metrics_use_low_cardinality_runtime_labels() {
     assert!(metrics.contains("apolysis_queue_depth 3"));
     assert!(metrics.contains("apolysis_queue_accepted_total 42"));
     assert!(metrics.contains("apolysis_queue_dropped_total{priority=\"ordinary\"} 1"));
+    assert!(metrics.contains("apolysis_queue_dropped_total{priority=\"gap\"} 0"));
     assert!(!metrics.contains("session_id"));
     assert!(!metrics.contains("container_id"));
     assert!(!metrics.contains("workload_id"));

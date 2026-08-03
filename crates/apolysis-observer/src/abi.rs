@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stable userspace mirror of the observer ring-buffer ABI.
+//! Stable userspace mirrors of the observer kernel/userspace ABIs.
 
 use std::fmt;
+
+use aya::Pod;
 
 pub const COMM_LEN: usize = 16;
 pub const RESOURCE_LEN: usize = 256;
@@ -15,6 +17,40 @@ pub const FLAG_PAYLOAD_TRUNCATED: u32 = 1 << 1;
 pub const FLAG_PAYLOAD_SOCKADDR: u32 = 1 << 2;
 pub const FLAG_ARGV_TRUNCATED: u32 = 1 << 3;
 pub const FLAG_RETURN_VALUE: u32 = 1 << 4;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub(crate) struct NetworkConnectCountersAbi {
+    pub(crate) missing_entries: u64,
+    pub(crate) missing_exits: u64,
+    pub(crate) pending: u64,
+}
+
+unsafe impl Pod for NetworkConnectCountersAbi {}
+
+const _: [(); 24] = [(); std::mem::size_of::<NetworkConnectCountersAbi>()];
+const _: [(); 8] = [(); std::mem::align_of::<NetworkConnectCountersAbi>()];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TrackedCgroupState {
+    Active = 1,
+    Draining = 2,
+}
+
+impl TryFrom<u8> for TrackedCgroupState {
+    type Error = String;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Active),
+            2 => Ok(Self::Draining),
+            state => Err(format!("unknown cgroup observer scope state: {state}")),
+        }
+    }
+}
+
+const _: [(); 1] = [(); std::mem::size_of::<TrackedCgroupState>()];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KernelEventDecodeError {

@@ -5,7 +5,7 @@ use apolysis_observer::abi::{
     KernelEventKind, FLAG_RESOURCE_TRUNCATED, KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN,
 };
 use apolysis_observer::{
-    network_connect_observation_gaps, DaemonObserver, DaemonObserverConfig, DaemonObserverCounters,
+    network_connect_observation_gaps, DaemonObserver, DaemonObserverConfig, NetworkConnectCounters,
     ObserverBatchDecoder,
 };
 
@@ -52,11 +52,10 @@ fn daemon_batch_decoder_accounts_for_invalid_and_truncated_records() {
 fn network_connect_counters_become_explicit_agent_run_observation_gaps() {
     let gaps = network_connect_observation_gaps(
         "agent-run-connect-gaps",
-        &DaemonObserverCounters {
-            connect_missing_entries: 2,
-            connect_missing_exits: 1,
-            connect_pending: 2,
-            ..DaemonObserverCounters::default()
+        &NetworkConnectCounters {
+            missing_entries: 2,
+            missing_exits: 1,
+            pending: 2,
         },
     );
 

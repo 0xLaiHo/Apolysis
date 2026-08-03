@@ -55,11 +55,42 @@ pub enum RecordWriteOutcome {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordDeliveryMode {
+    Queued,
+    Confirmed,
+}
+
 struct PipelineInner {
-    queue: Mutex<BoundedPriorityQueue<DaemonRecord>>,
+    queue: Mutex<BoundedPriorityQueue<QueuedRecord>>,
     notify: Notify,
     accepting: AtomicBool,
     writer_started: AtomicBool,
+}
+
+struct QueuedRecord {
+    record: DaemonRecord,
+    delivery: RecordDelivery,
+}
+
+enum RecordDelivery {
+    Queued,
+    Confirmed(oneshot::Sender<Result<RecordWriteOutcome, String>>),
+}
+
+impl RecordDelivery {
+    fn mode(&self) -> RecordDeliveryMode {
+        match self {
+            Self::Queued => RecordDeliveryMode::Queued,
+            Self::Confirmed(_) => RecordDeliveryMode::Confirmed,
+        }
+    }
+
+    fn complete(self, outcome: Result<RecordWriteOutcome, String>) {
+        if let Self::Confirmed(confirmation) = self {
+            let _ = confirmation.send(outcome);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -80,6 +111,34 @@ impl EventPipeline {
     }
 
     pub fn submit(&self, record: DaemonRecord) -> Result<PushOutcome, SubmitError> {
+        self.submit_queued(QueuedRecord {
+            record,
+            delivery: RecordDelivery::Queued,
+        })
+    }
+
+    pub async fn submit_and_wait(
+        &self,
+        record: DaemonRecord,
+    ) -> Result<RecordWriteOutcome, String> {
+        let (confirmation, receiver) = oneshot::channel();
+        match self
+            .submit_queued(QueuedRecord {
+                record,
+                delivery: RecordDelivery::Confirmed(confirmation),
+            })
+            .map_err(|error| format!("failed to submit record: {error}"))?
+        {
+            PushOutcome::Accepted | PushOutcome::AcceptedAfterShedding { .. } => receiver
+                .await
+                .map_err(|_| "record left the queue before writer confirmation".to_string())?,
+            PushOutcome::Dropped { dropped } => {
+                Err(format!("record was dropped from the {dropped:?} queue"))
+            }
+        }
+    }
+
+    fn submit_queued(&self, queued: QueuedRecord) -> Result<PushOutcome, SubmitError> {
         if !self.inner.accepting.load(Ordering::Acquire) {
             return Err(SubmitError::Closed);
         }
@@ -91,7 +150,7 @@ impl EventPipeline {
         if !self.inner.accepting.load(Ordering::Acquire) {
             return Err(SubmitError::Closed);
         }
-        let outcome = queue.push(record.priority, record);
+        let outcome = queue.push(queued.record.priority, queued);
         drop(queue);
         self.inner.notify.notify_one();
         Ok(outcome)
@@ -111,7 +170,7 @@ impl EventPipeline {
         mut sink: S,
     ) -> Result<WriterSummary, String>
     where
-        S: FnMut(DaemonRecord) -> F,
+        S: FnMut(DaemonRecord, RecordDeliveryMode) -> F,
         F: Future<Output = Result<RecordWriteOutcome, String>>,
     {
         if self
@@ -127,8 +186,11 @@ impl EventPipeline {
         let mut written = 0_u64;
         let mut failed = 0_u64;
         loop {
-            if let Some(record) = self.pop()? {
-                match sink(record).await {
+            if let Some(queued) = self.pop()? {
+                let delivery_mode = queued.delivery.mode();
+                let outcome = sink(queued.record, delivery_mode).await;
+                queued.delivery.complete(outcome.clone());
+                match outcome {
                     Ok(RecordWriteOutcome::Written) => {
                         written = written.saturating_add(1);
                     }
@@ -161,7 +223,7 @@ impl EventPipeline {
         }
     }
 
-    fn pop(&self) -> Result<Option<DaemonRecord>, String> {
+    fn pop(&self) -> Result<Option<QueuedRecord>, String> {
         self.inner
             .queue
             .lock()

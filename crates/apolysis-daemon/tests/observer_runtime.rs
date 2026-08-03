@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::future::{pending, Future};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use apolysis_accountability::ComponentState;
+use apolysis_accountability::{ActionClass, ComponentState, QueuePriority, SessionIntent};
 use apolysis_daemon::{
-    run_observer_runtime, scope_channel, DaemonConfig, DaemonState, ObserverRuntimeBackend,
-    ScopeOperation,
+    run_observer_runtime, scope_channel, DaemonConfig, DaemonRecord, DaemonState,
+    ObserverRuntimeBackend, ScopeOperation,
 };
-use apolysis_observer::{DaemonObserverBatch, DaemonObserverCounters};
+use apolysis_observer::{DaemonObserverBatch, DaemonObserverCounters, NetworkConnectCounters};
 use tokio::sync::oneshot;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -24,7 +25,9 @@ async fn observer_runtime_processes_scope_commands_and_reports_final_counters() 
         operations: Arc::clone(&operations),
         fail_counters: false,
         fail_track: None,
+        fail_untrack: None,
         batch: None,
+        scoped_counters: BTreeMap::new(),
     };
     let (scope, receiver) = scope_channel(4);
     let (shutdown, shutdown_receiver) = oneshot::channel();
@@ -53,11 +56,243 @@ async fn observer_runtime_processes_scope_commands_and_reports_final_counters() 
             (ScopeOperation::Track, 31),
             (ScopeOperation::Track, 32),
             (ScopeOperation::Track, 41),
-            (ScopeOperation::Untrack, 41)
+            (ScopeOperation::Untrack, 41),
+            (ScopeOperation::Untrack, 31),
+            (ScopeOperation::Untrack, 32)
         ]
     );
     assert_eq!(summary.counters.reserve_failures, 3);
     assert_eq!(summary.counters.map_pressure, 2);
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn observer_shutdown_persists_connect_gaps_to_the_owning_agent_run() {
+    let config = config();
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("agent-run-a"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run A");
+    state
+        .register(intent("agent-run-b"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run B");
+    state
+        .discover_cgroup("agent-run-a", 31)
+        .await
+        .expect("associate cgroup 31");
+    state
+        .discover_cgroup("agent-run-b", 32)
+        .await
+        .expect("associate cgroup 32");
+
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        scoped_counters: BTreeMap::from([
+            (
+                31,
+                NetworkConnectCounters {
+                    missing_entries: 2,
+                    ..NetworkConnectCounters::default()
+                },
+            ),
+            (
+                32,
+                NetworkConnectCounters {
+                    missing_exits: 1,
+                    pending: 2,
+                    ..NetworkConnectCounters::default()
+                },
+            ),
+        ]),
+    };
+    let (_scope, receiver) = scope_channel(2);
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (shutdown, shutdown_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, vec![31, 32], receiver, state, shutdown_receiver).await
+        })
+    };
+
+    for _ in 0..100 {
+        if state.health().await.ebpf() == ComponentState::Ready {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    shutdown.send(()).expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
+
+    let timeline_a = timeline(&config, "agent-run-a");
+    assert!(timeline_a.contains(r#""record_type":"observation_gap""#));
+    assert!(timeline_a.contains(r#""agent_run_id":"agent-run-a""#));
+    assert!(timeline_a.contains(r#""kind":"missing_entry""#));
+    assert!(timeline_a.contains(r#""count":2"#));
+    assert!(!timeline_a.contains("agent-run-b"));
+    assert!(!timeline_a.contains(r#""kind":"missing_exit""#));
+
+    let timeline_b = timeline(&config, "agent-run-b");
+    assert!(timeline_b.contains(r#""record_type":"observation_gap""#));
+    assert!(timeline_b.contains(r#""agent_run_id":"agent-run-b""#));
+    assert!(timeline_b.contains(r#""kind":"missing_exit""#));
+    assert!(timeline_b.contains(r#""count":3"#));
+    assert!(!timeline_b.contains("agent-run-a"));
+    assert!(!timeline_b.contains(r#""kind":"missing_entry""#));
+
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn dropped_observation_gap_makes_scope_drain_fail_loud() {
+    let mut config = config();
+    config.queue_capacity = 1;
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("agent-run-gap-drop"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-gap-drop", 51)
+        .await
+        .expect("associate cgroup");
+    state
+        .pipeline()
+        .submit(DaemonRecord::new(
+            "agent-run-gap-drop",
+            QueuePriority::Integrity,
+            serde_json::json!({"record_type":"integrity_test"}),
+        ))
+        .expect("fill protected queue");
+
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        scoped_counters: BTreeMap::from([(
+            51,
+            NetworkConnectCounters {
+                missing_entries: 1,
+                ..NetworkConnectCounters::default()
+            },
+        )]),
+    };
+    let (_scope, receiver) = scope_channel(1);
+    let (shutdown, shutdown_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, vec![51], receiver, state, shutdown_receiver).await
+        })
+    };
+    for _ in 0..100 {
+        if state.health().await.ebpf() == ComponentState::Ready {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    shutdown.send(()).unwrap();
+
+    let error = runtime
+        .await
+        .unwrap()
+        .expect_err("dropped Observation Gap must fail scope drain");
+    assert!(error.contains("Observation Gap"));
+    assert!(error.contains("dropped"));
+    assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
+    let config = config();
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let backend = FakeBackend {
+        operations: Arc::clone(&operations),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        scoped_counters: BTreeMap::from([(
+            41,
+            NetworkConnectCounters {
+                missing_entries: 1,
+                ..NetworkConnectCounters::default()
+            },
+        )]),
+    };
+    let (scope, receiver) = scope_channel(2);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+
+    state
+        .register(intent("agent-run-close"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-close", 41)
+        .await
+        .expect("associate cgroup");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        state.close("agent-run-close"),
+    )
+    .await
+    .expect("Agent Run close must not deadlock")
+    .expect("close Agent Run");
+    let timeline_after_close = timeline(&config, "agent-run-close");
+    let gap_index = timeline_after_close
+        .find(r#""record_type":"observation_gap""#)
+        .expect("gap is durable before close returns");
+    let close_index = timeline_after_close
+        .find(r#""record_type":"session_closed""#)
+        .expect("terminal record is durable before close returns");
+    assert!(gap_index < close_index);
+
+    observer_shutdown
+        .send(())
+        .expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![(ScopeOperation::Track, 41), (ScopeOperation::Untrack, 41)]
+    );
+    let timeline = timeline(&config, "agent-run-close");
+    assert!(timeline.contains(r#""record_type":"observation_gap""#));
+    assert!(timeline.contains(r#""agent_run_id":"agent-run-close""#));
+    assert!(timeline.contains(r#""kind":"missing_entry""#));
+    assert!(timeline.contains(r#""count":1"#));
+
     cleanup(&config);
 }
 
@@ -69,7 +304,9 @@ async fn counter_read_failure_marks_ebpf_unavailable() {
         operations: Arc::new(Mutex::new(Vec::new())),
         fail_counters: true,
         fail_track: None,
+        fail_untrack: None,
         batch: None,
+        scoped_counters: BTreeMap::new(),
     };
     let (_scope, receiver) = scope_channel(1);
     let (shutdown, shutdown_receiver) = oneshot::channel();
@@ -95,6 +332,54 @@ async fn counter_read_failure_marks_ebpf_unavailable() {
 }
 
 #[tokio::test]
+async fn scoped_counter_read_failure_stops_runtime_and_keeps_agent_run_open() {
+    let config = config();
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: Some(61),
+        batch: None,
+        scoped_counters: BTreeMap::new(),
+    };
+    let (scope, receiver) = scope_channel(2);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (_observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+    state
+        .register(intent("agent-run-read-failure"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-read-failure", 61)
+        .await
+        .expect("associate cgroup");
+
+    let close_error = state
+        .close("agent-run-read-failure")
+        .await
+        .expect_err("counter read failure must reject clean close");
+    let runtime_error = runtime
+        .await
+        .unwrap()
+        .expect_err("counter read failure must stop observer runtime");
+
+    assert!(close_error.contains("scoped counter read failed"));
+    assert!(runtime_error.contains("scoped counter read failed"));
+    assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    assert!(state.query("agent-run-read-failure").await.is_some());
+    assert!(!timeline(&config, "agent-run-read-failure").contains("session_closed"));
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn restored_scope_failure_keeps_ebpf_unavailable() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
@@ -102,7 +387,9 @@ async fn restored_scope_failure_keeps_ebpf_unavailable() {
         operations: Arc::new(Mutex::new(Vec::new())),
         fail_counters: false,
         fail_track: Some(31),
+        fail_untrack: None,
         batch: None,
+        scoped_counters: BTreeMap::new(),
     };
     let (_scope, receiver) = scope_channel(1);
     let (_shutdown, shutdown_receiver) = oneshot::channel();
@@ -130,10 +417,12 @@ async fn abi_mismatch_stops_the_observer_and_marks_ebpf_unavailable() {
         operations: Arc::new(Mutex::new(Vec::new())),
         fail_counters: false,
         fail_track: None,
+        fail_untrack: None,
         batch: Some(DaemonObserverBatch {
             abi_mismatches: 1,
             ..DaemonObserverBatch::default()
         }),
+        scoped_counters: BTreeMap::new(),
     };
     let (_scope, receiver) = scope_channel(1);
     let (_shutdown, shutdown_receiver) = oneshot::channel();
@@ -161,7 +450,9 @@ struct FakeBackend {
     operations: Arc<Mutex<Vec<(ScopeOperation, u64)>>>,
     fail_counters: bool,
     fail_track: Option<u64>,
+    fail_untrack: Option<u64>,
     batch: Option<DaemonObserverBatch>,
+    scoped_counters: BTreeMap<u64, NetworkConnectCounters>,
 }
 
 impl ObserverRuntimeBackend for FakeBackend {
@@ -176,12 +467,15 @@ impl ObserverRuntimeBackend for FakeBackend {
         Ok(())
     }
 
-    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<(), String> {
+    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<NetworkConnectCounters, String> {
         self.operations
             .lock()
             .unwrap()
             .push((ScopeOperation::Untrack, cgroup_id));
-        Ok(())
+        if self.fail_untrack == Some(cgroup_id) {
+            return Err("scoped counter read failed".to_string());
+        }
+        Ok(self.scoped_counters.remove(&cgroup_id).unwrap_or_default())
     }
 
     fn read_batch(
@@ -203,6 +497,30 @@ impl ObserverRuntimeBackend for FakeBackend {
             ..DaemonObserverCounters::default()
         })
     }
+}
+
+fn intent(agent_run_id: &str) -> SessionIntent {
+    SessionIntent {
+        schema_version: 1,
+        tenant_id: apolysis_accountability::DEFAULT_TENANT_ID.to_string(),
+        retention_tier: apolysis_accountability::RetentionTier::Standard,
+        session_id: agent_run_id.to_string(),
+        expires_at_unix_ms: 4_102_444_800_000,
+        declared_actions: vec![ActionClass::Test],
+        allowed_resources: Vec::new(),
+        workload_selectors: Vec::new(),
+    }
+}
+
+fn timeline(config: &DaemonConfig, agent_run_id: &str) -> String {
+    std::fs::read_to_string(
+        config
+            .state_dir
+            .join("sessions")
+            .join(agent_run_id)
+            .join("timeline.jsonl"),
+    )
+    .expect("read Agent Run timeline")
 }
 
 fn config() -> DaemonConfig {

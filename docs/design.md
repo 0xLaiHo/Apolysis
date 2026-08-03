@@ -156,6 +156,14 @@ bounded thread-scoped entry record, emits the Runtime Observation at syscall
 exit, and maps the Linux return value to succeeded, failed, denied, or pending.
 An unmatched entry or exit becomes an explicit Observation Gap.
 
+In multi-cgroup daemon mode, connect pairing loss is counted separately for
+each cgroup while collector-global counters remain available for health
+diagnosis. Draining a scope prevents new connect entries, snapshots its
+missing-entry, missing-exit, and pending counts after a bounded in-flight
+collector-update drain, and confirms typed Observation Gaps are durable in the
+owning Agent Run before its ownership is discarded. A drain, snapshot, queue,
+or storage failure stops the observer runtime and rejects a clean run close.
+
 Full-syscall collection, prompt/response capture, TLS plaintext capture, and
 generic kernel enforcement are not targets.
 
@@ -293,7 +301,7 @@ Implemented today:
 
 - `ebpf/observer` and `apolysis-observer`: CO-RE tracepoints, ring buffer,
   process-tree/cgroup scopes, ABI v2, outcome-aware network connect,
-  redaction, and health/gap diagnostics;
+  per-cgroup connect gap counters, redaction, and health/gap diagnostics;
 - `apolysis-cli`: fixture/live observation, managed Agent launch, optional
   Codex intent correlation, visibility, and verification commands;
 - `apolysis-core`: current JSONL vocabulary, record types, and versioned
@@ -308,8 +316,10 @@ Implemented today:
 
 The live collector synchronizes its capability manifest to stable storage after
 successful attachment and before releasing a managed Agent gate. Network
-connect has bounded entry/exit outcome semantics; current file hooks still
-describe attempts. Extending outcome semantics to the remaining operation set,
+connect has bounded entry/exit outcome semantics, and the daemon persists
+connect pairing gaps to the owning Agent Run at explicit scope removal and
+clean shutdown. Current file hooks still describe attempts. Extending outcome
+semantics to the remaining operation set, stable scope/process generations,
 complete collector lifecycle records, the saved-run viewer, and bounded
 Kubernetes beta remain targets.
 
@@ -327,9 +337,11 @@ them as historical implementation input; they do not define this architecture.
 - A successful connect does not prove that a remote operation committed.
 - Same-process logical Agents cannot be separated without an additional
   propagated identity; runtime-only attribution remains process-level.
-- The multi-cgroup daemon reports collector-global network correlation counters
-  but does not yet persist them as Agent-Run-scoped Observation Gaps; doing so
-  requires per-cgroup gap attribution.
+- Connect entries still pending when a cgroup scope drains remain in the
+  bounded pairing map until syscall or thread exit. Reassigning that same
+  cgroup to another Agent Run before those entries settle is not a qualified
+  workflow; stable scope generations remain required before cgroup reuse can
+  be supported safely.
 - A compromised kernel or privileged host can suppress or forge observations.
 - Kernel version, BTF, hook availability, verifier behavior, and privileges
   constrain support.

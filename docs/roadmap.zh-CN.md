@@ -101,8 +101,8 @@ enforcement。
 - 把有界 `network_connect` entry/exit 模式扩展到其余受支持 operation set；
 - 保持 return value 与 errno 语义，并区分 attempted、succeeded、failed、denied、pending
   和 unknown；
-- 在 multi-cgroup daemon 持久化 Agent-Run-scoped Observation Gap 前，按 cgroup 归属
-  network correlation counter；
+- 保持 per-cgroup network correlation counter，并验证 scope drain、shutdown 与 identity
+  churn 下隔离的 Agent-Run gap 持久化；
 - 建立抵御 PID reuse 与 exec 的稳定 process identity；
 - 保留 cgroup scope 与 deterministic process lineage；
 - 发出 collector start、周期 health、loss checkpoint、terminal state 和显式 stop reason；

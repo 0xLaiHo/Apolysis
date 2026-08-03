@@ -78,8 +78,8 @@ an exact one.
 - Ordered JSONL output, rotation, optional local hash-chain envelopes, and
   typed diagnostics for drops, map pressure, ABI mismatches, decode failures,
   and truncation.
-- Explicit Observation Gaps for unmatched or still-pending network connect
-  entry/exit pairs.
+- Agent-Run-scoped Observation Gaps for unmatched or still-pending network
+  connect entry/exit pairs, including isolated multi-cgroup daemon scopes.
 - Optional Codex declared-intent ingestion and heuristic mismatch findings.
 
 Network connect now uses bounded entry/exit matching and reports return value,

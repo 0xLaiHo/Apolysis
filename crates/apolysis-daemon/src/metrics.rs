@@ -64,6 +64,7 @@ pub fn render_prometheus_metrics(health: &HealthSnapshot) -> String {
         QueuePriority::Lifecycle,
         QueuePriority::Diagnostic,
         QueuePriority::Finding,
+        QueuePriority::Gap,
         QueuePriority::Integrity,
     ] {
         push_metric(
@@ -120,6 +121,7 @@ fn priority_name(priority: QueuePriority) -> &'static str {
         QueuePriority::Lifecycle => "lifecycle",
         QueuePriority::Diagnostic => "diagnostic",
         QueuePriority::Finding => "finding",
+        QueuePriority::Gap => "gap",
         QueuePriority::Integrity => "integrity",
     }
 }

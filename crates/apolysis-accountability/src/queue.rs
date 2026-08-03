@@ -11,6 +11,7 @@ pub enum QueuePriority {
     Lifecycle,
     Diagnostic,
     Finding,
+    Gap,
     Integrity,
 }
 
@@ -97,6 +98,7 @@ impl<T> BoundedPriorityQueue<T> {
     pub fn pop(&mut self) -> Option<T> {
         for priority in [
             QueuePriority::Integrity,
+            QueuePriority::Gap,
             QueuePriority::Finding,
             QueuePriority::Diagnostic,
             QueuePriority::Lifecycle,
