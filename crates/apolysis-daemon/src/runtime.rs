@@ -410,7 +410,12 @@ async fn ingest_observer_batch_with_delivery(
             continue;
         };
         let session_id = context.agent_run_id;
-        let raw = match raw_event_from_record(&event.record, &session_id, event.timestamp_unix_ms) {
+        let raw = match raw_event_from_record(
+            &event.record,
+            &session_id,
+            event.timestamp_unix_ms,
+            "",
+        ) {
             Ok(raw) => raw,
             Err(error) => {
                 return Err(format!(

@@ -167,7 +167,7 @@ fn live_file_record_converts_to_the_fixture_compatible_raw_schema() {
     write_fixed(&mut record.resource, b"/workspace/input.txt");
     write_fixed(&mut record.action, b"read");
 
-    let raw = raw_event_from_record(&record, "session-live", 1_700_000_000_044)
+    let raw = raw_event_from_record(&record, "session-live", 1_700_000_000_044, "boot-test")
         .expect("convert live record");
 
     assert_eq!(raw.session_id, "session-live");
@@ -245,7 +245,7 @@ fn live_file_records_map_linux_return_values_to_synchronous_outcomes() {
             record.flags = FLAG_RETURN_VALUE;
             record.return_value = return_value;
 
-            let raw = raw_event_from_record(&record, "agent-run-file-result", 1)
+            let raw = raw_event_from_record(&record, "agent-run-file-result", 1, "boot-test")
                 .expect("convert file result record");
 
             assert_eq!(raw.operation_result, Some(expected), "kind: {kind:?}");
@@ -262,7 +262,8 @@ fn live_connect_record_decodes_ipv4_sockaddr() {
     record.payload[4..8].copy_from_slice(&[1, 1, 1, 1]);
     write_fixed(&mut record.action, b"connect");
 
-    let raw = raw_event_from_record(&record, "session-live", 1).expect("convert sockaddr record");
+    let raw = raw_event_from_record(&record, "session-live", 1, "boot-test")
+        .expect("convert sockaddr record");
 
     assert_eq!(raw.event_name, "connect");
     assert_eq!(raw.resource, "1.1.1.1:443");
@@ -297,7 +298,7 @@ fn live_connect_record_maps_linux_return_values_to_supported_outcomes() {
         record.flags = FLAG_RETURN_VALUE;
         record.return_value = return_value;
 
-        let raw = raw_event_from_record(&record, "agent-run-connect-result", 1)
+        let raw = raw_event_from_record(&record, "agent-run-connect-result", 1, "boot-test")
             .expect("convert connect result record");
 
         assert_eq!(raw.operation_result, Some(expected));
@@ -313,7 +314,8 @@ fn live_exec_record_preserves_argv_payload_and_truncation_markers() {
     write_fixed(&mut record.action, b"exec");
     write_fixed(&mut record.payload, b"argv:/usr/bin/sed -n 1,8p README.md");
 
-    let raw = raw_event_from_record(&record, "session-live", 1).expect("convert exec record");
+    let raw = raw_event_from_record(&record, "session-live", 1, "boot-test")
+        .expect("convert exec record");
 
     assert_eq!(raw.event_name, "sched_process_exec");
     assert_eq!(raw.resource, "/usr/bin/sed");

@@ -29,6 +29,25 @@ pub const COLLECTOR_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 pub const OBSERVATION_GAP_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeRelation {
+    Exact,
+    Inferred,
+    Ambiguous,
+    Unattributed,
+}
+
+impl RuntimeRelation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Inferred => "inferred",
+            Self::Ambiguous => "ambiguous",
+            Self::Unattributed => "unattributed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObservationGapKind {
     MissingEntry,
     MissingExit,
@@ -475,6 +494,15 @@ pub struct RawKernelEvent {
     pub operation_result: Option<OperationResult>,
     pub container_id: Option<String>,
     pub cgroup_id: Option<String>,
+    pub host_boot_id: Option<String>,
+    pub scope_generation: Option<u64>,
+    pub process_generation: Option<u64>,
+    pub process_start_time_ns: Option<u64>,
+    pub exec_generation: Option<u32>,
+    pub parent_process_generation: Option<u64>,
+    pub parent_exec_generation: Option<u32>,
+    pub relation_status: RuntimeRelation,
+    pub relation_reason: String,
     pub raw_payload: String,
 }
 
@@ -513,6 +541,15 @@ impl RawKernelEvent {
             operation_result: None,
             container_id,
             cgroup_id,
+            host_boot_id: None,
+            scope_generation: None,
+            process_generation: None,
+            process_start_time_ns: None,
+            exec_generation: None,
+            parent_process_generation: None,
+            parent_exec_generation: None,
+            relation_status: RuntimeRelation::Inferred,
+            relation_reason: "pid_only_runtime_identity".to_string(),
             raw_payload: raw_payload.into(),
         }
     }
@@ -526,6 +563,39 @@ impl RawKernelEvent {
     /// Attach an outcome supported by the active Collector Capability.
     pub fn with_operation_result(mut self, operation_result: OperationResult) -> Self {
         self.operation_result = Some(operation_result);
+        self
+    }
+
+    /// Attach the bounded kernel/runtime generations used for exact attribution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_process_identity(
+        mut self,
+        host_boot_id: Option<String>,
+        scope_generation: Option<u64>,
+        process_generation: Option<u64>,
+        process_start_time_ns: Option<u64>,
+        exec_generation: Option<u32>,
+        parent_process_generation: Option<u64>,
+        parent_exec_generation: Option<u32>,
+    ) -> Self {
+        self.host_boot_id = host_boot_id.filter(|value| !value.trim().is_empty());
+        self.scope_generation = scope_generation.filter(|value| *value != 0);
+        self.process_generation = process_generation.filter(|value| *value != 0);
+        self.process_start_time_ns = process_start_time_ns.filter(|value| *value != 0);
+        self.exec_generation = exec_generation;
+        self.parent_process_generation =
+            parent_process_generation.filter(|value| *value != 0);
+        self.parent_exec_generation = parent_exec_generation;
+        if self.host_boot_id.is_some()
+            && self.process_generation.is_some()
+            && self.exec_generation.is_some()
+        {
+            self.relation_status = RuntimeRelation::Exact;
+            self.relation_reason = "host_boot_process_exec_generation".to_string();
+        } else {
+            self.relation_status = RuntimeRelation::Inferred;
+            self.relation_reason = "runtime_generation_unavailable".to_string();
+        }
         self
     }
 
@@ -560,9 +630,19 @@ impl JsonLine for RawKernelEvent {
             .and_then(|result| result.errno)
             .map(|errno| errno.to_string())
             .unwrap_or_else(|| "null".to_string());
+        let optional_u64 = |value: Option<u64>| {
+            value
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        };
+        let optional_u32 = |value: Option<u32>| {
+            value
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        };
 
         format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"event_id\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"outcome\":{outcome},\"return_value\":{return_value},\"errno\":{errno},\"container_id\":{},\"cgroup_id\":{},\"raw_payload\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"event_id\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"outcome\":{outcome},\"return_value\":{return_value},\"errno\":{errno},\"container_id\":{},\"cgroup_id\":{},\"host_boot_id\":{},\"scope_generation\":{},\"process_generation\":{},\"process_start_time_ns\":{},\"exec_generation\":{},\"parent_process_generation\":{},\"parent_exec_generation\":{},\"relation_status\":{},\"relation_reason\":{},\"raw_payload\":{}}}",
             json_string(records::RAW_KERNEL_EVENT),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
@@ -578,6 +658,15 @@ impl JsonLine for RawKernelEvent {
             json_string(&self.action),
             container_id,
             cgroup_id,
+            optional_json_string(self.host_boot_id.as_deref()),
+            optional_u64(self.scope_generation),
+            optional_u64(self.process_generation),
+            optional_u64(self.process_start_time_ns),
+            optional_u32(self.exec_generation),
+            optional_u64(self.parent_process_generation),
+            optional_u32(self.parent_exec_generation),
+            json_string(self.relation_status.as_str()),
+            json_string(&self.relation_reason),
             json_string(&self.raw_payload)
         )
     }

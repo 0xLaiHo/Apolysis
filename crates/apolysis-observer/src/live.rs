@@ -935,6 +935,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 &record,
                 &request.session_id,
                 calibration.to_unix_ms(record.timestamp_ns),
+                "",
             ) {
                 Ok(raw) => raw.with_event_id(event_ids.next_raw_event_id()),
                 Err(_) => {
@@ -2349,6 +2350,7 @@ pub fn raw_event_from_record(
     record: &KernelEventRecord,
     session_id: &str,
     timestamp_unix_ms: u128,
+    host_boot_id: &str,
 ) -> Result<RawKernelEvent, String> {
     let kind = record.kind()?;
     let event_name = match kind {
@@ -2403,6 +2405,15 @@ pub fn raw_event_from_record(
         None,
         Some(record.cgroup_id.to_string()),
         payload,
+    )
+    .with_process_identity(
+        Some(host_boot_id.to_string()),
+        Some(record.scope_generation),
+        Some(record.process_generation),
+        Some(record.process_start_time_ns),
+        Some(record.exec_generation),
+        Some(record.parent_process_generation),
+        Some(record.parent_exec_generation),
     );
     Ok(match record.return_value() {
         Some(return_value) => {
