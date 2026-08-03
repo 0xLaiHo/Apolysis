@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -10,11 +10,14 @@ use apolysis_accountability::{
     AccountabilityAnalyzer, ComponentState, EffectKind, EvidenceBoundary, ObservedEffect,
     PushOutcome, QueuePriority, ResourceKind, RuntimeIdentity, SessionIntent,
 };
-use apolysis_core::RawKernelEvent;
+use apolysis_core::{
+    new_collector_instance_id, CollectorHealthState, CollectorLifecycleCounters,
+    CollectorLifecycleRecord, CollectorNormalStopReason, RawKernelEvent,
+};
 use apolysis_observer::{
     raw_event_from_record, scope_observation_gaps, DaemonObserver, DaemonObserverBatch,
-    DaemonObserverCounters, Redactor, RuntimeEvidencePersistence, ScopeGeneration,
-    ScopeObservationGapCounters,
+    DaemonObserverCounters, OperationPairCounters, Redactor, RuntimeEvidencePersistence,
+    ScopeGeneration, ScopeObservationGapCounters,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -120,8 +123,10 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
     state: Arc<DaemonState>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<ObserverRuntimeSummary, String> {
+    let collector_instance_id = new_collector_instance_id()?;
     let mut tracked_cgroups = BTreeMap::new();
     let mut scope_contexts = BTreeMap::new();
+    let mut lifecycle_counters = BTreeMap::new();
     for cgroup_id in initial_cgroups {
         let generation = match backend.track_cgroup(cgroup_id) {
             Ok(generation) => generation,
@@ -142,6 +147,13 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
         }
     }
     state.set_ebpf(ComponentState::Ready).await;
+    let initial_agent_runs: BTreeSet<String> = scope_contexts
+        .values()
+        .map(|context| context.agent_run_id.clone())
+        .collect();
+    for agent_run_id in initial_agent_runs {
+        persist_collector_started(&state, &agent_run_id, &collector_instance_id).await?;
+    }
     let pipeline = state.pipeline();
     let mut summary = ObserverIngestSummary::default();
     let mut scope_open = true;
@@ -157,18 +169,49 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                         let agent_intent = request.agent_intent().cloned();
                         let operation = request.operation();
                         let result = match operation {
-                            ScopeOperation::Track => backend.track_cgroup(cgroup_id).map(|generation| {
-                                tracked_cgroups.insert(cgroup_id, generation);
-                                if let Some(agent_run_id) = &agent_run_id {
-                                    scope_contexts.insert(
-                                        ScopeRuntimeIdentity::new(cgroup_id, generation),
-                                        ScopeObservationContext::new(
-                                            agent_run_id.clone(),
-                                            agent_intent.clone(),
-                                        ),
-                                    );
+                            ScopeOperation::Track => match backend.track_cgroup(cgroup_id) {
+                                Ok(generation) => {
+                                    let first_scope = agent_run_id.as_ref().is_some_and(|agent_run_id| {
+                                        !scope_contexts.values().any(|context| {
+                                            context.agent_run_id == *agent_run_id
+                                        })
+                                    });
+                                    tracked_cgroups.insert(cgroup_id, generation);
+                                    if let Some(agent_run_id) = &agent_run_id {
+                                        scope_contexts.insert(
+                                            ScopeRuntimeIdentity::new(cgroup_id, generation),
+                                            ScopeObservationContext::new(
+                                                agent_run_id.clone(),
+                                                agent_intent.clone(),
+                                            ),
+                                        );
+                                        if first_scope {
+                                            if let Err(error) = persist_collector_started(
+                                                &state,
+                                                agent_run_id,
+                                                &collector_instance_id,
+                                            )
+                                            .await
+                                            {
+                                                let _ = backend.untrack_cgroup(cgroup_id);
+                                                tracked_cgroups.remove(&cgroup_id);
+                                                scope_contexts.remove(&ScopeRuntimeIdentity::new(
+                                                    cgroup_id,
+                                                    generation,
+                                                ));
+                                                Err(error)
+                                            } else {
+                                                Ok(())
+                                            }
+                                        } else {
+                                            Ok(())
+                                        }
+                                    } else {
+                                        Ok(())
+                                    }
                                 }
-                            }),
+                                Err(error) => Err(error),
+                            },
                             ScopeOperation::Untrack => {
                                 let generation = tracked_cgroups.get(&cgroup_id).copied();
                                 if let Some(agent_run_id) = &agent_run_id {
@@ -205,11 +248,44 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                                                 .await
                                                 {
                                                     Ok(()) => {
+                                                        if let Some(agent_run_id) = &agent_run_id {
+                                                            add_scope_lifecycle_counters(
+                                                                lifecycle_counters
+                                                                    .entry(agent_run_id.clone())
+                                                                    .or_default(),
+                                                                counters,
+                                                            );
+                                                        }
                                                         tracked_cgroups.remove(&cgroup_id);
                                                         if let Some(generation) = generation {
                                                             scope_contexts.remove(&ScopeRuntimeIdentity::new(cgroup_id, generation));
                                                         }
-                                                        Ok(())
+                                                        if let Some(agent_run_id) = &agent_run_id {
+                                                            let final_scope = !scope_contexts.values().any(|context| {
+                                                                context.agent_run_id == *agent_run_id
+                                                            });
+                                                            if final_scope {
+                                                                match backend.counters() {
+                                                                    Ok(global) => persist_collector_stopped(
+                                                                        &state,
+                                                                        agent_run_id,
+                                                                        &collector_instance_id,
+                                                                        CollectorNormalStopReason::AgentRunClosed,
+                                                                        global,
+                                                                        summary,
+                                                                        lifecycle_counters
+                                                                            .remove(agent_run_id)
+                                                                            .unwrap_or_default(),
+                                                                    )
+                                                                    .await,
+                                                                    Err(error) => Err(error),
+                                                                }
+                                                            } else {
+                                                                Ok(())
+                                                            }
+                                                        } else {
+                                                            Ok(())
+                                                        }
                                                     }
                                                     Err(error) => Err(error),
                                                 }
@@ -271,6 +347,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
         }
     }
 
+    let mut shutdown_agent_runs = BTreeSet::new();
     for (cgroup_id, generation) in tracked_cgroups {
         if let Some(agent_run_id) = state.session_for_cgroup(cgroup_id).await {
             let intent = state.intent_for_session(&agent_run_id).await;
@@ -314,6 +391,16 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
             state.set_ebpf(ComponentState::Unavailable).await;
             return Err(error);
         }
+        if let Some(context) = scope_contexts.get(&ScopeRuntimeIdentity::new(cgroup_id, generation))
+        {
+            shutdown_agent_runs.insert(context.agent_run_id.clone());
+            add_scope_lifecycle_counters(
+                lifecycle_counters
+                    .entry(context.agent_run_id.clone())
+                    .or_default(),
+                counters,
+            );
+        }
         scope_contexts.remove(&ScopeRuntimeIdentity::new(cgroup_id, generation));
     }
 
@@ -324,11 +411,95 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
             return Err(error);
         }
     };
+    for agent_run_id in shutdown_agent_runs {
+        persist_collector_stopped(
+            &state,
+            &agent_run_id,
+            &collector_instance_id,
+            CollectorNormalStopReason::DaemonShutdown,
+            counters,
+            summary,
+            lifecycle_counters.remove(&agent_run_id).unwrap_or_default(),
+        )
+        .await?;
+    }
     state.set_ebpf(ComponentState::Unavailable).await;
     Ok(ObserverRuntimeSummary {
         counters,
         ingest: summary,
     })
+}
+
+async fn persist_collector_started(
+    state: &DaemonState,
+    agent_run_id: &str,
+    collector_instance_id: &str,
+) -> Result<(), String> {
+    state
+        .persist_collector_lifecycle(CollectorLifecycleRecord::started(
+            agent_run_id,
+            collector_instance_id,
+        ))
+        .await
+        .map_err(|error| format!("failed to persist collector start: {error}"))
+}
+
+async fn persist_collector_stopped(
+    state: &DaemonState,
+    agent_run_id: &str,
+    collector_instance_id: &str,
+    reason: CollectorNormalStopReason,
+    global: DaemonObserverCounters,
+    ingest: ObserverIngestSummary,
+    mut counters: CollectorLifecycleCounters,
+) -> Result<(), String> {
+    counters.global_reserve_failures = global.reserve_failures;
+    counters.global_map_pressure = global.map_pressure;
+    counters.global_abi_mismatches = ingest.abi_mismatches;
+    counters.global_decode_failures = ingest.decode_failures;
+    counters.global_truncations = ingest.truncations;
+    let health = if counters.has_loss() {
+        CollectorHealthState::Degraded
+    } else {
+        CollectorHealthState::Healthy
+    };
+    state
+        .persist_collector_lifecycle(CollectorLifecycleRecord::stopped(
+            agent_run_id,
+            collector_instance_id,
+            health,
+            reason,
+            counters,
+        ))
+        .await
+        .map_err(|error| format!("failed to persist collector terminal state: {error}"))
+}
+
+fn add_scope_lifecycle_counters(
+    totals: &mut CollectorLifecycleCounters,
+    scoped: ScopeObservationGapCounters,
+) {
+    let pairs = [
+        OperationPairCounters {
+            missing_entries: scoped.network_connect.missing_entries,
+            missing_exits: scoped.network_connect.missing_exits,
+            pending: scoped.network_connect.pending,
+        },
+        scoped.file_operations.open,
+        scoped.file_operations.create,
+        scoped.file_operations.truncate,
+        scoped.file_operations.unlink,
+        scoped.file_operations.rename,
+    ];
+    for pair in pairs {
+        totals.scope_missing_entries = totals
+            .scope_missing_entries
+            .saturating_add(pair.missing_entries);
+        totals.scope_missing_exits = totals
+            .scope_missing_exits
+            .saturating_add(pair.missing_exits);
+        totals.scope_pending = totals.scope_pending.saturating_add(pair.pending);
+    }
 }
 
 async fn submit_scope_observation_gaps(

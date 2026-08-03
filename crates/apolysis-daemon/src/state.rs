@@ -392,6 +392,16 @@ impl DaemonState {
         self.health.write().await.set_adapter(adapter, state);
     }
 
+    pub async fn persist_collector_lifecycle(
+        &self,
+        record: CollectorLifecycleRecord,
+    ) -> Result<(), String> {
+        let agent_run_id = record.agent_run_id.clone();
+        let payload = serde_json::from_str(&record.to_json_line())
+            .map_err(|error| format!("failed to encode collector lifecycle: {error}"))?;
+        self.persist(&agent_run_id, payload).await
+    }
+
     pub async fn ingest_runtime_workload(
         &self,
         workload: RuntimeWorkload,

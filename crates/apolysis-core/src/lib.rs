@@ -29,6 +29,21 @@ pub const COLLECTOR_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 pub const COLLECTOR_LIFECYCLE_SCHEMA_VERSION: u32 = 1;
 pub const OBSERVATION_GAP_SCHEMA_VERSION: u32 = 1;
 
+pub fn new_collector_instance_id() -> Result<String, String> {
+    let value = std::fs::read_to_string("/proc/sys/kernel/random/uuid")
+        .map_err(|error| format!("failed to allocate collector instance ID: {error}"))?;
+    let value = value.trim();
+    let valid = value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    if !valid {
+        return Err("kernel returned an invalid collector instance ID".to_string());
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollectorLifecycleState {
     Started,

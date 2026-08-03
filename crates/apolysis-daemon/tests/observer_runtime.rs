@@ -528,6 +528,10 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
         .discover_cgroup("agent-run-close", 41)
         .await
         .expect("associate cgroup");
+    let timeline_after_track = timeline(&config, "agent-run-close");
+    assert!(timeline_after_track.contains(r#""record_type":"collector_lifecycle""#));
+    assert!(timeline_after_track.contains(r#""state":"started""#));
+    assert!(timeline_after_track.contains(r#""health":"healthy""#));
     state
         .register(intent("agent-run-close"), 1_700_000_000_001)
         .await
@@ -552,9 +556,14 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
     let close_index = timeline_after_close
         .find(r#""record_type":"session_closed""#)
         .expect("terminal record is durable before close returns");
-    assert!(outcome_index < close_index);
-    assert!(process_index < close_index);
-    assert!(gap_index < close_index);
+    let lifecycle_terminal_index = timeline_after_close
+        .find(r#""state":"stopped""#)
+        .expect("collector terminal is durable before close returns");
+    assert!(timeline_after_close.contains(r#""stop_reason":"agent_run_closed""#));
+    assert!(outcome_index < lifecycle_terminal_index);
+    assert!(process_index < lifecycle_terminal_index);
+    assert!(gap_index < lifecycle_terminal_index);
+    assert!(lifecycle_terminal_index < close_index);
     assert!(!timeline_after_close.contains("/sensitive/private.txt"));
     assert!(timeline_after_close.contains("path_token:"));
 
