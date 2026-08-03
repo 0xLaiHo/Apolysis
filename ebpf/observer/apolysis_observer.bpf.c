@@ -583,12 +583,14 @@ static __always_inline bool advance_current_exec_generation(void)
         return false;
     if (identity.exec_generation == 0xffffffff) {
         count_map_pressure();
+        bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &pid);
         return false;
     }
     identity.exec_generation++;
     if (bpf_map_update_elem(&APOLYSIS_PROCESS_IDENTITIES, &pid, &identity,
                             BPF_EXIST)) {
         count_map_pressure();
+        bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &pid);
         return false;
     }
     return true;

@@ -821,6 +821,11 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     assert!(credential_read.contains(r#""outcome":"succeeded""#));
     assert!(credential_read.contains(r#""return_value":"#));
     assert!(credential_read.contains(r#""errno":null"#));
+    assert!(credential_read.contains(r#""host_boot_id":"#));
+    assert!(!credential_read.contains(r#""process_generation":null"#));
+    assert!(!credential_read.contains(r#""process_start_time_ns":null"#));
+    assert!(!credential_read.contains(r#""exec_generation":null"#));
+    assert!(credential_read.contains(r#""relation_status":"exact""#));
     let connect = timeline
         .lines()
         .find(|line| line.contains(r#""event_type":"network_connect""#))

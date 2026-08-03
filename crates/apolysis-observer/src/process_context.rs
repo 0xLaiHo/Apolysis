@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use apolysis_core::{CanonicalEvent, EventType, RawKernelEvent};
 
+const MAX_PROCESS_CONTEXTS: usize = 16_384;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProcessContext {
     command: String,
@@ -77,7 +79,10 @@ impl ProcessContextTable {
                 executable: raw.resource.clone(),
                 started_at_unix_ms: raw.timestamp_unix_ms,
             };
-            self.by_identity.insert(key.clone(), context);
+            if self.by_identity.contains_key(&key) || self.by_identity.len() < MAX_PROCESS_CONTEXTS
+            {
+                self.by_identity.insert(key.clone(), context);
+            }
         }
 
         let enriched = if should_enrich(&canonical.event_type) {
