@@ -96,6 +96,51 @@ impl TryFrom<u8> for TrackedCgroupState {
 
 const _: [(); 1] = [(); std::mem::size_of::<TrackedCgroupState>()];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct TrackedCgroupScopeAbi {
+    generation: u64,
+    state: u8,
+    reserved: [u8; 7],
+}
+
+unsafe impl Pod for TrackedCgroupScopeAbi {}
+
+impl TrackedCgroupScopeAbi {
+    pub fn active(generation: u64) -> Result<Self, String> {
+        if generation == 0 {
+            return Err("cgroup scope generation must be non-zero".to_string());
+        }
+        Ok(Self {
+            generation,
+            state: TrackedCgroupState::Active as u8,
+            reserved: [0; 7],
+        })
+    }
+
+    pub fn generation(self) -> u64 {
+        self.generation
+    }
+
+    pub fn is_active(self) -> bool {
+        self.state == TrackedCgroupState::Active as u8
+    }
+
+    pub(crate) fn with_state(self, state: TrackedCgroupState) -> Self {
+        Self {
+            state: state as u8,
+            ..self
+        }
+    }
+
+    pub(crate) fn state(self) -> Result<TrackedCgroupState, String> {
+        self.state.try_into()
+    }
+}
+
+const _: [(); 16] = [(); std::mem::size_of::<TrackedCgroupScopeAbi>()];
+const _: [(); 8] = [(); std::mem::align_of::<TrackedCgroupScopeAbi>()];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KernelEventDecodeError {
     UnexpectedRecordLength { expected: usize, received: usize },

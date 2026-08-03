@@ -624,8 +624,7 @@ impl RawKernelEvent {
         self.process_generation = process_generation.filter(|value| *value != 0);
         self.process_start_time_ns = process_start_time_ns.filter(|value| *value != 0);
         self.exec_generation = exec_generation;
-        self.parent_process_generation =
-            parent_process_generation.filter(|value| *value != 0);
+        self.parent_process_generation = parent_process_generation.filter(|value| *value != 0);
         self.parent_exec_generation = parent_exec_generation;
         if self.host_boot_id.is_some()
             && self.process_generation.is_some()

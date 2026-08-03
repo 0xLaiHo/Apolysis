@@ -28,13 +28,11 @@ impl ProcessContextKey {
             raw.process_generation,
             raw.exec_generation,
         ) {
-            (Some(host_boot_id), Some(process_generation), Some(exec_generation)) => {
-                Self::Stable {
-                    host_boot_id: host_boot_id.to_string(),
-                    process_generation,
-                    exec_generation,
-                }
-            }
+            (Some(host_boot_id), Some(process_generation), Some(exec_generation)) => Self::Stable {
+                host_boot_id: host_boot_id.to_string(),
+                process_generation,
+                exec_generation,
+            },
             _ => Self::LegacyPid(raw.pid),
         }
     }

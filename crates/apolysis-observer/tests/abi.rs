@@ -2,10 +2,9 @@
 
 use apolysis_core::{OperationOutcome, OperationResult, RuntimeRelation};
 use apolysis_observer::abi::{
-    KernelEventDecodeError, KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN,
-    FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RETURN_VALUE,
-    KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
-    TrackedCgroupScopeAbi,
+    KernelEventDecodeError, KernelEventKind, KernelEventRecord, TrackedCgroupScopeAbi, ACTION_LEN,
+    COMM_LEN, FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED,
+    FLAG_RETURN_VALUE, KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
 };
 use apolysis_observer::raw_event_from_record;
 
@@ -203,13 +202,8 @@ fn live_record_normalizes_a_stable_runtime_identity() {
     record.parent_process_generation = 11;
     record.parent_exec_generation = 4;
 
-    let raw = raw_event_from_record(
-        &record,
-        "session-live",
-        1_700_000_000_044,
-        "boot-test",
-    )
-    .expect("convert stable runtime identity");
+    let raw = raw_event_from_record(&record, "session-live", 1_700_000_000_044, "boot-test")
+        .expect("convert stable runtime identity");
 
     assert_eq!(raw.host_boot_id.as_deref(), Some("boot-test"));
     assert_eq!(raw.scope_generation, Some(7));
@@ -219,10 +213,7 @@ fn live_record_normalizes_a_stable_runtime_identity() {
     assert_eq!(raw.parent_process_generation, Some(11));
     assert_eq!(raw.parent_exec_generation, Some(4));
     assert_eq!(raw.relation_status, RuntimeRelation::Exact);
-    assert_eq!(
-        raw.relation_reason,
-        "host_boot_process_exec_generation"
-    );
+    assert_eq!(raw.relation_reason, "host_boot_process_exec_generation");
 }
 
 #[test]

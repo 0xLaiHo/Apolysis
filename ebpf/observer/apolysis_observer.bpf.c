@@ -32,6 +32,7 @@ struct apolysis_process_identity {
 
 struct apolysis_pending_connect {
     unsigned long long cgroup_id;
+    unsigned long long scope_generation;
     unsigned int flags;
     unsigned char payload[APOLYSIS_PAYLOAD_LEN];
 };
@@ -47,6 +48,7 @@ enum apolysis_file_syscall_source {
 
 struct apolysis_pending_file {
     unsigned long long cgroup_id;
+    unsigned long long scope_generation;
     unsigned int event_kind;
     unsigned int source;
     unsigned int flags;
@@ -127,7 +129,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 16384);
     __type(key, unsigned long long);
-    __type(value, unsigned char);
+    __type(value, struct apolysis_cgroup_scope);
 } APOLYSIS_TRACKED_CGROUPS SEC(".maps");
 
 struct {
@@ -181,12 +183,25 @@ static __always_inline void count_map_pressure(void)
         __sync_fetch_and_add(&counters->map_pressure, 1);
 }
 
+static __always_inline struct apolysis_cgroup_scope *cgroup_scope(
+    unsigned long long cgroup_id)
+{
+    return bpf_map_lookup_elem(&APOLYSIS_TRACKED_CGROUPS, &cgroup_id);
+}
+
 static __always_inline unsigned char cgroup_scope_state(unsigned long long cgroup_id)
 {
-    unsigned char *state;
+    struct apolysis_cgroup_scope *scope = cgroup_scope(cgroup_id);
 
-    state = bpf_map_lookup_elem(&APOLYSIS_TRACKED_CGROUPS, &cgroup_id);
-    return state ? *state : 0;
+    return scope ? scope->state : 0;
+}
+
+static __always_inline unsigned long long cgroup_scope_generation(
+    unsigned long long cgroup_id)
+{
+    struct apolysis_cgroup_scope *scope = cgroup_scope(cgroup_id);
+
+    return scope ? scope->generation : 0;
 }
 
 static __always_inline struct apolysis_network_connect_counters *
@@ -195,15 +210,24 @@ network_connect_counters(unsigned long long cgroup_id)
     return bpf_map_lookup_elem(&APOLYSIS_CONNECT_COUNTERS_BY_CGROUP, &cgroup_id);
 }
 
-static __always_inline bool begin_scope_counter_update(unsigned long long cgroup_id)
+static __always_inline bool begin_scope_counter_update(
+    unsigned long long cgroup_id,
+    unsigned long long expected_generation)
 {
     unsigned long long *updates;
+    struct apolysis_cgroup_scope *scope;
 
+    scope = cgroup_scope(cgroup_id);
+    if (!scope || scope->state != APOLYSIS_CGROUP_ACTIVE ||
+        (expected_generation && scope->generation != expected_generation))
+        return false;
     updates = bpf_map_lookup_elem(&APOLYSIS_SCOPE_UPDATES_BY_CGROUP, &cgroup_id);
     if (!updates)
         return false;
     __sync_fetch_and_add(updates, 1);
-    if (cgroup_scope_state(cgroup_id) == APOLYSIS_CGROUP_ACTIVE)
+    scope = cgroup_scope(cgroup_id);
+    if (scope && scope->state == APOLYSIS_CGROUP_ACTIVE &&
+        (!expected_generation || scope->generation == expected_generation))
         return true;
     __sync_fetch_and_sub(updates, 1);
     return false;
@@ -286,9 +310,11 @@ static __always_inline void decrement_connect_pending(
         __sync_fetch_and_sub(&scoped->pending, 1);
 }
 
-static __always_inline void account_stale_connect(unsigned long long cgroup_id)
+static __always_inline void account_stale_connect(
+    unsigned long long cgroup_id,
+    unsigned long long scope_generation)
 {
-    bool update_scoped = begin_scope_counter_update(cgroup_id);
+    bool update_scoped = begin_scope_counter_update(cgroup_id, scope_generation);
 
     decrement_connect_pending(cgroup_id, update_scoped);
     count_connect_missing_exit(cgroup_id, update_scoped);
@@ -404,9 +430,10 @@ static __always_inline void decrement_file_pending(
 }
 
 static __always_inline void account_stale_file(unsigned long long cgroup_id,
+                                                unsigned long long scope_generation,
                                                 unsigned int event_kind)
 {
-    bool update_scoped = begin_scope_counter_update(cgroup_id);
+    bool update_scoped = begin_scope_counter_update(cgroup_id, scope_generation);
 
     decrement_file_pending(cgroup_id, event_kind, update_scoped);
     count_file_missing_exit(cgroup_id, event_kind, update_scoped);
@@ -466,7 +493,9 @@ static __always_inline bool current_is_in_scope(void)
     return current_pid_tree_is_tracked();
 }
 
-static __always_inline bool pair_is_in_scope(unsigned long long cgroup_id)
+static __always_inline bool pair_is_in_scope(
+    unsigned long long cgroup_id,
+    unsigned long long scope_generation)
 {
     struct apolysis_scope_config *config = scope_config();
 
@@ -477,6 +506,7 @@ static __always_inline bool pair_is_in_scope(unsigned long long cgroup_id)
                bpf_get_current_cgroup_id() == cgroup_id;
     if (config->mode == APOLYSIS_SCOPE_MULTI_CGROUP)
         return cgroup_scope_state(cgroup_id) == APOLYSIS_CGROUP_ACTIVE &&
+               cgroup_scope_generation(cgroup_id) == scope_generation &&
                bpf_get_current_cgroup_id() == cgroup_id;
     if (config->mode == APOLYSIS_SCOPE_PID_TREE)
         return current_pid_tree_is_tracked();
@@ -618,6 +648,9 @@ static __always_inline struct apolysis_kernel_event *reserve_event_unchecked(uns
     event->record_size = sizeof(*event);
     event->timestamp_ns = bpf_ktime_get_ns();
     event->cgroup_id = bpf_get_current_cgroup_id();
+    event->scope_generation = multi_cgroup_scope()
+        ? cgroup_scope_generation(event->cgroup_id)
+        : 1;
     event->pid = pid_tgid >> 32;
     event->ppid = current_parent_pid();
     event->uid = uid_gid;
@@ -648,7 +681,7 @@ reserve_process_event(unsigned int kind,
         return reserve_event(kind);
 
     *cgroup_id = bpf_get_current_cgroup_id();
-    *update_scoped = begin_scope_counter_update(*cgroup_id);
+    *update_scoped = begin_scope_counter_update(*cgroup_id, 0);
     if (!*update_scoped)
         return 0;
     return reserve_event_unchecked(kind);
@@ -837,7 +870,9 @@ static __always_inline int capture_file_enter(unsigned int event_kind,
     struct apolysis_pending_file *stale;
     unsigned long long pid_tgid;
     unsigned long long cgroup_id;
+    unsigned long long scope_generation;
     unsigned long long stale_cgroup_id = 0;
+    unsigned long long stale_scope_generation = 0;
     unsigned int stale_event_kind = 0;
     unsigned int scratch_key = 0;
     bool replaces_stale_entry;
@@ -847,7 +882,10 @@ static __always_inline int capture_file_enter(unsigned int event_kind,
     if (!current_is_in_scope())
         return 0;
     cgroup_id = bpf_get_current_cgroup_id();
-    update_scoped = begin_scope_counter_update(cgroup_id);
+    scope_generation = multi_cgroup_scope()
+        ? cgroup_scope_generation(cgroup_id)
+        : 1;
+    update_scoped = begin_scope_counter_update(cgroup_id, scope_generation);
     if (multi_cgroup_scope() && !update_scoped) {
         if (cgroup_scope_state(cgroup_id) == APOLYSIS_CGROUP_ACTIVE)
             count_map_pressure();
@@ -863,6 +901,7 @@ static __always_inline int capture_file_enter(unsigned int event_kind,
     }
     __builtin_memset(pending, 0, sizeof(*pending));
     pending->cgroup_id = cgroup_id;
+    pending->scope_generation = scope_generation;
     pending->event_kind = event_kind;
     pending->source = source;
     read_pending_file_path(pending, path);
@@ -879,12 +918,14 @@ static __always_inline int capture_file_enter(unsigned int event_kind,
     replaces_stale_entry = stale != 0;
     if (stale) {
         stale_cgroup_id = stale->cgroup_id;
+        stale_scope_generation = stale->scope_generation;
         stale_event_kind = stale->event_kind;
     }
     if (bpf_map_update_elem(&APOLYSIS_PENDING_FILES, &pid_tgid, pending, BPF_ANY)) {
         if (replaces_stale_entry) {
             bpf_map_delete_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
-            account_stale_file(stale_cgroup_id, stale_event_kind);
+            account_stale_file(stale_cgroup_id, stale_scope_generation,
+                               stale_event_kind);
         }
         count_file_missing_exit(cgroup_id, event_kind, update_scoped);
         end_scope_counter_update(cgroup_id, update_scoped);
@@ -892,7 +933,8 @@ static __always_inline int capture_file_enter(unsigned int event_kind,
         return 0;
     }
     if (replaces_stale_entry)
-        account_stale_file(stale_cgroup_id, stale_event_kind);
+        account_stale_file(stale_cgroup_id, stale_scope_generation,
+                           stale_event_kind);
     increment_file_pending(cgroup_id, event_kind, update_scoped);
     end_scope_counter_update(cgroup_id, update_scoped);
     return 0;
@@ -905,7 +947,7 @@ static __always_inline void account_file_missing_entry_for_current(
     bool update_scoped;
 
     if (multi_cgroup_scope()) {
-        update_scoped = begin_scope_counter_update(cgroup_id);
+        update_scoped = begin_scope_counter_update(cgroup_id, 0);
         if (update_scoped) {
             count_file_missing_entry(cgroup_id, event_kind, update_scoped);
             end_scope_counter_update(cgroup_id, update_scoped);
@@ -923,6 +965,7 @@ static __always_inline int capture_file_exit(struct trace_event_raw_sys_exit *ct
     struct apolysis_kernel_event *event;
     unsigned long long pid_tgid;
     unsigned long long cgroup_id;
+    unsigned long long scope_generation;
     unsigned int event_kind;
     bool update_scoped;
 
@@ -933,16 +976,17 @@ static __always_inline int capture_file_exit(struct trace_event_raw_sys_exit *ct
         return 0;
     }
     cgroup_id = pending->cgroup_id;
+    scope_generation = pending->scope_generation;
     event_kind = pending->event_kind;
     if (pending->source != source) {
         bpf_map_delete_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
-        account_stale_file(cgroup_id, event_kind);
+        account_stale_file(cgroup_id, scope_generation, event_kind);
         account_file_missing_entry_for_current(fallback_event_kind);
         return 0;
     }
 
-    update_scoped = begin_scope_counter_update(cgroup_id);
-    if (!pair_is_in_scope(cgroup_id)) {
+    update_scoped = begin_scope_counter_update(cgroup_id, scope_generation);
+    if (!pair_is_in_scope(cgroup_id, scope_generation)) {
         bpf_map_delete_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
         decrement_file_pending(cgroup_id, event_kind, update_scoped);
         count_file_missing_exit(cgroup_id, event_kind, update_scoped);
@@ -1070,7 +1114,9 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     struct apolysis_pending_connect *pending_connect;
     struct apolysis_pending_file *pending_file;
     unsigned long long connect_cgroup_id;
+    unsigned long long connect_scope_generation;
     unsigned long long file_cgroup_id;
+    unsigned long long file_scope_generation;
     unsigned int file_event_kind;
     unsigned long long event_cgroup_id;
     bool event_update_scoped;
@@ -1084,7 +1130,9 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     pending_connect = bpf_map_lookup_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
     if (pending_connect) {
         connect_cgroup_id = pending_connect->cgroup_id;
-        update_scoped = begin_scope_counter_update(connect_cgroup_id);
+        connect_scope_generation = pending_connect->scope_generation;
+        update_scoped = begin_scope_counter_update(connect_cgroup_id,
+                                                   connect_scope_generation);
         bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
         decrement_connect_pending(connect_cgroup_id, update_scoped);
         count_connect_missing_exit(connect_cgroup_id, update_scoped);
@@ -1093,8 +1141,10 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     pending_file = bpf_map_lookup_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
     if (pending_file) {
         file_cgroup_id = pending_file->cgroup_id;
+        file_scope_generation = pending_file->scope_generation;
         file_event_kind = pending_file->event_kind;
-        update_scoped = begin_scope_counter_update(file_cgroup_id);
+        update_scoped = begin_scope_counter_update(file_cgroup_id,
+                                                   file_scope_generation);
         bpf_map_delete_elem(&APOLYSIS_PENDING_FILES, &pid_tgid);
         decrement_file_pending(file_cgroup_id, file_event_kind, update_scoped);
         count_file_missing_exit(file_cgroup_id, file_event_kind, update_scoped);
@@ -1102,7 +1152,6 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     }
 
     if (event) {
-        event->pid = ctx->pid;
         bpf_probe_read_kernel(event->comm, sizeof(event->comm), ctx->comm);
         copy_action(event, "exit", 5);
         bpf_ringbuf_submit(event, 0);
@@ -1113,7 +1162,7 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
         pid = ctx->pid;
         bpf_map_delete_elem(&APOLYSIS_TRACKED_PIDS, &pid);
     }
-    identity_pid = ctx->pid;
+    identity_pid = pid_tgid >> 32;
     bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &identity_pid);
     return 0;
 }
@@ -1218,7 +1267,9 @@ int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
     struct apolysis_pending_connect *stale;
     unsigned long long pid_tgid;
     unsigned long long cgroup_id;
+    unsigned long long scope_generation;
     unsigned long long stale_cgroup_id = 0;
+    unsigned long long stale_scope_generation = 0;
     bool update_scoped;
     unsigned long long length;
     unsigned int scratch_key = 0;
@@ -1228,7 +1279,10 @@ int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
     if (!current_is_in_scope())
         return 0;
     cgroup_id = bpf_get_current_cgroup_id();
-    update_scoped = begin_scope_counter_update(cgroup_id);
+    scope_generation = multi_cgroup_scope()
+        ? cgroup_scope_generation(cgroup_id)
+        : 1;
+    update_scoped = begin_scope_counter_update(cgroup_id, scope_generation);
     if (multi_cgroup_scope() && !update_scoped) {
         if (cgroup_scope_state(cgroup_id) == APOLYSIS_CGROUP_ACTIVE)
             count_map_pressure();
@@ -1243,6 +1297,7 @@ int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
 
     __builtin_memset(pending, 0, sizeof(*pending));
     pending->cgroup_id = cgroup_id;
+    pending->scope_generation = scope_generation;
     length = ctx->args[2];
     if (length > sizeof(pending->payload)) {
         length = sizeof(pending->payload);
@@ -1260,19 +1315,21 @@ int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
     pid_tgid = bpf_get_current_pid_tgid();
     stale = bpf_map_lookup_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
     replaces_stale_entry = stale != 0;
-    if (stale)
+    if (stale) {
         stale_cgroup_id = stale->cgroup_id;
+        stale_scope_generation = stale->scope_generation;
+    }
     if (bpf_map_update_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid, pending, BPF_ANY)) {
         if (replaces_stale_entry) {
             bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
-            account_stale_connect(stale_cgroup_id);
+            account_stale_connect(stale_cgroup_id, stale_scope_generation);
         }
         end_scope_counter_update(cgroup_id, update_scoped);
         count_map_pressure();
         return 0;
     }
     if (replaces_stale_entry)
-        account_stale_connect(stale_cgroup_id);
+        account_stale_connect(stale_cgroup_id, stale_scope_generation);
     increment_connect_pending(cgroup_id, update_scoped);
     end_scope_counter_update(cgroup_id, update_scoped);
     return 0;
@@ -1285,6 +1342,7 @@ int apolysis_sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
     struct apolysis_kernel_event *event;
     unsigned long long pid_tgid;
     unsigned long long cgroup_id;
+    unsigned long long scope_generation;
     unsigned long long current_cgroup_id;
     bool update_scoped;
 
@@ -1293,7 +1351,7 @@ int apolysis_sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
     if (!pending) {
         if (multi_cgroup_scope()) {
             current_cgroup_id = bpf_get_current_cgroup_id();
-            update_scoped = begin_scope_counter_update(current_cgroup_id);
+            update_scoped = begin_scope_counter_update(current_cgroup_id, 0);
             if (update_scoped) {
                 count_connect_missing_entry(current_cgroup_id, update_scoped);
                 end_scope_counter_update(current_cgroup_id, update_scoped);
@@ -1305,8 +1363,9 @@ int apolysis_sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
         return 0;
     }
     cgroup_id = pending->cgroup_id;
-    update_scoped = begin_scope_counter_update(cgroup_id);
-    if (!pair_is_in_scope(cgroup_id)) {
+    scope_generation = pending->scope_generation;
+    update_scoped = begin_scope_counter_update(cgroup_id, scope_generation);
+    if (!pair_is_in_scope(cgroup_id, scope_generation)) {
         bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
         decrement_connect_pending(cgroup_id, update_scoped);
         count_connect_missing_exit(cgroup_id, update_scoped);

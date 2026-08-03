@@ -41,6 +41,15 @@ enum apolysis_cgroup_scope_state {
     APOLYSIS_CGROUP_DRAINING = 2,
 };
 
+struct apolysis_cgroup_scope {
+    unsigned long long generation;
+    unsigned char state;
+    unsigned char reserved[7];
+};
+
+_Static_assert(sizeof(struct apolysis_cgroup_scope) == 16,
+               "apolysis cgroup scope ABI size mismatch");
+
 struct apolysis_scope_config {
     unsigned long long cgroup_id;
     unsigned int root_pid;

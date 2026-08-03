@@ -20,7 +20,7 @@ pub use live::{
     raw_event_from_record, scope_observation_gaps, AgentDiscoveryRequest, AgentRegistration,
     AgentRunRequest, DaemonKernelEvent, DaemonObserver, DaemonObserverBatch, DaemonObserverConfig,
     DaemonObserverCounters, FileOperationCounters, LiveObserveRequest, LiveScope,
-    NetworkConnectCounters, ObserverBatchDecoder, OperationPairCounters,
+    NetworkConnectCounters, ObserverBatchDecoder, OperationPairCounters, ScopeGeneration,
     ScopeObservationGapCounters,
 };
 pub use redaction::{
@@ -616,8 +616,7 @@ fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEven
     let process_generation = parse_optional_raw_u64(&fields, "process_generation")?;
     let process_start_time_ns = parse_optional_raw_u64(&fields, "process_start_time_ns")?;
     let exec_generation = parse_optional_raw_u32(&fields, "exec_generation")?;
-    let parent_process_generation =
-        parse_optional_raw_u64(&fields, "parent_process_generation")?;
+    let parent_process_generation = parse_optional_raw_u64(&fields, "parent_process_generation")?;
     let parent_exec_generation = parse_optional_raw_u32(&fields, "parent_exec_generation")?;
     let raw_payload = fields.optional("payload").unwrap_or_default();
 
