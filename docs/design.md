@@ -22,9 +22,9 @@ product and cannot replace runtime observation.
 
 The active target is a bounded beta, not a production evidence plane. Gateway,
 PostgreSQL, evidence-object, projection, and cross-provider contract prototypes
-have left the active workspace. Policy-control and broad qualification
-prototypes belong to the same superseded direction and remain only until their
-observer-side dependencies are separated.
+have left the active workspace. Policy actuation, Agent feedback control,
+sandbox execution, and broad production qualification have also left active
+builds; none is an observer-side product dependency.
 
 ### Maturity labels
 
@@ -218,7 +218,7 @@ misinterpretation.
 | --- | --- | --- |
 | Process | fork/clone lineage, exec, exit | Process lifecycle, not logical sub-Agent semantics |
 | File | selected open/create/truncate/rename/unlink paths | Supported operations and resolved identity only; no universal filesystem history |
-| Credential | configured credential-path access | Path access finding, not proof that a secret was consumed |
+| Credential | built-in credential-class path access | Path access finding, not proof that a secret was consumed |
 | Network | outbound connect tuple and outcome | Connection attempt/result, not remote mutation or TLS content |
 | Health | attach, loss, map pressure, decode, truncation, terminal state | Collector condition, not host integrity attestation |
 
@@ -231,7 +231,7 @@ network, guest, or runtime paths become explicit capability gaps.
 | Environment | Runtime observation contract |
 | --- | --- |
 | Local Linux CLI | Managed launch or protected process-tree attach |
-| Linux self-hosted CI | Same managed-run boundary; runner isolation remains external |
+| Linux self-hosted CI | Same CLI managed-run boundary; runner isolation remains external |
 | Docker/containerd | Host eBPF observation joined to container and cgroup identity |
 | Kubernetes | Node eBPF observation joined to Pod/container/cgroup identity; bounded beta |
 | gVisor | Host/runtime boundary visibility, not every guest syscall |
@@ -243,7 +243,7 @@ network, guest, or runtime paths become explicit capability gaps.
 
 Findings are post-observation review aids. The initial bounded set is:
 
-- access to a configured credential or secret path;
+- access to a built-in credential-class path;
 - file mutation outside the configured workspace boundary;
 - connection to an unapproved address or domain class when resolvable;
 - execution of an unexpected binary class;
@@ -290,7 +290,10 @@ Implemented today:
   Codex intent correlation, visibility, and verification commands;
 - `apolysis-core`: current JSONL vocabulary and record types;
 - `apolysis-store`: rotation and optional local hash-chain envelopes;
-- `apolysis-runtime` and `apolysis-kubernetes`: runtime metadata prototypes;
+- `apolysis-accountability`: optional declared-intent comparison and
+  review-oriented findings;
+- `apolysis-kubernetes` and `apolysis-visibility`: bounded runtime metadata and
+  visibility-boundary assessment;
 - `apolysis-daemon`: long-lived observer, bounded queue, local socket, and
   runtime registration prototype.
 
@@ -299,10 +302,10 @@ describe attempts. Stable entry/exit outcome semantics, complete collector
 lifecycle records, the saved-run viewer, and bounded Kubernetes beta remain
 targets.
 
-The central contracts, Gateway, PostgreSQL projection, and evidence-object
-cluster has been removed from the active workspace. Remaining policy-control
-and broad qualification prototypes are historical implementation input only
-and do not define the target architecture in this document.
+The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
+policy/feedback/control planes, sandbox runner, and broad qualification
+machinery have been removed from the active workspace. Git history preserves
+them as historical implementation input; they do not define this architecture.
 
 ## 13. Limitations
 

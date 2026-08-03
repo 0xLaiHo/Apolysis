@@ -82,7 +82,6 @@ async fn register_renew_query_and_close_update_session_state() {
             "expires_at_unix_ms":4102444800000,
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }
     }"#;
@@ -133,7 +132,6 @@ async fn tenant_scoped_queries_and_session_lists_do_not_cross_tenant_boundaries(
             "expires_at_unix_ms":4102444800000,
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }
     }"#;
@@ -147,7 +145,6 @@ async fn tenant_scoped_queries_and_session_lists_do_not_cross_tenant_boundaries(
             "expires_at_unix_ms":4102444800000,
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }
     }"#;
@@ -227,7 +224,6 @@ async fn retention_purge_request_dry_runs_then_removes_only_matching_tenant_stat
             "expires_at_unix_ms":{expires_at},
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }}
     }}"#
@@ -243,7 +239,6 @@ async fn retention_purge_request_dry_runs_then_removes_only_matching_tenant_stat
             "expires_at_unix_ms":{expires_at},
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }}
     }}"#
@@ -536,7 +531,6 @@ async fn restart_restores_active_session_and_continues_hash_chain() {
             "expires_at_unix_ms":4102444800000,
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }
     }"#;
@@ -586,7 +580,6 @@ async fn restart_quarantines_corrupt_tail_and_keeps_valid_session_recoverable() 
             "expires_at_unix_ms":4102444800000,
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }
     }"#;
@@ -656,7 +649,6 @@ async fn failed_persistence_does_not_publish_session_state() {
             "expires_at_unix_ms":4102444800000,
             "declared_actions":["test"],
             "allowed_resources":[],
-            "policy_ref":"policy.yaml",
             "workload_selectors":[]
         }
     }"#;

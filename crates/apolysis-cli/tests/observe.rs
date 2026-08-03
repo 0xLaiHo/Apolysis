@@ -4,6 +4,37 @@ use std::process::Command;
 use std::time::Duration;
 
 #[test]
+fn observe_rejects_removed_control_plane_options() {
+    for option in ["--policy", "--feedback-dir"] {
+        let output = temp_jsonl("apolysis-observe-removed-option");
+        let result = apolysis_command()
+            .args([
+                "observe",
+                "--backend",
+                "fixture",
+                "--input",
+                "tests/fixtures/raw-kernel-events.txt",
+                "--session",
+                "agent-run-observer-removed-option",
+                "--output",
+                output.to_str().expect("utf-8 output path"),
+                option,
+                "removed",
+            ])
+            .output()
+            .expect("run apolysis observe with removed option");
+
+        assert!(!result.status.success(), "{option} must stay removed");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("unknown argument"),
+            "unexpected error for {option}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let _ = std::fs::remove_file(output);
+    }
+}
+
+#[test]
 fn observe_fixture_ring_buffer_writes_raw_and_canonical_timeline() {
     let output = temp_jsonl("apolysis-observe-fixture");
     let _ = std::fs::remove_file(&output);
@@ -17,8 +48,6 @@ fn observe_fixture_ring_buffer_writes_raw_and_canonical_timeline() {
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
             "session-host-observer-fixture",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
         ])
@@ -67,8 +96,6 @@ fn observe_fixture_rotates_timeline_when_output_budget_is_reached() {
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
             "session-host-observer-rotation",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--output-max-bytes",
@@ -128,8 +155,6 @@ fn observe_output_rotation_requires_complete_positive_budget() {
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
             "session-host-observer-invalid-rotation",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
         ];
@@ -163,8 +188,6 @@ fn observe_fixture_reports_runner_plan_metadata() {
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
             "session-host-observer-runners",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
         ])
@@ -186,124 +209,6 @@ fn observe_fixture_reports_runner_plan_metadata() {
 }
 
 #[test]
-fn observe_fixture_emits_policy_violations_and_feedback_file() {
-    let output = temp_jsonl("apolysis-observe-policy");
-    let feedback_dir = temp_dir("apolysis-feedback");
-    let _ = std::fs::remove_file(&output);
-    let _ = std::fs::remove_dir_all(&feedback_dir);
-
-    let status = apolysis_command()
-        .env("APOLYSIS_BPF_LSM_AVAILABLE", "0")
-        .args([
-            "observe",
-            "--backend",
-            "fixture",
-            "--input",
-            "tests/fixtures/raw-kernel-events.txt",
-            "--session",
-            "session-policy-feedback-policy",
-            "--policy",
-            "tests/fixtures/policies/policy-feedback-block-policy.yaml",
-            "--output",
-            output.to_str().expect("utf-8 output path"),
-            "--feedback-dir",
-            feedback_dir.to_str().expect("utf-8 feedback path"),
-        ])
-        .status()
-        .expect("run apolysis observe with policy feedback");
-
-    assert!(status.success());
-    let timeline = std::fs::read_to_string(&output).expect("read observer timeline");
-    assert!(timeline.contains(r#""record_type":"policy_violation""#));
-    assert!(timeline.contains(r#""rule_id":"credentials.deny_read""#));
-    assert!(timeline.contains(r#""rule_id":"network.allow_egress""#));
-    assert!(timeline.contains(r#""rule_id":"workspace.allow_write""#));
-    assert!(!timeline.contains(r#""rule_id":"workspace.allow_read""#));
-    assert!(timeline.contains(r#""decision":"notify""#));
-    assert!(timeline.contains(r#""enforcement_backend":"tracepoint_notify""#));
-    assert!(timeline.contains(r#""actor":"policy""#));
-    assert!(timeline.contains(r#""resource":"bpf-lsm""#));
-    assert!(timeline.contains(r#""action":"unavailable:downgrade:block->notify""#));
-
-    let feedback =
-        std::fs::read_to_string(feedback_dir.join("last-violation.txt")).expect("read feedback");
-    assert!(feedback.contains("session_id: session-policy-feedback-policy"));
-    assert!(feedback.contains("rule_id:"));
-    assert!(feedback.contains("decision: notify"));
-    assert!(feedback.contains("APOLYSIS_VIOLATION"));
-
-    let _ = std::fs::remove_file(&output);
-    let _ = std::fs::remove_dir_all(&feedback_dir);
-}
-
-#[test]
-fn observe_fixture_links_raw_canonical_and_policy_records_by_event_id() {
-    let output = temp_jsonl("apolysis-observe-correlation");
-    let _ = std::fs::remove_file(&output);
-
-    let status = apolysis_command()
-        .env("APOLYSIS_BPF_LSM_AVAILABLE", "0")
-        .args([
-            "observe",
-            "--backend",
-            "fixture",
-            "--input",
-            "tests/fixtures/raw-kernel-events.txt",
-            "--session",
-            "session-event-correlation",
-            "--policy",
-            "tests/fixtures/policies/policy-feedback-block-policy.yaml",
-            "--output",
-            output.to_str().expect("utf-8 output path"),
-        ])
-        .status()
-        .expect("run apolysis observe with correlation schema");
-
-    assert!(status.success());
-    let timeline = std::fs::read_to_string(&output).expect("read observer timeline");
-    let raw_connect = timeline
-        .lines()
-        .find(|line| {
-            line.contains(r#""record_type":"raw_kernel_event""#)
-                && line.contains(r#""event_name":"connect""#)
-        })
-        .expect("raw connect event");
-    let event_id = json_string_field(raw_connect, "event_id").expect("raw event id");
-
-    let canonical_connect = timeline
-        .lines()
-        .find(|line| {
-            line.contains(r#""record_type":"event""#)
-                && line.contains(r#""event_type":"network_connect""#)
-                && line.contains(&format!(r#""raw_event_id":"{event_id}""#))
-        })
-        .expect("canonical network event linked to raw connect");
-    assert!(canonical_connect.contains(r#""pid":4101"#));
-
-    let violation = timeline
-        .lines()
-        .find(|line| {
-            line.contains(r#""record_type":"policy_violation""#)
-                && line.contains(r#""rule_id":"network.allow_egress""#)
-                && line.contains(&format!(r#""observed_event_id":"{event_id}""#))
-        })
-        .expect("policy violation linked to raw connect");
-    assert!(violation.contains(r#""decision":"notify""#));
-
-    let metadata = timeline
-        .lines()
-        .find(|line| {
-            line.contains(r#""record_type":"enforcement_metadata""#)
-                && line.contains(r#""rule_id":"network.allow_egress""#)
-                && line.contains(&format!(r#""observed_event_id":"{event_id}""#))
-        })
-        .expect("enforcement metadata linked to raw connect");
-    assert!(metadata.contains(r#""observed_event_timestamp_unix_ms":1780328000004"#));
-
-    let _ = std::fs::remove_file(&output);
-}
-
-#[test]
 fn observe_fixture_keeps_process_identity_without_command_content() {
     let output = temp_jsonl("apolysis-observe-process-context");
     let _ = std::fs::remove_file(&output);
@@ -317,8 +222,6 @@ fn observe_fixture_keeps_process_identity_without_command_content() {
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
             "session-process-context",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
         ])
@@ -346,108 +249,6 @@ fn observe_fixture_keeps_process_identity_without_command_content() {
 }
 
 #[test]
-fn observe_fixture_emits_kill_containment_metadata() {
-    let output = temp_jsonl("apolysis-observe-kill-metadata");
-    let _ = std::fs::remove_file(&output);
-
-    let status = apolysis_command()
-        .args([
-            "observe",
-            "--backend",
-            "fixture",
-            "--input",
-            "tests/fixtures/raw-kernel-events.txt",
-            "--session",
-            "session-policy-guardrails-kill",
-            "--policy",
-            "tests/fixtures/policies/policy-guardrails-kill-policy.yaml",
-            "--output",
-            output.to_str().expect("utf-8 output path"),
-        ])
-        .status()
-        .expect("run apolysis observe with kill policy");
-
-    assert!(status.success());
-    let timeline = std::fs::read_to_string(&output).expect("read observer timeline");
-    assert!(timeline.contains(r#""record_type":"policy_violation""#));
-    assert!(timeline.contains(r#""decision":"kill""#));
-    assert!(timeline.contains(r#""enforcement_backend":"signal_kill""#));
-    assert!(timeline.contains(r#""record_type":"enforcement_metadata""#));
-    assert!(timeline.contains(r#""requested_decision":"kill""#));
-    assert!(timeline.contains(r#""effective_decision":"kill""#));
-    assert!(timeline.contains(r#""timing":"post_event_containment""#));
-    assert!(timeline.contains(r#""preoperation_prevention":false"#));
-    assert!(timeline.contains(r#""action":"credential_read""#));
-    assert!(timeline.contains(r#""observed_event_timestamp_unix_ms":"#));
-    assert!(timeline.contains(r#""decision_latency_ms":"#));
-    assert!(timeline.contains(r#""side_effect_race_window_ms":"#));
-
-    let _ = std::fs::remove_file(&output);
-}
-
-#[test]
-fn observe_fixture_preserves_policy_feedback_with_kubernetes_metadata() {
-    let output = temp_jsonl("apolysis-observe-kubernetes");
-    let feedback_dir = temp_dir("apolysis-k8s-feedback");
-    let _ = std::fs::remove_file(&output);
-    let _ = std::fs::remove_dir_all(&feedback_dir);
-
-    let status = apolysis_command()
-        .env("APOLYSIS_BPF_LSM_AVAILABLE", "0")
-        .args([
-            "observe",
-            "--backend",
-            "fixture",
-            "--input",
-            "tests/fixtures/raw-kernel-events.txt",
-            "--session",
-            "session-kubernetes-metadata-k8s",
-            "--policy",
-            "tests/fixtures/policies/policy-feedback-block-policy.yaml",
-            "--output",
-            output.to_str().expect("utf-8 output path"),
-            "--feedback-dir",
-            feedback_dir.to_str().expect("utf-8 feedback path"),
-            "--kubernetes-metadata",
-            "tests/fixtures/kubernetes/agent-sandbox-gvisor-pod.yaml",
-        ])
-        .status()
-        .expect("run apolysis observe with kubernetes metadata");
-
-    assert!(status.success());
-    let timeline = std::fs::read_to_string(&output).expect("read observer timeline");
-    assert!(timeline.contains(r#""actor":"kubernetes""#));
-    assert!(timeline.contains(r#""resource":"kubernetes-pod""#));
-    assert!(timeline.contains(r#""action":"name:codex-session-7""#));
-    assert!(timeline.contains(r#""resource":"kubernetes-namespace""#));
-    assert!(timeline.contains(r#""action":"namespace:agents""#));
-    assert!(timeline.contains(r#""resource":"kubernetes-service-account""#));
-    assert!(timeline.contains(r#""action":"serviceAccount:agent-runner""#));
-    assert!(timeline.contains(r#""resource":"kubernetes-runtime-class""#));
-    assert!(timeline.contains(r#""action":"runtimeClass:gvisor""#));
-    assert!(timeline.contains(r#""resource":"kubernetes-runtime-profile""#));
-    assert!(timeline.contains(r#""action":"isolation:gvisor""#));
-    assert!(timeline.contains(r#""resource":"kubernetes-node""#));
-    assert!(timeline.contains(r#""action":"node:worker-a""#));
-    assert!(timeline.contains(r#""resource":"agent-sandbox""#));
-    assert!(timeline.contains(r#""action":"sandbox:codex-sandbox""#));
-    assert!(timeline.contains(r#""resource":"kubernetes-service-account-token""#));
-    assert!(timeline.contains(r#""action":"automount:false""#));
-    assert!(timeline.contains(r#""record_type":"policy_violation""#));
-    assert!(timeline.contains(r#""rule_id":"credentials.deny_read""#));
-    assert!(timeline.contains(r#""rule_id":"network.allow_egress""#));
-
-    let feedback =
-        std::fs::read_to_string(feedback_dir.join("last-violation.txt")).expect("read feedback");
-    assert!(feedback.contains("session_id: session-kubernetes-metadata-k8s"));
-    assert!(feedback.contains("decision: notify"));
-    assert!(feedback.contains("APOLYSIS_VIOLATION"));
-
-    let _ = std::fs::remove_file(&output);
-    let _ = std::fs::remove_dir_all(&feedback_dir);
-}
-
-#[test]
 fn observe_live_requires_exactly_one_session_scope() {
     let output = temp_jsonl("apolysis-observe-live-scope");
     let result = apolysis_command()
@@ -457,8 +258,6 @@ fn observe_live_requires_exactly_one_session_scope() {
             "live",
             "--session",
             "session-audit-observer-live",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -491,8 +290,6 @@ fn observe_live_rejects_fixture_input() {
             "tests/fixtures/raw-kernel-events.txt",
             "--session",
             "session-audit-observer-live",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -523,8 +320,6 @@ fn observe_live_validates_the_bpf_object_before_loading() {
             "live",
             "--session",
             "session-audit-observer-live",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -555,8 +350,6 @@ fn observe_live_accepts_agent_run_without_operator_pid() {
             "live",
             "--session",
             "session-agent-run",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -599,8 +392,6 @@ fn observe_live_accepts_agent_registration_without_operator_pid() {
             "live",
             "--session",
             "session-agent-registration",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -637,8 +428,6 @@ fn observe_live_accepts_agent_discovery_without_operator_pid() {
             "live",
             "--session",
             "session-agent-discovery",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -674,8 +463,6 @@ fn observe_live_rejects_agent_run_with_scope_pid() {
             "live",
             "--session",
             "session-agent-run-scope-pid",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -714,8 +501,6 @@ fn observe_live_rejects_agent_registration_with_scope_pid() {
             "live",
             "--session",
             "session-agent-registration-scope-pid",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -749,8 +534,6 @@ fn observe_live_rejects_agent_discovery_with_scope_pid() {
             "live",
             "--session",
             "session-agent-discovery-scope-pid",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -782,8 +565,6 @@ fn observe_live_rejects_agent_run_with_scope_cgroup() {
             "live",
             "--session",
             "session-agent-run-scope-cgroup",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -819,8 +600,6 @@ fn observe_live_rejects_agent_run_without_command() {
             "live",
             "--session",
             "session-agent-run-empty",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -871,8 +650,6 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
             "live",
             "--session",
             "session-audit-observer-live-smoke",
-            "--policy",
-            "policies/local-dev.yaml",
             "--output",
             output.to_str().expect("utf-8 output path"),
             "--bpf-object",
@@ -916,7 +693,6 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     assert!(timeline.contains(r#""event_type":"exec""#));
     assert!(timeline.contains(r#""event_type":"credential_read""#));
     assert!(timeline.contains(r#""event_type":"network_connect""#));
-    assert!(timeline.contains(r#""record_type":"policy_violation""#));
     assert!(timeline.contains(r#""kind":"summary""#));
     assert!(!timeline.contains(credential_path.to_str().expect("utf-8 credential path")));
     assert!(!timeline.contains("APOLYSIS_TEST_SECRET"));
@@ -955,14 +731,6 @@ fn temp_jsonl(prefix: &str) -> std::path::PathBuf {
 
 fn archive_jsonl(path: &std::path::Path, index: usize) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{}.{}", path.display(), index))
-}
-
-fn json_string_field(line: &str, field: &str) -> Option<String> {
-    let needle = format!(r#""{field}":"#);
-    let start = line.find(&needle)? + needle.len();
-    let rest = line.get(start..)?.strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest.get(..end)?.to_string())
 }
 
 fn temp_dir(prefix: &str) -> std::path::PathBuf {

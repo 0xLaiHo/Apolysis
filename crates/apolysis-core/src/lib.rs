@@ -14,7 +14,7 @@ pub mod fields;
 pub mod scalars;
 pub mod vocabulary;
 
-pub use vocabulary::{actions, actors, env, feedback, records, resources, runtimes};
+pub use vocabulary::{actions, actors, records, resources};
 
 /// Anything that can be written as one JSONL record.
 ///
@@ -26,34 +26,12 @@ pub trait JsonLine {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RuntimeKind {
-    Local,
-    Docker,
-    Kubernetes,
-    Firecracker,
-}
-
-impl RuntimeKind {
-    /// Return the stable schema string for this runtime.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Local => runtimes::LOCAL,
-            Self::Docker => runtimes::DOCKER,
-            Self::Kubernetes => runtimes::KUBERNETES,
-            Self::Firecracker => runtimes::FIRECRACKER,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EventSource {
     Manual,
     ProcessTree,
     KernelTracepoint,
-    BpfLsm,
     Uprobe,
     RuntimeMetadata,
-    AgentFeedback,
 }
 
 impl EventSource {
@@ -63,10 +41,8 @@ impl EventSource {
             Self::Manual => "manual",
             Self::ProcessTree => "process_tree",
             Self::KernelTracepoint => "kernel_tracepoint",
-            Self::BpfLsm => "bpf_lsm",
             Self::Uprobe => "uprobe",
             Self::RuntimeMetadata => "runtime_metadata",
-            Self::AgentFeedback => "agent_feedback",
         }
     }
 }
@@ -102,101 +78,6 @@ impl EventType {
             Self::CredentialRead => "credential_read",
             Self::ProcessExit => "process_exit",
         }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PolicyDecision {
-    Allow,
-    Notify,
-    Block,
-    Kill,
-    Review,
-}
-
-impl PolicyDecision {
-    /// Return the stable schema string for this policy decision.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Allow => "allow",
-            Self::Notify => "notify",
-            Self::Block => "block",
-            Self::Kill => "kill",
-            Self::Review => "review",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum EnforcementBackend {
-    AuditOnly,
-    TracepointNotify,
-    BpfLsmBlock,
-    SeccompBlock,
-    SignalKill,
-}
-
-impl EnforcementBackend {
-    /// Return the stable schema string for this enforcement backend.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::AuditOnly => "audit_only",
-            Self::TracepointNotify => "tracepoint_notify",
-            Self::BpfLsmBlock => "bpf_lsm_block",
-            Self::SeccompBlock => "seccomp_block",
-            Self::SignalKill => "signal_kill",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SandboxSession {
-    pub id: String,
-    pub runtime: RuntimeKind,
-    pub root: Option<String>,
-    pub policy_path: String,
-    pub started_at_unix_ms: u128,
-}
-
-impl SandboxSession {
-    /// Create a session record with the current wall-clock timestamp.
-    pub fn new(
-        id: impl Into<String>,
-        runtime: RuntimeKind,
-        policy_path: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            runtime,
-            root: None,
-            policy_path: policy_path.into(),
-            started_at_unix_ms: now_unix_ms(),
-        }
-    }
-
-    /// Render this session as a JSONL record.
-    pub fn to_json_line(&self) -> String {
-        <Self as JsonLine>::to_json_line(self)
-    }
-}
-
-impl JsonLine for SandboxSession {
-    fn to_json_line(&self) -> String {
-        let root = self
-            .root
-            .as_ref()
-            .map(|value| json_string(value))
-            .unwrap_or_else(|| "null".to_string());
-
-        format!(
-            "{{\"record_type\":{},\"id\":{},\"runtime\":{},\"root\":{},\"policy_path\":{},\"started_at_unix_ms\":{}}}",
-            json_string(records::SESSION),
-            json_string(&self.id),
-            json_string(self.runtime.as_str()),
-            root,
-            json_string(&self.policy_path),
-            self.started_at_unix_ms
-        )
     }
 }
 
@@ -597,185 +478,6 @@ impl JsonLine for ObserverDiagnostic {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PolicyViolation {
-    pub timestamp_unix_ms: u128,
-    pub session_id: String,
-    pub observed_event_id: Option<String>,
-    pub rule_id: String,
-    pub decision: PolicyDecision,
-    pub reason: String,
-    pub pid: u32,
-    pub target: String,
-    pub enforcement_backend: EnforcementBackend,
-}
-
-impl PolicyViolation {
-    /// Create a policy violation record with the current wall-clock timestamp.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        session_id: impl Into<String>,
-        rule_id: impl Into<String>,
-        decision: PolicyDecision,
-        reason: impl Into<String>,
-        pid: u32,
-        target: impl Into<String>,
-        enforcement_backend: EnforcementBackend,
-    ) -> Self {
-        Self {
-            timestamp_unix_ms: now_unix_ms(),
-            session_id: session_id.into(),
-            observed_event_id: None,
-            rule_id: rule_id.into(),
-            decision,
-            reason: reason.into(),
-            pid,
-            target: target.into(),
-            enforcement_backend,
-        }
-    }
-
-    /// Link this policy decision to the observed raw event that caused it.
-    pub fn with_observed_event_id(mut self, observed_event_id: impl Into<String>) -> Self {
-        self.observed_event_id = Some(observed_event_id.into());
-        self
-    }
-
-    /// Render this violation as a JSONL record.
-    pub fn to_json_line(&self) -> String {
-        <Self as JsonLine>::to_json_line(self)
-    }
-}
-
-impl JsonLine for PolicyViolation {
-    fn to_json_line(&self) -> String {
-        format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"observed_event_id\":{},\"rule_id\":{},\"decision\":{},\"reason\":{},\"pid\":{},\"target\":{},\"enforcement_backend\":{}}}",
-            json_string(records::POLICY_VIOLATION),
-            self.timestamp_unix_ms,
-            json_string(&self.session_id),
-            optional_json_string(self.observed_event_id.as_deref()),
-            json_string(&self.rule_id),
-            json_string(self.decision.as_str()),
-            json_string(&self.reason),
-            self.pid,
-            json_string(&self.target),
-            json_string(self.enforcement_backend.as_str())
-        )
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EnforcementMetadata {
-    pub timestamp_unix_ms: u128,
-    pub session_id: String,
-    pub rule_id: Option<String>,
-    pub observed_event_id: Option<String>,
-    pub requested_decision: PolicyDecision,
-    pub effective_decision: PolicyDecision,
-    pub enforcement_backend: EnforcementBackend,
-    pub timing: String,
-    pub runtime: String,
-    pub action: String,
-    pub preoperation_prevention: bool,
-    pub observed_event_timestamp_unix_ms: Option<u128>,
-    pub decision_latency_ms: Option<u128>,
-    pub side_effect_race_window_ms: Option<u128>,
-    pub downgrade_reason: Option<String>,
-}
-
-impl EnforcementMetadata {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        session_id: impl Into<String>,
-        requested_decision: PolicyDecision,
-        effective_decision: PolicyDecision,
-        enforcement_backend: EnforcementBackend,
-        timing: impl Into<String>,
-        runtime: impl Into<String>,
-        action: impl Into<String>,
-        preoperation_prevention: bool,
-    ) -> Self {
-        Self {
-            timestamp_unix_ms: now_unix_ms(),
-            session_id: session_id.into(),
-            rule_id: None,
-            observed_event_id: None,
-            requested_decision,
-            effective_decision,
-            enforcement_backend,
-            timing: timing.into(),
-            runtime: runtime.into(),
-            action: action.into(),
-            preoperation_prevention,
-            observed_event_timestamp_unix_ms: None,
-            decision_latency_ms: None,
-            side_effect_race_window_ms: None,
-            downgrade_reason: None,
-        }
-    }
-
-    pub fn with_rule_id(mut self, rule_id: impl Into<String>) -> Self {
-        self.rule_id = Some(rule_id.into());
-        self
-    }
-
-    pub fn with_observed_event_id(mut self, observed_event_id: impl Into<String>) -> Self {
-        self.observed_event_id = Some(observed_event_id.into());
-        self
-    }
-
-    pub fn with_downgrade_reason(mut self, reason: Option<impl Into<String>>) -> Self {
-        self.downgrade_reason = reason.map(Into::into);
-        self
-    }
-
-    pub fn with_measurement(
-        mut self,
-        observed_event_timestamp_unix_ms: u128,
-        decision_timestamp_unix_ms: u128,
-    ) -> Self {
-        let latency = decision_timestamp_unix_ms.saturating_sub(observed_event_timestamp_unix_ms);
-        self.timestamp_unix_ms = decision_timestamp_unix_ms;
-        self.observed_event_timestamp_unix_ms = Some(observed_event_timestamp_unix_ms);
-        self.decision_latency_ms = Some(latency);
-        self.side_effect_race_window_ms = Some(if self.preoperation_prevention {
-            0
-        } else {
-            latency
-        });
-        self
-    }
-
-    pub fn to_json_line(&self) -> String {
-        <Self as JsonLine>::to_json_line(self)
-    }
-}
-
-impl JsonLine for EnforcementMetadata {
-    fn to_json_line(&self) -> String {
-        format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"rule_id\":{},\"observed_event_id\":{},\"requested_decision\":{},\"effective_decision\":{},\"enforcement_backend\":{},\"timing\":{},\"runtime\":{},\"action\":{},\"preoperation_prevention\":{},\"observed_event_timestamp_unix_ms\":{},\"decision_latency_ms\":{},\"side_effect_race_window_ms\":{},\"downgrade_reason\":{}}}",
-            json_string(records::ENFORCEMENT_METADATA),
-            self.timestamp_unix_ms,
-            json_string(&self.session_id),
-            optional_json_string(self.rule_id.as_deref()),
-            optional_json_string(self.observed_event_id.as_deref()),
-            json_string(self.requested_decision.as_str()),
-            json_string(self.effective_decision.as_str()),
-            json_string(self.enforcement_backend.as_str()),
-            json_string(&self.timing),
-            json_string(&self.runtime),
-            json_string(&self.action),
-            self.preoperation_prevention,
-            optional_json_u128(self.observed_event_timestamp_unix_ms),
-            optional_json_u128(self.decision_latency_ms),
-            optional_json_u128(self.side_effect_race_window_ms),
-            optional_json_string(self.downgrade_reason.as_deref())
-        )
-    }
-}
-
 /// Escape a Rust string as a JSON string.
 ///
 /// This only implements the JSON escapes Apolysis can emit today.  It handles
@@ -800,12 +502,6 @@ pub fn json_string(value: &str) -> String {
 
 fn optional_json_string(value: Option<&str>) -> String {
     value.map(json_string).unwrap_or_else(|| "null".to_string())
-}
-
-fn optional_json_u128(value: Option<u128>) -> String {
-    value
-        .map(|number| number.to_string())
-        .unwrap_or_else(|| "null".to_string())
 }
 
 /// Return the current Unix timestamp in milliseconds.

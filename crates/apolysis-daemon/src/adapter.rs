@@ -10,10 +10,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use apolysis_accountability::{AdapterKind, AssociationOutcome, ComponentState};
-use apolysis_validation::{
-    RuntimeGuardrailsRuntimeAdapterEvidenceReport, RuntimeGuardrailsRuntimeAdapterEvidenceSource,
-    RuntimeGuardrailsRuntimeGuardrailTarget,
-};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -35,47 +31,6 @@ pub struct RuntimeWorkload {
     pub runtime_handler: Option<String>,
 }
 
-pub fn runtime_guardrails_runtime_adapter_evidence_from_workload(
-    workload: &RuntimeWorkload,
-    evidence_id: impl Into<String>,
-    source: RuntimeGuardrailsRuntimeAdapterEvidenceSource,
-) -> Result<RuntimeGuardrailsRuntimeAdapterEvidenceReport, String> {
-    let evidence_id = evidence_id.into();
-    if evidence_id.trim().is_empty() {
-        return Err("RuntimeGuardrails runtime adapter evidence id must not be empty".to_string());
-    }
-    if workload.session_id.trim().is_empty() {
-        return Err(
-            "RuntimeGuardrails runtime adapter evidence session id must not be empty".to_string(),
-        );
-    }
-    if workload.workload_id.trim().is_empty() {
-        return Err(
-            "RuntimeGuardrails runtime adapter evidence workload id must not be empty".to_string(),
-        );
-    }
-    if workload.cgroup_id == 0 {
-        return Err(
-            "RuntimeGuardrails runtime adapter evidence cgroup id must be non-zero".to_string(),
-        );
-    }
-
-    Ok(RuntimeGuardrailsRuntimeAdapterEvidenceReport {
-        evidence_id,
-        source,
-        runtime: runtime_guardrails_runtime_target_from_workload(workload),
-        adapter: adapter_name(workload.adapter).to_string(),
-        session_id: workload.session_id.clone(),
-        workload_id: workload.workload_id.clone(),
-        cgroup_id: workload.cgroup_id,
-        runtime_handler: workload.runtime_handler.clone(),
-        metadata_correlation: true,
-        cgroup_correlation: true,
-        host_boundary_visibility: true,
-        guest_semantics_claimed: false,
-    })
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DockerContainerSnapshot {
     pub container_id: String,
@@ -83,40 +38,6 @@ pub struct DockerContainerSnapshot {
     pub cgroup_id: u64,
     pub image: Option<String>,
     pub runtime_handler: Option<String>,
-}
-
-fn runtime_guardrails_runtime_target_from_workload(
-    workload: &RuntimeWorkload,
-) -> RuntimeGuardrailsRuntimeGuardrailTarget {
-    if let Some(handler) = workload.runtime_handler.as_deref() {
-        let handler = handler.to_ascii_lowercase();
-        if handler.contains("runsc") || handler.contains("gvisor") {
-            return RuntimeGuardrailsRuntimeGuardrailTarget::Gvisor;
-        }
-        if handler.contains("kata") {
-            return RuntimeGuardrailsRuntimeGuardrailTarget::Kata;
-        }
-        if handler.contains("firecracker") {
-            return RuntimeGuardrailsRuntimeGuardrailTarget::Firecracker;
-        }
-    }
-
-    match workload.adapter {
-        AdapterKind::Docker => RuntimeGuardrailsRuntimeGuardrailTarget::Docker,
-        AdapterKind::Containerd | AdapterKind::K3sContainerd => {
-            RuntimeGuardrailsRuntimeGuardrailTarget::Containerd
-        }
-        AdapterKind::Kubernetes => RuntimeGuardrailsRuntimeGuardrailTarget::Kubernetes,
-    }
-}
-
-fn adapter_name(adapter: AdapterKind) -> &'static str {
-    match adapter {
-        AdapterKind::Docker => "docker",
-        AdapterKind::Containerd => "containerd",
-        AdapterKind::K3sContainerd => "k3s_containerd",
-        AdapterKind::Kubernetes => "kubernetes",
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

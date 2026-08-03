@@ -3,13 +3,12 @@
 Schema version: v1
 
 This document is the stable consumer contract for Apolysis JSONL records emitted
-by the CLI observer, runtime metadata adapters, policy feedback path, and
-visibility validator. It covers append-only audit records intended for
-operators, tests, and downstream log or SIEM pipelines.
+by the CLI observer, runtime metadata adapters, accountability analyzer, and
+visibility assessor. It covers append-only observation records intended for
+operators, tests, and downstream log pipelines.
 
-Generated validation reports, provider evidence bundles, release manifests, and
-hash-chain package metadata are separate artifacts. They may contain JSON, but
-they are not timeline JSONL records covered by this schema.
+Release manifests and hash-chain package metadata are separate artifacts. They
+may contain JSON, but they are not timeline JSONL records covered by this schema.
 
 ## Format
 
@@ -32,48 +31,34 @@ The v1 compatibility contract is append-only:
 - New nullable fields may be added to an existing record.
 - New `record_type` values may be added.
 - New enum string values may be added when a feature introduces a new runtime,
-  event source, event type, policy decision, enforcement backend, or diagnostic
-  kind.
+  event source, event type, or diagnostic kind.
 - Consumers must not rely on object field ordering.
 - Consumers that need exact joins should use `event_id`, `raw_event_id`, and
-  `observed_event_id`, not timestamp-only matching.
+  `evidence_ref`, not timestamp-only matching.
 - Backward-incompatible removal, renaming, type changes, or semantic changes
   require a new schema version.
 
 ## Record Types
 
-### `session`
-
-Session records describe a supervised runtime session.
-
-Fields:
-
-- `record_type`: always `session`
-- `id`: session identifier
-- `runtime`: `local`, `docker`, `kubernetes`, or `firecracker`
-- `root`: runtime root or `null`
-- `policy_path`: policy file path used for the run
-- `started_at_unix_ms`: session start timestamp
-
 ### `event`
 
 Canonical event records describe normalized runtime, metadata, process, file,
-network, credential, or policy-visible activity.
+network, or credential activity.
 
 Fields:
 
 - `record_type`: always `event`
 - `timestamp_unix_ms`: event timestamp
 - `session_id`: session identifier
-- `event_source`: `manual`, `process_tree`, `kernel_tracepoint`, `bpf_lsm`,
-  `uprobe`, `runtime_metadata`, or `agent_feedback`
+- `event_source`: `manual`, `process_tree`, `kernel_tracepoint`, `uprobe`, or
+  `runtime_metadata`
 - `event_type`: `session_started`, `runtime_metadata`, `exec`, `file_open`,
   `file_create`, `file_truncate`, `file_unlink`, `file_rename`,
   `network_connect`, `credential_read`, or `process_exit`
 - `raw_event_id`: matching raw kernel `event_id`, or `null`
 - `pid`: process ID
 - `ppid`: parent process ID
-- `actor`: process, observer, policy, runtime, or integration actor
+- `actor`: process, observer, runtime, or integration actor
 - `resource`: target resource, metadata resource, path token, executable, or
   socket token
 - `action`: action or metadata value
@@ -223,49 +208,6 @@ Fields:
 - `evidence_boundary`: `host_boundary` or `guest_semantic`; intent correlation
   currently emits `host_boundary`
 
-### `policy_violation`
-
-Policy violation records describe policy decisions derived from observed events.
-
-Fields:
-
-- `record_type`: always `policy_violation`
-- `timestamp_unix_ms`: decision timestamp
-- `session_id`: session identifier
-- `observed_event_id`: raw kernel `event_id` that caused the decision, or `null`
-- `rule_id`: policy rule identifier
-- `decision`: `allow`, `notify`, `block`, `kill`, or `review`
-- `reason`: human-readable policy reason
-- `pid`: process ID
-- `target`: resource or target that matched the rule
-- `enforcement_backend`: `audit_only`, `tracepoint_notify`, `bpf_lsm_block`,
-  `seccomp_block`, or `signal_kill`
-
-### `enforcement_metadata`
-
-Enforcement metadata records explain how a requested policy decision was handled
-by the available runtime backend.
-
-Fields:
-
-- `record_type`: always `enforcement_metadata`
-- `timestamp_unix_ms`: metadata timestamp
-- `session_id`: session identifier
-- `rule_id`: policy rule identifier or `null`
-- `observed_event_id`: raw kernel `event_id` that caused the decision, or `null`
-- `requested_decision`: requested policy decision
-- `effective_decision`: effective policy decision after downgrade or backend
-  selection
-- `enforcement_backend`: backend used or selected
-- `timing`: enforcement timing label
-- `runtime`: runtime label
-- `action`: observed or policy action
-- `preoperation_prevention`: boolean, true only for pre-operation blocking paths
-- `observed_event_timestamp_unix_ms`: observed event timestamp or `null`
-- `decision_latency_ms`: decision latency or `null`
-- `side_effect_race_window_ms`: post-event race window or `null`
-- `downgrade_reason`: downgrade reason or `null`
-
 ### `observer_diagnostic`
 
 Observer diagnostic records describe observer health, loss, truncation, attach
@@ -318,10 +260,6 @@ Use these fields for deterministic joins:
   event and raw kernel event that proved the observed side effect.
 - `accountability_finding.evidence_ref` links a mismatch finding to either an
   observed `raw_event_id` or an unmatched `intent_id`.
-- `policy_violation.observed_event_id` links a policy decision to the observed
-  raw event.
-- `enforcement_metadata.observed_event_id` links enforcement metadata to the
-  observed raw event.
 
 Process context is a separate enrichment model. Current observer producers keep
 an allowlisted `process_executable` basename reference and
@@ -336,7 +274,7 @@ effects.
 Persistence-time redaction applies before JSONL output:
 
 - Exec argv is removed as a whole and replaced with `argv_redacted:true`.
-- Credential-looking paths outside the allowed workspace may become
+- Credential-class paths may become
   `path_token:<digest>` values.
 - Socket addresses may be tokenized while retaining non-sensitive routing
   detail such as port where needed.
@@ -374,6 +312,8 @@ jq -c 'select(.record_type=="intent") | {intent_source,intent_id,tool_name,decla
 jq -c 'select(.record_type=="intent_correlation") | {intent_source,intent_id,match_basis,raw_event_id,event_type,pid,resource}' intent-correlation.jsonl
 
 jq -c 'select(.record_type=="accountability_finding") | {kind,decision,evidence_ref,reason}' intent-correlation.jsonl
-
-jq -c 'select((.record_type=="policy_violation" or .record_type=="enforcement_metadata") and .observed_event_id!=null)' timeline.jsonl
 ```
+
+Legacy `v0.3.0` research timelines may contain `session`, `policy_violation`,
+or `enforcement_metadata` records. Active producers no longer emit them; v1
+consumers should handle them as unknown historical record types.

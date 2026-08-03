@@ -2,15 +2,13 @@
 
 //! CLI vocabulary shared by command parsers.
 //!
-//! The binary intentionally keeps argument parsing lightweight for TimelineStore-VisibilityValidation, but
-//! command names and flags still form a public interface.  Centralizing them
+//! The binary intentionally keeps argument parsing lightweight, but command
+//! names and flags still form a public interface. Centralizing them
 //! makes new subcommands less error-prone and keeps usage text in sync with
 //! parser logic.
 
 /// Top-level command names.
 pub(crate) mod commands {
-    /// Execute a command under a selected runtime adapter.
-    pub(crate) const RUN: &str = "run";
     /// Convert observer input into a canonical timeline.
     pub(crate) const OBSERVE: &str = "observe";
     /// Assess host-side visibility for an isolation profile.
@@ -29,10 +27,6 @@ pub(crate) mod commands {
 
 /// Runtime and backend selection values.
 pub(crate) mod values {
-    /// Local process-tree runtime adapter.
-    pub(crate) const LOCAL: &str = apolysis_core::runtimes::LOCAL;
-    /// Docker runtime adapter.
-    pub(crate) const DOCKER: &str = apolysis_core::runtimes::DOCKER;
     /// Fixture-backed observer input.
     pub(crate) const FIXTURE: &str = "fixture";
     /// Live Aya ring-buffer observer.
@@ -43,14 +37,6 @@ pub(crate) mod values {
 
 /// Shared CLI option names.
 pub(crate) mod options {
-    /// Runtime selector for `apolysis run`.
-    pub(crate) const RUNTIME: &str = "--runtime";
-    /// Docker image selector for `apolysis run --runtime docker`.
-    pub(crate) const IMAGE: &str = "--image";
-    /// Docker OCI runtime selector for gVisor/runsc or compatible shims.
-    pub(crate) const DOCKER_RUNTIME: &str = "--docker-runtime";
-    /// Policy file path.
-    pub(crate) const POLICY: &str = "--policy";
     /// JSONL output path.
     pub(crate) const OUTPUT: &str = "--output";
     /// Maximum bytes for one active JSONL output file before rotation.
@@ -73,8 +59,6 @@ pub(crate) mod options {
     pub(crate) const SUMMARY: &str = "--summary";
     /// Session id selector.
     pub(crate) const SESSION: &str = "--session";
-    /// Agent feedback directory path.
-    pub(crate) const FEEDBACK_DIR: &str = "--feedback-dir";
     /// Kubernetes metadata fixture or snapshot path.
     pub(crate) const KUBERNETES_METADATA: &str = "--kubernetes-metadata";
     /// CO-RE eBPF object path for the live observer.
@@ -99,14 +83,10 @@ pub(crate) mod options {
     pub(crate) const SCENARIO: &str = "--scenario";
 }
 
-/// Default JSONL timeline path used by `apolysis run`.
-pub(crate) const DEFAULT_TIMELINE_PATH: &str = ".apolysis/timeline.jsonl";
-
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
     format!(
-        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
-        run = commands::RUN,
+        "usage: apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
         observe = commands::OBSERVE,
         intent = commands::INTENT,
         verify = commands::VERIFY,
@@ -114,12 +94,6 @@ pub(crate) fn usage() -> String {
         correlate = commands::CORRELATE,
         hash_chain = commands::HASH_CHAIN,
         visibility = commands::VISIBILITY,
-        runtime = options::RUNTIME,
-        local = values::LOCAL,
-        docker = values::DOCKER,
-        image = options::IMAGE,
-        docker_runtime = options::DOCKER_RUNTIME,
-        policy = options::POLICY,
         output = options::OUTPUT,
         output_max_bytes = options::OUTPUT_MAX_BYTES,
         output_max_files = options::OUTPUT_MAX_FILES,
@@ -134,7 +108,6 @@ pub(crate) fn usage() -> String {
         live = values::LIVE,
         input = options::INPUT,
         session = options::SESSION,
-        feedback_dir = options::FEEDBACK_DIR,
         kubernetes_metadata = options::KUBERNETES_METADATA,
         bpf_object = options::BPF_OBJECT,
         scope_cgroup = options::SCOPE_CGROUP,
