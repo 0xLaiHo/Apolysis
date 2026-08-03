@@ -78,21 +78,34 @@ impl<T> BoundedPriorityQueue<T> {
     }
 
     pub fn push(&mut self, priority: QueuePriority, value: T) -> PushOutcome {
+        self.push_with_evicted(priority, value).0
+    }
+
+    pub fn push_with_evicted(
+        &mut self,
+        priority: QueuePriority,
+        value: T,
+    ) -> (PushOutcome, Option<T>) {
         if self.stats.depth < self.stats.capacity {
             self.enqueue(priority, value);
-            return PushOutcome::Accepted;
+            return (PushOutcome::Accepted, None);
         }
 
-        if priority != QueuePriority::Ordinary && self.shed_oldest_ordinary() {
-            self.stats.increment_drop(QueuePriority::Ordinary);
-            self.enqueue(priority, value);
-            return PushOutcome::AcceptedAfterShedding {
-                dropped: QueuePriority::Ordinary,
-            };
+        if priority != QueuePriority::Ordinary {
+            if let Some(evicted) = self.shed_oldest_ordinary() {
+                self.stats.increment_drop(QueuePriority::Ordinary);
+                self.enqueue(priority, value);
+                return (
+                    PushOutcome::AcceptedAfterShedding {
+                        dropped: QueuePriority::Ordinary,
+                    },
+                    Some(evicted),
+                );
+            }
         }
 
         self.stats.increment_drop(priority);
-        PushOutcome::Dropped { dropped: priority }
+        (PushOutcome::Dropped { dropped: priority }, None)
     }
 
     pub fn pop(&mut self) -> Option<T> {
@@ -130,13 +143,12 @@ impl<T> BoundedPriorityQueue<T> {
         self.stats.accepted += 1;
     }
 
-    fn shed_oldest_ordinary(&mut self) -> bool {
+    fn shed_oldest_ordinary(&mut self) -> Option<T> {
         let dropped = self
             .queues
             .get_mut(&QueuePriority::Ordinary)
-            .and_then(VecDeque::pop_front)
-            .is_some();
-        if dropped {
+            .and_then(VecDeque::pop_front);
+        if dropped.is_some() {
             self.stats.depth -= 1;
         }
         dropped

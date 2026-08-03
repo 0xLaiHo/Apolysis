@@ -118,6 +118,11 @@ Agent Run. Any non-zero loss counter makes a checkpoint or normal terminal
 active checkpoint; it does degrade a terminal because those operations remain
 unmatched when collection stops.
 
+For daemon timelines, a checkpoint or terminal waits on a sequence fence for
+all pipeline records admitted before the boundary, then appends directly to the
+per-run hash chain. Lifecycle boundaries therefore do not consume bounded
+queue capacity and cannot be dropped merely because that queue is full.
+
 Normal completion drains confirmed events and persists Observation Gaps before
 writing `stopped`. A fatal collector path writes `failed` when the timeline is
 still writable. Daemon recovery treats an instance with `started` or

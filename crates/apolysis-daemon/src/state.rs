@@ -498,7 +498,7 @@ impl DaemonState {
     }
 
     pub(crate) async fn persist_record(
-        &self,
+        self: &std::sync::Arc<Self>,
         record: DaemonRecord,
         delivery_mode: RecordDeliveryMode,
     ) -> Result<RecordWriteOutcome, String> {
@@ -518,25 +518,35 @@ impl DaemonState {
         match self.persist_inner(&record.session_id, record.payload).await {
             Ok(()) => Ok(RecordWriteOutcome::Written),
             Err(error) => {
-                if delivery_mode == RecordDeliveryMode::Confirmed {
-                    // The observer runtime is waiting for this write result and
-                    // close may still hold the registry lock. Re-entering scope
-                    // cleanup here would wait on that same runtime. Pause this
-                    // session and let the confirmed failure unwind the caller.
-                    self.paused_sessions
-                        .write()
-                        .await
-                        .insert(record.session_id.clone(), error);
-                    self.health
-                        .write()
-                        .await
-                        .set_storage(ComponentState::Degraded);
-                } else {
-                    self.mark_session_degraded(&record.session_id, &error).await;
+                let degraded = self
+                    .mark_session_degraded_state(&record.session_id, &error)
+                    .await;
+                if delivery_mode == RecordDeliveryMode::Queued {
+                    if let (Some(scope), Some((intent, cgroup_ids))) =
+                        (self.scope.clone(), degraded)
+                    {
+                        let session_id = record.session_id.clone();
+                        tokio::spawn(async move {
+                            for cgroup_id in cgroup_ids {
+                                let _ = scope
+                                    .fail_agent_run(
+                                        &session_id,
+                                        Some(&intent),
+                                        cgroup_id,
+                                        CollectorFailureReason::StorageFailure,
+                                    )
+                                    .await;
+                            }
+                        });
+                    }
                 }
                 Ok(RecordWriteOutcome::Failed)
             }
         }
+    }
+
+    pub(crate) async fn session_is_paused(&self, session_id: &str) -> bool {
+        self.paused_sessions.read().await.contains_key(session_id)
     }
 
     async fn persist(&self, session_id: &str, payload: Value) -> Result<(), String> {
@@ -580,28 +590,31 @@ impl DaemonState {
         Ok(())
     }
 
-    async fn mark_session_degraded(&self, session_id: &str, reason: &str) {
-        self.paused_sessions
+    async fn mark_session_degraded_state(
+        &self,
+        session_id: &str,
+        reason: &str,
+    ) -> Option<(SessionIntent, Vec<u64>)> {
+        let first_failure = self
+            .paused_sessions
             .write()
             .await
-            .insert(session_id.to_string(), reason.to_string());
+            .insert(session_id.to_string(), reason.to_string())
+            .is_none();
+        if !first_failure {
+            return None;
+        }
         let degraded = {
             let mut registry = self.registry.write().await;
             registry
                 .degrade(session_id)
                 .map(|state| (state.intent, state.cgroup_ids))
         };
-        if let (Some(scope), Ok((intent, cgroup_ids))) = (&self.scope, degraded) {
-            for cgroup_id in cgroup_ids {
-                let _ = scope
-                    .untrack_agent_run(session_id, Some(&intent), cgroup_id)
-                    .await;
-            }
-        }
         self.health
             .write()
             .await
             .set_storage(ComponentState::Degraded);
+        degraded.ok()
     }
 
     async fn persist_inner(&self, session_id: &str, payload: Value) -> Result<(), String> {
@@ -878,4 +891,98 @@ fn current_unix_ms() -> Result<u64, String> {
         .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
         .as_millis();
     u64::try_from(millis).map_err(|_| "current Unix timestamp exceeds u64".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    use apolysis_accountability::{ActionClass, QueuePriority, DEFAULT_TENANT_ID};
+    use serde_json::json;
+
+    use super::*;
+    use crate::{scope_channel, DaemonRecord, ScopeOperation};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[tokio::test]
+    async fn queued_write_failure_releases_the_writer_before_scope_cleanup() {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let config = DaemonConfig {
+            state_dir: std::env::temp_dir().join(format!(
+                "apolysis-writer-scope-failure-{}-{id}",
+                std::process::id()
+            )),
+            ..DaemonConfig::default()
+        };
+        let (scope, mut requests) = scope_channel(1);
+        let state = Arc::new(
+            DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+        );
+        let agent_run_id = "agent-run-writer-scope-failure";
+        {
+            let mut registry = state.registry.write().await;
+            registry
+                .register(test_intent(agent_run_id), 1_700_000_000_000)
+                .expect("register test Agent Run");
+            registry
+                .discover_cgroup(agent_run_id, 71)
+                .expect("associate test cgroup");
+        }
+        std::fs::create_dir_all(
+            config
+                .state_dir
+                .join("sessions")
+                .join(agent_run_id)
+                .join("timeline.jsonl"),
+        )
+        .expect("block timeline path with a directory");
+
+        let pipeline = state.pipeline();
+        let (shutdown, shutdown_receiver) = oneshot::channel();
+        let writer = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.run_writer(shutdown_receiver).await })
+        };
+        pipeline
+            .submit(DaemonRecord::new(
+                agent_run_id,
+                QueuePriority::Ordinary,
+                json!({"record_type":"forced_write_failure"}),
+            ))
+            .expect("admit failing record");
+
+        let request = tokio::time::timeout(std::time::Duration::from_secs(1), requests.recv())
+            .await
+            .expect("scope cleanup signal must not deadlock the writer")
+            .expect("scope cleanup request");
+        assert_eq!(request.operation(), ScopeOperation::Untrack);
+        assert_eq!(
+            request.failure_reason(),
+            Some(CollectorFailureReason::StorageFailure)
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), pipeline.fence())
+            .await
+            .expect("writer fence completes while scope cleanup is pending")
+            .expect("writer fence");
+
+        request.complete(Err("test scope worker stopped".to_string()));
+        shutdown.send(()).expect("request writer shutdown");
+        assert_eq!(writer.await.unwrap().expect("writer drain").failed, 1);
+        std::fs::remove_dir_all(&config.state_dir).expect("clean test state");
+    }
+
+    fn test_intent(agent_run_id: &str) -> SessionIntent {
+        SessionIntent {
+            schema_version: 1,
+            tenant_id: DEFAULT_TENANT_ID.to_string(),
+            retention_tier: RetentionTier::Standard,
+            session_id: agent_run_id.to_string(),
+            expires_at_unix_ms: 4_102_444_800_000,
+            declared_actions: vec![ActionClass::Test],
+            allowed_resources: Vec::new(),
+            workload_selectors: Vec::new(),
+        }
+    }
 }

@@ -282,6 +282,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                 for (agent_run_id, counters) in checkpoints {
                     match persist_collector_checkpoint(
                         &state,
+                        &pipeline,
                         &agent_run_id,
                         &collector_instance_id,
                         global,
@@ -314,6 +315,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                         let cgroup_id = request.cgroup_id();
                         let agent_run_id = request.agent_run_id().map(str::to_owned);
                         let agent_intent = request.agent_intent().cloned();
+                        let failure_reason = request.failure_reason();
                         let operation = request.operation();
                         let result = match operation {
                             ScopeOperation::Track => match backend.track_cgroup(cgroup_id) {
@@ -426,14 +428,20 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                                                                 context.agent_run_id == *agent_run_id
                                                             });
                                                             if final_scope {
-                                                                match backend.counters() {
+                                                                if let Some(reason) = failure_reason {
+                                                                    Err(format!(
+                                                                        "collector failure requested after scope drain: {}",
+                                                                        reason.as_str()
+                                                                    ))
+                                                                } else {
+                                                                    match backend.counters() {
                                                                     Ok(global) => {
                                                                         let counters = terminal_scope_counters
                                                                             .get(agent_run_id)
                                                                             .copied()
                                                                             .unwrap_or_default();
                                                                         let result = persist_collector_stopped(
-                                                                            &pipeline,
+                                                                            &state,
                                                                             agent_run_id,
                                                                             &collector_instance_id,
                                                                             CollectorNormalStopReason::AgentRunClosed,
@@ -449,6 +457,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                                                                         result
                                                                     }
                                                                     Err(error) => Err(error),
+                                                                    }
                                                                 }
                                                             } else {
                                                                 Ok(())
@@ -472,7 +481,8 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                         match result {
                             Ok(()) => request.complete(Ok(())),
                             Err(error) => {
-                                let reason = collector_failure_reason(&error);
+                                let reason = failure_reason
+                                    .unwrap_or_else(|| collector_failure_reason(&error));
                                 let runtime_error = format!(
                                     "observer scope {operation:?} failed for cgroup {cgroup_id}: {error}"
                                 );
@@ -670,7 +680,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
             .copied()
             .unwrap_or_default();
         if let Err(error) = persist_collector_stopped(
-            &pipeline,
+            &state,
             &agent_run_id,
             &collector_instance_id,
             CollectorNormalStopReason::DaemonShutdown,
@@ -716,7 +726,7 @@ async fn persist_collector_started(
 }
 
 async fn persist_collector_stopped(
-    pipeline: &EventPipeline,
+    state: &DaemonState,
     agent_run_id: &str,
     collector_instance_id: &str,
     reason: CollectorNormalStopReason,
@@ -725,16 +735,27 @@ async fn persist_collector_stopped(
     mut counters: CollectorLifecycleCounters,
 ) -> Result<(), String> {
     apply_global_lifecycle_counters(&mut counters, global, ingest);
-    persist_collector_terminal(
-        pipeline,
-        CollectorLifecycleRecord::stopped(agent_run_id, collector_instance_id, reason, counters),
-    )
-    .await
-    .map_err(|error| format!("failed to persist collector terminal state: {error}"))
+    let pipeline = state.pipeline();
+    pipeline.fence().await.map_err(|error| {
+        format!("failed to fence collector terminal state behind admitted evidence: {error}")
+    })?;
+    if state.session_is_paused(agent_run_id).await {
+        return Err("failed to persist clean collector terminal for a paused session".to_string());
+    }
+    state
+        .persist_collector_lifecycle(CollectorLifecycleRecord::stopped(
+            agent_run_id,
+            collector_instance_id,
+            reason,
+            counters,
+        ))
+        .await
+        .map_err(|error| format!("failed to persist collector terminal state: {error}"))
 }
 
 async fn persist_collector_checkpoint(
     state: &DaemonState,
+    pipeline: &EventPipeline,
     agent_run_id: &str,
     collector_instance_id: &str,
     global: DaemonObserverCounters,
@@ -742,6 +763,12 @@ async fn persist_collector_checkpoint(
     mut counters: CollectorLifecycleCounters,
 ) -> Result<CollectorLifecycleCounters, String> {
     apply_global_lifecycle_counters(&mut counters, global, ingest);
+    pipeline.fence().await.map_err(|error| {
+        format!("failed to fence collector checkpoint behind admitted evidence: {error}")
+    })?;
+    if state.session_is_paused(agent_run_id).await {
+        return Err("failed to persist collector checkpoint for a paused session".to_string());
+    }
     state
         .persist_collector_lifecycle(CollectorLifecycleRecord::checkpoint(
             agent_run_id,
@@ -753,19 +780,20 @@ async fn persist_collector_checkpoint(
     Ok(counters)
 }
 
-async fn persist_collector_terminal(
+async fn persist_failed_collector_terminal(
+    state: &DaemonState,
     pipeline: &EventPipeline,
     record: CollectorLifecycleRecord,
 ) -> Result<(), String> {
-    let agent_run_id = record.agent_run_id().to_string();
-    let payload = serde_json::from_str(&record.to_json_line())
-        .map_err(|error| format!("failed to encode collector terminal state: {error}"))?;
-    submit_observer_record(
-        pipeline,
-        DaemonRecord::new(agent_run_id, QueuePriority::Ordinary, payload),
-        ObserverDelivery::Confirmed,
-    )
-    .await
+    let fence_error = pipeline.fence().await.err();
+    let persist_result = state.persist_collector_lifecycle(record).await;
+    match (fence_error, persist_result) {
+        (_, Ok(())) => Ok(()),
+        (Some(fence_error), Err(persist_error)) => Err(format!(
+            "failed to fence failed collector terminal: {fence_error}; failed to persist failed collector terminal: {persist_error}"
+        )),
+        (None, Err(error)) => Err(format!("failed to persist failed collector terminal: {error}")),
+    }
 }
 
 fn apply_global_lifecycle_counters(
@@ -837,7 +865,8 @@ async fn fail_collector_lifecycles(
             }
             _ => {}
         }
-        if let Err(terminal_error) = persist_collector_terminal(
+        if let Err(terminal_error) = persist_failed_collector_terminal(
+            state,
             &pipeline,
             CollectorLifecycleRecord::failed(
                 &agent_run_id,
@@ -863,7 +892,7 @@ async fn fail_collector_lifecycles(
 
 fn collector_failure_reason(error: &str) -> CollectorFailureReason {
     let normalized = error.to_ascii_lowercase();
-    if normalized.contains("collector terminal state") {
+    if normalized.contains("collector terminal") {
         CollectorFailureReason::IncompleteTerminalFlush
     } else if normalized.contains("verifier") {
         CollectorFailureReason::VerifierFailure

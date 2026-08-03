@@ -226,6 +226,12 @@ daemon 而言，它只汇总属于该 Agent Run 的 cgroup。非零 loss counter
 `degraded`。采集仍活跃时，只有 pending 仍保持 healthy；到 terminal 时，它代表停止时未匹配的
 工作，因此会使 terminal degraded。
 
+Daemon checkpoint 与 terminal 会先等待 sequence fence；该 fence 覆盖 boundary 之前所有已被
+pipeline 接纳的 record。随后 lifecycle boundary 直接追加到每个 Agent Run 的 hash chain，因此
+bounded queue 即使已满也不能丢弃它，后来的高优先级流量也不能让它越过旧 evidence。普通 writer
+失败会暂停受影响的 Agent Run，并异步发送 scope failure；唯一 writer 不会同步等待 observer
+untrack，也不会等待该 untrack 产生的 failed terminal。
+
 正常路径会先确认 event drain 与 Observation Gap 已持久化，再写入带显式 reason 的
 `stopped`。致命 attach、verifier、ABI、decoder、counter、observer 或可写 storage 路径会在
 timeline 仍可写时记录 `failed`。Daemon 恢复时，缺少 `stopped` 或 `failed` 的 `started` /

@@ -315,6 +315,75 @@ async fn failed_terminal_preserves_the_last_cumulative_checkpoint() {
 }
 
 #[tokio::test]
+async fn empty_checkpoint_drain_waits_for_previously_admitted_evidence() {
+    let mut config = config();
+    config.collector_checkpoint_interval = std::time::Duration::from_millis(1);
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        drain_batch: None,
+        scoped_counters: BTreeMap::new(),
+    };
+    let (scope, receiver) = scope_channel(2);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+    state
+        .register(intent("agent-run-checkpoint-fence"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-checkpoint-fence", 92)
+        .await
+        .expect("associate cgroup");
+    state
+        .pipeline()
+        .submit(DaemonRecord::new(
+            "agent-run-checkpoint-fence",
+            QueuePriority::Ordinary,
+            serde_json::json!({"record_type":"admitted_before_checkpoint"}),
+        ))
+        .expect("admit evidence");
+
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(!timeline(&config, "agent-run-checkpoint-fence").contains(r#""state":"checkpoint""#));
+
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    for _ in 0..100 {
+        if timeline(&config, "agent-run-checkpoint-fence").contains(r#""state":"checkpoint""#) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    observer_shutdown
+        .send(())
+        .expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
+
+    let timeline = timeline(&config, "agent-run-checkpoint-fence");
+    let evidence = timeline.find("admitted_before_checkpoint").unwrap();
+    let checkpoint = timeline.find(r#""state":"checkpoint""#).unwrap();
+    assert!(evidence < checkpoint);
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn observer_shutdown_persists_file_gaps_to_the_owning_agent_runs() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
@@ -472,6 +541,14 @@ async fn dropped_observation_gap_makes_scope_drain_fail_loud() {
     }
     shutdown.send(()).unwrap();
 
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(!runtime.is_finished());
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+
     let error = runtime
         .await
         .unwrap()
@@ -479,6 +556,9 @@ async fn dropped_observation_gap_makes_scope_drain_fail_loud() {
     assert!(error.contains("Observation Gap"));
     assert!(error.contains("dropped"));
     assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    assert!(timeline(&config, "agent-run-gap-drop").contains(r#""state":"failed""#));
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
     cleanup(&config);
 }
 
@@ -516,18 +596,29 @@ async fn dropped_file_outcome_stops_the_observer_runtime() {
     let (_scope, receiver) = scope_channel(1);
     let (_shutdown, shutdown_receiver) = oneshot::channel();
 
-    let error = run_observer_runtime(
-        backend,
-        vec![52],
-        receiver,
-        Arc::clone(&state),
-        shutdown_receiver,
-    )
-    .await
-    .expect_err("dropped file outcome must fail loud");
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, vec![52], receiver, state, shutdown_receiver).await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(!runtime.is_finished());
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let error = runtime
+        .await
+        .unwrap()
+        .expect_err("dropped file outcome must fail loud");
 
     assert!(error.contains("dropped"));
     assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    assert!(timeline(&config, "agent-run-outcome-drop").contains(r#""state":"failed""#));
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
     cleanup(&config);
 }
 

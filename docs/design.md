@@ -265,6 +265,14 @@ of only the cgroups owned by the Agent Run. A non-zero loss counter degrades a
 checkpoint. Pending alone remains healthy while collection is active, but
 degrades a terminal because it then represents unmatched work at stop.
 
+Daemon checkpoints and terminals first wait on a sequence fence covering every
+pipeline record admitted before that boundary. The lifecycle boundary is then
+appended directly to the per-run hash chain, so a full bounded queue cannot
+drop it and later high-priority traffic cannot make it overtake older evidence.
+An ordinary writer failure pauses the affected run and signals scope failure
+asynchronously; the single writer never waits for observer untrack or for the
+failed terminal that untrack produces.
+
 After confirmed event drain and Observation Gap persistence, a normal path
 writes `stopped` with an explicit reason. A fatal attach, verifier, ABI,
 decoder, counter, observer, or writable-storage path writes `failed` when the
