@@ -62,8 +62,6 @@ jobs:
           /usr/bin/sudo -n chmod 0600 "$sentinel/unchanged.txt"
           ln -s "$sentinel" .apolysis-action
           mkdir -p .action-hostile/curl-home
-          ln -s /tmp/apolysis-selftest-home/.aws/credentials \
-            .action-hostile/policy-link.yaml
           cat >.action-hostile/sudo <<'EOF'
           #!/usr/bin/bash
           touch "$GITHUB_WORKSPACE/action-hostile-sudo-ran"
@@ -146,7 +144,6 @@ jobs:
           APOLYSIS_SELF_TEST_ENV: runner-environment
           APOLYSIS_PRELOAD_MARKER: ${{ github.workspace }}/action-hostile-preload-ran
           APOLYSIS_SITECUSTOMIZE_MARKER: ${{ github.workspace }}/action-hostile-sitecustomize-ran
-          APOLYSIS_BPF_LSM_AVAILABLE: '0'
           BASH_ENV: ${{ github.workspace }}/.action-hostile/bash-env.sh
           BASH_XTRACEFD: '2'
           CURL_HOME: ${{ github.workspace }}/.action-hostile/curl-home
@@ -162,7 +159,6 @@ jobs:
             : action-run-input-content-canary;
             test "$(id -u)" -ne 0;
             test "$APOLYSIS_SELF_TEST_ENV" = runner-environment;
-            if [[ -n ${APOLYSIS_BPF_LSM_AVAILABLE+x} ]]; then exit 1; fi;
             test "$HOME" = "$(cat action-expected-home)";
             test "$PATH" = "$(cat action-expected-path)";
             test "$(/usr/bin/awk '/NoNewPrivs/{print $2}' /proc/self/status)" = 1;
@@ -177,7 +173,6 @@ jobs:
             cat /tmp/apolysis-selftest-home/.aws/credentials >/dev/null;
             echo selftest-done
           session: action-self-test
-          policy: policies/local-dev.yaml
 
       - name: Prove and stop the detached tamper attempt
         run: |
@@ -252,15 +247,6 @@ jobs:
           run: ''
           session: action-empty-command
 
-      - name: Reject a symlinked policy after privileged setup
-        id: reject-policy
-        continue-on-error: true
-        uses: ./
-        with:
-          run: 'touch action-rejected-policy-ran'
-          session: action-policy-rejection
-          policy: .action-hostile/policy-link.yaml
-
       - name: Assert evidence, redaction, and privilege boundaries
         run: |
           set +e
@@ -292,12 +278,8 @@ jobs:
             "[[ '${{ steps.reject-session.outcome }}' == 'failure' ]]"
           check 'empty managed command failed closed' \
             "[[ '${{ steps.reject-empty-command.outcome }}' == 'failure' ]]"
-          check 'symlinked policy failed closed' \
-            "[[ '${{ steps.reject-policy.outcome }}' == 'failure' ]]"
           check 'rejected session workload never ran' \
             '[[ ! -e action-rejected-session-ran ]]'
-          check 'rejected policy workload never ran' \
-            '[[ ! -e action-rejected-policy-ran ]]'
           check 'colliding scope workload never ran' \
             '[[ ! -e action-collision-workload-ran ]]'
           check 'colliding scope remained untouched by losing invocation' \
@@ -373,7 +355,7 @@ jobs:
           rm -f -- .apolysis-action action-workload-uid action-workload-gid \
             action-workload-groups action-background-pid \
             action-background-survived action-rejected-session-ran \
-            action-rejected-policy-ran action-collision-workload-ran \
+            action-collision-workload-ran \
             action-collision-preserved action-expected-home action-expected-path \
             action-expected-gid \
             action-hostile-sudo-ran action-hostile-bash-env-ran \

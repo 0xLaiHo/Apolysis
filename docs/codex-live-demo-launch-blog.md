@@ -44,7 +44,7 @@ later. Isolation decides what the workload can reach.
 
 The evidence boundary is what the environment observed. This is where Apolysis
 lives today. The live observer uses eBPF to collect host-side events and joins
-them with runtime metadata, policy findings, and declared intent. The result is
+them with runtime metadata, review findings, and declared intent. The result is
 not a claim that the workload was safe. It is a durable record of what the
 workload did, where the evidence came from, and which side effects were not
 covered by declared intent.
@@ -65,7 +65,6 @@ operator runs Codex through managed launch:
 sudo -E ./target/debug/apolysis observe \
   --backend live \
   --session codex-live-demo \
-  --policy policies/local-dev.yaml \
   --output .apolysis/codex-live-demo/timeline.agent-run.jsonl \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
   --agent-kind codex \
@@ -123,7 +122,7 @@ needs.
 Third, the important question in incident review is often comparative. Did the
 declared intent cover the observed side effects? If the answer is no, the
 reviewer needs the intent record and the host-side evidence record linked by a
-stable session id, event id, runtime metadata, and policy context.
+stable session id, event id, runtime metadata, and declared-intent context.
 
 Apolysis is built around that comparison. It keeps append-only timelines,
 redacts sensitive paths into `path_token:*` values for public material, and
@@ -216,7 +215,7 @@ report it is built to produce. Tell us what it found.
 
 The product direction is intentionally constrained. Apolysis improves the shared
 evidence spine first: stable schema, managed agent launch, intent correlation,
-runtime metadata, policy findings, and evidence verification. Stronger isolation
+runtime metadata, review findings, and evidence verification. Stronger isolation
 and richer deployment surfaces can consume that spine later, when real use asks
 for them.
 

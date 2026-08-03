@@ -7,7 +7,6 @@ repository.workspace = true
 
 [dependencies]
 apolysis-core = { path = "../apolysis-core" }
-apolysis-validation = { path = "../apolysis-validation" }
 
 [lib]
 path = "src/lib.rs"

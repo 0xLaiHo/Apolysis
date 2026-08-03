@@ -1,6 +1,6 @@
 {"version": 2, "width": 80, "height": 24, "timestamp": 1783511757, "env": {"SHELL": "/usr/bin/zsh", "TERM": "xterm-ghostty"}}
 [1.05613, "o", "# An agent said it ran the project checks. Did it do anything else?\r\n"]
-[2.658061, "o", "$ sudo ./apolysis observe --backend live --session demo --policy policy.yaml --output timeline.jsonl --bpf-object observer.bpf.o --workspace-root . --agent-kind codex --agent-run -- ./demo-check.sh\r\n"]
+[2.658061, "o", "$ sudo ./apolysis observe --backend live --session demo --output timeline.jsonl --bpf-object observer.bpf.o --workspace-root . --agent-kind codex --agent-run -- ./demo-check.sh\r\n"]
 [3.072372, "o", "\u001b]3008;start=77231ec967b54ec6bf4b5ec8b1359ae4;user=mactavish;hostname=mactavish;machineid=29a605a6d8c24eebb70ec14de48ad2a3;bootid=3adfab75b8ac4d8db5c659a545d36e32;pid=255539;pidfdid=255540;comm=sudo;targetuser=root;type=session\u001b\\"]
 [3.151435, "o", "running the project checks...\r\n"]
 [3.172526, "o", "fake credential fixture read: path=/tmp/apolysis-demo-home/.aws/credentials bytes=81 sha256=2859dfc8ddb137a5c2b18c63cd4fb751c4c37f9468d87687aed605811eb00ef3\r\n"]

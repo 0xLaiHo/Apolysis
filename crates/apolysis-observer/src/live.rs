@@ -12,8 +12,6 @@ use apolysis_core::{
     actors, resources, CanonicalEvent, EventSource, EventType, ObserverDiagnostic,
     ObserverDiagnosticKind, RawKernelEvent,
 };
-use apolysis_feedback::FeedbackWriter;
-use apolysis_policy::PolicyRuntimeCapabilities;
 use apolysis_store::JsonlRotationPolicy;
 use apolysis_store::JsonlStore;
 use aya::maps::{Array, HashMap, MapData, RingBuf};
@@ -31,9 +29,8 @@ use crate::abi::{
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
 use crate::{
-    append_policy_evaluation, canonicalize, load_policy, write_observer_metadata, AyaLoaderPlan,
-    EventIdSequence, ObserveResult, ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor,
-    RuntimeEvidencePersistence,
+    canonicalize, write_observer_metadata, AyaLoaderPlan, EventIdSequence, ObserveResult,
+    ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor, RuntimeEvidencePersistence,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -218,9 +215,7 @@ impl AgentDiscoveryRequest {
 pub struct LiveObserveRequest {
     pub object_path: PathBuf,
     pub output_path: PathBuf,
-    pub policy_path: PathBuf,
     pub session_id: String,
-    pub feedback_dir: Option<PathBuf>,
     pub scope: Option<LiveScope>,
     pub agent_run: Option<AgentRunRequest>,
     pub agent_registration_path: Option<PathBuf>,
@@ -470,9 +465,6 @@ unsafe impl Pod for ObserverCounters {}
 
 pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveResult, String> {
     request.validate()?;
-    let policy = load_policy(&request.policy_path)?;
-    let capabilities = PolicyRuntimeCapabilities::detect();
-    let feedback = request.feedback_dir.clone().map(FeedbackWriter::new);
     let runner_plan = ObserverRunnerPlan::host_observer_default();
     let loader_plan = AyaLoaderPlan::audit_observer_default(&request.object_path);
     let mut store =
@@ -483,7 +475,6 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         &request.session_id,
         &runner_plan,
         ObserverBackend::AyaRingBuffer,
-        policy.startup_downgrade(&capabilities),
         request.output_rotation,
         &mut store,
     )?;
@@ -690,18 +681,9 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                     continue;
                 }
             };
-            let canonical = process_context.observe(&raw, canonicalize(&raw, &policy));
-            let persisted_canonical =
-                append_content_off_runtime_event(&raw, &canonical, &redactor, &mut store)?;
+            let canonical = process_context.observe(&raw, canonicalize(&raw));
+            append_content_off_runtime_event(&raw, &canonical, &redactor, &mut store)?;
             raw_count += 1;
-            append_policy_evaluation(
-                &canonical,
-                &policy,
-                &capabilities,
-                feedback.as_ref(),
-                Some(&persisted_canonical.resource),
-                &mut store,
-            )?;
             canonical_count += 1;
         }
     }
@@ -2165,7 +2147,6 @@ mod tests {
 
     #[test]
     fn process_context_enriches_exec_and_exit_before_cleanup() {
-        let policy = apolysis_policy::Policy::default();
         let mut contexts = crate::process_context::ProcessContextTable::default();
         let exec_raw = RawKernelEvent::new(
             1_780_328_000_004,
@@ -2185,7 +2166,7 @@ mod tests {
         )
         .with_event_id("raw-exec");
 
-        let exec_event = contexts.observe(&exec_raw, canonicalize(&exec_raw, &policy));
+        let exec_event = contexts.observe(&exec_raw, canonicalize(&exec_raw));
 
         assert_eq!(
             exec_event.process_command.as_deref(),
@@ -2218,7 +2199,7 @@ mod tests {
         )
         .with_event_id("raw-exit");
 
-        let exit_event = contexts.observe(&exit_raw, canonicalize(&exit_raw, &policy));
+        let exit_event = contexts.observe(&exit_raw, canonicalize(&exit_raw));
 
         assert_eq!(
             exit_event.process_command.as_deref(),
@@ -2250,7 +2231,7 @@ mod tests {
             "",
         );
 
-        let stale_event = contexts.observe(&stale_raw, canonicalize(&stale_raw, &policy));
+        let stale_event = contexts.observe(&stale_raw, canonicalize(&stale_raw));
 
         assert_eq!(stale_event.process_command, None);
         assert_eq!(stale_event.process_executable, None);
@@ -2386,9 +2367,7 @@ mod tests {
         let request = LiveObserveRequest {
             object_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
             output_path: PathBuf::from("target/test.jsonl"),
-            policy_path: PathBuf::from("policies/local-dev.yaml"),
             session_id: "session-agent-scope-conflict".to_string(),
-            feedback_dir: None,
             scope: Some(LiveScope::ProcessTree(42)),
             agent_run: Some(
                 AgentRunRequest::new("codex", vec!["codex".to_string()])

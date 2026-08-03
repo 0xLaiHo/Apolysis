@@ -28,10 +28,12 @@ The reset establishes these durable boundaries:
 - a central multi-tenant evidence plane requires new user evidence and a new
   architectural decision.
 
-The isolated contracts, Gateway, PostgreSQL projection, and evidence-object
-cluster has now left active builds and tests. Workspace reduction remains open
-while policy actuation, feedback control, and broad production qualification
-are separated from the observer-side product.
+The active workspace now matches the bounded product: eight crates cover core
+records, observer, accountability findings, local storage, daemon, CLI,
+Kubernetes metadata, and visibility assessment. Central services, policy
+actuation, feedback control, sandbox execution, and broad production
+qualification no longer participate in active builds or default tests. The
+next priority is collector correctness.
 
 ## Beta outcome
 
@@ -119,7 +121,7 @@ Priorities:
 - retain content-off persistence and secret/path redaction.
 
 Initial operation breadth remains process lifecycle, selected file mutations
-and opens, configured credential paths, and outbound connect. New hooks require
+and opens, built-in credential-class paths, and outbound connect. New hooks require
 a user investigation case plus a privacy and performance budget.
 
 Exit conditions:

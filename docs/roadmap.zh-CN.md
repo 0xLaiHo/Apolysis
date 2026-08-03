@@ -23,9 +23,10 @@ Apolysis 不再推进跨 provider 的 Agent Runtime Evidence & Policy Plane。�
 - finding 是 post-observation review aid，不宣称 enforcement；
 - 中央多租户证据平面需要新的用户证据和新的架构决策。
 
-隔离的 contracts、Gateway、PostgreSQL projection 与 evidence-object 集群现已移出活跃
-build 与 test。Workspace 收敛仍未完成；下一步将把 policy actuation、feedback control 与
-广泛的 production qualification 从 observer-side 产品中解耦。
+活跃 workspace 现在与有界产品一致：8 个 crate 覆盖 core record、observer、
+accountability finding、本地 storage、daemon、CLI、Kubernetes metadata 与 visibility
+assessment。中央服务、policy actuation、feedback control、sandbox execution 与广泛的
+production qualification 不再参与活跃 build 或默认 test。下一优先级是 collector 正确性。
 
 ## Beta 结果
 
@@ -105,8 +106,8 @@ enforcement。
   mismatch、restart 与 incomplete flush fail loud；
 - 保持 content-off persistence 与 secret/path redaction。
 
-首批 operation breadth 保持 process lifecycle、选定 file mutation/open、配置的 credential
-path 与 outbound connect。新 hook 必须有真实用户调查场景，以及隐私和性能预算。
+首批 operation breadth 保持 process lifecycle、选定 file mutation/open、内置 credential
+类别 path 与 outbound connect。新 hook 必须有真实用户调查场景，以及隐私和性能预算。
 
 退出条件：
 

@@ -76,10 +76,7 @@ grep -Fq -- '--output "$timeline"' "$action_file" \
 grep -Fq -- '--mode=0440' "$action_file" \
     || fail 'sealed evidence is not root-owned and read-only'
 grep -Fq 'scripts/github-action-boundary.sh action-scope' "$action_file" \
-    || fail 'Action-owned paths are not derived from bounded identifiers'
-grep -Fq 'copy-policy' "$action_file" \
-    || fail 'custom policy is not copied from one bounded file descriptor'
-grep -Fq 'exit "$code"' "$action_file" \
+    || fail 'Action-owned paths are not derived from bounded identifiers'grep -Fq 'exit "$code"' "$action_file" \
     || fail 'runner-recorded step status does not propagate the observed failure'
 grep -Fq "id: install" "$action_file" \
     || fail 'path reservation does not have a runner-recorded outcome'
@@ -101,10 +98,7 @@ grep -Fq 'name.startswith("BASH_FUNC_")' "$action_file" \
     || fail 'exported Bash functions can reach the pre-observation gate shell'
 [[ "$(grep -Fc 'readonly sanitizer="$secure_dir/environment-sanitizer.py"' \
     "$action_file")" -eq 3 ]] \
-    || fail 'every sanitizer consumer does not bind the root-owned path'
-grep -Fq -- '-u APOLYSIS_BPF_LSM_AVAILABLE' "$action_file" \
-    || fail 'caller input can override observed BPF LSM capability metadata'
-grep -Fq 'SUDO_UID="$runner_uid"' "$action_file" \
+    || fail 'every sanitizer consumer does not bind the root-owned path'grep -Fq 'SUDO_UID="$runner_uid"' "$action_file" \
     || fail 'the pinned observer is not forced to restore the invoking non-root uid'
 grep -Fq 'SUDO_GID="$runner_gid"' "$action_file" \
     || fail 'the pinned observer is not forced to restore the invoking non-root gid'
@@ -164,53 +158,11 @@ done
 [[ -x "$boundary_helper" ]] || fail 'Action boundary helper is missing or not executable'
 [[ "$(head -n 1 "$boundary_helper")" == '#!/usr/bin/bash -p' ]] \
     || fail 'Action boundary helper can import caller-controlled Bash functions'
-grep -Fq 'O_NOFOLLOW' "$boundary_helper" \
-    || fail 'policy copy does not reject symlink components at open time'
-grep -Fq 'os.fstat(policy_fd)' "$boundary_helper" \
-    || fail 'policy copy does not validate the opened file descriptor'
-grep -Fq '/usr/bin/python3 -I -S -' "$boundary_helper" \
-    || fail 'policy copy allows workspace-controlled Python startup hooks'
 
 temporary_base="${RUNNER_TEMP:-/tmp}"
 temporary_root="$(mktemp -d "$temporary_base/apolysis-action-boundary.XXXXXXXX")"
 trap 'rm -rf -- "$temporary_root"' EXIT
-workspace="$temporary_root/workspace"
-outside="$temporary_root/outside"
-mkdir -p "$workspace/policies" "$outside"
-printf 'version: 1\n' >"$workspace/policy.yaml"
-printf 'version: 1\n' >"$outside/policy.yaml"
-printf 'version: 1\n' >"$outside/hardlink-source.yaml"
-printf '%s\n' \
-    'import os' \
-    'open(os.environ["APOLYSIS_SITECUSTOMIZE_MARKER"], "w").write("ran")' \
-    >"$workspace/sitecustomize.py"
-ln -s "$outside/policy.yaml" "$workspace/policy-link.yaml"
-ln -s "$outside" "$workspace/policies/linked"
-ln "$outside/hardlink-source.yaml" "$workspace/policy-hardlink.yaml"
-mkfifo "$workspace/policy.fifo"
-truncate -s 1048577 "$workspace/oversized-policy.yaml"
-truncate -s 1048576 "$workspace/maximum-policy.yaml"
 
-copied_policy="$($boundary_helper copy-policy "$workspace" policy.yaml 1048576)"
-[[ "$copied_policy" == 'version: 1' ]] \
-    || fail 'workspace policy bytes changed during bounded copy'
-absolute_copy="$($boundary_helper copy-policy \
-    "$workspace" "$workspace/policy.yaml" 1048576)"
-[[ "$absolute_copy" == 'version: 1' ]] \
-    || fail 'absolute in-workspace policy was not copied'
-startup_marker="$temporary_root/sitecustomize-ran"
-isolated_copy="$(APOLYSIS_SITECUSTOMIZE_MARKER="$startup_marker" \
-    PYTHONPATH="$workspace" \
-    "$boundary_helper" copy-policy "$workspace" policy.yaml 1048576)"
-[[ "$isolated_copy" == 'version: 1' && ! -e "$startup_marker" ]] \
-    || fail 'workspace-controlled Python startup code ran during policy copy'
-bash_function_marker="$temporary_root/bash-function-ran"
-function_copy="$(/usr/bin/env \
-    APOLYSIS_BASH_FUNCTION_MARKER="$bash_function_marker" \
-    'BASH_FUNC_printf%%=() { /usr/bin/touch "$APOLYSIS_BASH_FUNCTION_MARKER"; builtin printf "$@"; }' \
-    "$boundary_helper" copy-policy "$workspace" policy.yaml 1048576)"
-[[ "$function_copy" == 'version: 1' && ! -e "$bash_function_marker" ]] \
-    || fail 'caller-controlled Bash function ran inside the boundary helper'
 sanitizer_fixture="$temporary_root/environment-sanitizer.py"
 awk '
     /tee "\$sanitizer".*<<.*PY/ { copying=1; next }
@@ -221,35 +173,13 @@ awk '
     || fail 'root-owned environment sanitizer could not be extracted for testing'
 sanitized_environment="$(/usr/bin/env \
     APOLYSIS_SANITIZER_PRESERVE=preserved \
-    APOLYSIS_BPF_LSM_AVAILABLE=0 \
     'BASH_FUNC_read%%=() { /usr/bin/false; }' \
     /usr/bin/python3 -I -S "$sanitizer_fixture" /usr/bin/env)"
 grep -Fq 'APOLYSIS_SANITIZER_PRESERVE=preserved' <<<"$sanitized_environment" \
     || fail 'environment sanitizer discarded deliberate workload configuration'
-if grep -Eq '^(BASH_FUNC_|APOLYSIS_BPF_LSM_AVAILABLE=)' \
-    <<<"$sanitized_environment"; then
+if grep -Eq '^BASH_FUNC_' <<<"$sanitized_environment"; then
     fail 'environment sanitizer retained observer-control input'
 fi
-maximum_source_digest="$(sha256sum "$workspace/maximum-policy.yaml" | awk '{print $1}')"
-maximum_copy_digest="$($boundary_helper copy-policy \
-    "$workspace" maximum-policy.yaml 1048576 | sha256sum | awk '{print $1}')"
-[[ "$maximum_copy_digest" == "$maximum_source_digest" ]] \
-    || fail 'maximum-sized policy was truncated during descriptor copy'
-
-expect_rejection 'policy outside the workspace' \
-    "$boundary_helper" copy-policy "$workspace" "$outside/policy.yaml" 1048576
-expect_rejection 'final-component policy symlink' \
-    "$boundary_helper" copy-policy "$workspace" policy-link.yaml 1048576
-expect_rejection 'parent-component policy symlink' \
-    "$boundary_helper" copy-policy "$workspace" policies/linked/policy.yaml 1048576
-expect_rejection 'policy hard link' \
-    "$boundary_helper" copy-policy "$workspace" policy-hardlink.yaml 1048576
-expect_rejection 'policy directory' \
-    "$boundary_helper" copy-policy "$workspace" policies 1048576
-expect_rejection 'policy FIFO' \
-    "$boundary_helper" copy-policy "$workspace" policy.fifo 1048576
-expect_rejection 'oversized policy' \
-    "$boundary_helper" copy-policy "$workspace" oversized-policy.yaml 1048576
 
 [[ "$($boundary_helper validate-session action-run_01.test)" == 'action-run_01.test' ]] \
     || fail 'safe session identifier changed during validation'

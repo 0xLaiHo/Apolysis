@@ -101,10 +101,10 @@ Agent command / container / Pod
 ## 当前仓库状态
 
 `v0.3.0` 仍是最新公开研究版本，展示 live collector、托管 Agent 启动、JSONL timeline、
-隐私脱敏和发布打包。活跃 Cargo workspace 现已移除被取代的 contracts、Gateway、
-PostgreSQL projection 与 evidence-object 集群，以及它们的专属 CI 和集成门禁。Policy、
-feedback、validation 与广泛的 production-qualification 原型暂时保留；后续范围收敛变更会
-先解除它们与 observer、daemon 和 runtime 的依赖。它们不会扩大活跃产品边界。
+隐私脱敏和发布打包。活跃 Cargo workspace 现仅包含 8 个 crate：core、observer、
+accountability finding、本地 storage、daemon、CLI、Kubernetes metadata 与 visibility
+assessment。被取代的 contracts、中央服务、policy actuation、Agent feedback control、
+sandbox execution 与广泛的 production-qualification 原型已移出活跃 build 和默认门禁。
 
 范围重置是一项路线图决策，不是追溯性的生产声明。在受支持 collector、归属、失败、性能和
 隐私路径通过新的有界 Beta 门禁前，Apolysis 仍是实验性项目。
@@ -137,7 +137,6 @@ make test-live
 sudo -E ./target/debug/apolysis observe \
   --backend live \
   --session codex-local-observation \
-  --policy policies/local-dev.yaml \
   --output .apolysis/codex-live/timeline.agent-run.jsonl \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
   --workspace-root "$PWD" \
@@ -150,12 +149,11 @@ sudo -E ./target/debug/apolysis observe \
 
 ## 高层路线图
 
-1. 冻结 eBPF 观测产品边界，从活跃文档中移除已被取代的产品承诺。
-2. 把活跃 workspace 收敛到 collector、runtime scope、storage、daemon、CLI 和有界
-   runtime-attribution 模块。
-3. 完成 outcome-aware collector 语义、稳定 runtime identity、health/gap 报告和本地
+1. 保持活跃 workspace 只包含 eBPF collection、runtime scope、attribution、本地 storage、
+   daemon、CLI 与操作者调查能力。
+2. 完成 outcome-aware collector 语义、稳定 runtime identity、health/gap 报告和本地
    Agent Run 调查 workflow。
-4. 先验证 container 归属，再交付有界 Kubernetes Beta；在此之前不扩张中央平台。
+3. 先验证 container 归属，再交付有界 Kubernetes Beta；在此之前不扩张中央平台。
 
 ## 文档
 

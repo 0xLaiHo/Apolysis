@@ -30,7 +30,6 @@ body:
         - live observer
         - fixture observer
         - runtime metadata
-        - policy feedback
         - release artifacts
         - documentation
     validations:

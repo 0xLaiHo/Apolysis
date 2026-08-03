@@ -17,10 +17,6 @@ inputs:
     description: 'Bounded agent adapter hint, for example codex.'
     required: false
     default: 'ci-agent'
-  policy:
-    description: 'Regular non-symlink policy inside the workspace (maximum 1 MiB); generated when omitted.'
-    required: false
-    default: ''
   intent-log:
     description: 'Optional Codex response-items JSONL used for an advisory correlation summary.'
     required: false
@@ -182,7 +178,7 @@ runs:
 
         blocked = {
             "BASHOPTS", "BASH_ENV", "BASH_XTRACEFD", "CDPATH", "ENV",
-            "GLOBIGNORE", "PS4", "SHELLOPTS", "APOLYSIS_BPF_LSM_AVAILABLE",
+            "GLOBIGNORE", "PS4", "SHELLOPTS",
         }
         for name in tuple(os.environ):
             if name in blocked or name.startswith("BASH_FUNC_"):
@@ -194,7 +190,7 @@ runs:
           '0:0:regular file:1:400' ]]
         trap - EXIT
 
-    - name: Stage bounded policy and managed command
+    - name: Stage managed command
       shell: /usr/bin/bash --noprofile --norc -p -e -o pipefail {0}
       env:
         BASHOPTS: ''
@@ -215,7 +211,6 @@ runs:
         PS4: '+ '
         SHELLOPTS: ''
         ACTION_PATH: ${{ github.action_path }}
-        IN_POLICY: ${{ inputs.policy }}
         RUN_CMD: ${{ inputs.run }}
         SESSION: ${{ inputs.session }}
         RUN_ID: ${{ github.run_id }}
@@ -227,7 +222,6 @@ runs:
         readonly scope
         readonly secure_dir="/var/tmp/apolysis-action-stage.${scope}"
         readonly marker="$secure_dir/.apolysis-action-scope"
-        readonly policy="$secure_dir/policy.yaml"
         readonly sanitizer="$secure_dir/environment-sanitizer.py"
         readonly command_script="$secure_dir/managed-command.sh"
         [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%a' -- "$secure_dir")" == \
@@ -235,43 +229,6 @@ runs:
         [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$marker")" == \
           '0:0:regular file:1:400' ]]
         [[ "$(/usr/bin/sudo -n /usr/bin/cat -- "$marker")" == "$scope" ]]
-        if [[ -n "$IN_POLICY" ]]; then
-          "$ACTION_PATH/scripts/github-action-boundary.sh" copy-policy \
-            "$GITHUB_WORKSPACE" "$IN_POLICY" 1048576 \
-            | /usr/bin/sudo -n /usr/bin/tee "$policy" >/dev/null
-        else
-          /usr/bin/sudo -n /usr/bin/tee "$policy" >/dev/null <<'EOF'
-        version: 1
-
-        workspace:
-          allow_read:
-            - ./
-          allow_write:
-            - ./
-
-        credentials:
-          deny_read:
-            - ~/.ssh
-            - ~/.aws
-            - .env
-            - /var/run/secrets
-
-        network:
-          allow_egress:
-            - 127.0.0.1:0
-
-        commands:
-          deny:
-            - curl http://169.254.169.254
-
-        runtime:
-          max_seconds: 3600
-          max_processes: 4096
-        EOF
-        fi
-        /usr/bin/sudo -n /usr/bin/chmod 0400 "$policy"
-        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$policy")" == \
-          '0:0:regular file:1:400' ]]
         [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$sanitizer")" == \
           '0:0:regular file:1:400' ]]
         /usr/bin/printf '%s\n' "$RUN_CMD" \
@@ -319,7 +276,6 @@ runs:
         readonly marker="$secure_dir/.apolysis-action-scope"
         readonly bin="$secure_dir/apolysis"
         readonly bpf="$secure_dir/apolysis_observer.bpf.o"
-        readonly policy="$secure_dir/policy.yaml"
         readonly sanitizer="$secure_dir/environment-sanitizer.py"
         readonly command_script="$secure_dir/managed-command.sh"
         readonly timeline="$secure_dir/timeline.jsonl"
@@ -337,8 +293,6 @@ runs:
         [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$bin")" == \
           '0:0:regular file:1:500' ]]
         [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$bpf")" == \
-          '0:0:regular file:1:400' ]]
-        [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$policy")" == \
           '0:0:regular file:1:400' ]]
         [[ "$(/usr/bin/sudo -n /usr/bin/stat -c '%u:%g:%F:%h:%a' -- "$sanitizer")" == \
           '0:0:regular file:1:400' ]]
@@ -392,7 +346,6 @@ runs:
           -u ACTIONS_RUNTIME_URL \
           -u ACTIONS_RESULTS_URL \
           -u ACTIONS_CACHE_URL \
-          -u APOLYSIS_BPF_LSM_AVAILABLE \
           -u SUDO_UID \
           -u SUDO_GID \
           -u SUDO_USER \
@@ -406,7 +359,6 @@ runs:
           /usr/bin/python3 -I -S "$sanitizer" "$bin" observe \
           --backend live \
           --session "$SESSION" \
-          --policy "$policy" \
           --output "$timeline" \
           --bpf-object "$bpf" \
           --workspace-root "$GITHUB_WORKSPACE" \
@@ -523,13 +475,13 @@ runs:
           exit 0
         fi
         events=$(grep -c '"record_type":"event"' "$timeline" || true)
-        violations=$(grep -c '"record_type":"policy_violation"' "$timeline" || true)
+        findings=$(grep -c '"record_type":"accountability_finding"' "$timeline" || true)
         credentials=$(grep -c '"event_type":"credential_read"' "$timeline" || true)
         connects=$(grep -c '"event_type":"network_connect"' "$timeline" || true)
         {
-          echo '| Observed events | Policy findings | Credential reads | Network connects |'
+          echo '| Observed events | Review findings | Credential reads | Network connects |'
           echo '| --- | --- | --- | --- |'
-          echo "| $events | $violations | $credentials | $connects |"
+          echo "| $events | $findings | $credentials | $connects |"
           echo ''
         } >>"$GITHUB_STEP_SUMMARY"
         dropped=$(grep -oE '"kind":"(ring_buffer_reserve_failure|map_pressure|decode_failure)","count":[0-9]+' "$timeline" | grep -oE '[0-9]+$' | awk '{s+=$1} END{print s+0}' || true)
@@ -640,7 +592,6 @@ runs:
             "$secure_dir/apolysis" \
             "$secure_dir/apolysis_observer.bpf.o" \
             "$secure_dir/environment-sanitizer.py" \
-            "$secure_dir/policy.yaml" \
             "$secure_dir/managed-command.sh" \
             "$secure_dir/timeline.jsonl" \
             "$secure_dir/$marker"

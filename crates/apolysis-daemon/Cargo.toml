@@ -8,11 +8,8 @@ repository.workspace = true
 [dependencies]
 apolysis-accountability = { path = "../apolysis-accountability" }
 apolysis-core = { path = "../apolysis-core" }
-apolysis-feedback = { path = "../apolysis-feedback" }
 apolysis-observer = { path = "../apolysis-observer" }
-apolysis-policy = { path = "../apolysis-policy" }
 apolysis-store = { path = "../apolysis-store" }
-apolysis-validation = { path = "../apolysis-validation" }
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -34,7 +31,3 @@ path = "src/main.rs"
 [[bin]]
 name = "apolysisd-health"
 path = "src/bin/apolysisd-health.rs"
-
-[[bin]]
-name = "apolysis-runtime-foundation-pipeline-benchmark"
-path = "src/bin/apolysis-runtime-foundation-pipeline-benchmark.rs"

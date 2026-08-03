@@ -63,7 +63,6 @@ is uploaded.
 | `run` | (required) | Non-empty command staged root-owned and executed by non-root Bash with `-p`. |
 | `session` | (required) | Unique per job; 1–128 safe identifier characters. |
 | `agent-kind` | `ci-agent` | Bounded agent adapter label. |
-| `policy` | generated | Regular, single-link, non-symlink file inside the workspace, limited to 1 MiB. |
 | `intent-log` | — | Optional Codex response-items JSONL for an advisory summary. |
 
 Repeated Action invocations in one job must use distinct sessions. A collision
@@ -84,11 +83,9 @@ before use. Curl starts with configuration disabled and both curl and tar run
 under a minimal root environment. The workspace cannot select these privileged
 inputs.
 
-A custom policy is opened component by component without following symlinks,
-validated from that same descriptor, bounded to 1 MiB, and streamed into the
-root-only stage. The non-empty command is staged separately as a root-owned,
-single-link file; immediately before launch it becomes group-readable but not
-writable by the runner. Every control-plane Bash starts in Bash `-p` mode,
+The non-empty command is staged as a root-owned, single-link file; immediately
+before launch it becomes group-readable but not writable by the runner. Every
+privileged wrapper Bash starts in Bash `-p` mode,
 and shell-startup plus dynamic-loader variables are neutralized. The observer
 is execed through a root-owned isolated environment sanitizer rather than a
 root shell; that sanitizer removes exported Bash functions before v0.3.0's
@@ -160,7 +157,7 @@ benign runner environment, supplementary-group removal, `no_new_privs` with
 sudo rejection, credential-path redaction, staged top-level command privacy,
 the explicit v0.3.0 child-argv privacy exception, nonzero-command failure
 propagation with retained evidence, collision isolation, rejection of empty or
-unsafe inputs and a symlinked policy, direct-write resistance against a
+unsafe inputs, direct-write resistance against a
 surviving same-UID process, preservation of a root-owned legacy-path sentinel,
 verified non-empty evidence before the pinned upload, and exact cleanup. The
 local boundary test separately requires missing-file upload behavior to be
