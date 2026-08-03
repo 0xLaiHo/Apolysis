@@ -151,6 +151,11 @@ operation. A record distinguishes attempted, succeeded, failed, denied,
 pending, and unknown outcomes and preserves return value or errno when that is
 part of the capability.
 
+The first completed outcome path is `network_connect`. The collector keeps a
+bounded thread-scoped entry record, emits the Runtime Observation at syscall
+exit, and maps the Linux return value to succeeded, failed, denied, or pending.
+An unmatched entry or exit becomes an explicit Observation Gap.
+
 Full-syscall collection, prompt/response capture, TLS plaintext capture, and
 generic kernel enforcement are not targets.
 
@@ -287,7 +292,8 @@ A quiet timeline is never proof that the Agent performed no relevant action.
 Implemented today:
 
 - `ebpf/observer` and `apolysis-observer`: CO-RE tracepoints, ring buffer,
-  process-tree/cgroup scopes, versioned ABI, redaction, and health diagnostics;
+  process-tree/cgroup scopes, ABI v2, outcome-aware network connect,
+  redaction, and health/gap diagnostics;
 - `apolysis-cli`: fixture/live observation, managed Agent launch, optional
   Codex intent correlation, visibility, and verification commands;
 - `apolysis-core`: current JSONL vocabulary, record types, and versioned
@@ -301,10 +307,11 @@ Implemented today:
   runtime registration prototype.
 
 The live collector synchronizes its capability manifest to stable storage after
-successful attachment and before releasing a managed Agent gate. The current
-file and network hooks mostly capture syscall entry and therefore describe
-attempts. Stable entry/exit outcome semantics, complete collector lifecycle
-records, the saved-run viewer, and bounded Kubernetes beta remain targets.
+successful attachment and before releasing a managed Agent gate. Network
+connect has bounded entry/exit outcome semantics; current file hooks still
+describe attempts. Extending outcome semantics to the remaining operation set,
+complete collector lifecycle records, the saved-run viewer, and bounded
+Kubernetes beta remain targets.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification
@@ -320,6 +327,9 @@ them as historical implementation input; they do not define this architecture.
 - A successful connect does not prove that a remote operation committed.
 - Same-process logical Agents cannot be separated without an additional
   propagated identity; runtime-only attribution remains process-level.
+- The multi-cgroup daemon reports collector-global network correlation counters
+  but does not yet persist them as Agent-Run-scoped Observation Gaps; doing so
+  requires per-cgroup gap attribution.
 - A compromised kernel or privileged host can suppress or forge observations.
 - Kernel version, BTF, hook availability, verifier behavior, and privileges
   constrain support.

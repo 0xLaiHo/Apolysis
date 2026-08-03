@@ -16,10 +16,10 @@ mod scope;
 
 pub use live::{
     discover_agent_registration, discover_process_tree_scope_pids, enable_multi_cgroup_scope,
-    observe_live, raw_event_from_record, update_tracked_cgroup, AgentDiscoveryRequest,
-    AgentRegistration, AgentRunRequest, DaemonKernelEvent, DaemonObserver, DaemonObserverBatch,
-    DaemonObserverConfig, DaemonObserverCounters, LiveObserveRequest, LiveScope,
-    ObserverBatchDecoder,
+    network_connect_observation_gaps, observe_live, raw_event_from_record, update_tracked_cgroup,
+    AgentDiscoveryRequest, AgentRegistration, AgentRunRequest, DaemonKernelEvent, DaemonObserver,
+    DaemonObserverBatch, DaemonObserverConfig, DaemonObserverCounters, LiveObserveRequest,
+    LiveScope, ObserverBatchDecoder,
 };
 pub use redaction::{
     redact_command_text_for_persistence, RedactedValue, Redactor, RuntimeEvidencePersistence,
@@ -171,6 +171,7 @@ impl AyaLoaderPlan {
                 TracepointAttach::new("syscalls", "sys_enter_unlinkat"),
                 TracepointAttach::new("syscalls", "sys_enter_renameat2"),
                 TracepointAttach::new("syscalls", "sys_enter_connect"),
+                TracepointAttach::new("syscalls", "sys_exit_connect"),
             ],
         }
     }
@@ -189,16 +190,16 @@ type TracepointId = (&'static str, &'static str);
 struct CapabilityDeclaration {
     operation: &'static str,
     sources: &'static [TracepointId],
-    required_source: Option<TracepointId>,
-    outcome: OperationOutcome,
+    required_sources: &'static [TracepointId],
+    outcomes: &'static [OperationOutcome],
 }
 
 const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
     CapabilityDeclaration {
         operation: "process_fork",
         sources: &[("sched", "sched_process_fork")],
-        required_source: None,
-        outcome: OperationOutcome::Succeeded,
+        required_sources: &[],
+        outcomes: &[OperationOutcome::Succeeded],
     },
     CapabilityDeclaration {
         operation: "process_exec",
@@ -207,14 +208,14 @@ const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
             ("syscalls", "sys_enter_execve"),
             ("syscalls", "sys_enter_execveat"),
         ],
-        required_source: Some(("sched", "sched_process_exec")),
-        outcome: OperationOutcome::Succeeded,
+        required_sources: &[("sched", "sched_process_exec")],
+        outcomes: &[OperationOutcome::Succeeded],
     },
     CapabilityDeclaration {
         operation: "process_exit",
         sources: &[("sched", "sched_process_exit")],
-        required_source: None,
-        outcome: OperationOutcome::Unknown,
+        required_sources: &[],
+        outcomes: &[OperationOutcome::Unknown],
     },
     CapabilityDeclaration {
         operation: "file_open",
@@ -222,8 +223,8 @@ const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
             ("syscalls", "sys_enter_openat"),
             ("syscalls", "sys_enter_openat2"),
         ],
-        required_source: None,
-        outcome: OperationOutcome::Attempted,
+        required_sources: &[],
+        outcomes: &[OperationOutcome::Attempted],
     },
     CapabilityDeclaration {
         operation: "file_create",
@@ -232,8 +233,8 @@ const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
             ("syscalls", "sys_enter_openat2"),
             ("syscalls", "sys_enter_creat"),
         ],
-        required_source: None,
-        outcome: OperationOutcome::Attempted,
+        required_sources: &[],
+        outcomes: &[OperationOutcome::Attempted],
     },
     CapabilityDeclaration {
         operation: "file_truncate",
@@ -242,26 +243,37 @@ const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
             ("syscalls", "sys_enter_openat2"),
             ("syscalls", "sys_enter_truncate"),
         ],
-        required_source: None,
-        outcome: OperationOutcome::Attempted,
+        required_sources: &[],
+        outcomes: &[OperationOutcome::Attempted],
     },
     CapabilityDeclaration {
         operation: "file_unlink",
         sources: &[("syscalls", "sys_enter_unlinkat")],
-        required_source: None,
-        outcome: OperationOutcome::Attempted,
+        required_sources: &[],
+        outcomes: &[OperationOutcome::Attempted],
     },
     CapabilityDeclaration {
         operation: "file_rename",
         sources: &[("syscalls", "sys_enter_renameat2")],
-        required_source: None,
-        outcome: OperationOutcome::Attempted,
+        required_sources: &[],
+        outcomes: &[OperationOutcome::Attempted],
     },
     CapabilityDeclaration {
         operation: "network_connect",
-        sources: &[("syscalls", "sys_enter_connect")],
-        required_source: None,
-        outcome: OperationOutcome::Attempted,
+        sources: &[
+            ("syscalls", "sys_enter_connect"),
+            ("syscalls", "sys_exit_connect"),
+        ],
+        required_sources: &[
+            ("syscalls", "sys_enter_connect"),
+            ("syscalls", "sys_exit_connect"),
+        ],
+        outcomes: &[
+            OperationOutcome::Succeeded,
+            OperationOutcome::Failed,
+            OperationOutcome::Denied,
+            OperationOutcome::Pending,
+        ],
     },
     CapabilityDeclaration {
         operation: "credential_path_access",
@@ -269,8 +281,8 @@ const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
             ("syscalls", "sys_enter_openat"),
             ("syscalls", "sys_enter_openat2"),
         ],
-        required_source: None,
-        outcome: OperationOutcome::Attempted,
+        required_sources: &[],
+        outcomes: &[OperationOutcome::Attempted],
     },
 ];
 
@@ -290,8 +302,9 @@ pub fn audit_observer_capability_manifest(
                     .any(|attach| attach.category == category && attach.name == name)
             };
             if declaration
-                .required_source
-                .is_some_and(|(category, name)| !is_attached(category, name))
+                .required_sources
+                .iter()
+                .any(|(category, name)| !is_attached(category, name))
             {
                 return None;
             }
@@ -307,7 +320,7 @@ pub fn audit_observer_capability_manifest(
                 Some(CollectorCapability::new(
                     declaration.operation,
                     event_sources,
-                    vec![declaration.outcome],
+                    declaration.outcomes.to_vec(),
                 ))
             }
         })
@@ -533,6 +546,9 @@ fn canonicalize(raw: &RawKernelEvent) -> CanonicalEvent {
     if let Some(raw_event_id) = raw.event_id.as_deref() {
         event = event.with_raw_event_id(raw_event_id);
     }
+    if let Some(operation_result) = raw.operation_result {
+        event = event.with_operation_result(operation_result);
+    }
     event
 }
 
@@ -619,7 +635,7 @@ mod tests {
         let plan = AyaLoaderPlan::audit_observer_default("target/ebpf/apolysis_observer.bpf.o");
 
         assert_eq!(plan.ring_buffer_map, "APOLYSIS_EVENTS");
-        assert_eq!(plan.tracepoints.len(), 12);
+        assert_eq!(plan.tracepoints.len(), 13);
         assert_eq!(
             plan.tracepoints
                 .iter()
@@ -639,6 +655,9 @@ mod tests {
         assert!(plan
             .tracepoints
             .contains(&TracepointAttach::new("syscalls", "sys_enter_connect")));
+        assert!(plan
+            .tracepoints
+            .contains(&TracepointAttach::new("syscalls", "sys_exit_connect")));
         assert!(plan
             .tracepoints
             .contains(&TracepointAttach::new("syscalls", "sys_enter_execve")));

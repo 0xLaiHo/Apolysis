@@ -8,8 +8,8 @@ use apolysis_accountability::{
 };
 use apolysis_daemon::{ingest_observer_batch, DaemonConfig, DaemonRecord, DaemonState};
 use apolysis_observer::abi::{
-    KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN, KERNEL_ABI_VERSION,
-    KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
+    KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN, FLAG_RETURN_VALUE,
+    KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
 };
 use apolysis_observer::{DaemonKernelEvent, DaemonObserverBatch};
 use serde_json::json;
@@ -266,6 +266,9 @@ async fn observer_batch_appends_accountability_findings_for_registered_intent() 
     )
     .expect("session timeline");
     assert!(timeline.contains(r#""record_type":"raw_kernel_event""#));
+    assert!(timeline.contains(r#""outcome":"denied""#));
+    assert!(timeline.contains(r#""return_value":-13"#));
+    assert!(timeline.contains(r#""errno":13"#));
     assert!(timeline.contains(r#""record_type":"accountability_finding""#));
     assert!(timeline.contains(r#""kind":"undeclared_action""#));
     assert!(timeline.contains(r#""kind":"unknown_egress""#));
@@ -290,6 +293,7 @@ fn kernel_event(cgroup_id: u64) -> DaemonKernelEvent {
             gid: 1000,
             event_kind: KernelEventKind::Exec as u32,
             flags: 0,
+            return_value: 0,
             comm,
             resource: [0; RESOURCE_LEN],
             action: [0; ACTION_LEN],
@@ -301,6 +305,8 @@ fn kernel_event(cgroup_id: u64) -> DaemonKernelEvent {
 fn kernel_network_event(cgroup_id: u64, endpoint: &str) -> DaemonKernelEvent {
     let mut event = kernel_event(cgroup_id);
     event.record.event_kind = KernelEventKind::Connect as u32;
+    event.record.flags = FLAG_RETURN_VALUE;
+    event.record.return_value = -13;
     event.record.action[..7].copy_from_slice(b"connect");
     event.record.resource[..endpoint.len()].copy_from_slice(endpoint.as_bytes());
     event

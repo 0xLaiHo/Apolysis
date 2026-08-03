@@ -9,8 +9,8 @@ use std::process::ExitStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apolysis_core::{
-    actors, resources, CanonicalEvent, EventSource, EventType, ObserverDiagnostic,
-    ObserverDiagnosticKind, RawKernelEvent,
+    actors, resources, CanonicalEvent, EventSource, EventType, ObservationGap, ObservationGapKind,
+    ObserverDiagnostic, ObserverDiagnosticKind, OperationOutcome, OperationResult, RawKernelEvent,
 };
 use apolysis_store::JsonlRotationPolicy;
 use apolysis_store::JsonlStore;
@@ -391,6 +391,41 @@ pub struct DaemonObserverBatch {
 pub struct DaemonObserverCounters {
     pub reserve_failures: u64,
     pub map_pressure: u64,
+    pub connect_missing_entries: u64,
+    pub connect_missing_exits: u64,
+    pub connect_pending: u64,
+}
+
+pub fn network_connect_observation_gaps(
+    agent_run_id: &str,
+    counters: &DaemonObserverCounters,
+) -> Vec<ObservationGap> {
+    let mut gaps = Vec::new();
+    if counters.connect_missing_entries > 0 {
+        gaps.push(ObservationGap::new(
+            agent_run_id,
+            "network_connect",
+            ObservationGapKind::MissingEntry,
+            counters.connect_missing_entries,
+            "connect exits observed without matching entries",
+        ));
+    }
+    let missing_exits = counters
+        .connect_missing_exits
+        .saturating_add(counters.connect_pending);
+    if missing_exits > 0 {
+        gaps.push(ObservationGap::new(
+            agent_run_id,
+            "network_connect",
+            ObservationGapKind::MissingExit,
+            missing_exits,
+            format!(
+                "kernel_reported:{},pending_at_stop:{}",
+                counters.connect_missing_exits, counters.connect_pending
+            ),
+        ));
+    }
+    gaps
 }
 
 pub struct DaemonObserver {
@@ -438,11 +473,7 @@ impl DaemonObserver {
     }
 
     pub fn counters(&mut self) -> Result<DaemonObserverCounters, String> {
-        let counters = read_observer_counters(&mut self.ebpf)?;
-        Ok(DaemonObserverCounters {
-            reserve_failures: counters.reserve_failures,
-            map_pressure: counters.map_pressure,
-        })
+        Ok(read_observer_counters(&mut self.ebpf)?.into())
     }
 }
 
@@ -461,9 +492,24 @@ unsafe impl Pod for ScopeConfig {}
 struct ObserverCounters {
     reserve_failures: u64,
     map_pressure: u64,
+    connect_missing_entries: u64,
+    connect_missing_exits: u64,
+    connect_pending: u64,
 }
 
 unsafe impl Pod for ObserverCounters {}
+
+impl From<ObserverCounters> for DaemonObserverCounters {
+    fn from(counters: ObserverCounters) -> Self {
+        Self {
+            reserve_failures: counters.reserve_failures,
+            map_pressure: counters.map_pressure,
+            connect_missing_entries: counters.connect_missing_entries,
+            connect_missing_exits: counters.connect_missing_exits,
+            connect_pending: counters.connect_pending,
+        }
+    }
+}
 
 pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveResult, String> {
     request.validate()?;
@@ -717,6 +763,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     }
 
     let counters = read_observer_counters(&mut ebpf)?;
+    let public_counters = DaemonObserverCounters::from(counters);
     if counters.reserve_failures > 0 {
         append_diagnostic(
             &request.session_id,
@@ -762,13 +809,22 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             &mut store,
         )?;
     }
+    for gap in network_connect_observation_gaps(&request.session_id, &public_counters) {
+        store
+            .append(&gap)
+            .map_err(|error| format!("failed to write network Observation Gap: {error}"))?;
+    }
     append_diagnostic(
         &request.session_id,
         ObserverDiagnosticKind::Summary,
         raw_count as u64,
         format!(
-            "raw_events:{raw_count},canonical_events:{canonical_count},reserve_failures:{},map_pressure:{},abi_mismatches:{abi_mismatches},decode_failures:{decode_failures},truncations:{truncations}",
-            counters.reserve_failures, counters.map_pressure
+            "raw_events:{raw_count},canonical_events:{canonical_count},reserve_failures:{},map_pressure:{},connect_missing_entries:{},connect_missing_exits:{},connect_pending:{},abi_mismatches:{abi_mismatches},decode_failures:{decode_failures},truncations:{truncations}",
+            counters.reserve_failures,
+            counters.map_pressure,
+            counters.connect_missing_entries,
+            counters.connect_missing_exits,
+            counters.connect_pending,
         ),
         &mut store,
     )?;
@@ -777,10 +833,15 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     // absence, which is the one thing an evidence tool must never do.
     let dropped_events =
         counters.reserve_failures + counters.map_pressure + abi_mismatches + decode_failures;
-    if dropped_events > 0 || truncations > 0 {
+    let observation_gaps = counters
+        .connect_missing_entries
+        .saturating_add(counters.connect_missing_exits)
+        .saturating_add(counters.connect_pending);
+    if dropped_events > 0 || observation_gaps > 0 || truncations > 0 {
         eprintln!(
             "apolysis: ⚠ evidence may be incomplete — {dropped_events} event(s) dropped, \
-             {truncations} truncated. A quiet timeline is not proof of absence."
+             {observation_gaps} network Observation Gap(s), {truncations} truncated. \
+             A quiet timeline is not proof of absence."
         );
     }
 
@@ -1751,7 +1812,7 @@ pub fn raw_event_from_record(
         payload = markers.join(",");
     }
 
-    Ok(RawKernelEvent::new(
+    let raw = RawKernelEvent::new(
         timestamp_unix_ms,
         session_id,
         EventSource::KernelTracepoint,
@@ -1766,7 +1827,28 @@ pub fn raw_event_from_record(
         None,
         Some(record.cgroup_id.to_string()),
         payload,
-    ))
+    );
+    Ok(match record.return_value() {
+        Some(return_value) => {
+            raw.with_operation_result(operation_result_from_syscall_return(return_value))
+        }
+        None => raw,
+    })
+}
+
+fn operation_result_from_syscall_return(return_value: i64) -> OperationResult {
+    if return_value >= 0 {
+        return OperationResult::new(OperationOutcome::Succeeded, return_value, None);
+    }
+    let errno = return_value
+        .checked_neg()
+        .and_then(|value| i32::try_from(value).ok());
+    let outcome = match errno {
+        Some(libc::EACCES | libc::EPERM) => OperationOutcome::Denied,
+        Some(libc::EINPROGRESS | libc::EALREADY) => OperationOutcome::Pending,
+        _ => OperationOutcome::Failed,
+    };
+    OperationResult::new(outcome, return_value, errno)
 }
 
 fn decode_sockaddr(bytes: &[u8]) -> Result<(String, &'static str), String> {

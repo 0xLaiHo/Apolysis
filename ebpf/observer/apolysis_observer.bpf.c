@@ -13,11 +13,18 @@ char LICENSE[] SEC("license") = "GPL";
 #define APOLYSIS_O_TRUNC 00001000
 #define APOLYSIS_EXEC_ARGC_LIMIT 8
 #define APOLYSIS_EXEC_ARG_LEN 32
+#define APOLYSIS_AF_INET 2
+#define APOLYSIS_AF_INET6 10
 
 struct apolysis_pending_exec {
     unsigned int flags;
     char resource[APOLYSIS_RESOURCE_LEN];
     char payload[APOLYSIS_PAYLOAD_LEN];
+};
+
+struct apolysis_pending_connect {
+    unsigned int flags;
+    unsigned char payload[APOLYSIS_PAYLOAD_LEN];
 };
 
 struct {
@@ -55,6 +62,20 @@ struct {
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, unsigned long long);
+    __type(value, struct apolysis_pending_connect);
+} APOLYSIS_PENDING_CONNECTS SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, unsigned int);
+    __type(value, struct apolysis_pending_connect);
+} APOLYSIS_CONNECT_SCRATCH SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 16384);
     __type(key, unsigned long long);
     __type(value, unsigned char);
@@ -88,6 +109,38 @@ static __always_inline void count_map_pressure(void)
 
     if (counters)
         __sync_fetch_and_add(&counters->map_pressure, 1);
+}
+
+static __always_inline void count_connect_missing_entry(void)
+{
+    struct apolysis_observer_counters *counters = observer_counters();
+
+    if (counters)
+        __sync_fetch_and_add(&counters->connect_missing_entries, 1);
+}
+
+static __always_inline void count_connect_missing_exit(void)
+{
+    struct apolysis_observer_counters *counters = observer_counters();
+
+    if (counters)
+        __sync_fetch_and_add(&counters->connect_missing_exits, 1);
+}
+
+static __always_inline void increment_connect_pending(void)
+{
+    struct apolysis_observer_counters *counters = observer_counters();
+
+    if (counters)
+        __sync_fetch_and_add(&counters->connect_pending, 1);
+}
+
+static __always_inline void decrement_connect_pending(void)
+{
+    struct apolysis_observer_counters *counters = observer_counters();
+
+    if (counters)
+        __sync_fetch_and_sub(&counters->connect_pending, 1);
 }
 
 static __always_inline struct apolysis_scope_config *scope_config(void)
@@ -410,7 +463,15 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
 {
     struct apolysis_scope_config *config = scope_config();
     struct apolysis_kernel_event *event;
+    unsigned long long pid_tgid;
     unsigned int pid;
+
+    pid_tgid = bpf_get_current_pid_tgid();
+    if (bpf_map_lookup_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid)) {
+        bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
+        decrement_connect_pending();
+        count_connect_missing_exit();
+    }
 
     event = reserve_event(APOLYSIS_EVENT_EXIT);
     if (event) {
@@ -518,20 +579,84 @@ int apolysis_sys_enter_renameat2(struct trace_event_raw_sys_enter *ctx)
 SEC("tracepoint/syscalls/sys_enter_connect")
 int apolysis_sys_enter_connect(struct trace_event_raw_sys_enter *ctx)
 {
-    struct apolysis_kernel_event *event = reserve_event(APOLYSIS_EVENT_CONNECT);
+    struct apolysis_pending_connect *pending;
+    unsigned long long pid_tgid;
     unsigned long long length;
+    unsigned int scratch_key = 0;
+    unsigned short family = 0;
+    bool replaces_stale_entry;
 
-    if (!event)
+    if (!current_is_in_scope())
         return 0;
-
-    length = ctx->args[2];
-    if (length > sizeof(event->payload)) {
-        length = sizeof(event->payload);
-        event->flags |= APOLYSIS_FLAG_PAYLOAD_TRUNCATED;
+    pending = bpf_map_lookup_elem(&APOLYSIS_CONNECT_SCRATCH, &scratch_key);
+    if (!pending) {
+        count_map_pressure();
+        return 0;
     }
-    if (bpf_probe_read_user(event->payload, length, (const void *)ctx->args[1]) == 0)
-        event->flags |= APOLYSIS_FLAG_PAYLOAD_SOCKADDR;
-    copy_action(event, "connect", 8);
-    bpf_ringbuf_submit(event, 0);
+
+    __builtin_memset(pending, 0, sizeof(*pending));
+    length = ctx->args[2];
+    if (length > sizeof(pending->payload)) {
+        length = sizeof(pending->payload);
+        pending->flags |= APOLYSIS_FLAG_PAYLOAD_TRUNCATED;
+    }
+    if (bpf_probe_read_user(pending->payload, length, (const void *)ctx->args[1]) == 0 &&
+        length >= sizeof(family)) {
+        __builtin_memcpy(&family, pending->payload, sizeof(family));
+        if ((family == APOLYSIS_AF_INET && length >= 8) ||
+            (family == APOLYSIS_AF_INET6 && length >= 24) ||
+            (family != APOLYSIS_AF_INET && family != APOLYSIS_AF_INET6 && length >= 4))
+            pending->flags |= APOLYSIS_FLAG_PAYLOAD_SOCKADDR;
+    }
+
+    pid_tgid = bpf_get_current_pid_tgid();
+    replaces_stale_entry = bpf_map_lookup_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid) != 0;
+    if (bpf_map_update_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid, pending, BPF_ANY)) {
+        if (replaces_stale_entry) {
+            bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
+            decrement_connect_pending();
+            count_connect_missing_exit();
+        }
+        count_map_pressure();
+        return 0;
+    }
+    if (replaces_stale_entry)
+        count_connect_missing_exit();
+    else
+        increment_connect_pending();
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_exit_connect")
+int apolysis_sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
+{
+    struct apolysis_pending_connect *pending;
+    struct apolysis_kernel_event *event;
+    unsigned long long pid_tgid;
+
+    pid_tgid = bpf_get_current_pid_tgid();
+    pending = bpf_map_lookup_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
+    if (!pending) {
+        if (current_is_in_scope())
+            count_connect_missing_entry();
+        return 0;
+    }
+    if (!current_is_in_scope()) {
+        bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
+        decrement_connect_pending();
+        count_connect_missing_exit();
+        return 0;
+    }
+
+    event = reserve_event(APOLYSIS_EVENT_CONNECT);
+    if (event) {
+        __builtin_memcpy(event->payload, pending->payload, sizeof(event->payload));
+        event->flags |= pending->flags | APOLYSIS_FLAG_RETURN_VALUE;
+        event->return_value = ctx->ret;
+        copy_action(event, "connect", 8);
+        bpf_ringbuf_submit(event, 0);
+    }
+    bpf_map_delete_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
+    decrement_connect_pending();
     return 0;
 }
