@@ -341,6 +341,15 @@ pub struct CanonicalEvent {
     pub operation_result: Option<OperationResult>,
     pub container_id: Option<String>,
     pub cgroup_id: Option<String>,
+    pub host_boot_id: Option<String>,
+    pub scope_generation: Option<u64>,
+    pub process_generation: Option<u64>,
+    pub process_start_time_ns: Option<u64>,
+    pub exec_generation: Option<u32>,
+    pub parent_process_generation: Option<u64>,
+    pub parent_exec_generation: Option<u32>,
+    pub relation_status: RuntimeRelation,
+    pub relation_reason: String,
     pub process_command: Option<String>,
     pub process_executable: Option<String>,
     pub process_started_at_unix_ms: Option<u128>,
@@ -373,6 +382,15 @@ impl CanonicalEvent {
             operation_result: None,
             container_id: None,
             cgroup_id: None,
+            host_boot_id: None,
+            scope_generation: None,
+            process_generation: None,
+            process_start_time_ns: None,
+            exec_generation: None,
+            parent_process_generation: None,
+            parent_exec_generation: None,
+            relation_status: RuntimeRelation::Inferred,
+            relation_reason: "pid_only_runtime_identity".to_string(),
             process_command: None,
             process_executable: None,
             process_started_at_unix_ms: None,
@@ -405,6 +423,20 @@ impl CanonicalEvent {
     ) -> Self {
         self.container_id = container_id;
         self.cgroup_id = cgroup_id;
+        self
+    }
+
+    /// Copy the process and scope generations assigned to the source observation.
+    pub fn with_process_identity_from(mut self, raw: &RawKernelEvent) -> Self {
+        self.host_boot_id = raw.host_boot_id.clone();
+        self.scope_generation = raw.scope_generation;
+        self.process_generation = raw.process_generation;
+        self.process_start_time_ns = raw.process_start_time_ns;
+        self.exec_generation = raw.exec_generation;
+        self.parent_process_generation = raw.parent_process_generation;
+        self.parent_exec_generation = raw.parent_exec_generation;
+        self.relation_status = raw.relation_status;
+        self.relation_reason = raw.relation_reason.clone();
         self
     }
 
@@ -454,7 +486,7 @@ impl JsonLine for CanonicalEvent {
             .unwrap_or_else(|| "null".to_string());
 
         format!(
-            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"raw_event_id\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"outcome\":{outcome},\"return_value\":{return_value},\"errno\":{errno},\"container_id\":{},\"cgroup_id\":{},\"process_command\":{},\"process_executable\":{},\"process_started_at_unix_ms\":{}}}",
+            "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"raw_event_id\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"outcome\":{outcome},\"return_value\":{return_value},\"errno\":{errno},\"container_id\":{},\"cgroup_id\":{},\"host_boot_id\":{},\"scope_generation\":{},\"process_generation\":{},\"process_start_time_ns\":{},\"exec_generation\":{},\"parent_process_generation\":{},\"parent_exec_generation\":{},\"relation_status\":{},\"relation_reason\":{},\"process_command\":{},\"process_executable\":{},\"process_started_at_unix_ms\":{}}}",
             json_string(records::EVENT),
             self.timestamp_unix_ms,
             json_string(&self.session_id),
@@ -468,6 +500,15 @@ impl JsonLine for CanonicalEvent {
             json_string(&self.action),
             container_id,
             cgroup_id,
+            optional_json_string(self.host_boot_id.as_deref()),
+            optional_json_u64(self.scope_generation),
+            optional_json_u64(self.process_generation),
+            optional_json_u64(self.process_start_time_ns),
+            optional_json_u32(self.exec_generation),
+            optional_json_u64(self.parent_process_generation),
+            optional_json_u32(self.parent_exec_generation),
+            json_string(self.relation_status.as_str()),
+            json_string(&self.relation_reason),
             optional_json_string(self.process_command.as_deref()),
             optional_json_string(self.process_executable.as_deref()),
             self.process_started_at_unix_ms
@@ -630,17 +671,6 @@ impl JsonLine for RawKernelEvent {
             .and_then(|result| result.errno)
             .map(|errno| errno.to_string())
             .unwrap_or_else(|| "null".to_string());
-        let optional_u64 = |value: Option<u64>| {
-            value
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "null".to_string())
-        };
-        let optional_u32 = |value: Option<u32>| {
-            value
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "null".to_string())
-        };
-
         format!(
             "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"event_id\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"outcome\":{outcome},\"return_value\":{return_value},\"errno\":{errno},\"container_id\":{},\"cgroup_id\":{},\"host_boot_id\":{},\"scope_generation\":{},\"process_generation\":{},\"process_start_time_ns\":{},\"exec_generation\":{},\"parent_process_generation\":{},\"parent_exec_generation\":{},\"relation_status\":{},\"relation_reason\":{},\"raw_payload\":{}}}",
             json_string(records::RAW_KERNEL_EVENT),
@@ -659,12 +689,12 @@ impl JsonLine for RawKernelEvent {
             container_id,
             cgroup_id,
             optional_json_string(self.host_boot_id.as_deref()),
-            optional_u64(self.scope_generation),
-            optional_u64(self.process_generation),
-            optional_u64(self.process_start_time_ns),
-            optional_u32(self.exec_generation),
-            optional_u64(self.parent_process_generation),
-            optional_u32(self.parent_exec_generation),
+            optional_json_u64(self.scope_generation),
+            optional_json_u64(self.process_generation),
+            optional_json_u64(self.process_start_time_ns),
+            optional_json_u32(self.exec_generation),
+            optional_json_u64(self.parent_process_generation),
+            optional_json_u32(self.parent_exec_generation),
             json_string(self.relation_status.as_str()),
             json_string(&self.relation_reason),
             json_string(&self.raw_payload)
@@ -861,6 +891,18 @@ pub fn json_string(value: &str) -> String {
 
 fn optional_json_string(value: Option<&str>) -> String {
     value.map(json_string).unwrap_or_else(|| "null".to_string())
+}
+
+fn optional_json_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn optional_json_u32(value: Option<u32>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
 }
 
 /// Return the current Unix timestamp in milliseconds.
