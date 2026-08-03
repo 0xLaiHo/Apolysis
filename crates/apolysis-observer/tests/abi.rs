@@ -10,9 +10,9 @@ use apolysis_observer::raw_event_from_record;
 
 #[test]
 fn kernel_event_record_matches_the_c_abi_size() {
-    assert_eq!(KERNEL_ABI_VERSION, 2);
-    assert_eq!(std::mem::size_of::<KernelEventRecord>(), 616);
-    assert_eq!(KERNEL_EVENT_RECORD_LEN, 616);
+    assert_eq!(KERNEL_ABI_VERSION, 3);
+    assert_eq!(std::mem::size_of::<KernelEventRecord>(), 656);
+    assert_eq!(KERNEL_EVENT_RECORD_LEN, 656);
 }
 
 #[test]
