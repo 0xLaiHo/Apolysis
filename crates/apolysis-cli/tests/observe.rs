@@ -249,6 +249,71 @@ fn observe_fixture_keeps_process_identity_without_command_content() {
 }
 
 #[test]
+fn observe_fixture_does_not_cross_process_or_exec_generations() {
+    let input = temp_jsonl("apolysis-observe-runtime-generations-input");
+    let output = temp_jsonl("apolysis-observe-runtime-generations-output");
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+    std::fs::write(
+        &input,
+        concat!(
+            "timestamp=1780328000001|pid=44|ppid=40|uid=1000|gid=1000|comm=old-tool|event=exec|resource=/usr/bin/old-tool|action=exec|cgroup_id=901|host_boot_id=boot-test|scope_generation=7|process_generation=100|process_start_time_ns=1000|exec_generation=1|parent_process_generation=90|parent_exec_generation=2|payload=argv=/usr/bin/old-tool\n",
+            "timestamp=1780328000002|pid=44|ppid=40|uid=1000|gid=1000|comm=old-tool|event=openat|resource=old.txt|action=read|cgroup_id=901|host_boot_id=boot-test|scope_generation=7|process_generation=100|process_start_time_ns=1000|exec_generation=1|parent_process_generation=90|parent_exec_generation=2\n",
+            "timestamp=1780328000003|pid=44|ppid=40|uid=1000|gid=1000|comm=new-tool|event=exec|resource=/usr/bin/new-tool|action=exec|cgroup_id=901|host_boot_id=boot-test|scope_generation=7|process_generation=100|process_start_time_ns=1000|exec_generation=2|parent_process_generation=90|parent_exec_generation=2|payload=argv=/usr/bin/new-tool\n",
+            "timestamp=1780328000004|pid=44|ppid=40|uid=1000|gid=1000|comm=new-tool|event=openat|resource=new.txt|action=read|cgroup_id=901|host_boot_id=boot-test|scope_generation=7|process_generation=100|process_start_time_ns=1000|exec_generation=2|parent_process_generation=90|parent_exec_generation=2\n",
+            "timestamp=1780328000005|pid=44|ppid=1|uid=1000|gid=1000|comm=reused|event=openat|resource=reused.txt|action=read|cgroup_id=901|host_boot_id=boot-test|scope_generation=8|process_generation=200|process_start_time_ns=2000|exec_generation=0\n",
+        ),
+    )
+    .expect("write runtime-generation fixture");
+
+    let status = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "fixture",
+            "--input",
+            input.to_str().expect("utf-8 fixture path"),
+            "--session",
+            "session-runtime-generations",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+        ])
+        .status()
+        .expect("run generation-aware fixture observation");
+
+    assert!(status.success());
+    let timeline = std::fs::read_to_string(&output).expect("read generation-aware timeline");
+    let old_file = canonical_file_event(&timeline, "old.txt");
+    let new_file = canonical_file_event(&timeline, "new.txt");
+    let reused_file = canonical_file_event(&timeline, "reused.txt");
+
+    assert!(old_file.contains(r#""process_executable":"executable_ref:old-tool""#));
+    assert!(old_file.contains(r#""process_generation":100"#));
+    assert!(old_file.contains(r#""exec_generation":1"#));
+    assert!(new_file.contains(r#""process_executable":"executable_ref:new-tool""#));
+    assert!(new_file.contains(r#""process_generation":100"#));
+    assert!(new_file.contains(r#""exec_generation":2"#));
+    assert!(reused_file.contains(r#""process_executable":null"#));
+    assert!(reused_file.contains(r#""process_generation":200"#));
+    assert!(reused_file.contains(r#""exec_generation":0"#));
+    assert!(reused_file.contains(r#""relation_status":"exact""#));
+
+    let _ = std::fs::remove_file(input);
+    let _ = std::fs::remove_file(output);
+}
+
+fn canonical_file_event<'a>(timeline: &'a str, resource: &str) -> &'a str {
+    timeline
+        .lines()
+        .find(|line| {
+            line.contains(r#""record_type":"event""#)
+                && line.contains(r#""event_type":"file_open""#)
+                && line.contains(&format!(r#""resource":"{resource}""#))
+        })
+        .unwrap_or_else(|| panic!("missing canonical file event for {resource}:\n{timeline}"))
+}
+
+#[test]
 fn observe_live_requires_exactly_one_session_scope() {
     let output = temp_jsonl("apolysis-observe-live-scope");
     let result = apolysis_command()
@@ -756,6 +821,11 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     assert!(credential_read.contains(r#""outcome":"succeeded""#));
     assert!(credential_read.contains(r#""return_value":"#));
     assert!(credential_read.contains(r#""errno":null"#));
+    assert!(credential_read.contains(r#""host_boot_id":"#));
+    assert!(!credential_read.contains(r#""process_generation":null"#));
+    assert!(!credential_read.contains(r#""process_start_time_ns":null"#));
+    assert!(!credential_read.contains(r#""exec_generation":null"#));
+    assert!(credential_read.contains(r#""relation_status":"exact""#));
     let connect = timeline
         .lines()
         .find(|line| line.contains(r#""event_type":"network_connect""#))

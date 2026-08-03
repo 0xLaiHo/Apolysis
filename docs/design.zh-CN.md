@@ -144,8 +144,10 @@ thread-scoped entry record，并在 syscall exit 发出 Runtime Observation。Li
 collector-global counter 用于健康诊断。Drain 一个 scope 时会阻止新的 entry，快照其
 missing-entry、missing-exit 与 pending 计数；快照前会有界等待正在执行的 collector update
 排空，并在丢弃归属前确认类型化 Observation Gap 已持久化到所属 Agent Run。已提交的 ring
-record 会先经过有界排空并确认持久化。Drain、快照、queue drop/shedding 或 storage 失败会停止
-observer runtime，并拒绝把该 run 干净关闭。
+record 会先经过有界排空并确认持久化。每次 scope 注册都会获得单调递增 generation；pending
+pair 与发出 record 会保留该 generation，因此 drained scope 的 stale pair 无法计入或发到复用
+同一数字 cgroup ID 的后续 Agent Run。Drain、快照、queue drop/shedding 或 storage 失败会
+停止 observer runtime，并拒绝把该 run 干净关闭。
 
 所有 multi-cgroup ring producer（包括 process fork、exec 与 exit）都参与同一个 in-flight
 scope barrier。Barrier map 读取失败时 scope 会保持 draining 并 fail closed；只有有界等待超时
@@ -159,9 +161,23 @@ scope barrier。Barrier map 读取失败时 scope 会保持 draining 并 fail cl
 Userspace 解码 kernel ABI，分配 deterministic source sequence，标准化 event type，关联
 runtime metadata，应用 content-off privacy，并写入 Agent Observation Record。
 
-稳定 process identity 必须携带足够上下文以抵御 PID reuse。在可用时，归属还包含 host boot
-identity、process start、exec generation、PID namespace、cgroup、container、Pod 和 node
-identity。不支持的 identity field 保持为空，并影响 attribution quality。
+Kernel ABI v3 携带有界的 scope generation、process generation、kernel process-start
+timestamp、exec generation 以及 parent process/exec generation。Live userspace boundary 会
+附加 collector 启动时读取一次的 host boot ID。Process context 按 host boot、PID、process
+generation 与 exec generation 键控，而不是只按 PID 键控，因此 PID reuse 或 exec transition
+不会继承陈旧 executable context。Process-identity map 与 userspace context table 保持有界；
+出现 pressure 时会 fail loud，而不会静默复用或丢弃 identity state。Kernel identity-map 或
+exec-generation 失败会设置预分配的 fail-closed latch；此后直到 collector 重启，所有 record
+都保持 inferred，因此 pressure 不会静默恢复 exact attribution。
+
+只有 host boot、scope generation、process generation、kernel process-start time 与 exec
+generation 都存在时 attribution 才是 exact。Fork identity 在观测到 child process start 前保持
+provisional；始终未成为 process identity 的 thread-clone candidate 保持 inferred，并在 task exit
+时丢弃。Generation 缺失时保持 inferred 并给出显式 reason；PID-only、command、path 与
+timestamp join 不会升级为 exact。Scope generation 只保护单次 collector 生命周期内的 cgroup
+ownership。Collector restart 仍是可见 identity boundary：在 lifecycle persistence 实现前，
+不声明跨重启 continuity。PID namespace、container、Pod 与 node identity 在可用时仍作为
+增量 attribution。
 
 ### 5.4 本地 Store 与 Viewer
 
@@ -277,8 +293,9 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 Implemented today：
 
 - `ebpf/observer` 与 `apolysis-observer`：CO-RE tracepoint、ring buffer、
-  process-tree/cgroup scope、ABI v2、outcome-aware 选定文件操作与 network connect、
-  per-cgroup operation gap counter、脱敏和 health/gap diagnostic；
+  process-tree/cgroup scope、ABI v3、有界 process/exec 与 cgroup scope generation、
+  outcome-aware 选定文件操作与 network connect、per-cgroup operation gap counter、脱敏和
+  health/gap diagnostic；
 - `apolysis-cli`：fixture/live observation、托管 Agent launch、可选 Codex intent
   correlation、visibility 与 verification command；
 - `apolysis-core`：当前 JSONL vocabulary、record type 与版本化 Collector Capability
@@ -292,9 +309,9 @@ Implemented today：
 
 Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 同步到稳定
 存储。选定文件操作与 network connect 已具备有界 entry/exit outcome 语义，daemon 会在显式
-移除 scope 与正常关闭时把这些配对 gap 持久化到所属 Agent Run。稳定 scope/process
-generation、完整 collector lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是
-target。
+移除 scope 与正常关闭时把这些配对 gap 持久化到所属 Agent Run。单次运行内稳定的
+scope/process generation 已实现。完整 collector lifecycle record 与 restart-gap persistence、
+saved-run viewer 和有界 Kubernetes Beta 仍是 target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃
@@ -309,9 +326,9 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 - 没有额外传播 identity 时，无法区分同进程中的逻辑 Agent；runtime-only attribution 保持
   process-level。
 - Cgroup scope drain 时仍 pending 的 connect 或 file entry 会保留在有界配对 map 中，直到
-  syscall 返回或 thread 退出。为防止这些 record 跨 Agent Run，daemon 会维护有界的 retired
-  cgroup guard，并在同一 observer 生命周期内拒绝复用该数字 cgroup ID。若不重启 observer
-  也要安全复用，仍需稳定的 scope generation。
+  syscall 返回或 thread 退出。它们捕获的 scope generation 会阻止其在数字 cgroup ID 复用后
+  跨入后续 Agent Run；但 generation allocator 属于 observer-lifetime state，不能建立跨
+  collector restart 的 identity continuity。
 - Entry 缺失后，exit 侧无法重建 `openat` 或 `openat2` flags，因此这类 unmatched exit 会
   保守归因到 `file_open`，而不是 create 或 truncate。
 - 被攻陷的 kernel 或 privileged host 可以省略或伪造 observation。

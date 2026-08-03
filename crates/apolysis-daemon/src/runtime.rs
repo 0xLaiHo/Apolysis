@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -13,7 +13,8 @@ use apolysis_accountability::{
 use apolysis_core::RawKernelEvent;
 use apolysis_observer::{
     raw_event_from_record, scope_observation_gaps, DaemonObserver, DaemonObserverBatch,
-    DaemonObserverCounters, Redactor, RuntimeEvidencePersistence, ScopeObservationGapCounters,
+    DaemonObserverCounters, Redactor, RuntimeEvidencePersistence, ScopeGeneration,
+    ScopeObservationGapCounters,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -42,6 +43,21 @@ struct ScopeObservationContext {
     workspace_root: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ScopeRuntimeIdentity {
+    cgroup_id: u64,
+    generation: ScopeGeneration,
+}
+
+impl ScopeRuntimeIdentity {
+    fn new(cgroup_id: u64, generation: ScopeGeneration) -> Self {
+        Self {
+            cgroup_id,
+            generation,
+        }
+    }
+}
+
 impl ScopeObservationContext {
     fn new(agent_run_id: impl Into<String>, intent: Option<SessionIntent>) -> Self {
         let agent_run_id = agent_run_id.into();
@@ -64,7 +80,7 @@ impl ScopeObservationContext {
 }
 
 pub trait ObserverRuntimeBackend: Send + 'static {
-    fn track_cgroup(&mut self, cgroup_id: u64) -> Result<(), String>;
+    fn track_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeGeneration, String>;
     fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String>;
     fn drain_batch(&mut self) -> Result<DaemonObserverBatch, String>;
     fn read_batch(
@@ -74,7 +90,7 @@ pub trait ObserverRuntimeBackend: Send + 'static {
 }
 
 impl ObserverRuntimeBackend for DaemonObserver {
-    fn track_cgroup(&mut self, cgroup_id: u64) -> Result<(), String> {
+    fn track_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeGeneration, String> {
         DaemonObserver::track_cgroup(self, cgroup_id)
     }
 
@@ -104,20 +120,23 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
     state: Arc<DaemonState>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<ObserverRuntimeSummary, String> {
-    let mut tracked_cgroups = BTreeSet::new();
+    let mut tracked_cgroups = BTreeMap::new();
     let mut scope_contexts = BTreeMap::new();
     for cgroup_id in initial_cgroups {
-        if let Err(error) = backend.track_cgroup(cgroup_id) {
-            state.set_ebpf(ComponentState::Unavailable).await;
-            return Err(format!(
-                "failed to restore observer scope for cgroup {cgroup_id}: {error}"
-            ));
-        }
-        tracked_cgroups.insert(cgroup_id);
+        let generation = match backend.track_cgroup(cgroup_id) {
+            Ok(generation) => generation,
+            Err(error) => {
+                state.set_ebpf(ComponentState::Unavailable).await;
+                return Err(format!(
+                    "failed to restore observer scope for cgroup {cgroup_id}: {error}"
+                ));
+            }
+        };
+        tracked_cgroups.insert(cgroup_id, generation);
         if let Some(agent_run_id) = state.session_for_cgroup(cgroup_id).await {
             let intent = state.intent_for_session(&agent_run_id).await;
             scope_contexts.insert(
-                cgroup_id,
+                ScopeRuntimeIdentity::new(cgroup_id, generation),
                 ScopeObservationContext::new(agent_run_id, intent),
             );
         }
@@ -138,11 +157,11 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                         let agent_intent = request.agent_intent().cloned();
                         let operation = request.operation();
                         let result = match operation {
-                            ScopeOperation::Track => backend.track_cgroup(cgroup_id).map(|()| {
-                                tracked_cgroups.insert(cgroup_id);
+                            ScopeOperation::Track => backend.track_cgroup(cgroup_id).map(|generation| {
+                                tracked_cgroups.insert(cgroup_id, generation);
                                 if let Some(agent_run_id) = &agent_run_id {
                                     scope_contexts.insert(
-                                        cgroup_id,
+                                        ScopeRuntimeIdentity::new(cgroup_id, generation),
                                         ScopeObservationContext::new(
                                             agent_run_id.clone(),
                                             agent_intent.clone(),
@@ -151,14 +170,17 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                                 }
                             }),
                             ScopeOperation::Untrack => {
+                                let generation = tracked_cgroups.get(&cgroup_id).copied();
                                 if let Some(agent_run_id) = &agent_run_id {
-                                    scope_contexts.insert(
-                                        cgroup_id,
-                                        ScopeObservationContext::new(
-                                            agent_run_id.clone(),
-                                            agent_intent.clone(),
-                                        ),
-                                    );
+                                    if let Some(generation) = generation {
+                                        scope_contexts.insert(
+                                            ScopeRuntimeIdentity::new(cgroup_id, generation),
+                                            ScopeObservationContext::new(
+                                                agent_run_id.clone(),
+                                                agent_intent.clone(),
+                                            ),
+                                        );
+                                    }
                                 }
                                 match backend.untrack_cgroup(cgroup_id) {
                                 Ok(counters) => {
@@ -184,7 +206,9 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                                                 {
                                                     Ok(()) => {
                                                         tracked_cgroups.remove(&cgroup_id);
-                                                        scope_contexts.remove(&cgroup_id);
+                                                        if let Some(generation) = generation {
+                                                            scope_contexts.remove(&ScopeRuntimeIdentity::new(cgroup_id, generation));
+                                                        }
                                                         Ok(())
                                                     }
                                                     Err(error) => Err(error),
@@ -228,7 +252,14 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                         batch.abi_mismatches
                     ));
                 }
-                let current = match ingest_observer_batch(&state, &pipeline, batch).await {
+                let current = match ingest_observer_batch_scoped(
+                    &state,
+                    &pipeline,
+                    batch,
+                    &scope_contexts,
+                )
+                .await
+                {
                     Ok(current) => current,
                     Err(error) => {
                         state.set_ebpf(ComponentState::Unavailable).await;
@@ -240,11 +271,11 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
         }
     }
 
-    for cgroup_id in tracked_cgroups {
+    for (cgroup_id, generation) in tracked_cgroups {
         if let Some(agent_run_id) = state.session_for_cgroup(cgroup_id).await {
             let intent = state.intent_for_session(&agent_run_id).await;
             scope_contexts.insert(
-                cgroup_id,
+                ScopeRuntimeIdentity::new(cgroup_id, generation),
                 ScopeObservationContext::new(agent_run_id, intent),
             );
         }
@@ -283,7 +314,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
             state.set_ebpf(ComponentState::Unavailable).await;
             return Err(error);
         }
-        scope_contexts.remove(&cgroup_id);
+        scope_contexts.remove(&ScopeRuntimeIdentity::new(cgroup_id, generation));
     }
 
     let counters = match backend.counters() {
@@ -347,11 +378,27 @@ pub async fn ingest_observer_batch(
         .await
 }
 
+async fn ingest_observer_batch_scoped(
+    state: &DaemonState,
+    pipeline: &EventPipeline,
+    batch: DaemonObserverBatch,
+    scope_contexts: &BTreeMap<ScopeRuntimeIdentity, ScopeObservationContext>,
+) -> Result<ObserverIngestSummary, String> {
+    ingest_observer_batch_with_delivery(
+        state,
+        pipeline,
+        batch,
+        ObserverDelivery::Queued,
+        Some(scope_contexts),
+    )
+    .await
+}
+
 async fn ingest_observer_batch_confirmed(
     state: &DaemonState,
     pipeline: &EventPipeline,
     batch: DaemonObserverBatch,
-    scope_contexts: &BTreeMap<u64, ScopeObservationContext>,
+    scope_contexts: &BTreeMap<ScopeRuntimeIdentity, ScopeObservationContext>,
 ) -> Result<ObserverIngestSummary, String> {
     ingest_observer_batch_with_delivery(
         state,
@@ -374,7 +421,7 @@ async fn ingest_observer_batch_with_delivery(
     pipeline: &EventPipeline,
     batch: DaemonObserverBatch,
     delivery: ObserverDelivery,
-    scope_contexts: Option<&BTreeMap<u64, ScopeObservationContext>>,
+    scope_contexts: Option<&BTreeMap<ScopeRuntimeIdentity, ScopeObservationContext>>,
 ) -> Result<ObserverIngestSummary, String> {
     if delivery == ObserverDelivery::Confirmed && batch.abi_mismatches > 0 {
         return Err(format!(
@@ -396,7 +443,15 @@ async fn ingest_observer_batch_with_delivery(
     };
     for event in batch.events {
         let context = match scope_contexts {
-            Some(scope_contexts) => scope_contexts.get(&event.record.cgroup_id).cloned(),
+            Some(scope_contexts) => ScopeGeneration::new(event.record.scope_generation)
+                .ok()
+                .and_then(|generation| {
+                    scope_contexts.get(&ScopeRuntimeIdentity::new(
+                        event.record.cgroup_id,
+                        generation,
+                    ))
+                })
+                .cloned(),
             None => match state.session_for_cgroup(event.record.cgroup_id).await {
                 Some(agent_run_id) => {
                     let intent = state.intent_for_session(&agent_run_id).await;
@@ -410,7 +465,12 @@ async fn ingest_observer_batch_with_delivery(
             continue;
         };
         let session_id = context.agent_run_id;
-        let raw = match raw_event_from_record(&event.record, &session_id, event.timestamp_unix_ms) {
+        let raw = match raw_event_from_record(
+            &event.record,
+            &session_id,
+            event.timestamp_unix_ms,
+            event.host_boot_id.as_deref().unwrap_or_default(),
+        ) {
             Ok(raw) => raw,
             Err(error) => {
                 return Err(format!(
@@ -441,6 +501,15 @@ async fn ingest_observer_batch_with_delivery(
             "errno": persisted.operation_result.and_then(|result| result.errno),
             "container_id": persisted.container_id,
             "cgroup_id": persisted.cgroup_id,
+            "host_boot_id": persisted.host_boot_id,
+            "scope_generation": persisted.scope_generation,
+            "process_generation": persisted.process_generation,
+            "process_start_time_ns": persisted.process_start_time_ns,
+            "exec_generation": persisted.exec_generation,
+            "parent_process_generation": persisted.parent_process_generation,
+            "parent_exec_generation": persisted.parent_exec_generation,
+            "relation_status": persisted.relation_status.as_str(),
+            "relation_reason": persisted.relation_reason,
             "raw_payload": persisted.raw_payload,
         });
         submit_observer_record(
@@ -470,9 +539,9 @@ async fn ingest_observer_batch_with_delivery(
             }
         }
     }
-    if delivery == ObserverDelivery::Confirmed && summary.unscoped > 0 {
+    if scope_contexts.is_some() && summary.unscoped > 0 {
         return Err(format!(
-            "{} observer record(s) lost Agent Run ownership while flushing scope",
+            "{} observer record(s) had stale or unknown scope generations",
             summary.unscoped
         ));
     }

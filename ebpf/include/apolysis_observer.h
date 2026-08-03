@@ -7,8 +7,8 @@
 #define APOLYSIS_RESOURCE_LEN 256
 #define APOLYSIS_ACTION_LEN 32
 #define APOLYSIS_PAYLOAD_LEN 256
-#define APOLYSIS_KERNEL_ABI_VERSION 2
-#define APOLYSIS_KERNEL_EVENT_RECORD_LEN 616
+#define APOLYSIS_KERNEL_ABI_VERSION 3
+#define APOLYSIS_KERNEL_EVENT_RECORD_LEN 656
 
 enum apolysis_kernel_event_kind {
     APOLYSIS_EVENT_EXEC = 1,
@@ -40,6 +40,15 @@ enum apolysis_cgroup_scope_state {
     APOLYSIS_CGROUP_ACTIVE = 1,
     APOLYSIS_CGROUP_DRAINING = 2,
 };
+
+struct apolysis_cgroup_scope {
+    unsigned long long generation;
+    unsigned char state;
+    unsigned char reserved[7];
+};
+
+_Static_assert(sizeof(struct apolysis_cgroup_scope) == 16,
+               "apolysis cgroup scope ABI size mismatch");
 
 struct apolysis_scope_config {
     unsigned long long cgroup_id;
@@ -102,6 +111,12 @@ struct apolysis_kernel_event {
     unsigned int event_kind;
     unsigned int flags;
     long long return_value;
+    unsigned long long scope_generation;
+    unsigned long long process_generation;
+    unsigned long long process_start_time_ns;
+    unsigned long long parent_process_generation;
+    unsigned int exec_generation;
+    unsigned int parent_exec_generation;
     char comm[APOLYSIS_COMM_LEN];
     char resource[APOLYSIS_RESOURCE_LEN];
     char action[APOLYSIS_ACTION_LEN];

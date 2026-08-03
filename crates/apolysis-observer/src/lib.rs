@@ -20,7 +20,7 @@ pub use live::{
     raw_event_from_record, scope_observation_gaps, AgentDiscoveryRequest, AgentRegistration,
     AgentRunRequest, DaemonKernelEvent, DaemonObserver, DaemonObserverBatch, DaemonObserverConfig,
     DaemonObserverCounters, FileOperationCounters, LiveObserveRequest, LiveScope,
-    NetworkConnectCounters, ObserverBatchDecoder, OperationPairCounters,
+    NetworkConnectCounters, ObserverBatchDecoder, OperationPairCounters, ScopeGeneration,
     ScopeObservationGapCounters,
 };
 pub use redaction::{
@@ -447,7 +447,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
 
         let raw = parse_fixture_raw_event(raw_line, &request.session_id)?
             .with_event_id(event_ids.next_raw_event_id());
-        let canonical = process_context.observe(&raw, canonicalize(&raw));
+        let canonical = process_context.observe(&raw, canonicalize(&raw))?;
         let (persisted_raw, persisted_canonical) = RuntimeEvidencePersistence::new(&redactor)
             .persist_event(
                 &raw,
@@ -572,7 +572,8 @@ fn canonicalize(raw: &RawKernelEvent) -> CanonicalEvent {
         &raw.action,
     )
     .with_timestamp(raw.timestamp_unix_ms)
-    .with_runtime_identity(raw.container_id.clone(), raw.cgroup_id.clone());
+    .with_runtime_identity(raw.container_id.clone(), raw.cgroup_id.clone())
+    .with_process_identity_from(raw);
     if let Some(raw_event_id) = raw.event_id.as_deref() {
         event = event.with_raw_event_id(raw_event_id);
     }
@@ -610,6 +611,13 @@ fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEven
     let action = required_raw(&fields, "action")?;
     let container_id = fields.optional("container_id").map(ToString::to_string);
     let cgroup_id = fields.optional("cgroup_id").map(ToString::to_string);
+    let host_boot_id = fields.optional("host_boot_id").map(ToString::to_string);
+    let scope_generation = parse_optional_raw_u64(&fields, "scope_generation")?;
+    let process_generation = parse_optional_raw_u64(&fields, "process_generation")?;
+    let process_start_time_ns = parse_optional_raw_u64(&fields, "process_start_time_ns")?;
+    let exec_generation = parse_optional_raw_u32(&fields, "exec_generation")?;
+    let parent_process_generation = parse_optional_raw_u64(&fields, "parent_process_generation")?;
+    let parent_exec_generation = parse_optional_raw_u32(&fields, "parent_exec_generation")?;
     let raw_payload = fields.optional("payload").unwrap_or_default();
 
     Ok(RawKernelEvent::new(
@@ -627,6 +635,15 @@ fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEven
         container_id,
         cgroup_id,
         raw_payload,
+    )
+    .with_process_identity(
+        host_boot_id,
+        scope_generation,
+        process_generation,
+        process_start_time_ns,
+        exec_generation,
+        parent_process_generation,
+        parent_exec_generation,
     ))
 }
 
@@ -646,6 +663,28 @@ fn parse_raw_u128(fields: &PipeFields, key: &str) -> Result<u128, String> {
     required_raw(fields, key)?
         .parse()
         .map_err(|error| format!("invalid {key}: {error}"))
+}
+
+fn parse_optional_raw_u64(fields: &PipeFields, key: &str) -> Result<Option<u64>, String> {
+    fields
+        .optional(key)
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|error| format!("invalid {key}: {error}"))
+        })
+        .transpose()
+}
+
+fn parse_optional_raw_u32(fields: &PipeFields, key: &str) -> Result<Option<u32>, String> {
+    fields
+        .optional(key)
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|error| format!("invalid {key}: {error}"))
+        })
+        .transpose()
 }
 
 fn enabled(value: bool) -> &'static str {
