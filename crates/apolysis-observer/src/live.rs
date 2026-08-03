@@ -24,12 +24,11 @@ use tokio::process::Child;
 
 use crate::abi::{
     FileOperationCountersAbi, KernelEventKind, KernelEventRecord, NetworkConnectCountersAbi,
-    ObserverCountersAbi, OperationPairCountersAbi, TrackedCgroupState, FLAG_ARGV_TRUNCATED,
-    FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
+    ObserverCountersAbi, OperationPairCountersAbi, TrackedCgroupScopeAbi, TrackedCgroupState,
+    FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
 };
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
-use crate::scope::ScopeSet;
 use crate::{
     audit_observer_capability_manifest, canonicalize, write_observer_metadata, AyaLoaderPlan,
     EventIdSequence, ObserveResult, ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor,
@@ -378,6 +377,7 @@ impl DaemonObserverConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonKernelEvent {
     pub timestamp_unix_ms: u128,
+    pub host_boot_id: Option<String>,
     pub record: KernelEventRecord,
 }
 
@@ -532,49 +532,45 @@ pub struct DaemonObserver {
     ebpf: Ebpf,
     ring: AsyncFd<RingBuf<MapData>>,
     decoder: ObserverBatchDecoder,
-    retired_cgroups: RetiredCgroupGuard,
+    scope_generations: ScopeGenerationSequence,
+    active_scope_generations: BTreeMap<u64, ScopeGeneration>,
 }
 
-#[derive(Debug, Default)]
-struct RetiredCgroupGuard {
-    cgroup_ids: ScopeSet,
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ScopeGeneration(u64);
+
+impl ScopeGeneration {
+    pub fn new(generation: u64) -> Result<Self, String> {
+        if generation == 0 {
+            return Err("cgroup scope generation must be non-zero".to_string());
+        }
+        Ok(Self(generation))
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
 }
 
-impl RetiredCgroupGuard {
-    #[cfg(test)]
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            cgroup_ids: ScopeSet::with_capacity(capacity),
-        }
-    }
+#[derive(Debug)]
+struct ScopeGenerationSequence {
+    next: u64,
+}
 
-    fn validate_track(&self, cgroup_id: u64) -> Result<(), String> {
-        if self.cgroup_ids.contains(cgroup_id) {
-            return Err(format!(
-                "cgroup observer scope {cgroup_id} was already drained; reuse requires a stable scope generation"
-            ));
-        }
-        if self.cgroup_ids.len() >= self.cgroup_ids.capacity() {
-            return Err(format!(
-                "retired cgroup generation guard capacity reached: {}",
-                self.cgroup_ids.capacity()
-            ));
-        }
-        Ok(())
+impl Default for ScopeGenerationSequence {
+    fn default() -> Self {
+        Self { next: 1 }
     }
+}
 
-    fn reserve_drain(&mut self, cgroup_id: u64) -> Result<(), String> {
-        match self.cgroup_ids.insert(cgroup_id) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(format!(
-                "cgroup observer scope {cgroup_id} was already drained; reuse requires a stable scope generation"
-            )),
-            Err(error) => Err(format!("retired cgroup generation guard: {error}")),
-        }
-    }
-
-    fn rollback_drain(&mut self, cgroup_id: u64) {
-        self.cgroup_ids.remove(cgroup_id);
+impl ScopeGenerationSequence {
+    fn allocate(&mut self) -> Result<ScopeGeneration, String> {
+        let generation = ScopeGeneration::new(self.next)?;
+        self.next = self
+            .next
+            .checked_add(1)
+            .ok_or_else(|| "cgroup scope generation exhausted".to_string())?;
+        Ok(generation)
     }
 }
 
@@ -600,27 +596,33 @@ impl DaemonObserver {
             ebpf,
             ring,
             decoder: ObserverBatchDecoder::capture()?,
-            retired_cgroups: RetiredCgroupGuard::default(),
+            scope_generations: ScopeGenerationSequence::default(),
+            active_scope_generations: BTreeMap::new(),
         })
     }
 
-    pub fn track_cgroup(&mut self, cgroup_id: u64) -> Result<(), String> {
-        self.retired_cgroups.validate_track(cgroup_id)?;
-        update_tracked_cgroup(&mut self.ebpf, cgroup_id, true)
+    pub fn track_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeGeneration, String> {
+        if let Some(generation) = self.active_scope_generations.get(&cgroup_id) {
+            return Ok(*generation);
+        }
+        let generation = self.scope_generations.allocate()?;
+        track_cgroup_with_observation_counters(&mut self.ebpf, cgroup_id, generation)?;
+        self.active_scope_generations.insert(cgroup_id, generation);
+        Ok(generation)
     }
 
     pub fn untrack_cgroup(
         &mut self,
         cgroup_id: u64,
     ) -> Result<ScopeObservationGapCounters, String> {
-        self.retired_cgroups.reserve_drain(cgroup_id)?;
-        match drain_tracked_cgroup(&mut self.ebpf, cgroup_id) {
-            Ok(counters) => Ok(counters),
-            Err(error) => {
-                self.retired_cgroups.rollback_drain(cgroup_id);
-                Err(error)
-            }
-        }
+        let generation = self
+            .active_scope_generations
+            .get(&cgroup_id)
+            .copied()
+            .ok_or_else(|| format!("cgroup observer scope {cgroup_id} is not tracked"))?;
+        let counters = drain_tracked_cgroup(&mut self.ebpf, cgroup_id, generation)?;
+        self.active_scope_generations.remove(&cgroup_id);
+        Ok(counters)
     }
 
     pub async fn read_batch(&mut self) -> Result<DaemonObserverBatch, String> {
@@ -935,6 +937,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 &record,
                 &request.session_id,
                 calibration.to_unix_ms(record.timestamp_ns),
+                calibration.host_boot_id.as_deref().unwrap_or_default(),
             ) {
                 Ok(raw) => raw.with_event_id(event_ids.next_raw_event_id()),
                 Err(_) => {
@@ -942,7 +945,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                     continue;
                 }
             };
-            let canonical = process_context.observe(&raw, canonicalize(&raw));
+            let canonical = process_context.observe(&raw, canonicalize(&raw))?;
             append_content_off_runtime_event(&raw, &canonical, &redactor, &mut store)?;
             raw_count += 1;
             canonical_count += 1;
@@ -1776,30 +1779,23 @@ pub fn enable_multi_cgroup_scope(ebpf: &mut Ebpf) -> Result<(), String> {
         .map_err(|error| format!("failed to configure multi-cgroup observer scope: {error}"))
 }
 
-/// Add or remove one cgroup id from the daemon observer scope map.
-fn update_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64, present: bool) -> Result<(), String> {
-    if cgroup_id == 0 {
-        return Err("cgroup id must be non-zero".to_string());
-    }
-    if present {
-        track_cgroup_with_observation_counters(ebpf, cgroup_id)
-    } else {
-        drain_tracked_cgroup(ebpf, cgroup_id).map(|_| ())
-    }
-}
-
 const SCOPE_DRAIN_POLL_LIMIT: usize = 4_096;
 const RING_DRAIN_RECORD_LIMIT: usize = 2_048;
 
-fn track_cgroup_with_observation_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
-    match tracked_cgroup_state(ebpf, cgroup_id)? {
-        Some(TrackedCgroupState::Active) => return Ok(()),
-        Some(state) => {
-            return Err(format!(
-                "cgroup observer scope {cgroup_id} is already in state {state:?}"
-            ));
-        }
-        None => {}
+fn track_cgroup_with_observation_counters(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+    generation: ScopeGeneration,
+) -> Result<(), String> {
+    if cgroup_id == 0 {
+        return Err("cgroup id must be non-zero".to_string());
+    }
+    if let Some(scope) = tracked_cgroup_scope(ebpf, cgroup_id)? {
+        return Err(format!(
+            "cgroup observer scope {cgroup_id} is already generation {} in state {:?}",
+            scope.generation(),
+            scope.state()?
+        ));
     }
 
     set_network_connect_counters(ebpf, cgroup_id, NetworkConnectCountersAbi::default())?;
@@ -1824,7 +1820,11 @@ fn track_cgroup_with_observation_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Re
         }
         return Err(failures.join("; "));
     }
-    if let Err(error) = set_tracked_cgroup_state(ebpf, cgroup_id, TrackedCgroupState::Active) {
+    if let Err(error) = set_tracked_cgroup_scope(
+        ebpf,
+        cgroup_id,
+        TrackedCgroupScopeAbi::active(generation.get())?,
+    ) {
         let inflight_rollback = remove_scope_updates_inflight(ebpf, cgroup_id);
         let file_rollback = remove_file_operation_counters(ebpf, cgroup_id);
         let connect_rollback = remove_network_connect_counters(ebpf, cgroup_id);
@@ -1843,42 +1843,60 @@ fn track_cgroup_with_observation_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Re
     Ok(())
 }
 
-fn tracked_cgroup_state(
+fn tracked_cgroup_scope(
     ebpf: &mut Ebpf,
     cgroup_id: u64,
-) -> Result<Option<TrackedCgroupState>, String> {
+) -> Result<Option<TrackedCgroupScopeAbi>, String> {
     let tracked_map = ebpf
         .map_mut("APOLYSIS_TRACKED_CGROUPS")
         .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_CGROUPS".to_string())?;
-    let tracked = HashMap::<_, u64, u8>::try_from(tracked_map)
+    let tracked = HashMap::<_, u64, TrackedCgroupScopeAbi>::try_from(tracked_map)
         .map_err(|error| format!("invalid APOLYSIS_TRACKED_CGROUPS map: {error}"))?;
     match tracked.get(&cgroup_id, 0) {
-        Ok(state) => Ok(Some(state.try_into()?)),
+        Ok(scope) => Ok(Some(scope)),
         Err(MapError::KeyNotFound) => Ok(None),
         Err(error) => Err(format!("failed to read cgroup observer scope: {error}")),
     }
 }
 
-fn set_tracked_cgroup_state(
+fn set_tracked_cgroup_scope(
     ebpf: &mut Ebpf,
     cgroup_id: u64,
-    state: TrackedCgroupState,
+    scope: TrackedCgroupScopeAbi,
 ) -> Result<(), String> {
     let tracked_map = ebpf
         .map_mut("APOLYSIS_TRACKED_CGROUPS")
         .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_CGROUPS".to_string())?;
-    let mut tracked = HashMap::<_, u64, u8>::try_from(tracked_map)
+    let mut tracked = HashMap::<_, u64, TrackedCgroupScopeAbi>::try_from(tracked_map)
         .map_err(|error| format!("invalid APOLYSIS_TRACKED_CGROUPS map: {error}"))?;
     tracked
-        .insert(cgroup_id, state as u8, 0)
+        .insert(cgroup_id, scope, 0)
         .map_err(|error| format!("failed to update cgroup observer scope: {error}"))
+}
+
+fn set_tracked_cgroup_state(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+    generation: ScopeGeneration,
+    state: TrackedCgroupState,
+) -> Result<(), String> {
+    let scope = tracked_cgroup_scope(ebpf, cgroup_id)?
+        .ok_or_else(|| format!("cgroup observer scope {cgroup_id} is not tracked"))?;
+    if scope.generation() != generation.get() {
+        return Err(format!(
+            "cgroup observer scope {cgroup_id} generation mismatch: expected {}, found {}",
+            generation.get(),
+            scope.generation()
+        ));
+    }
+    set_tracked_cgroup_scope(ebpf, cgroup_id, scope.with_state(state))
 }
 
 fn remove_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
     let tracked_map = ebpf
         .map_mut("APOLYSIS_TRACKED_CGROUPS")
         .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_CGROUPS".to_string())?;
-    let mut tracked = HashMap::<_, u64, u8>::try_from(tracked_map)
+    let mut tracked = HashMap::<_, u64, TrackedCgroupScopeAbi>::try_from(tracked_map)
         .map_err(|error| format!("invalid APOLYSIS_TRACKED_CGROUPS map: {error}"))?;
     tracked
         .remove(&cgroup_id)
@@ -2029,8 +2047,21 @@ where
     Err(ScopeDrainWaitError::Timeout)
 }
 
-fn restore_active_scope(ebpf: &mut Ebpf, cgroup_id: u64, error: String) -> String {
-    match set_tracked_cgroup_state(ebpf, cgroup_id, TrackedCgroupState::Active) {
+fn restore_active_scope(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+    generation: ScopeGeneration,
+    error: String,
+) -> String {
+    let restore = match tracked_cgroup_scope(ebpf, cgroup_id) {
+        Ok(Some(_)) => {
+            set_tracked_cgroup_state(ebpf, cgroup_id, generation, TrackedCgroupState::Active)
+        }
+        Ok(None) => TrackedCgroupScopeAbi::active(generation.get())
+            .and_then(|scope| set_tracked_cgroup_scope(ebpf, cgroup_id, scope)),
+        Err(read) => Err(read),
+    };
+    match restore {
         Ok(()) => error,
         Err(rollback) => format!("{error}; cgroup scope rollback failed: {rollback}"),
     }
@@ -2039,6 +2070,7 @@ fn restore_active_scope(ebpf: &mut Ebpf, cgroup_id: u64, error: String) -> Strin
 fn restore_scope_with_counters(
     ebpf: &mut Ebpf,
     cgroup_id: u64,
+    generation: ScopeGeneration,
     network: NetworkConnectCountersAbi,
     files: FileOperationCountersAbi,
     error: String,
@@ -2061,33 +2093,40 @@ fn restore_scope_with_counters(
         failures.push("cgroup scope remains inactive after incomplete rollback".to_string());
         return failures.join("; ");
     }
-    restore_active_scope(ebpf, cgroup_id, failures.join("; "))
+    restore_active_scope(ebpf, cgroup_id, generation, failures.join("; "))
 }
 
 fn drain_tracked_cgroup(
     ebpf: &mut Ebpf,
     cgroup_id: u64,
+    generation: ScopeGeneration,
 ) -> Result<ScopeObservationGapCounters, String> {
     if cgroup_id == 0 {
         return Err("cgroup id must be non-zero".to_string());
     }
 
-    match tracked_cgroup_state(ebpf, cgroup_id)? {
-        Some(TrackedCgroupState::Active) => {}
-        Some(state) => {
+    match tracked_cgroup_scope(ebpf, cgroup_id)? {
+        Some(scope)
+            if scope.generation() == generation.get()
+                && scope.state()? == TrackedCgroupState::Active => {}
+        Some(scope) => {
             return Err(format!(
-                "cgroup observer scope {cgroup_id} cannot drain from state {state:?}"
+                "cgroup observer scope {cgroup_id} generation/state mismatch: expected generation {}, found generation {} in state {:?}",
+                generation.get(),
+                scope.generation(),
+                scope.state()?
             ));
         }
         None => return Err(format!("cgroup observer scope {cgroup_id} is not tracked")),
     }
-    set_tracked_cgroup_state(ebpf, cgroup_id, TrackedCgroupState::Draining)?;
+    set_tracked_cgroup_state(ebpf, cgroup_id, generation, TrackedCgroupState::Draining)?;
     match wait_for_scope_updates_to_drain(|| read_scope_updates_inflight(ebpf, cgroup_id)) {
         Ok(()) => {}
         Err(ScopeDrainWaitError::Timeout) => {
             return Err(restore_active_scope(
                 ebpf,
                 cgroup_id,
+                generation,
                 ScopeDrainWaitError::Timeout.to_string(),
             ));
         }
@@ -2098,7 +2137,7 @@ fn drain_tracked_cgroup(
         }
     }
     if let Err(error) = remove_tracked_cgroup(ebpf, cgroup_id) {
-        return Err(restore_active_scope(ebpf, cgroup_id, error));
+        return Err(restore_active_scope(ebpf, cgroup_id, generation, error));
     }
 
     let network_snapshot = match read_network_connect_counters(ebpf, cgroup_id) {
@@ -2121,6 +2160,7 @@ fn drain_tracked_cgroup(
         return Err(restore_scope_with_counters(
             ebpf,
             cgroup_id,
+            generation,
             network_snapshot,
             file_snapshot,
             error,
@@ -2130,6 +2170,7 @@ fn drain_tracked_cgroup(
         return Err(restore_scope_with_counters(
             ebpf,
             cgroup_id,
+            generation,
             network_snapshot,
             file_snapshot,
             error,
@@ -2139,6 +2180,7 @@ fn drain_tracked_cgroup(
         return Err(restore_scope_with_counters(
             ebpf,
             cgroup_id,
+            generation,
             network_snapshot,
             file_snapshot,
             error,
@@ -2273,6 +2315,7 @@ fn append_content_off_runtime_event(
 pub struct ObserverBatchDecoder {
     monotonic_ns: u64,
     unix_ms: u128,
+    host_boot_id: Option<String>,
 }
 
 impl ObserverBatchDecoder {
@@ -2280,7 +2323,13 @@ impl ObserverBatchDecoder {
         Self {
             monotonic_ns,
             unix_ms,
+            host_boot_id: None,
         }
+    }
+
+    pub fn with_host_boot_id(mut self, host_boot_id: impl Into<String>) -> Self {
+        self.host_boot_id = Some(host_boot_id.into());
+        self
     }
 
     fn capture() -> Result<Self, String> {
@@ -2291,6 +2340,7 @@ impl ObserverBatchDecoder {
         Ok(Self {
             monotonic_ns: monotonic_now_ns()?,
             unix_ms,
+            host_boot_id: Some(read_host_boot_id_at("/proc/sys/kernel/random/boot_id")?),
         })
     }
 
@@ -2313,6 +2363,7 @@ impl ObserverBatchDecoder {
             }
             batch.events.push(DaemonKernelEvent {
                 timestamp_unix_ms: self.to_unix_ms(record.timestamp_ns),
+                host_boot_id: self.host_boot_id.clone(),
                 record,
             });
         }
@@ -2345,10 +2396,34 @@ fn monotonic_now_ns() -> Result<u64, String> {
     Ok(value.tv_sec as u64 * 1_000_000_000 + value.tv_nsec as u64)
 }
 
+fn read_host_boot_id_at(path: impl AsRef<Path>) -> Result<String, String> {
+    let path = path.as_ref();
+    let boot_id = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read host boot identity {}: {error}",
+            path.display()
+        )
+    })?;
+    let boot_id = boot_id.trim();
+    let valid = boot_id.len() == 36
+        && boot_id.char_indices().all(|(index, character)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                character == '-'
+            } else {
+                character.is_ascii_hexdigit()
+            }
+        });
+    if !valid {
+        return Err(format!("invalid host boot identity in {}", path.display()));
+    }
+    Ok(boot_id.to_ascii_lowercase())
+}
+
 pub fn raw_event_from_record(
     record: &KernelEventRecord,
     session_id: &str,
     timestamp_unix_ms: u128,
+    host_boot_id: &str,
 ) -> Result<RawKernelEvent, String> {
     let kind = record.kind()?;
     let event_name = match kind {
@@ -2403,6 +2478,15 @@ pub fn raw_event_from_record(
         None,
         Some(record.cgroup_id.to_string()),
         payload,
+    )
+    .with_process_identity(
+        Some(host_boot_id.to_string()),
+        Some(record.scope_generation),
+        Some(record.process_generation),
+        Some(record.process_start_time_ns),
+        Some(record.exec_generation),
+        Some(record.parent_process_generation),
+        Some(record.parent_exec_generation),
     );
     Ok(match record.return_value() {
         Some(return_value) => {
@@ -2474,6 +2558,26 @@ mod tests {
     }
 
     #[test]
+    fn host_boot_identity_is_read_once_from_the_kernel_boundary() {
+        let root =
+            std::env::temp_dir().join(format!("apolysis-host-boot-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create boot identity fixture");
+        let boot_id = root.join("boot_id");
+        std::fs::write(&boot_id, "11111111-2222-3333-4444-555555555555\n")
+            .expect("write boot identity fixture");
+
+        assert_eq!(
+            read_host_boot_id_at(&boot_id).expect("read host boot identity"),
+            "11111111-2222-3333-4444-555555555555"
+        );
+
+        std::fs::write(&boot_id, "not a boot id\n").expect("write invalid boot identity fixture");
+        assert!(read_host_boot_id_at(&boot_id).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cgroup_drain_does_not_treat_a_barrier_read_failure_as_a_timeout() {
         let error = wait_for_scope_updates_to_drain(|| Err("barrier map missing".to_string()))
             .expect_err("barrier read failure must fail closed");
@@ -2485,23 +2589,15 @@ mod tests {
     }
 
     #[test]
-    fn drained_cgroup_ids_cannot_be_reassigned_without_a_scope_generation() {
-        let mut guard = RetiredCgroupGuard::with_capacity(1);
+    fn cgroup_scope_generations_are_nonzero_and_monotonic() {
+        let mut generations = ScopeGenerationSequence::default();
 
-        guard.reserve_drain(41).expect("reserve drained cgroup");
-        let reuse = guard
-            .validate_track(41)
-            .expect_err("same observer must reject numeric cgroup reuse");
-        assert!(reuse.contains("stable scope generation"));
-        let capacity = guard
-            .reserve_drain(42)
-            .expect_err("retired cgroup guard stays bounded");
-        assert!(capacity.contains("capacity reached"));
+        let first = generations.allocate().expect("first scope generation");
+        let second = generations.allocate().expect("second scope generation");
 
-        guard.rollback_drain(41);
-        guard
-            .validate_track(41)
-            .expect("failed drains do not retire active cgroups");
+        assert_eq!(first.get(), 1);
+        assert_eq!(second.get(), 2);
+        assert!(ScopeGeneration::new(0).is_err());
     }
 
     #[test]
@@ -2914,7 +3010,9 @@ mod tests {
         )
         .with_event_id("raw-exec");
 
-        let exec_event = contexts.observe(&exec_raw, canonicalize(&exec_raw));
+        let exec_event = contexts
+            .observe(&exec_raw, canonicalize(&exec_raw))
+            .expect("observe exec context");
 
         assert_eq!(
             exec_event.process_command.as_deref(),
@@ -2947,7 +3045,9 @@ mod tests {
         )
         .with_event_id("raw-exit");
 
-        let exit_event = contexts.observe(&exit_raw, canonicalize(&exit_raw));
+        let exit_event = contexts
+            .observe(&exit_raw, canonicalize(&exit_raw))
+            .expect("observe exit context");
 
         assert_eq!(
             exit_event.process_command.as_deref(),
@@ -2979,7 +3079,9 @@ mod tests {
             "",
         );
 
-        let stale_event = contexts.observe(&stale_raw, canonicalize(&stale_raw));
+        let stale_event = contexts
+            .observe(&stale_raw, canonicalize(&stale_raw))
+            .expect("observe post-exit event");
 
         assert_eq!(stale_event.process_command, None);
         assert_eq!(stale_event.process_executable, None);

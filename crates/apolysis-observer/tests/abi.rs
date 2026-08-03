@@ -1,18 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use apolysis_core::{OperationOutcome, OperationResult};
+use apolysis_core::{OperationOutcome, OperationResult, RuntimeRelation};
 use apolysis_observer::abi::{
-    KernelEventDecodeError, KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN,
-    FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RETURN_VALUE,
-    KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
+    KernelEventDecodeError, KernelEventKind, KernelEventRecord, TrackedCgroupScopeAbi, ACTION_LEN,
+    COMM_LEN, FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED,
+    FLAG_RETURN_VALUE, KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
 };
 use apolysis_observer::raw_event_from_record;
 
 #[test]
 fn kernel_event_record_matches_the_c_abi_size() {
-    assert_eq!(KERNEL_ABI_VERSION, 2);
-    assert_eq!(std::mem::size_of::<KernelEventRecord>(), 616);
-    assert_eq!(KERNEL_EVENT_RECORD_LEN, 616);
+    assert_eq!(KERNEL_ABI_VERSION, 3);
+    assert_eq!(std::mem::size_of::<KernelEventRecord>(), 656);
+    assert_eq!(KERNEL_EVENT_RECORD_LEN, 656);
+}
+
+#[test]
+fn tracked_cgroup_scope_abi_carries_a_nonzero_generation() {
+    let scope = TrackedCgroupScopeAbi::active(7).expect("create active scope generation");
+
+    assert_eq!(std::mem::size_of::<TrackedCgroupScopeAbi>(), 16);
+    assert_eq!(scope.generation(), 7);
+    assert!(scope.is_active());
+    assert!(TrackedCgroupScopeAbi::active(0).is_err());
 }
 
 #[test]
@@ -42,13 +52,19 @@ fn kernel_event_record_decodes_native_endian_fields_and_fixed_buffers() {
     bytes[36..40].copy_from_slice(&1001_u32.to_ne_bytes());
     bytes[40..44].copy_from_slice(&(KernelEventKind::Connect as u32).to_ne_bytes());
     bytes[44..48].copy_from_slice(&3_u32.to_ne_bytes());
-    write_fixed(&mut bytes[56..56 + COMM_LEN], b"python3");
+    bytes[56..64].copy_from_slice(&11_u64.to_ne_bytes());
+    bytes[64..72].copy_from_slice(&22_u64.to_ne_bytes());
+    bytes[72..80].copy_from_slice(&33_u64.to_ne_bytes());
+    bytes[80..88].copy_from_slice(&44_u64.to_ne_bytes());
+    bytes[88..92].copy_from_slice(&5_u32.to_ne_bytes());
+    bytes[92..96].copy_from_slice(&4_u32.to_ne_bytes());
+    write_fixed(&mut bytes[96..96 + COMM_LEN], b"python3");
     write_fixed(
-        &mut bytes[56 + COMM_LEN..56 + COMM_LEN + RESOURCE_LEN],
+        &mut bytes[96 + COMM_LEN..96 + COMM_LEN + RESOURCE_LEN],
         b"1.1.1.1:443",
     );
     write_fixed(
-        &mut bytes[56 + COMM_LEN + RESOURCE_LEN..56 + COMM_LEN + RESOURCE_LEN + ACTION_LEN],
+        &mut bytes[96 + COMM_LEN + RESOURCE_LEN..96 + COMM_LEN + RESOURCE_LEN + ACTION_LEN],
         b"connect",
     );
     write_fixed(
@@ -68,6 +84,12 @@ fn kernel_event_record_decodes_native_endian_fields_and_fixed_buffers() {
     assert_eq!(record.gid, 1001);
     assert_eq!(record.kind().expect("known kind"), KernelEventKind::Connect);
     assert_eq!(record.flags, 3);
+    assert_eq!(record.scope_generation, 11);
+    assert_eq!(record.process_generation, 22);
+    assert_eq!(record.process_start_time_ns, 33);
+    assert_eq!(record.parent_process_generation, 44);
+    assert_eq!(record.exec_generation, 5);
+    assert_eq!(record.parent_exec_generation, 4);
     assert_eq!(record.comm(), "python3");
     assert_eq!(record.resource(), "1.1.1.1:443");
     assert_eq!(record.action(), "connect");
@@ -84,7 +106,7 @@ fn kernel_event_record_rejects_short_ring_buffer_items() {
     assert_eq!(
         error,
         KernelEventDecodeError::UnexpectedRecordLength {
-            expected: 616,
+            expected: 656,
             received: 32,
         }
     );
@@ -94,7 +116,7 @@ fn kernel_event_record_rejects_short_ring_buffer_items() {
 #[test]
 fn kernel_event_record_rejects_an_unsupported_abi_version() {
     let mut bytes = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
-    bytes[0..4].copy_from_slice(&3_u32.to_ne_bytes());
+    bytes[0..4].copy_from_slice(&2_u32.to_ne_bytes());
     bytes[4..8].copy_from_slice(&(KERNEL_EVENT_RECORD_LEN as u32).to_ne_bytes());
 
     let error = KernelEventRecord::decode(&bytes).expect_err("unknown ABI must fail");
@@ -103,7 +125,7 @@ fn kernel_event_record_rejects_an_unsupported_abi_version() {
         error,
         KernelEventDecodeError::UnsupportedAbiVersion {
             expected: KERNEL_ABI_VERSION,
-            received: 3,
+            received: 2,
         }
     );
     assert!(error.is_abi_mismatch());
@@ -111,9 +133,9 @@ fn kernel_event_record_rejects_an_unsupported_abi_version() {
 
 #[test]
 fn kernel_event_record_classifies_a_different_sized_future_abi_by_version() {
-    let mut bytes = vec![0_u8; 624];
-    bytes[0..4].copy_from_slice(&3_u32.to_ne_bytes());
-    bytes[4..8].copy_from_slice(&624_u32.to_ne_bytes());
+    let mut bytes = vec![0_u8; 664];
+    bytes[0..4].copy_from_slice(&4_u32.to_ne_bytes());
+    bytes[4..8].copy_from_slice(&664_u32.to_ne_bytes());
 
     let error = KernelEventRecord::decode(&bytes).expect_err("future ABI must fail");
 
@@ -121,7 +143,7 @@ fn kernel_event_record_classifies_a_different_sized_future_abi_by_version() {
         error,
         KernelEventDecodeError::UnsupportedAbiVersion {
             expected: KERNEL_ABI_VERSION,
-            received: 3,
+            received: 4,
         }
     );
 }
@@ -130,7 +152,7 @@ fn kernel_event_record_classifies_a_different_sized_future_abi_by_version() {
 fn kernel_event_record_rejects_a_declared_record_size_mismatch() {
     let mut bytes = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
     bytes[0..4].copy_from_slice(&KERNEL_ABI_VERSION.to_ne_bytes());
-    bytes[4..8].copy_from_slice(&608_u32.to_ne_bytes());
+    bytes[4..8].copy_from_slice(&648_u32.to_ne_bytes());
 
     let error = KernelEventRecord::decode(&bytes).expect_err("wrong ABI size must fail");
 
@@ -138,7 +160,7 @@ fn kernel_event_record_rejects_a_declared_record_size_mismatch() {
         error,
         KernelEventDecodeError::DeclaredRecordSizeMismatch {
             expected: KERNEL_EVENT_RECORD_LEN as u32,
-            received: 608,
+            received: 648,
         }
     );
     assert!(error.is_abi_mismatch());
@@ -155,7 +177,7 @@ fn live_file_record_converts_to_the_fixture_compatible_raw_schema() {
     write_fixed(&mut record.resource, b"/workspace/input.txt");
     write_fixed(&mut record.action, b"read");
 
-    let raw = raw_event_from_record(&record, "session-live", 1_700_000_000_044)
+    let raw = raw_event_from_record(&record, "session-live", 1_700_000_000_044, "boot-test")
         .expect("convert live record");
 
     assert_eq!(raw.session_id, "session-live");
@@ -165,6 +187,36 @@ fn live_file_record_converts_to_the_fixture_compatible_raw_schema() {
     assert_eq!(raw.resource, "/workspace/input.txt");
     assert_eq!(raw.action, "read");
     assert_eq!(raw.cgroup_id.as_deref(), Some("901"));
+}
+
+#[test]
+fn live_record_normalizes_a_stable_runtime_identity() {
+    let mut record = empty_record(KernelEventKind::Open);
+    record.cgroup_id = 901;
+    record.scope_generation = 7;
+    record.pid = 44;
+    record.process_generation = 22;
+    record.process_start_time_ns = 33;
+    record.exec_generation = 5;
+    record.ppid = 40;
+    record.parent_process_generation = 11;
+    record.parent_exec_generation = 4;
+
+    let raw = raw_event_from_record(&record, "session-live", 1_700_000_000_044, "boot-test")
+        .expect("convert stable runtime identity");
+
+    assert_eq!(raw.host_boot_id.as_deref(), Some("boot-test"));
+    assert_eq!(raw.scope_generation, Some(7));
+    assert_eq!(raw.process_generation, Some(22));
+    assert_eq!(raw.process_start_time_ns, Some(33));
+    assert_eq!(raw.exec_generation, Some(5));
+    assert_eq!(raw.parent_process_generation, Some(11));
+    assert_eq!(raw.parent_exec_generation, Some(4));
+    assert_eq!(raw.relation_status, RuntimeRelation::Exact);
+    assert_eq!(
+        raw.relation_reason,
+        "host_boot_scope_process_start_exec_generation"
+    );
 }
 
 #[test]
@@ -198,7 +250,7 @@ fn live_file_records_map_linux_return_values_to_synchronous_outcomes() {
             record.flags = FLAG_RETURN_VALUE;
             record.return_value = return_value;
 
-            let raw = raw_event_from_record(&record, "agent-run-file-result", 1)
+            let raw = raw_event_from_record(&record, "agent-run-file-result", 1, "boot-test")
                 .expect("convert file result record");
 
             assert_eq!(raw.operation_result, Some(expected), "kind: {kind:?}");
@@ -215,7 +267,8 @@ fn live_connect_record_decodes_ipv4_sockaddr() {
     record.payload[4..8].copy_from_slice(&[1, 1, 1, 1]);
     write_fixed(&mut record.action, b"connect");
 
-    let raw = raw_event_from_record(&record, "session-live", 1).expect("convert sockaddr record");
+    let raw = raw_event_from_record(&record, "session-live", 1, "boot-test")
+        .expect("convert sockaddr record");
 
     assert_eq!(raw.event_name, "connect");
     assert_eq!(raw.resource, "1.1.1.1:443");
@@ -250,7 +303,7 @@ fn live_connect_record_maps_linux_return_values_to_supported_outcomes() {
         record.flags = FLAG_RETURN_VALUE;
         record.return_value = return_value;
 
-        let raw = raw_event_from_record(&record, "agent-run-connect-result", 1)
+        let raw = raw_event_from_record(&record, "agent-run-connect-result", 1, "boot-test")
             .expect("convert connect result record");
 
         assert_eq!(raw.operation_result, Some(expected));
@@ -266,7 +319,8 @@ fn live_exec_record_preserves_argv_payload_and_truncation_markers() {
     write_fixed(&mut record.action, b"exec");
     write_fixed(&mut record.payload, b"argv:/usr/bin/sed -n 1,8p README.md");
 
-    let raw = raw_event_from_record(&record, "session-live", 1).expect("convert exec record");
+    let raw = raw_event_from_record(&record, "session-live", 1, "boot-test")
+        .expect("convert exec record");
 
     assert_eq!(raw.event_name, "sched_process_exec");
     assert_eq!(raw.resource, "/usr/bin/sed");
@@ -294,6 +348,12 @@ fn empty_record(kind: KernelEventKind) -> KernelEventRecord {
         event_kind: kind as u32,
         flags: 0,
         return_value: 0,
+        scope_generation: 0,
+        process_generation: 0,
+        process_start_time_ns: 0,
+        parent_process_generation: 0,
+        exec_generation: 0,
+        parent_exec_generation: 0,
         comm: [0; COMM_LEN],
         resource: [0; RESOURCE_LEN],
         action: [0; ACTION_LEN],

@@ -192,6 +192,11 @@ async fn observer_batch_submits_only_records_with_session_ownership() {
     .expect("session timeline");
     assert!(timeline.contains(r#""record_type":"raw_kernel_event""#));
     assert!(timeline.contains(r#""cgroup_id":"77""#));
+    assert!(timeline.contains(r#""host_boot_id":"11111111-2222-3333-4444-555555555555""#));
+    assert!(timeline.contains(r#""scope_generation":1"#));
+    assert!(timeline.contains(r#""process_generation":100"#));
+    assert!(timeline.contains(r#""exec_generation":1"#));
+    assert!(timeline.contains(r#""relation_status":"exact""#));
     assert!(!timeline.contains(r#""cgroup_id":"99""#));
     assert!(timeline.contains("path_token:"));
     assert!(!timeline.contains("/host/private/credential"));
@@ -320,6 +325,7 @@ fn kernel_event(cgroup_id: u64) -> DaemonKernelEvent {
     comm[..4].copy_from_slice(b"test");
     DaemonKernelEvent {
         timestamp_unix_ms: 1_700_000_000_100,
+        host_boot_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
         record: KernelEventRecord {
             abi_version: KERNEL_ABI_VERSION,
             record_size: KERNEL_EVENT_RECORD_LEN as u32,
@@ -332,6 +338,12 @@ fn kernel_event(cgroup_id: u64) -> DaemonKernelEvent {
             event_kind: KernelEventKind::Exec as u32,
             flags: 0,
             return_value: 0,
+            scope_generation: 1,
+            process_generation: 100,
+            process_start_time_ns: 1_000,
+            parent_process_generation: 1,
+            exec_generation: 1,
+            parent_exec_generation: 1,
             comm,
             resource: [0; RESOURCE_LEN],
             action: [0; ACTION_LEN],

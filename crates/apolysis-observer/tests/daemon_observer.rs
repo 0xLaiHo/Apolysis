@@ -37,7 +37,7 @@ fn daemon_batch_decoder_accounts_for_invalid_and_truncated_records() {
     valid[40..44].copy_from_slice(&(KernelEventKind::Exec as u32).to_ne_bytes());
     valid[44..48].copy_from_slice(&FLAG_RESOURCE_TRUNCATED.to_ne_bytes());
     let mut abi_mismatch = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
-    abi_mismatch[0..4].copy_from_slice(&3_u32.to_ne_bytes());
+    abi_mismatch[0..4].copy_from_slice(&2_u32.to_ne_bytes());
     abi_mismatch[4..8].copy_from_slice(&(KERNEL_EVENT_RECORD_LEN as u32).to_ne_bytes());
 
     let batch = decoder.decode(vec![valid, abi_mismatch, vec![0_u8; 4]]);

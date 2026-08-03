@@ -117,8 +117,10 @@ Priorities:
   succeeded, failed, denied, pending, and unknown;
 - preserve per-cgroup operation correlation counters and qualify isolated
   Agent-Run gap persistence across scope drain, shutdown, and identity churn;
-- establish stable process identity across PID reuse and exec;
-- preserve cgroup scope and deterministic process lineage;
+- preserve stable process identity across PID reuse and exec within one
+  collector lifetime;
+- preserve generation-qualified cgroup scope and deterministic process
+  lineage;
 - emit collector start, periodic health, loss checkpoints, terminal state, and
   explicit stop reason;
 - fail loud on reserve failure, map pressure, truncation, decode failure,

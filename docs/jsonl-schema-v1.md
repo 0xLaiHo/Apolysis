@@ -57,8 +57,8 @@ Fields:
 - `collector`: collector identifier, currently `apolysis_observer`
 - `collector_version`: userspace collector package version
 - `kernel_abi_version`: supported kernel/userspace event ABI version, currently
-  `2`
-- `kernel_record_size`: event record size for ABI v2, currently `616`
+  `3`
+- `kernel_record_size`: event record size for ABI v3, currently `656`
 - `observation_scope`: `process_tree` or `cgroup`; the manifest does not persist
   the host PID or cgroup ID
 - `privacy_profile`: persistence privacy profile, currently `content_off`
@@ -102,11 +102,34 @@ Fields:
 - `errno`: positive Linux errno derived from a negative return value, or `null`
 - `container_id`: container identifier or `null`
 - `cgroup_id`: cgroup identifier or `null`
+- `host_boot_id`: boot UUID captured once by the live userspace collector, or
+  `null` for legacy/fixture sources
+- `scope_generation`: observer-lifetime generation for one cgroup scope, or
+  `null`
+- `process_generation`: bounded collector-assigned process generation, or
+  `null`
+- `process_start_time_ns`: kernel process start time in boot-relative
+  nanoseconds, or `null`
+- `exec_generation`: process-local exec generation, or `null`
+- `parent_process_generation`: parent process generation when known, or `null`
+- `parent_exec_generation`: parent exec generation when known, or `null`
+- `relation_status`: `exact`, `inferred`, `ambiguous`, or `unattributed`
+- `relation_reason`: stable reason describing the attribution status
 - `process_command`: legacy redacted command context, or `null`; current
   content-off observer producers emit `null`
 - `process_executable`: allowlisted `executable_ref:<basename>` known for the
   PID, or `null`; paths and small-space executable hashes are not persisted
-- `process_started_at_unix_ms`: command-context start timestamp, or `null`
+- `process_started_at_unix_ms`: legacy command-context start timestamp, or
+  `null`; this is distinct from the boot-relative kernel
+  `process_start_time_ns`
+
+Runtime attribution is `exact` only when `host_boot_id`, `scope_generation`,
+`process_generation`, `process_start_time_ns`, and `exec_generation` are
+present. A fork identity without a confirmed process-start time remains
+`inferred`. Missing generation data remains `inferred` with a reason; PID-only
+matching is never exact. Scope generation prevents numeric cgroup-ID reuse from
+crossing Agent Runs within one observer lifetime, but does not claim continuity
+across collector restart.
 
 Runtime metadata records are canonical `event` records with
 `event_type:"runtime_metadata"`. Agent supervisor metadata uses resources such
@@ -141,6 +164,17 @@ Fields:
 - `errno`: positive Linux errno derived from a negative return value, or `null`
 - `container_id`: container identifier or `null`
 - `cgroup_id`: cgroup identifier or `null`
+- `host_boot_id`: boot UUID attached by the live userspace collector, or `null`
+- `scope_generation`: observer-lifetime cgroup-scope generation, or `null`
+- `process_generation`: bounded collector-assigned process generation, or
+  `null`
+- `process_start_time_ns`: kernel process start time in boot-relative
+  nanoseconds, or `null`
+- `exec_generation`: process-local exec generation, or `null`
+- `parent_process_generation`: parent process generation when known, or `null`
+- `parent_exec_generation`: parent exec generation when known, or `null`
+- `relation_status`: `exact`, `inferred`, `ambiguous`, or `unattributed`
+- `relation_reason`: stable reason describing the attribution status
 - `raw_payload`: bounded raw payload after persistence-time redaction
 
 Persisted exec payloads never contain argv. They contain

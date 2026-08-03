@@ -19,7 +19,7 @@ use apolysis_observer::abi::{
 };
 use apolysis_observer::{
     DaemonKernelEvent, DaemonObserverBatch, DaemonObserverCounters, FileOperationCounters,
-    NetworkConnectCounters, OperationPairCounters, ScopeObservationGapCounters,
+    NetworkConnectCounters, OperationPairCounters, ScopeGeneration, ScopeObservationGapCounters,
 };
 use tokio::sync::oneshot;
 
@@ -376,7 +376,7 @@ async fn dropped_file_outcome_stops_the_observer_runtime() {
 
     let error = run_observer_runtime(
         backend,
-        Vec::new(),
+        vec![52],
         receiver,
         Arc::clone(&state),
         shutdown_receiver,
@@ -415,7 +415,7 @@ async fn normalization_failure_stops_queued_observer_ingest() {
 
     let error = run_observer_runtime(
         backend,
-        Vec::new(),
+        vec![53],
         receiver,
         Arc::clone(&state),
         shutdown_receiver,
@@ -696,6 +696,75 @@ async fn restored_scope_failure_keeps_ebpf_unavailable() {
 }
 
 #[tokio::test]
+async fn reused_cgroup_rejects_records_from_the_drained_scope_generation() {
+    let config = config();
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let mut stale = file_outcome_batch_for_path(41, "reused-stale.txt");
+    stale.events[0].record.scope_generation = 1;
+    let backend = ReuseBackend {
+        operations: Arc::clone(&operations),
+        stale_batch: Some(stale),
+    };
+    let (scope, receiver) = scope_channel(4);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (_observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+
+    state
+        .register(intent("agent-run-generation-a"), 1_700_000_000_000)
+        .await
+        .expect("register first Agent Run");
+    state
+        .discover_cgroup("agent-run-generation-a", 41)
+        .await
+        .expect("track first cgroup generation");
+    state
+        .close("agent-run-generation-a")
+        .await
+        .expect("drain first cgroup generation");
+    state
+        .register(intent("agent-run-generation-b"), 1_700_000_000_001)
+        .await
+        .expect("register second Agent Run");
+    state
+        .discover_cgroup("agent-run-generation-b", 41)
+        .await
+        .expect("reuse numeric cgroup with a new generation");
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), runtime)
+        .await
+        .expect("stale generation must stop the observer")
+        .expect("observer task")
+        .expect_err("stale generation must fail loud");
+
+    assert!(error.contains("stale or unknown scope generations"));
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            (ScopeOperation::Track, 41),
+            (ScopeOperation::Untrack, 41),
+            (ScopeOperation::Track, 41),
+        ]
+    );
+    assert!(!timeline(&config, "agent-run-generation-b").contains("reused-stale.txt"));
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn abi_mismatch_stops_the_observer_and_marks_ebpf_unavailable() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
@@ -743,16 +812,72 @@ struct FakeBackend {
     scoped_counters: BTreeMap<u64, ScopeObservationGapCounters>,
 }
 
-impl ObserverRuntimeBackend for FakeBackend {
-    fn track_cgroup(&mut self, cgroup_id: u64) -> Result<(), String> {
+struct ReuseBackend {
+    operations: Arc<Mutex<Vec<(ScopeOperation, u64)>>>,
+    stale_batch: Option<DaemonObserverBatch>,
+}
+
+impl ObserverRuntimeBackend for ReuseBackend {
+    fn track_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeGeneration, String> {
+        let mut operations = self.operations.lock().unwrap();
+        let generation = operations
+            .iter()
+            .filter(|(operation, _)| *operation == ScopeOperation::Track)
+            .count() as u64
+            + 1;
+        operations.push((ScopeOperation::Track, cgroup_id));
+        ScopeGeneration::new(generation)
+    }
+
+    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
         self.operations
             .lock()
             .unwrap()
-            .push((ScopeOperation::Track, cgroup_id));
+            .push((ScopeOperation::Untrack, cgroup_id));
+        Ok(ScopeObservationGapCounters::default())
+    }
+
+    fn drain_batch(&mut self) -> Result<DaemonObserverBatch, String> {
+        Ok(DaemonObserverBatch::default())
+    }
+
+    fn read_batch(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<DaemonObserverBatch, String>> + Send + '_>> {
+        let tracked_twice = self
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(operation, _)| *operation == ScopeOperation::Track)
+            .count()
+            >= 2;
+        if tracked_twice {
+            if let Some(batch) = self.stale_batch.take() {
+                return Box::pin(async move { Ok(batch) });
+            }
+        }
+        Box::pin(pending())
+    }
+
+    fn counters(&mut self) -> Result<DaemonObserverCounters, String> {
+        Ok(DaemonObserverCounters::default())
+    }
+}
+
+impl ObserverRuntimeBackend for FakeBackend {
+    fn track_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeGeneration, String> {
+        let mut operations = self.operations.lock().unwrap();
+        let generation = operations
+            .iter()
+            .filter(|(operation, _)| *operation == ScopeOperation::Track)
+            .count() as u64
+            + 1;
+        operations.push((ScopeOperation::Track, cgroup_id));
         if self.fail_track == Some(cgroup_id) {
             return Err("track failed".to_string());
         }
-        Ok(())
+        ScopeGeneration::new(generation)
     }
 
     fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
@@ -838,6 +963,7 @@ fn file_outcome_batch_for_path(cgroup_id: u64, path: &str) -> DaemonObserverBatc
     DaemonObserverBatch {
         events: vec![DaemonKernelEvent {
             timestamp_unix_ms: 1_780_000_000_000,
+            host_boot_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
             record: KernelEventRecord {
                 abi_version: KERNEL_ABI_VERSION,
                 record_size: KERNEL_EVENT_RECORD_LEN as u32,
@@ -850,6 +976,12 @@ fn file_outcome_batch_for_path(cgroup_id: u64, path: &str) -> DaemonObserverBatc
                 event_kind: KernelEventKind::Open as u32,
                 flags: FLAG_RETURN_VALUE,
                 return_value: 3,
+                scope_generation: 1,
+                process_generation: 4_242,
+                process_start_time_ns: 42_000,
+                parent_process_generation: 1,
+                exec_generation: 1,
+                parent_exec_generation: 1,
                 comm,
                 resource,
                 action,
