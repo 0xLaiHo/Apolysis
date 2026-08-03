@@ -143,8 +143,9 @@ thread-scoped entry record，并在 syscall exit 发出 Runtime Observation。Li
 在 multi-cgroup daemon 模式下，connect 与文件配对丢失会按 cgroup 分别计数，同时保留
 collector-global counter 用于健康诊断。Drain 一个 scope 时会阻止新的 entry，快照其
 missing-entry、missing-exit 与 pending 计数；快照前会有界等待正在执行的 collector update
-排空，并在丢弃归属前确认类型化 Observation Gap 已持久化到所属 Agent Run。Drain、快照、
-queue 或 storage 失败会停止 observer runtime，并拒绝把该 run 干净关闭。
+排空，并在丢弃归属前确认类型化 Observation Gap 已持久化到所属 Agent Run。已提交的 ring
+record 会先被排空并确认持久化。Drain、快照、queue drop/shedding 或 storage 失败会停止
+observer runtime，并拒绝把该 run 干净关闭。
 
 全 syscall 采集、prompt/response、TLS plaintext 和通用 kernel enforcement 都不是目标。
 
@@ -303,8 +304,9 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 - 没有额外传播 identity 时，无法区分同进程中的逻辑 Agent；runtime-only attribution 保持
   process-level。
 - Cgroup scope drain 时仍 pending 的 connect 或 file entry 会保留在有界配对 map 中，直到
-  syscall 返回或 thread 退出。在这些 entry 完成前把同一 cgroup 重新归属给另一个 Agent Run
-  尚未经过资格验证；要安全支持 cgroup 复用，仍需稳定的 scope generation。
+  syscall 返回或 thread 退出。为防止这些 record 跨 Agent Run，daemon 会维护有界的 retired
+  cgroup guard，并在同一 observer 生命周期内拒绝复用该数字 cgroup ID。若不重启 observer
+  也要安全复用，仍需稳定的 scope generation。
 - Entry 缺失后，exit 侧无法重建 `openat` 或 `openat2` flags，因此这类 unmatched exit 会
   保守归因到 `file_open`，而不是 create 或 truncate。
 - 被攻陷的 kernel 或 privileged host 可以省略或伪造 observation。

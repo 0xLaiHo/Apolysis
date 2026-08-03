@@ -129,9 +129,12 @@ impl EventPipeline {
             })
             .map_err(|error| format!("failed to submit record: {error}"))?
         {
-            PushOutcome::Accepted | PushOutcome::AcceptedAfterShedding { .. } => receiver
+            PushOutcome::Accepted => receiver
                 .await
                 .map_err(|_| "record left the queue before writer confirmation".to_string())?,
+            PushOutcome::AcceptedAfterShedding { dropped } => Err(format!(
+                "confirmed record admission shed a {dropped:?} record"
+            )),
             PushOutcome::Dropped { dropped } => {
                 Err(format!("record was dropped from the {dropped:?} queue"))
             }

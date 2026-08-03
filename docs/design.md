@@ -164,8 +164,10 @@ separately for each cgroup while collector-global counters remain available
 for health diagnosis. Draining a scope prevents new entries, snapshots its
 missing-entry, missing-exit, and pending counts after a bounded in-flight
 collector-update drain, and confirms typed Observation Gaps are durable in the
-owning Agent Run before its ownership is discarded. A drain, snapshot, queue,
-or storage failure stops the observer runtime and rejects a clean run close.
+owning Agent Run before its ownership is discarded. Already-submitted ring
+records are drained and confirmed durable first. A drain, snapshot, queue drop
+or shedding event, or storage failure stops the observer runtime and rejects a
+clean run close.
 
 Full-syscall collection, prompt/response capture, TLS plaintext capture, and
 generic kernel enforcement are not targets.
@@ -341,10 +343,11 @@ them as historical implementation input; they do not define this architecture.
 - Same-process logical Agents cannot be separated without an additional
   propagated identity; runtime-only attribution remains process-level.
 - Connect or file entries still pending when a cgroup scope drains remain in
-  bounded pairing maps until syscall or thread exit. Reassigning that same
-  cgroup to another Agent Run before those entries settle is not a qualified
-  workflow; stable scope generations remain required before cgroup reuse can
-  be supported safely.
+  bounded pairing maps until syscall or thread exit. To prevent those records
+  from crossing Agent Runs, the daemon keeps a bounded retired-cgroup guard and
+  rejects reuse of that numeric cgroup ID for the rest of the observer
+  lifetime. Stable scope generations remain required before safe reuse can be
+  supported without restarting the observer.
 - The exit side cannot reconstruct `openat` or `openat2` flags after a missing
   entry, so such an unmatched exit is conservatively attributed to
   `file_open`, not create or truncate.

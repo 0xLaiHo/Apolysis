@@ -29,6 +29,7 @@ use crate::abi::{
 };
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
+use crate::scope::ScopeSet;
 use crate::{
     audit_observer_capability_manifest, canonicalize, write_observer_metadata, AyaLoaderPlan,
     EventIdSequence, ObserveResult, ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor,
@@ -531,6 +532,50 @@ pub struct DaemonObserver {
     ebpf: Ebpf,
     ring: AsyncFd<RingBuf<MapData>>,
     decoder: ObserverBatchDecoder,
+    retired_cgroups: RetiredCgroupGuard,
+}
+
+#[derive(Debug, Default)]
+struct RetiredCgroupGuard {
+    cgroup_ids: ScopeSet,
+}
+
+impl RetiredCgroupGuard {
+    #[cfg(test)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            cgroup_ids: ScopeSet::with_capacity(capacity),
+        }
+    }
+
+    fn validate_track(&self, cgroup_id: u64) -> Result<(), String> {
+        if self.cgroup_ids.contains(cgroup_id) {
+            return Err(format!(
+                "cgroup observer scope {cgroup_id} was already drained; reuse requires a stable scope generation"
+            ));
+        }
+        if self.cgroup_ids.len() >= self.cgroup_ids.capacity() {
+            return Err(format!(
+                "retired cgroup generation guard capacity reached: {}",
+                self.cgroup_ids.capacity()
+            ));
+        }
+        Ok(())
+    }
+
+    fn reserve_drain(&mut self, cgroup_id: u64) -> Result<(), String> {
+        match self.cgroup_ids.insert(cgroup_id) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "cgroup observer scope {cgroup_id} was already drained; reuse requires a stable scope generation"
+            )),
+            Err(error) => Err(format!("retired cgroup generation guard: {error}")),
+        }
+    }
+
+    fn rollback_drain(&mut self, cgroup_id: u64) {
+        self.cgroup_ids.remove(cgroup_id);
+    }
 }
 
 impl DaemonObserver {
@@ -555,10 +600,12 @@ impl DaemonObserver {
             ebpf,
             ring,
             decoder: ObserverBatchDecoder::capture()?,
+            retired_cgroups: RetiredCgroupGuard::default(),
         })
     }
 
     pub fn track_cgroup(&mut self, cgroup_id: u64) -> Result<(), String> {
+        self.retired_cgroups.validate_track(cgroup_id)?;
         update_tracked_cgroup(&mut self.ebpf, cgroup_id, true)
     }
 
@@ -566,12 +613,23 @@ impl DaemonObserver {
         &mut self,
         cgroup_id: u64,
     ) -> Result<ScopeObservationGapCounters, String> {
-        drain_tracked_cgroup(&mut self.ebpf, cgroup_id)
+        self.retired_cgroups.reserve_drain(cgroup_id)?;
+        match drain_tracked_cgroup(&mut self.ebpf, cgroup_id) {
+            Ok(counters) => Ok(counters),
+            Err(error) => {
+                self.retired_cgroups.rollback_drain(cgroup_id);
+                Err(error)
+            }
+        }
     }
 
     pub async fn read_batch(&mut self) -> Result<DaemonObserverBatch, String> {
         let records = read_ring_batch(&mut self.ring).await?;
         Ok(self.decoder.decode(records))
+    }
+
+    pub fn drain_batch(&mut self) -> DaemonObserverBatch {
+        self.decoder.decode(drain_ring_batch_now(&mut self.ring))
     }
 
     pub fn counters(&mut self) -> Result<DaemonObserverCounters, String> {
@@ -1719,7 +1777,7 @@ pub fn enable_multi_cgroup_scope(ebpf: &mut Ebpf) -> Result<(), String> {
 }
 
 /// Add or remove one cgroup id from the daemon observer scope map.
-pub fn update_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64, present: bool) -> Result<(), String> {
+fn update_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64, present: bool) -> Result<(), String> {
     if cgroup_id == 0 {
         return Err("cgroup id must be non-zero".to_string());
     }
@@ -1969,11 +2027,22 @@ fn restore_scope_with_counters(
     error: String,
 ) -> String {
     let mut failures = vec![error];
+    let mut prerequisites_restored = true;
     if let Err(rollback) = set_network_connect_counters(ebpf, cgroup_id, network) {
+        prerequisites_restored = false;
         failures.push(format!("connect-counter rollback failed: {rollback}"));
     }
     if let Err(rollback) = set_file_operation_counters(ebpf, cgroup_id, files) {
+        prerequisites_restored = false;
         failures.push(format!("file-counter rollback failed: {rollback}"));
+    }
+    if let Err(rollback) = set_scope_updates_inflight(ebpf, cgroup_id, 0) {
+        prerequisites_restored = false;
+        failures.push(format!("in-flight update rollback failed: {rollback}"));
+    }
+    if !prerequisites_restored {
+        failures.push("cgroup scope remains inactive after incomplete rollback".to_string());
+        return failures.join("; ");
     }
     restore_active_scope(ebpf, cgroup_id, failures.join("; "))
 }
@@ -2007,14 +2076,28 @@ fn drain_tracked_cgroup(
 
     let network_snapshot = match read_network_connect_counters(ebpf, cgroup_id) {
         Ok(snapshot) => snapshot,
-        Err(error) => return Err(restore_active_scope(ebpf, cgroup_id, error)),
+        Err(error) => {
+            return Err(format!(
+                "{error}; cgroup scope remains inactive because its connect counters could not be restored"
+            ));
+        }
     };
     let file_snapshot = match read_file_operation_counters(ebpf, cgroup_id) {
         Ok(snapshot) => snapshot,
-        Err(error) => return Err(restore_active_scope(ebpf, cgroup_id, error)),
+        Err(error) => {
+            return Err(format!(
+                "{error}; cgroup scope remains inactive because its file counters could not be restored"
+            ));
+        }
     };
     if let Err(error) = remove_network_connect_counters(ebpf, cgroup_id) {
-        return Err(restore_active_scope(ebpf, cgroup_id, error));
+        return Err(restore_scope_with_counters(
+            ebpf,
+            cgroup_id,
+            network_snapshot,
+            file_snapshot,
+            error,
+        ));
     }
     if let Err(error) = remove_file_operation_counters(ebpf, cgroup_id) {
         return Err(restore_scope_with_counters(
@@ -2086,6 +2169,14 @@ async fn read_ring_batch(ring: &mut AsyncFd<RingBuf<MapData>>) -> Result<Vec<Vec
     }
     guard.clear_ready();
     Ok(batch)
+}
+
+fn drain_ring_batch_now(ring: &mut AsyncFd<RingBuf<MapData>>) -> Vec<Vec<u8>> {
+    let mut batch = Vec::new();
+    while let Some(item) = ring.get_mut().next() {
+        batch.push(item.to_vec());
+    }
+    batch
 }
 
 fn write_scope_metadata(
@@ -2343,6 +2434,26 @@ mod tests {
         .expect("in-flight updates drain");
 
         assert!(observed.is_empty());
+    }
+
+    #[test]
+    fn drained_cgroup_ids_cannot_be_reassigned_without_a_scope_generation() {
+        let mut guard = RetiredCgroupGuard::with_capacity(1);
+
+        guard.reserve_drain(41).expect("reserve drained cgroup");
+        let reuse = guard
+            .validate_track(41)
+            .expect_err("same observer must reject numeric cgroup reuse");
+        assert!(reuse.contains("stable scope generation"));
+        let capacity = guard
+            .reserve_drain(42)
+            .expect_err("retired cgroup guard stays bounded");
+        assert!(capacity.contains("capacity reached"));
+
+        guard.rollback_drain(41);
+        guard
+            .validate_track(41)
+            .expect("failed drains do not retire active cgroups");
     }
 
     #[test]

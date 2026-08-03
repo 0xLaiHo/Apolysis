@@ -280,9 +280,11 @@ Fields:
 
 The managed single-Agent-Run live observer persists these records directly.
 The multi-cgroup daemon snapshots connect and file gap counters per cgroup and
-persists them to only the owning Agent Run before explicit scope removal or
-clean observer shutdown completes. Collector-global counters remain available
-for diagnostics and are not reassigned to an Agent Run.
+first drains already-submitted ring records with confirmed writes. It then
+persists gaps to only the owning Agent Run before explicit scope removal or
+clean observer shutdown completes. Any queue drop or shedding fails the
+observer runtime. Collector-global counters remain available for diagnostics
+and are not reassigned to an Agent Run.
 
 ### `observer_diagnostic`
 

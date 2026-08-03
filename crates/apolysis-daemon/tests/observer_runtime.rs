@@ -11,9 +11,13 @@ use apolysis_daemon::{
     run_observer_runtime, scope_channel, DaemonConfig, DaemonRecord, DaemonState,
     ObserverRuntimeBackend, ScopeOperation,
 };
+use apolysis_observer::abi::{
+    KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN, FLAG_RETURN_VALUE,
+    KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
+};
 use apolysis_observer::{
-    DaemonObserverBatch, DaemonObserverCounters, FileOperationCounters, NetworkConnectCounters,
-    OperationPairCounters, ScopeObservationGapCounters,
+    DaemonKernelEvent, DaemonObserverBatch, DaemonObserverCounters, FileOperationCounters,
+    NetworkConnectCounters, OperationPairCounters, ScopeObservationGapCounters,
 };
 use tokio::sync::oneshot;
 
@@ -30,6 +34,7 @@ async fn observer_runtime_processes_scope_commands_and_reports_final_counters() 
         fail_track: None,
         fail_untrack: None,
         batch: None,
+        drain_batch: None,
         scoped_counters: BTreeMap::new(),
     };
     let (scope, receiver) = scope_channel(4);
@@ -96,6 +101,7 @@ async fn observer_shutdown_persists_connect_gaps_to_the_owning_agent_run() {
         fail_track: None,
         fail_untrack: None,
         batch: None,
+        drain_batch: None,
         scoped_counters: BTreeMap::from([
             (
                 31,
@@ -191,6 +197,7 @@ async fn observer_shutdown_persists_file_gaps_to_the_owning_agent_runs() {
         fail_track: None,
         fail_untrack: None,
         batch: None,
+        drain_batch: Some(file_outcome_batch(71)),
         scoped_counters: BTreeMap::from([
             (
                 71,
@@ -248,6 +255,8 @@ async fn observer_shutdown_persists_file_gaps_to_the_owning_agent_runs() {
 
     let timeline_a = timeline(&config, "agent-run-file-a");
     assert!(timeline_a.contains(r#""operation":"file_open""#));
+    assert!(timeline_a.contains(r#""event_name":"openat""#));
+    assert!(timeline_a.contains(r#""outcome":"succeeded""#));
     assert!(timeline_a.contains(r#""kind":"missing_entry""#));
     assert!(timeline_a.contains(r#""count":2"#));
     assert!(!timeline_a.contains("file_rename"));
@@ -291,6 +300,7 @@ async fn dropped_observation_gap_makes_scope_drain_fail_loud() {
         fail_track: None,
         fail_untrack: None,
         batch: None,
+        drain_batch: None,
         scoped_counters: BTreeMap::from([(
             51,
             ScopeObservationGapCounters {
@@ -329,6 +339,55 @@ async fn dropped_observation_gap_makes_scope_drain_fail_loud() {
 }
 
 #[tokio::test]
+async fn dropped_file_outcome_stops_the_observer_runtime() {
+    let mut config = config();
+    config.queue_capacity = 1;
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("agent-run-outcome-drop"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-outcome-drop", 52)
+        .await
+        .expect("associate cgroup");
+    state
+        .pipeline()
+        .submit(DaemonRecord::new(
+            "agent-run-outcome-drop",
+            QueuePriority::Integrity,
+            serde_json::json!({"record_type":"integrity_test"}),
+        ))
+        .expect("fill protected queue");
+
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: Some(file_outcome_batch(52)),
+        drain_batch: None,
+        scoped_counters: BTreeMap::new(),
+    };
+    let (_scope, receiver) = scope_channel(1);
+    let (_shutdown, shutdown_receiver) = oneshot::channel();
+
+    let error = run_observer_runtime(
+        backend,
+        Vec::new(),
+        receiver,
+        Arc::clone(&state),
+        shutdown_receiver,
+    )
+    .await
+    .expect_err("dropped file outcome must fail loud");
+
+    assert!(error.contains("dropped"));
+    assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
     let config = config();
     let operations = Arc::new(Mutex::new(Vec::new()));
@@ -338,6 +397,7 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
         fail_track: None,
         fail_untrack: None,
         batch: None,
+        drain_batch: Some(file_outcome_batch(41)),
         scoped_counters: BTreeMap::from([(
             41,
             ScopeObservationGapCounters {
@@ -388,9 +448,13 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
     let gap_index = timeline_after_close
         .find(r#""record_type":"observation_gap""#)
         .expect("gap is durable before close returns");
+    let outcome_index = timeline_after_close
+        .find(r#""event_name":"openat""#)
+        .expect("completed file outcome is durable before close returns");
     let close_index = timeline_after_close
         .find(r#""record_type":"session_closed""#)
         .expect("terminal record is durable before close returns");
+    assert!(outcome_index < close_index);
     assert!(gap_index < close_index);
 
     observer_shutdown
@@ -424,6 +488,7 @@ async fn counter_read_failure_marks_ebpf_unavailable() {
         fail_track: None,
         fail_untrack: None,
         batch: None,
+        drain_batch: None,
         scoped_counters: BTreeMap::new(),
     };
     let (_scope, receiver) = scope_channel(1);
@@ -458,6 +523,7 @@ async fn scoped_counter_read_failure_stops_runtime_and_keeps_agent_run_open() {
         fail_track: None,
         fail_untrack: Some(61),
         batch: None,
+        drain_batch: None,
         scoped_counters: BTreeMap::new(),
     };
     let (scope, receiver) = scope_channel(2);
@@ -507,6 +573,7 @@ async fn restored_scope_failure_keeps_ebpf_unavailable() {
         fail_track: Some(31),
         fail_untrack: None,
         batch: None,
+        drain_batch: None,
         scoped_counters: BTreeMap::new(),
     };
     let (_scope, receiver) = scope_channel(1);
@@ -540,6 +607,7 @@ async fn abi_mismatch_stops_the_observer_and_marks_ebpf_unavailable() {
             abi_mismatches: 1,
             ..DaemonObserverBatch::default()
         }),
+        drain_batch: None,
         scoped_counters: BTreeMap::new(),
     };
     let (_scope, receiver) = scope_channel(1);
@@ -570,6 +638,7 @@ struct FakeBackend {
     fail_track: Option<u64>,
     fail_untrack: Option<u64>,
     batch: Option<DaemonObserverBatch>,
+    drain_batch: Option<DaemonObserverBatch>,
     scoped_counters: BTreeMap<u64, ScopeObservationGapCounters>,
 }
 
@@ -594,6 +663,10 @@ impl ObserverRuntimeBackend for FakeBackend {
             return Err("scoped counter read failed".to_string());
         }
         Ok(self.scoped_counters.remove(&cgroup_id).unwrap_or_default())
+    }
+
+    fn drain_batch(&mut self) -> Result<DaemonObserverBatch, String> {
+        Ok(self.drain_batch.take().unwrap_or_default())
     }
 
     fn read_batch(
@@ -639,6 +712,38 @@ fn timeline(config: &DaemonConfig, agent_run_id: &str) -> String {
             .join("timeline.jsonl"),
     )
     .expect("read Agent Run timeline")
+}
+
+fn file_outcome_batch(cgroup_id: u64) -> DaemonObserverBatch {
+    let mut comm = [0_u8; COMM_LEN];
+    comm[..4].copy_from_slice(b"test");
+    let mut resource = [0_u8; RESOURCE_LEN];
+    resource[..12].copy_from_slice(b"artifact.txt");
+    let mut action = [0_u8; ACTION_LEN];
+    action[..4].copy_from_slice(b"read");
+    DaemonObserverBatch {
+        events: vec![DaemonKernelEvent {
+            timestamp_unix_ms: 1_780_000_000_000,
+            record: KernelEventRecord {
+                abi_version: KERNEL_ABI_VERSION,
+                record_size: KERNEL_EVENT_RECORD_LEN as u32,
+                timestamp_ns: 1,
+                cgroup_id,
+                pid: 4242,
+                ppid: 1,
+                uid: 1000,
+                gid: 1000,
+                event_kind: KernelEventKind::Open as u32,
+                flags: FLAG_RETURN_VALUE,
+                return_value: 3,
+                comm,
+                resource,
+                action,
+                payload: [0; PAYLOAD_LEN],
+            },
+        }],
+        ..DaemonObserverBatch::default()
+    }
 }
 
 fn config() -> DaemonConfig {
