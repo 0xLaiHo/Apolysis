@@ -165,6 +165,7 @@ sudo -E ./target/debug/apolysis observe \
 - [范围决策](docs/adr/0004-focus-on-ebpf-agent-observability.md)
 - [设计文档](docs/design.zh-CN.md)
 - [路线图](docs/roadmap.zh-CN.md)
+- [有界 Beta 验证计划](docs/beta-qualification-plan.zh-CN.md)
 - [Quickstart](docs/quickstart.md)
 - [JSONL 模式](docs/jsonl-schema-v1.md)
 - [威胁模型](docs/threat-model.md)

@@ -184,6 +184,7 @@ third-party workload behavior still require a documented threat model.
 - [Scope decision](docs/adr/0004-focus-on-ebpf-agent-observability.md)
 - [Design](docs/design.md)
 - [Roadmap](docs/roadmap.md)
+- [Bounded Beta qualification plan](docs/beta-qualification-plan.md)
 - [Quickstart](docs/quickstart.md)
 - [JSONL schema](docs/jsonl-schema-v1.md)
 - [Threat model](docs/threat-model.md)
