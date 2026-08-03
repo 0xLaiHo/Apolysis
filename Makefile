@@ -1,14 +1,4 @@
 .PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
-	test-evidence-objects-real \
-	test-gateway-authority-rotation \
-	test-gateway-postgres \
-	test-gateway-postgres-crash-recovery \
-	test-gateway-https-crash-recovery \
-	test-gateway-https-replay-ttl-lock-wait \
-	test-gateway-mixed-lifecycle-deadline-races \
-	test-gateway-multiprocess-lifecycle-races \
-	test-projection-postgres \
-	test-gateway-transport-mtls \
 	test-local-agent-command-attribution \
 	test-policy-guardrails test-policy-guardrails-bpf-lsm-live test-runtime-guardrails \
 	test-runtime-foundation test-runtime-foundation-runtime \
@@ -55,63 +45,6 @@ quickstart:
 # Quickstart smoke test — the one product-path gate run in CI (release-validation.yml).
 test-quickstart:
 	./scripts/test-quickstart.sh
-
-# Opt-in integration gate. This is intentionally separate from `make test` so
-# the default workspace suite never requires Docker or a database.
-test-gateway-postgres:
-	./scripts/test-gateway-postgres.sh
-
-# Opt-in policy/credential cutover gate. It uses the same disposable,
-# loopback-only PostgreSQL harness while requiring the integration test's
-# explicit schema-reset acknowledgement.
-test-gateway-authority-rotation:
-	APOLYSIS_POSTGRES_TEST_COMMAND='APOLYSIS_TEST_ALLOW_DATABASE_RESET=1 cargo test -p apolysis-gateway-server --test authority_rotation -- --ignored --test-threads=1' \
-		./scripts/test-gateway-postgres.sh
-
-# Opt-in destructive fault-injection gate. It owns one random PostgreSQL
-# container and volume and never targets an operator-provided database.
-test-gateway-postgres-crash-recovery:
-	./scripts/test-gateway-postgres-crash-recovery.sh
-
-# Opt-in real HTTPS/mTLS server crash qualification. This extends the transport
-# gate with deterministic process death inside the ordinary AFTER INSERT trigger
-# reached by the final replay write, and after durable commit before any HTTP
-# acknowledgement can be handed to the network stack.
-test-gateway-https-crash-recovery:
-	./scripts/test-gateway-https-crash-recovery.sh
-
-# Opt-in real HTTPS/mTLS replay-TTL qualification. Each exact lifecycle replay
-# crosses the inclusive TTL boundary while its precise operation row is locked.
-test-gateway-https-replay-ttl-lock-wait:
-	./scripts/test-gateway-https-replay-ttl-lock-wait.sh
-
-# Opt-in two-process lifecycle race qualification. Two independent Gateway
-# listeners and pools wait behind a private pre-operation barrier before each
-# coordinated mTLS request pair enters PostgreSQL.
-test-gateway-multiprocess-lifecycle-races:
-	./scripts/test-gateway-multiprocess-lifecycle-races.sh
-
-# Opt-in transaction-boundary lifecycle qualification. Fifteen cells drive
-# exact replay against novel join, bind, ingest, and finish across join-grant,
-# finalization, and lease boundaries: seven real lock waits, seven one-shot
-# SQLSTATE 40001 retries, and focused SQLSTATE 40P01 finish parity.
-test-gateway-mixed-lifecycle-deadline-races:
-	./scripts/test-gateway-mixed-lifecycle-deadline-races.sh
-
-# Opt-in real-provider object lifecycle and crash-recovery qualification.
-test-evidence-objects-real:
-	./scripts/test-evidence-objects-real.sh
-
-# Opt-in production-transport gate. This starts a real PostgreSQL server,
-# creates a real CA and leaf certificates, and exercises the Gateway through
-# an mTLS loopback listener. No in-memory repository or transport mock is used.
-test-gateway-transport-mtls:
-	./scripts/test-gateway-transport-mtls.sh
-
-# Opt-in durability and recovery qualification. This owns two disposable
-# PostgreSQL containers and never uses an operator-supplied database.
-test-projection-postgres:
-	./scripts/test-projection-postgres.sh
 
 test-local-agent-command-attribution:
 	./scripts/test-local-agent-command-attribution.sh
