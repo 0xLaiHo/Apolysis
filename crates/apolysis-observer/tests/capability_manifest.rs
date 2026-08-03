@@ -33,6 +33,89 @@ fn audit_observer_manifest_declares_only_its_current_operation_outcomes() {
     );
     assert_eq!(process_exec.outcomes, [OperationOutcome::Succeeded]);
 
+    for (operation, event_sources) in [
+        (
+            "file_open",
+            &[
+                "syscalls/sys_enter_openat",
+                "syscalls/sys_exit_openat",
+                "syscalls/sys_enter_openat2",
+                "syscalls/sys_exit_openat2",
+            ][..],
+        ),
+        (
+            "file_create",
+            &[
+                "syscalls/sys_enter_openat",
+                "syscalls/sys_exit_openat",
+                "syscalls/sys_enter_openat2",
+                "syscalls/sys_exit_openat2",
+                "syscalls/sys_enter_creat",
+                "syscalls/sys_exit_creat",
+            ][..],
+        ),
+        (
+            "file_truncate",
+            &[
+                "syscalls/sys_enter_openat",
+                "syscalls/sys_exit_openat",
+                "syscalls/sys_enter_openat2",
+                "syscalls/sys_exit_openat2",
+                "syscalls/sys_enter_truncate",
+                "syscalls/sys_exit_truncate",
+            ][..],
+        ),
+        (
+            "file_unlink",
+            &["syscalls/sys_enter_unlinkat", "syscalls/sys_exit_unlinkat"][..],
+        ),
+        (
+            "file_rename",
+            &[
+                "syscalls/sys_enter_renameat2",
+                "syscalls/sys_exit_renameat2",
+            ][..],
+        ),
+    ] {
+        let capability = manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.operation == operation)
+            .unwrap_or_else(|| panic!("missing {operation} capability"));
+        assert_eq!(capability.event_sources, event_sources);
+        assert_eq!(
+            capability.outcomes,
+            [
+                OperationOutcome::Succeeded,
+                OperationOutcome::Failed,
+                OperationOutcome::Denied,
+            ]
+        );
+    }
+
+    let credential_access = manifest
+        .capabilities
+        .iter()
+        .find(|capability| capability.operation == "credential_path_access")
+        .expect("credential path access capability");
+    assert_eq!(
+        credential_access.event_sources,
+        [
+            "syscalls/sys_enter_openat",
+            "syscalls/sys_exit_openat",
+            "syscalls/sys_enter_openat2",
+            "syscalls/sys_exit_openat2",
+        ]
+    );
+    assert_eq!(
+        credential_access.outcomes,
+        [
+            OperationOutcome::Succeeded,
+            OperationOutcome::Failed,
+            OperationOutcome::Denied,
+        ]
+    );
+
     let connect = manifest
         .capabilities
         .iter()
@@ -89,4 +172,40 @@ fn audit_observer_manifest_omits_connect_without_its_exit_hook() {
         audit_observer_capability_manifest("agent-run-partial", &LiveScope::ProcessTree(42), &plan);
 
     assert!(manifest.capabilities.is_empty());
+}
+
+#[test]
+fn audit_observer_manifest_omits_file_operations_without_exit_hooks() {
+    let plan = AyaLoaderPlan {
+        object_path: "target/ebpf/apolysis_observer.bpf.o".into(),
+        ring_buffer_map: "EVENTS".to_string(),
+        tracepoints: vec![
+            TracepointAttach::new("syscalls", "sys_enter_openat"),
+            TracepointAttach::new("syscalls", "sys_enter_openat2"),
+            TracepointAttach::new("syscalls", "sys_enter_creat"),
+            TracepointAttach::new("syscalls", "sys_enter_truncate"),
+            TracepointAttach::new("syscalls", "sys_enter_unlinkat"),
+            TracepointAttach::new("syscalls", "sys_enter_renameat2"),
+        ],
+    };
+
+    let manifest =
+        audit_observer_capability_manifest("agent-run-partial", &LiveScope::ProcessTree(42), &plan);
+
+    for operation in [
+        "file_open",
+        "file_create",
+        "file_truncate",
+        "file_unlink",
+        "file_rename",
+        "credential_path_access",
+    ] {
+        assert!(
+            manifest
+                .capabilities
+                .iter()
+                .all(|capability| capability.operation != operation),
+            "partial {operation} capability must not be declared"
+        );
+    }
 }
