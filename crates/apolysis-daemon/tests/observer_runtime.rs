@@ -838,6 +838,7 @@ fn file_outcome_batch_for_path(cgroup_id: u64, path: &str) -> DaemonObserverBatc
     DaemonObserverBatch {
         events: vec![DaemonKernelEvent {
             timestamp_unix_ms: 1_780_000_000_000,
+            host_boot_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
             record: KernelEventRecord {
                 abi_version: KERNEL_ABI_VERSION,
                 record_size: KERNEL_EVENT_RECORD_LEN as u32,
@@ -850,6 +851,12 @@ fn file_outcome_batch_for_path(cgroup_id: u64, path: &str) -> DaemonObserverBatc
                 event_kind: KernelEventKind::Open as u32,
                 flags: FLAG_RETURN_VALUE,
                 return_value: 3,
+                scope_generation: 1,
+                process_generation: 4_242,
+                process_start_time_ns: 42_000,
+                parent_process_generation: 1,
+                exec_generation: 1,
+                parent_exec_generation: 1,
                 comm,
                 resource,
                 action,

@@ -320,6 +320,7 @@ fn kernel_event(cgroup_id: u64) -> DaemonKernelEvent {
     comm[..4].copy_from_slice(b"test");
     DaemonKernelEvent {
         timestamp_unix_ms: 1_700_000_000_100,
+        host_boot_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
         record: KernelEventRecord {
             abi_version: KERNEL_ABI_VERSION,
             record_size: KERNEL_EVENT_RECORD_LEN as u32,
@@ -332,6 +333,12 @@ fn kernel_event(cgroup_id: u64) -> DaemonKernelEvent {
             event_kind: KernelEventKind::Exec as u32,
             flags: 0,
             return_value: 0,
+            scope_generation: 1,
+            process_generation: 100,
+            process_start_time_ns: 1_000,
+            parent_process_generation: 1,
+            exec_generation: 1,
+            parent_exec_generation: 1,
             comm,
             resource: [0; RESOURCE_LEN],
             action: [0; ACTION_LEN],

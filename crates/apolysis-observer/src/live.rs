@@ -378,6 +378,7 @@ impl DaemonObserverConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonKernelEvent {
     pub timestamp_unix_ms: u128,
+    pub host_boot_id: Option<String>,
     pub record: KernelEventRecord,
 }
 
@@ -935,7 +936,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 &record,
                 &request.session_id,
                 calibration.to_unix_ms(record.timestamp_ns),
-                "",
+                calibration.host_boot_id.as_deref().unwrap_or_default(),
             ) {
                 Ok(raw) => raw.with_event_id(event_ids.next_raw_event_id()),
                 Err(_) => {
@@ -2274,6 +2275,7 @@ fn append_content_off_runtime_event(
 pub struct ObserverBatchDecoder {
     monotonic_ns: u64,
     unix_ms: u128,
+    host_boot_id: Option<String>,
 }
 
 impl ObserverBatchDecoder {
@@ -2281,7 +2283,13 @@ impl ObserverBatchDecoder {
         Self {
             monotonic_ns,
             unix_ms,
+            host_boot_id: None,
         }
+    }
+
+    pub fn with_host_boot_id(mut self, host_boot_id: impl Into<String>) -> Self {
+        self.host_boot_id = Some(host_boot_id.into());
+        self
     }
 
     fn capture() -> Result<Self, String> {
@@ -2292,6 +2300,9 @@ impl ObserverBatchDecoder {
         Ok(Self {
             monotonic_ns: monotonic_now_ns()?,
             unix_ms,
+            host_boot_id: Some(read_host_boot_id_at(
+                "/proc/sys/kernel/random/boot_id",
+            )?),
         })
     }
 
@@ -2314,6 +2325,7 @@ impl ObserverBatchDecoder {
             }
             batch.events.push(DaemonKernelEvent {
                 timestamp_unix_ms: self.to_unix_ms(record.timestamp_ns),
+                host_boot_id: self.host_boot_id.clone(),
                 record,
             });
         }
@@ -2344,6 +2356,28 @@ fn monotonic_now_ns() -> Result<u64, String> {
         ));
     }
     Ok(value.tv_sec as u64 * 1_000_000_000 + value.tv_nsec as u64)
+}
+
+fn read_host_boot_id_at(path: impl AsRef<Path>) -> Result<String, String> {
+    let path = path.as_ref();
+    let boot_id = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read host boot identity {}: {error}", path.display()))?;
+    let boot_id = boot_id.trim();
+    let valid = boot_id.len() == 36
+        && boot_id.char_indices().all(|(index, character)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                character == '-'
+            } else {
+                character.is_ascii_hexdigit()
+            }
+        });
+    if !valid {
+        return Err(format!(
+            "invalid host boot identity in {}",
+            path.display()
+        ));
+    }
+    Ok(boot_id.to_ascii_lowercase())
 }
 
 pub fn raw_event_from_record(

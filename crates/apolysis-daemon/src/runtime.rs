@@ -414,7 +414,7 @@ async fn ingest_observer_batch_with_delivery(
             &event.record,
             &session_id,
             event.timestamp_unix_ms,
-            "",
+            event.host_boot_id.as_deref().unwrap_or_default(),
         ) {
             Ok(raw) => raw,
             Err(error) => {
