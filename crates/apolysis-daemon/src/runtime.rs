@@ -150,7 +150,17 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                                     );
                                 }
                             }),
-                            ScopeOperation::Untrack => match backend.untrack_cgroup(cgroup_id) {
+                            ScopeOperation::Untrack => {
+                                if let Some(agent_run_id) = &agent_run_id {
+                                    scope_contexts.insert(
+                                        cgroup_id,
+                                        ScopeObservationContext::new(
+                                            agent_run_id.clone(),
+                                            agent_intent.clone(),
+                                        ),
+                                    );
+                                }
+                                match backend.untrack_cgroup(cgroup_id) {
                                 Ok(counters) => {
                                     match backend.drain_batch() {
                                         Ok(batch) => match ingest_observer_batch_confirmed(
@@ -186,7 +196,8 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                                     }
                                 }
                                 Err(error) => Err(error),
-                            },
+                                }
+                            }
                         };
                         match result {
                             Ok(()) => request.complete(Ok(())),
@@ -230,6 +241,13 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
     }
 
     for cgroup_id in tracked_cgroups {
+        if let Some(agent_run_id) = state.session_for_cgroup(cgroup_id).await {
+            let intent = state.intent_for_session(&agent_run_id).await;
+            scope_contexts.insert(
+                cgroup_id,
+                ScopeObservationContext::new(agent_run_id, intent),
+            );
+        }
         let counters = match backend.untrack_cgroup(cgroup_id) {
             Ok(counters) => counters,
             Err(error) => {

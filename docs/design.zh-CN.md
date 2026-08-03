@@ -144,7 +144,7 @@ thread-scoped entry record，并在 syscall exit 发出 Runtime Observation。Li
 collector-global counter 用于健康诊断。Drain 一个 scope 时会阻止新的 entry，快照其
 missing-entry、missing-exit 与 pending 计数；快照前会有界等待正在执行的 collector update
 排空，并在丢弃归属前确认类型化 Observation Gap 已持久化到所属 Agent Run。已提交的 ring
-record 会先被排空并确认持久化。Drain、快照、queue drop/shedding 或 storage 失败会停止
+record 会先经过有界排空并确认持久化。Drain、快照、queue drop/shedding 或 storage 失败会停止
 observer runtime，并拒绝把该 run 干净关闭。
 
 全 syscall 采集、prompt/response、TLS plaintext 和通用 kernel enforcement 都不是目标。

@@ -165,7 +165,7 @@ for health diagnosis. Draining a scope prevents new entries, snapshots its
 missing-entry, missing-exit, and pending counts after a bounded in-flight
 collector-update drain, and confirms typed Observation Gaps are durable in the
 owning Agent Run before its ownership is discarded. Already-submitted ring
-records are drained and confirmed durable first. A drain, snapshot, queue drop
+records pass through a bounded drain and are confirmed durable first. A drain, snapshot, queue drop
 or shedding event, or storage failure stops the observer runtime and rejects a
 clean run close.
 

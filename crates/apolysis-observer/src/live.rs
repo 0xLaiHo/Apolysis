@@ -1789,6 +1789,7 @@ fn update_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64, present: bool) -> Resu
 }
 
 const SCOPE_DRAIN_POLL_LIMIT: usize = 4_096;
+const RING_DRAIN_RECORD_LIMIT: usize = 2_048;
 
 fn track_cgroup_with_observation_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
     match tracked_cgroup_state(ebpf, cgroup_id)? {
@@ -2173,8 +2174,18 @@ async fn read_ring_batch(ring: &mut AsyncFd<RingBuf<MapData>>) -> Result<Vec<Vec
 
 fn drain_ring_batch_now(ring: &mut AsyncFd<RingBuf<MapData>>) -> Vec<Vec<u8>> {
     let mut batch = Vec::new();
-    while let Some(item) = ring.get_mut().next() {
-        batch.push(item.to_vec());
+    let mut idle_polls = 0;
+    while batch.len() < RING_DRAIN_RECORD_LIMIT && idle_polls < SCOPE_DRAIN_POLL_LIMIT {
+        match ring.get_mut().next() {
+            Some(item) => {
+                batch.push(item.to_vec());
+                idle_polls = 0;
+            }
+            None => {
+                idle_polls += 1;
+                std::thread::yield_now();
+            }
+        }
     }
     batch
 }

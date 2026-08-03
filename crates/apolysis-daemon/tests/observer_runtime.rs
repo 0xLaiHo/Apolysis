@@ -6,7 +6,9 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use apolysis_accountability::{ActionClass, ComponentState, QueuePriority, SessionIntent};
+use apolysis_accountability::{
+    ActionClass, ComponentState, QueuePriority, ResourceKind, ResourceSelector, SessionIntent,
+};
 use apolysis_daemon::{
     run_observer_runtime, scope_channel, DaemonConfig, DaemonRecord, DaemonState,
     ObserverRuntimeBackend, ScopeOperation,
@@ -397,7 +399,7 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
         fail_track: None,
         fail_untrack: None,
         batch: None,
-        drain_batch: Some(file_outcome_batch(41)),
+        drain_batch: Some(file_outcome_batch_for_path(41, "/sensitive/private.txt")),
         scoped_counters: BTreeMap::from([(
             41,
             ScopeObservationGapCounters {
@@ -430,13 +432,20 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
     };
 
     state
-        .register(intent("agent-run-close"), 1_700_000_000_000)
+        .register(
+            intent_with_workspace("agent-run-close", "/sensitive"),
+            1_700_000_000_000,
+        )
         .await
         .expect("register Agent Run");
     state
         .discover_cgroup("agent-run-close", 41)
         .await
         .expect("associate cgroup");
+    state
+        .register(intent("agent-run-close"), 1_700_000_000_001)
+        .await
+        .expect("replace Agent Run intent without workspace allowlist");
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
         state.close("agent-run-close"),
@@ -456,6 +465,8 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
         .expect("terminal record is durable before close returns");
     assert!(outcome_index < close_index);
     assert!(gap_index < close_index);
+    assert!(!timeline_after_close.contains("/sensitive/private.txt"));
+    assert!(timeline_after_close.contains("path_token:"));
 
     observer_shutdown
         .send(())
@@ -703,6 +714,15 @@ fn intent(agent_run_id: &str) -> SessionIntent {
     }
 }
 
+fn intent_with_workspace(agent_run_id: &str, workspace: &str) -> SessionIntent {
+    let mut intent = intent(agent_run_id);
+    intent.allowed_resources = vec![ResourceSelector {
+        kind: ResourceKind::Workspace,
+        value: workspace.to_string(),
+    }];
+    intent
+}
+
 fn timeline(config: &DaemonConfig, agent_run_id: &str) -> String {
     std::fs::read_to_string(
         config
@@ -715,10 +735,14 @@ fn timeline(config: &DaemonConfig, agent_run_id: &str) -> String {
 }
 
 fn file_outcome_batch(cgroup_id: u64) -> DaemonObserverBatch {
+    file_outcome_batch_for_path(cgroup_id, "artifact.txt")
+}
+
+fn file_outcome_batch_for_path(cgroup_id: u64, path: &str) -> DaemonObserverBatch {
     let mut comm = [0_u8; COMM_LEN];
     comm[..4].copy_from_slice(b"test");
     let mut resource = [0_u8; RESOURCE_LEN];
-    resource[..12].copy_from_slice(b"artifact.txt");
+    resource[..path.len()].copy_from_slice(path.as_bytes());
     let mut action = [0_u8; ACTION_LEN];
     action[..4].copy_from_slice(b"read");
     DaemonObserverBatch {
