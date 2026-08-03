@@ -115,11 +115,12 @@ deferred beyond the bounded beta.
 
 `v0.3.0` remains the latest public research release and demonstrates the live
 collector, managed Agent launch, JSONL timeline, privacy redaction, and release
-packaging. The current `pre-release` history also contains Gateway,
-PostgreSQL, projection, evidence-object, policy, and production-qualification
-prototypes from the superseded evidence-plane direction. They are not part of
-the active product boundary and will be removed from the active Cargo workspace
-in a dedicated scope-reduction change.
+packaging. The active Cargo workspace now excludes the superseded contracts,
+Gateway, PostgreSQL projection, and evidence-object cluster together with its
+dedicated CI and integration gates. Policy, feedback, validation, and broad
+production-qualification prototypes remain temporarily while their observer,
+daemon, and runtime dependencies are separated in follow-up scope-reduction
+changes; they do not expand the active product boundary.
 
 The scope reset is a roadmap decision, not a retroactive production claim.
 Apolysis remains experimental until the supported collector, attribution,

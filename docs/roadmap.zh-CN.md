@@ -23,8 +23,9 @@ Apolysis 不再推进跨 provider 的 Agent Runtime Evidence & Policy Plane。�
 - finding 是 post-observation review aid，不宣称 enforcement；
 - 中央多租户证据平面需要新的用户证据和新的架构决策。
 
-当前仓库仍包含来自已被取代方向的 prototype。在独立 workspace-reduction 变更将其移出活跃
-build 与 test 前，它们只作为历史输入保留。
+隔离的 contracts、Gateway、PostgreSQL projection 与 evidence-object 集群现已移出活跃
+build 与 test。Workspace 收敛仍未完成；下一步将把 policy actuation、feedback control 与
+广泛的 production qualification 从 observer-side 产品中解耦。
 
 ## Beta 结果
 

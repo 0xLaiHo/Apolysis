@@ -3,10 +3,10 @@
 //! Core domain types for Apolysis.
 //!
 //! This crate intentionally has no third-party dependencies. Its explicit
-//! records remain the legacy local JSONL v1 contract shared by the CLI, policy
-//! engine, store, and eBPF observer. Production Agent Execution Record and
-//! Gateway/Query wire types live in `apolysis-contracts`; keeping this crate
-//! small preserves compatibility for kernel/runtime experiments.
+//! records form the local JSONL v1 observation contract shared by the eBPF
+//! observer, CLI, daemon, store, and runtime-attribution crates. Keeping this
+//! crate small preserves compatibility across the collector and userspace
+//! pipeline.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

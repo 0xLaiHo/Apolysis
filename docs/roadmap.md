@@ -28,9 +28,10 @@ The reset establishes these durable boundaries:
 - a central multi-tenant evidence plane requires new user evidence and a new
   architectural decision.
 
-The current repository still contains prototypes from the superseded
-direction. They remain historical input until a dedicated workspace-reduction
-change removes them from active builds and tests.
+The isolated contracts, Gateway, PostgreSQL projection, and evidence-object
+cluster has now left active builds and tests. Workspace reduction remains open
+while policy actuation, feedback control, and broad production qualification
+are separated from the observer-side product.
 
 ## Beta outcome
 
