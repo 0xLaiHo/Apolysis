@@ -151,20 +151,35 @@ impl CollectorLifecycleCounters {
             || self.global_truncations > 0
             || self.scope_missing_entries > 0
             || self.scope_missing_exits > 0
-            || self.scope_pending > 0
+    }
+
+    fn checkpoint_health(self) -> CollectorHealthState {
+        if self.has_loss() {
+            CollectorHealthState::Degraded
+        } else {
+            CollectorHealthState::Healthy
+        }
+    }
+
+    fn terminal_health(self) -> CollectorHealthState {
+        if self.has_loss() || self.scope_pending > 0 {
+            CollectorHealthState::Degraded
+        } else {
+            CollectorHealthState::Healthy
+        }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectorLifecycleRecord {
-    pub schema_version: u32,
-    pub timestamp_unix_ms: u128,
-    pub agent_run_id: String,
-    pub collector_instance_id: String,
-    pub state: CollectorLifecycleState,
-    pub health: CollectorHealthState,
+    schema_version: u32,
+    timestamp_unix_ms: u128,
+    agent_run_id: String,
+    collector_instance_id: String,
+    state: CollectorLifecycleState,
+    health: CollectorHealthState,
     stop_reason: Option<&'static str>,
-    pub counters: CollectorLifecycleCounters,
+    counters: CollectorLifecycleCounters,
 }
 
 impl CollectorLifecycleRecord {
@@ -185,14 +200,13 @@ impl CollectorLifecycleRecord {
     pub fn checkpoint(
         agent_run_id: impl Into<String>,
         collector_instance_id: impl Into<String>,
-        health: CollectorHealthState,
         counters: CollectorLifecycleCounters,
     ) -> Self {
         Self::new(
             agent_run_id,
             collector_instance_id,
             CollectorLifecycleState::Checkpoint,
-            health,
+            counters.checkpoint_health(),
             None,
             counters,
         )
@@ -201,7 +215,6 @@ impl CollectorLifecycleRecord {
     pub fn stopped(
         agent_run_id: impl Into<String>,
         collector_instance_id: impl Into<String>,
-        health: CollectorHealthState,
         reason: CollectorNormalStopReason,
         counters: CollectorLifecycleCounters,
     ) -> Self {
@@ -209,7 +222,7 @@ impl CollectorLifecycleRecord {
             agent_run_id,
             collector_instance_id,
             CollectorLifecycleState::Stopped,
-            health,
+            counters.terminal_health(),
             Some(reason.as_str()),
             counters,
         )
@@ -258,6 +271,10 @@ impl CollectorLifecycleRecord {
 
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
+    }
+
+    pub fn agent_run_id(&self) -> &str {
+        &self.agent_run_id
     }
 }
 

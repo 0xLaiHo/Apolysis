@@ -257,6 +257,64 @@ async fn observer_runtime_persists_periodic_global_and_scope_loss_checkpoints() 
 }
 
 #[tokio::test]
+async fn failed_terminal_preserves_the_last_cumulative_checkpoint() {
+    let mut config = config();
+    config.collector_checkpoint_interval = std::time::Duration::from_millis(1);
+    let release_failure = Arc::new(tokio::sync::Notify::new());
+    let backend = CheckpointFailureBackend {
+        release_failure: Arc::clone(&release_failure),
+    };
+    let (scope, receiver) = scope_channel(2);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (_observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+    state
+        .register(intent("agent-run-checkpoint-failure"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-checkpoint-failure", 91)
+        .await
+        .expect("associate cgroup");
+    for _ in 0..100 {
+        if timeline(&config, "agent-run-checkpoint-failure").contains(r#""state":"checkpoint""#) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    release_failure.notify_one();
+    runtime
+        .await
+        .unwrap()
+        .expect_err("released ABI failure must stop observer");
+
+    let timeline = timeline(&config, "agent-run-checkpoint-failure");
+    let failed = timeline
+        .lines()
+        .find(|line| line.contains(r#""state":"failed""#))
+        .expect("failed lifecycle terminal");
+    assert!(failed.contains(r#""global_reserve_failures":3"#));
+    assert!(failed.contains(r#""global_map_pressure":2"#));
+    assert!(failed.contains(r#""scope_missing_entries":13"#));
+
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn observer_shutdown_persists_file_gaps_to_the_owning_agent_runs() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
@@ -490,22 +548,33 @@ async fn normalization_failure_stops_queued_observer_ingest() {
         fail_counters: false,
         fail_track: None,
         fail_untrack: None,
-        batch: Some(invalid_normalization_batch(53)),
+        batch: Some(partially_invalid_normalization_batch(53)),
         drain_batch: None,
         scoped_counters: BTreeMap::new(),
     };
     let (_scope, receiver) = scope_channel(1);
     let (_shutdown, shutdown_receiver) = oneshot::channel();
 
-    let error = run_observer_runtime(
-        backend,
-        vec![53],
-        receiver,
-        Arc::clone(&state),
-        shutdown_receiver,
-    )
-    .await
-    .expect_err("normalization failure must fail queued ingest");
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, vec![53], receiver, state, shutdown_receiver).await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(
+        !runtime.is_finished(),
+        "failed terminal overtook admitted evidence without writer confirmation"
+    );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let error = runtime
+        .await
+        .unwrap()
+        .expect_err("normalization failure must fail queued ingest");
 
     assert!(error.contains("failed to normalize observer record"));
     assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
@@ -513,6 +582,13 @@ async fn normalization_failure_stops_queued_observer_ingest() {
     assert!(timeline.contains(r#""state":"failed""#));
     assert!(timeline.contains(r#""health":"failed""#));
     assert!(timeline.contains(r#""stop_reason":"decode_failure""#));
+    let event = timeline
+        .find(r#""record_type":"raw_kernel_event""#)
+        .unwrap();
+    let terminal = timeline.find(r#""state":"failed""#).unwrap();
+    assert!(event < terminal);
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
     cleanup(&config);
 }
 
@@ -532,6 +608,11 @@ async fn normalization_failure_during_scope_drain_rejects_clean_close() {
     let state = Arc::new(
         DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
     );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
     let (_observer_shutdown, observer_receiver) = oneshot::channel();
     let runtime = {
         let state = Arc::clone(&state);
@@ -560,6 +641,8 @@ async fn normalization_failure_during_scope_drain_rejects_clean_close() {
     assert!(close_error.contains("failed to normalize observer record"));
     assert!(runtime_error.contains("failed to normalize observer record"));
     assert!(state.query("agent-run-drain-normalize").await.is_some());
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
     cleanup(&config);
 }
 
@@ -677,6 +760,84 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
 }
 
 #[tokio::test]
+async fn collector_terminal_waits_for_previously_admitted_evidence_when_drain_is_empty() {
+    let config = config();
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        drain_batch: None,
+        scoped_counters: BTreeMap::new(),
+    };
+    let (scope, receiver) = scope_channel(2);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+    state
+        .register(intent("agent-run-terminal-fence"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-terminal-fence", 81)
+        .await
+        .expect("associate cgroup");
+    assert_eq!(
+        state
+            .pipeline()
+            .submit(DaemonRecord::new(
+                "agent-run-terminal-fence",
+                QueuePriority::Ordinary,
+                serde_json::json!({"record_type":"admitted_before_terminal"}),
+            ))
+            .expect("admit evidence"),
+        apolysis_accountability::PushOutcome::Accepted
+    );
+
+    let close = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.close("agent-run-terminal-fence").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(
+        !close.is_finished(),
+        "close completed before admitted evidence had a writer confirmation"
+    );
+
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(1), close)
+        .await
+        .expect("terminal fence completes after writer starts")
+        .expect("close task")
+        .expect("clean close");
+
+    observer_shutdown
+        .send(())
+        .expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
+
+    let timeline = timeline(&config, "agent-run-terminal-fence");
+    let evidence = timeline.find("admitted_before_terminal").unwrap();
+    let terminal = timeline.find(r#""state":"stopped""#).unwrap();
+    assert!(evidence < terminal);
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn counter_read_failure_marks_ebpf_unavailable() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
@@ -688,6 +849,11 @@ async fn counter_read_failure_marks_ebpf_unavailable() {
         .discover_cgroup("agent-run-counter-failure", 31)
         .await
         .expect("associate cgroup");
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
     let backend = FakeBackend {
         operations: Arc::new(Mutex::new(Vec::new())),
         fail_counters: true,
@@ -712,16 +878,21 @@ async fn counter_read_failure_marks_ebpf_unavailable() {
         }
         tokio::task::yield_now().await;
     }
+    assert!(
+        timeline(&config, "agent-run-counter-failure").contains(r#""state":"started""#),
+        "eBPF readiness must not precede a durable collector start"
+    );
     shutdown.send(()).unwrap();
     let error = runtime.await.unwrap().expect_err("counter read must fail");
 
     assert!(error.contains("counter read failed"));
     assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
     let timeline = timeline(&config, "agent-run-counter-failure");
-    assert!(timeline.contains(r#""state":"started""#));
     assert!(timeline.contains(r#""state":"failed""#));
     assert!(timeline.contains(r#""health":"failed""#));
     assert!(timeline.contains(r#""stop_reason":"counter_read_failure""#));
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
     cleanup(&config);
 }
 
@@ -741,6 +912,11 @@ async fn scoped_counter_read_failure_stops_runtime_and_keeps_agent_run_open() {
     let state = Arc::new(
         DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
     );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
     let (_observer_shutdown, observer_receiver) = oneshot::channel();
     let runtime = {
         let state = Arc::clone(&state);
@@ -771,6 +947,8 @@ async fn scoped_counter_read_failure_stops_runtime_and_keeps_agent_run_open() {
     assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
     assert!(state.query("agent-run-read-failure").await.is_some());
     assert!(!timeline(&config, "agent-run-read-failure").contains("session_closed"));
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
     cleanup(&config);
 }
 
@@ -778,6 +956,19 @@ async fn scoped_counter_read_failure_stops_runtime_and_keeps_agent_run_open() {
 async fn restored_scope_failure_keeps_ebpf_unavailable() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("agent-run-restore-failure"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-restore-failure", 31)
+        .await
+        .expect("associate cgroup");
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
     let backend = FakeBackend {
         operations: Arc::new(Mutex::new(Vec::new())),
         fail_counters: false,
@@ -802,6 +993,11 @@ async fn restored_scope_failure_keeps_ebpf_unavailable() {
 
     assert!(error.contains("failed to restore observer scope"));
     assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    let timeline = timeline(&config, "agent-run-restore-failure");
+    assert!(timeline.contains(r#""state":"failed""#));
+    assert!(timeline.contains(r#""stop_reason":"observer_failure""#));
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
     cleanup(&config);
 }
 
@@ -886,6 +1082,11 @@ async fn abi_mismatch_stops_the_observer_and_marks_ebpf_unavailable() {
         .discover_cgroup("agent-run-abi-mismatch", 31)
         .await
         .expect("associate cgroup");
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
     let backend = FakeBackend {
         operations: Arc::new(Mutex::new(Vec::new())),
         fail_counters: false,
@@ -923,6 +1124,8 @@ async fn abi_mismatch_stops_the_observer_and_marks_ebpf_unavailable() {
     assert!(timeline.contains(r#""health":"failed""#));
     assert!(timeline.contains(r#""stop_reason":"abi_mismatch""#));
     assert!(timeline.contains(r#""global_abi_mismatches":1"#));
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("writer drain");
     cleanup(&config);
 }
 
@@ -939,6 +1142,55 @@ struct FakeBackend {
 struct ReuseBackend {
     operations: Arc<Mutex<Vec<(ScopeOperation, u64)>>>,
     stale_batch: Option<DaemonObserverBatch>,
+}
+
+struct CheckpointFailureBackend {
+    release_failure: Arc<tokio::sync::Notify>,
+}
+
+impl ObserverRuntimeBackend for CheckpointFailureBackend {
+    fn track_cgroup(&mut self, _cgroup_id: u64) -> Result<ScopeGeneration, String> {
+        ScopeGeneration::new(1)
+    }
+
+    fn untrack_cgroup(&mut self, _cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
+        Ok(ScopeObservationGapCounters::default())
+    }
+
+    fn scope_counters(&mut self, _cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
+        Ok(ScopeObservationGapCounters {
+            network_connect: NetworkConnectCounters {
+                missing_entries: 13,
+                ..NetworkConnectCounters::default()
+            },
+            ..ScopeObservationGapCounters::default()
+        })
+    }
+
+    fn drain_batch(&mut self) -> Result<DaemonObserverBatch, String> {
+        Ok(DaemonObserverBatch::default())
+    }
+
+    fn read_batch(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<DaemonObserverBatch, String>> + Send + '_>> {
+        let release_failure = Arc::clone(&self.release_failure);
+        Box::pin(async move {
+            release_failure.notified().await;
+            Ok(DaemonObserverBatch {
+                abi_mismatches: 1,
+                ..DaemonObserverBatch::default()
+            })
+        })
+    }
+
+    fn counters(&mut self) -> Result<DaemonObserverCounters, String> {
+        Ok(DaemonObserverCounters {
+            reserve_failures: 3,
+            map_pressure: 2,
+            ..DaemonObserverCounters::default()
+        })
+    }
 }
 
 impl ObserverRuntimeBackend for ReuseBackend {
@@ -1134,6 +1386,14 @@ fn file_outcome_batch_for_path(cgroup_id: u64, path: &str) -> DaemonObserverBatc
 fn invalid_normalization_batch(cgroup_id: u64) -> DaemonObserverBatch {
     let mut batch = file_outcome_batch(cgroup_id);
     batch.events[0].record.event_kind = u32::MAX;
+    batch
+}
+
+fn partially_invalid_normalization_batch(cgroup_id: u64) -> DaemonObserverBatch {
+    let mut batch = file_outcome_batch(cgroup_id);
+    let mut invalid = batch.events[0].clone();
+    invalid.record.event_kind = u32::MAX;
+    batch.events.push(invalid);
     batch
 }
 

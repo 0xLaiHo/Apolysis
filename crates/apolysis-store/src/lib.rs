@@ -118,6 +118,7 @@ impl JsonlStore {
             .rotation
             .expect("rotation is configured before rotate is called");
         self.writer.flush()?;
+        self.writer.get_ref().sync_all()?;
         let oldest = archive_path(&self.path, rotation.max_archived_files);
         match std::fs::remove_file(&oldest) {
             Ok(()) => {}
@@ -135,6 +136,12 @@ impl JsonlStore {
             std::fs::rename(&self.path, archive_path(&self.path, 1))?;
         }
         self.writer = BufWriter::new(File::create(&self.path)?);
+        let parent = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        File::open(parent)?.sync_all()?;
         self.current_bytes = 0;
         Ok(())
     }

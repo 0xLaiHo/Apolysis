@@ -256,12 +256,14 @@ Each Runtime Observation carries, when supported:
 Collector lifecycle records use one opaque instance ID per collector process
 and one record stream per Agent Run. `started` is durable before a managed
 Agent is released or a daemon scope registration completes. Periodic
-`checkpoint` records are cumulative and are emitted even for quiet workloads.
+`checkpoint` records carry cumulative loss counters plus the current
+`scope_pending` in-flight gauge, and are emitted even for quiet workloads.
 Their `global_*` counters describe collector-wide loss and retain that name
 when copied into each active run; `scope_*` counters contain only the owning
 Observation Scope's entry/exit pairing state. For the daemon, that is the sum
-of only the cgroups owned by the Agent Run. A non-zero loss counter makes the
-checkpoint or normal terminal `degraded`.
+of only the cgroups owned by the Agent Run. A non-zero loss counter degrades a
+checkpoint. Pending alone remains healthy while collection is active, but
+degrades a terminal because it then represents unmatched work at stop.
 
 After confirmed event drain and Observation Gap persistence, a normal path
 writes `stopped` with an explicit reason. A fatal attach, verifier, ABI,

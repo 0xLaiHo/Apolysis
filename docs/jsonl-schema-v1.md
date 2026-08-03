@@ -99,7 +99,8 @@ Fields:
   `verifier_failure`, `abi_mismatch`, `decode_failure`,
   `counter_read_failure`, `storage_failure`, `observer_failure`,
   `collector_restart`, or `incomplete_terminal_flush`
-- `counters`: cumulative health counters containing
+- `counters`: cumulative loss counters plus the current pending gauge,
+  containing
   `global_reserve_failures`, `global_map_pressure`,
   `global_abi_mismatches`, `global_decode_failures`, `global_truncations`,
   `scope_missing_entries`, `scope_missing_exits`, and `scope_pending`
@@ -112,8 +113,10 @@ describe collector-wide state and retain that name when repeated in each
 active Agent Run; `scope_*` counters contain only the owning Observation
 Scope's summed network and selected-file pairing state. In standalone mode
 this is the one requested scope; the daemon sums only cgroups owned by that
-Agent Run. Any non-zero counter makes a checkpoint or normal terminal
-`degraded`.
+Agent Run. Any non-zero loss counter makes a checkpoint or normal terminal
+`degraded`. `scope_pending` alone is an in-flight gauge and does not degrade an
+active checkpoint; it does degrade a terminal because those operations remain
+unmatched when collection stops.
 
 Normal completion drains confirmed events and persists Observation Gaps before
 writing `stopped`. A fatal collector path writes `failed` when the timeline is

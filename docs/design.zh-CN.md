@@ -219,10 +219,12 @@ Remote export、custody、organization authorization、object storage、跨 run 
 
 Collector lifecycle record 为每个 collector process 使用一个不透明 instance ID，并为每次
 Agent Run 维护一条 record stream。`started` 会在放行托管 Agent 或完成 daemon scope 注册前
-持久化。周期 `checkpoint` 使用累计计数，即使 workload 安静也会发出。`global_*` counter
-描述 collector 全局丢失；复制到每个 active run 时仍保留该命名。`scope_*` counter 只包含所属
-Observation Scope 的 entry/exit 配对状态；对 daemon 而言，它只汇总属于该 Agent Run 的
-cgroup。任一 loss counter 非零都会让 checkpoint 或正常 terminal 标记为 `degraded`。
+持久化。周期 `checkpoint` 携带累计 loss counter 与当前 `scope_pending` in-flight gauge，即使
+workload 安静也会发出。`global_*` counter 描述 collector 全局丢失；复制到每个 active run
+时仍保留该命名。`scope_*` counter 只包含所属 Observation Scope 的 entry/exit 配对状态；对
+daemon 而言，它只汇总属于该 Agent Run 的 cgroup。非零 loss counter 会让 checkpoint 标记为
+`degraded`。采集仍活跃时，只有 pending 仍保持 healthy；到 terminal 时，它代表停止时未匹配的
+工作，因此会使 terminal degraded。
 
 正常路径会先确认 event drain 与 Observation Gap 已持久化，再写入带显式 reason 的
 `stopped`。致命 attach、verifier、ABI、decoder、counter、observer 或可写 storage 路径会在

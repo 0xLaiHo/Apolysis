@@ -4,14 +4,48 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use apolysis_accountability::{ActionClass, RetentionTier, SessionIntent, DEFAULT_TENANT_ID};
 use apolysis_core::{
-    CollectorHealthState, CollectorLifecycleCounters, CollectorLifecycleRecord,
-    CollectorNormalStopReason,
+    CollectorFailureReason, CollectorLifecycleCounters, CollectorLifecycleRecord,
+    CollectorNormalStopReason, ObservationGap, ObservationGapKind,
 };
 use apolysis_daemon::{DaemonConfig, DaemonState};
 use apolysis_store::HashChainStore;
 use serde_json::{json, Value};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[tokio::test]
+async fn collector_setup_failure_is_persisted_for_every_tracked_agent_run() {
+    let config = config("setup-failure");
+    let state = DaemonState::new(&config).expect("daemon state");
+    state
+        .register(intent("agent-run-setup-failure"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-setup-failure", 41)
+        .await
+        .expect("associate cgroup");
+
+    assert_eq!(
+        state
+            .persist_collector_failure_for_tracked_runs(
+                "collector-setup-failure",
+                CollectorFailureReason::VerifierFailure,
+            )
+            .await
+            .expect("persist setup failure"),
+        1
+    );
+
+    let timeline = timeline_payloads(&timeline_path(&config, "agent-run-setup-failure"));
+    assert!(timeline.iter().any(|payload| {
+        payload["record_type"] == "collector_lifecycle"
+            && payload["collector_instance_id"] == "collector-setup-failure"
+            && payload["state"] == "failed"
+            && payload["stop_reason"] == "verifier_failure"
+    }));
+    cleanup(&config);
+}
 
 #[test]
 fn daemon_recovery_reports_and_closes_an_unfinished_collector_instance() {
@@ -39,6 +73,22 @@ fn daemon_recovery_reports_and_closes_an_unfinished_collector_instance() {
                 .to_json_line(),
         )
         .expect("append lifecycle start");
+    recovery
+        .store
+        .append_json(
+            1,
+            &CollectorLifecycleRecord::checkpoint(
+                agent_run_id,
+                "collector-instance-before-crash",
+                CollectorLifecycleCounters {
+                    global_map_pressure: 7,
+                    scope_pending: 11,
+                    ..CollectorLifecycleCounters::default()
+                },
+            )
+            .to_json_line(),
+        )
+        .expect("append lifecycle checkpoint");
     recovery.store.flush().expect("flush timeline");
     drop(recovery);
 
@@ -60,6 +110,8 @@ fn daemon_recovery_reports_and_closes_an_unfinished_collector_instance() {
             && payload["state"] == "failed"
             && payload["health"] == "failed"
             && payload["stop_reason"] == "collector_restart"
+            && payload["counters"]["global_map_pressure"] == 7
+            && payload["counters"]["scope_pending"] == 11
     }));
 
     let state = DaemonState::new(&config).expect("recover daemon state again");
@@ -125,7 +177,6 @@ fn daemon_recovery_does_not_report_a_completed_collector_instance() {
             &CollectorLifecycleRecord::stopped(
                 agent_run_id,
                 "collector-instance-completed",
-                CollectorHealthState::Healthy,
                 CollectorNormalStopReason::AgentRunClosed,
                 CollectorLifecycleCounters::default(),
             )
@@ -153,6 +204,62 @@ fn daemon_recovery_does_not_report_a_completed_collector_instance() {
         2
     );
 
+    cleanup(&config);
+}
+
+#[test]
+fn daemon_recovery_does_not_duplicate_a_restart_gap_after_interrupted_repair() {
+    let config = config("interrupted-repair");
+    let agent_run_id = "agent-run-interrupted-repair";
+    let timeline = timeline_path(&config, agent_run_id);
+    let mut recovery = HashChainStore::create_or_recover(&timeline).expect("create timeline");
+    recovery
+        .store
+        .append_json(
+            1,
+            &CollectorLifecycleRecord::started(agent_run_id, "collector-interrupted")
+                .to_json_line(),
+        )
+        .expect("append lifecycle start");
+    recovery
+        .store
+        .append_json(
+            1,
+            &ObservationGap::new(
+                agent_run_id,
+                "collector_lifecycle",
+                ObservationGapKind::CollectorRestart,
+                1,
+                "collector_instance:collector-interrupted,previous lifecycle has no durable terminal record",
+            )
+            .to_json_line(),
+        )
+        .expect("append interrupted recovery gap");
+    recovery.store.flush().expect("flush timeline");
+    drop(recovery);
+
+    let state = DaemonState::new(&config).expect("finish interrupted recovery");
+    drop(state);
+
+    let payloads = timeline_payloads(&timeline);
+    assert_eq!(
+        payloads
+            .iter()
+            .filter(|payload| payload["kind"] == "collector_restart")
+            .count(),
+        1
+    );
+    assert_eq!(
+        payloads
+            .iter()
+            .filter(|payload| {
+                payload["record_type"] == "collector_lifecycle"
+                    && payload["collector_instance_id"] == "collector-interrupted"
+                    && payload["state"] == "failed"
+            })
+            .count(),
+        1
+    );
     cleanup(&config);
 }
 

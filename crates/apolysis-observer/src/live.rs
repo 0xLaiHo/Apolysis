@@ -10,9 +10,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apolysis_core::{
     actors, new_collector_instance_id, resources, CanonicalEvent, CollectorFailureReason,
-    CollectorHealthState, CollectorLifecycleCounters, CollectorLifecycleRecord,
-    CollectorNormalStopReason, EventSource, EventType, ObservationGap, ObservationGapKind,
-    ObserverDiagnostic, ObserverDiagnosticKind, OperationOutcome, OperationResult, RawKernelEvent,
+    CollectorLifecycleCounters, CollectorLifecycleRecord, CollectorNormalStopReason, EventSource,
+    EventType, ObservationGap, ObservationGapKind, ObserverDiagnostic, ObserverDiagnosticKind,
+    OperationOutcome, OperationResult, RawKernelEvent,
 };
 use apolysis_store::JsonlRotationPolicy;
 use apolysis_store::JsonlStore;
@@ -1057,12 +1057,10 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 decode_failures,
                 truncations,
             );
-            let health = collector_health(last_lifecycle_counters);
             store
                 .append(&CollectorLifecycleRecord::checkpoint(
                     &request.session_id,
                     &collector_instance_id,
-                    health,
                     last_lifecycle_counters,
                 ))
                 .map_err(|error| format!("failed to write collector lifecycle checkpoint: {error}"))?;
@@ -1163,7 +1161,6 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         .append(&CollectorLifecycleRecord::stopped(
             &request.session_id,
             &collector_instance_id,
-            collector_health(last_lifecycle_counters),
             stop_reason,
             last_lifecycle_counters,
         ))
@@ -2494,17 +2491,12 @@ fn live_collector_lifecycle_counters(
     }
 }
 
-fn collector_health(counters: CollectorLifecycleCounters) -> CollectorHealthState {
-    if counters.has_loss() {
-        CollectorHealthState::Degraded
-    } else {
-        CollectorHealthState::Healthy
-    }
-}
-
 fn live_collector_failure_reason(error: &str) -> CollectorFailureReason {
     let error = error.to_ascii_lowercase();
-    if error.contains("counter") || error.contains("apolysis_counters") {
+    if error.contains("collector lifecycle stop") || error.contains("flush live observer timeline")
+    {
+        CollectorFailureReason::IncompleteTerminalFlush
+    } else if error.contains("counter") || error.contains("apolysis_counters") {
         CollectorFailureReason::CounterReadFailure
     } else if error.contains("abi") {
         CollectorFailureReason::AbiMismatch
@@ -2826,7 +2818,7 @@ mod tests {
         assert_eq!(counters.scope_missing_entries, 18);
         assert_eq!(counters.scope_missing_exits, 24);
         assert_eq!(counters.scope_pending, 30);
-        assert_eq!(collector_health(counters), CollectorHealthState::Degraded);
+        assert!(counters.has_loss());
     }
 
     #[test]
@@ -2842,6 +2834,10 @@ mod tests {
         assert_eq!(
             live_collector_failure_reason("ring-buffer poll failure"),
             CollectorFailureReason::ObserverFailure
+        );
+        assert_eq!(
+            live_collector_failure_reason("failed to flush live observer timeline"),
+            CollectorFailureReason::IncompleteTerminalFlush
         );
     }
 

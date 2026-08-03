@@ -2,9 +2,9 @@
 
 use apolysis_core::{
     actors, records, resources, CanonicalEvent, CollectorCapability, CollectorCapabilityManifest,
-    CollectorHealthState, CollectorLifecycleCounters, CollectorLifecycleRecord, EventSource,
-    EventType, ObservationGap, ObservationGapKind, ObserverDiagnostic, ObserverDiagnosticKind,
-    OperationOutcome, OperationResult, RawKernelEvent, RuntimeRelation, SessionIntentRecord,
+    CollectorLifecycleCounters, CollectorLifecycleRecord, EventSource, EventType, ObservationGap,
+    ObservationGapKind, ObserverDiagnostic, ObserverDiagnosticKind, OperationOutcome,
+    OperationResult, RawKernelEvent, RuntimeRelation, SessionIntentRecord,
 };
 
 #[test]
@@ -32,7 +32,6 @@ fn collector_lifecycle_checkpoint_records_health_and_bounded_loss_counters() {
     let checkpoint = CollectorLifecycleRecord::checkpoint(
         "agent-run-lifecycle",
         "collector-instance-7",
-        CollectorHealthState::Degraded,
         CollectorLifecycleCounters {
             global_reserve_failures: 2,
             global_map_pressure: 3,
@@ -50,6 +49,24 @@ fn collector_lifecycle_checkpoint_records_health_and_bounded_loss_counters() {
         checkpoint.to_json_line(),
         r#"{"record_type":"collector_lifecycle","schema_version":1,"timestamp_unix_ms":1780328100007,"agent_run_id":"agent-run-lifecycle","collector":"apolysis_observer","collector_instance_id":"collector-instance-7","state":"checkpoint","health":"degraded","stop_reason":null,"counters":{"global_reserve_failures":2,"global_map_pressure":3,"global_abi_mismatches":5,"global_decode_failures":7,"global_truncations":11,"scope_missing_entries":13,"scope_missing_exits":17,"scope_pending":19}}"#
     );
+}
+
+#[test]
+fn collector_lifecycle_treats_pending_as_inflight_until_the_terminal_boundary() {
+    let counters = CollectorLifecycleCounters {
+        scope_pending: 3,
+        ..CollectorLifecycleCounters::default()
+    };
+    let checkpoint = CollectorLifecycleRecord::checkpoint("agent-run", "collector", counters);
+    let stopped = CollectorLifecycleRecord::stopped(
+        "agent-run",
+        "collector",
+        apolysis_core::CollectorNormalStopReason::DurationElapsed,
+        counters,
+    );
+
+    assert!(checkpoint.to_json_line().contains(r#""health":"healthy""#));
+    assert!(stopped.to_json_line().contains(r#""health":"degraded""#));
 }
 
 #[test]

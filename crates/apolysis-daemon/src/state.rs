@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -403,10 +403,35 @@ impl DaemonState {
         &self,
         record: CollectorLifecycleRecord,
     ) -> Result<(), String> {
-        let agent_run_id = record.agent_run_id.clone();
+        let agent_run_id = record.agent_run_id().to_string();
         let payload = serde_json::from_str(&record.to_json_line())
             .map_err(|error| format!("failed to encode collector lifecycle: {error}"))?;
         self.persist(&agent_run_id, payload).await
+    }
+
+    pub async fn persist_collector_failure_for_tracked_runs(
+        &self,
+        collector_instance_id: &str,
+        reason: CollectorFailureReason,
+    ) -> Result<usize, String> {
+        let agent_run_ids: BTreeSet<String> = {
+            let registry = self.registry.read().await;
+            registry
+                .tracked_cgroups()
+                .into_iter()
+                .filter_map(|cgroup_id| registry.session_for_cgroup(cgroup_id).map(str::to_string))
+                .collect()
+        };
+        for agent_run_id in &agent_run_ids {
+            self.persist_collector_lifecycle(CollectorLifecycleRecord::failed(
+                agent_run_id,
+                collector_instance_id,
+                reason,
+                CollectorLifecycleCounters::default(),
+            ))
+            .await?;
+        }
+        Ok(agent_run_ids.len())
     }
 
     pub async fn ingest_runtime_workload(
@@ -608,9 +633,24 @@ fn append_incomplete_collector_lifecycles(
 ) -> Result<(), String> {
     let mut instances = BTreeMap::new();
     let mut order = Vec::new();
+    let mut recovered_gaps = BTreeSet::new();
     for record in records {
-        if record.payload.get("record_type").and_then(Value::as_str) != Some("collector_lifecycle")
+        let record_type = record.payload.get("record_type").and_then(Value::as_str);
+        if record_type == Some("observation_gap")
+            && record.payload.get("operation").and_then(Value::as_str)
+                == Some("collector_lifecycle")
+            && record.payload.get("kind").and_then(Value::as_str) == Some("collector_restart")
         {
+            if let Some(instance_id) = record
+                .payload
+                .get("detail")
+                .and_then(Value::as_str)
+                .and_then(recovered_instance_id)
+            {
+                recovered_gaps.insert(instance_id.to_string());
+            }
+        }
+        if record_type != Some("collector_lifecycle") {
             continue;
         }
         let Some(instance_id) = record
@@ -628,43 +668,54 @@ fn append_incomplete_collector_lifecycles(
                 if !instances.contains_key(instance_id) {
                     order.push(instance_id.to_string());
                 }
-                instances.insert(instance_id.to_string(), false);
+                instances.insert(
+                    instance_id.to_string(),
+                    (false, lifecycle_counters(&record.payload)),
+                );
             }
             "stopped" | "failed" => {
-                instances.insert(instance_id.to_string(), true);
+                instances.insert(
+                    instance_id.to_string(),
+                    (true, lifecycle_counters(&record.payload)),
+                );
             }
             _ => {}
         }
     }
 
-    let incomplete: Vec<String> = order
+    let incomplete: Vec<(String, CollectorLifecycleCounters)> = order
         .into_iter()
-        .filter(|instance_id| instances.get(instance_id) == Some(&false))
+        .filter_map(|instance_id| match instances.get(&instance_id) {
+            Some((false, counters)) => Some((instance_id, *counters)),
+            _ => None,
+        })
         .collect();
     if incomplete.is_empty() {
         return Ok(());
     }
 
-    for instance_id in incomplete {
-        let gap = ObservationGap::new(
-            agent_run_id,
-            "collector_lifecycle",
-            ObservationGapKind::CollectorRestart,
-            1,
-            format!(
-                "collector_instance:{instance_id},previous lifecycle has no durable terminal record"
-            ),
-        );
-        append_json_line(
-            store,
-            &gap.to_json_line(),
-            "collector restart Observation Gap",
-        )?;
+    for (instance_id, counters) in incomplete {
+        if !recovered_gaps.contains(&instance_id) {
+            let gap = ObservationGap::new(
+                agent_run_id,
+                "collector_lifecycle",
+                ObservationGapKind::CollectorRestart,
+                1,
+                format!(
+                    "collector_instance:{instance_id},previous lifecycle has no durable terminal record"
+                ),
+            );
+            append_json_line(
+                store,
+                &gap.to_json_line(),
+                "collector restart Observation Gap",
+            )?;
+        }
         let terminal = CollectorLifecycleRecord::failed(
             agent_run_id,
             instance_id,
             CollectorFailureReason::CollectorRestart,
-            CollectorLifecycleCounters::default(),
+            counters,
         );
         append_json_line(
             store,
@@ -675,6 +726,28 @@ fn append_incomplete_collector_lifecycles(
     store
         .flush()
         .map_err(|error| format!("failed to flush recovered collector lifecycle: {error}"))
+}
+
+fn recovered_instance_id(detail: &str) -> Option<&str> {
+    detail
+        .strip_prefix("collector_instance:")
+        .and_then(|detail| detail.split_once(',').map(|(instance_id, _)| instance_id))
+        .filter(|instance_id| !instance_id.is_empty())
+}
+
+fn lifecycle_counters(payload: &Value) -> CollectorLifecycleCounters {
+    let counters = &payload["counters"];
+    let counter = |name| counters.get(name).and_then(Value::as_u64).unwrap_or(0);
+    CollectorLifecycleCounters {
+        global_reserve_failures: counter("global_reserve_failures"),
+        global_map_pressure: counter("global_map_pressure"),
+        global_abi_mismatches: counter("global_abi_mismatches"),
+        global_decode_failures: counter("global_decode_failures"),
+        global_truncations: counter("global_truncations"),
+        scope_missing_entries: counter("scope_missing_entries"),
+        scope_missing_exits: counter("scope_missing_exits"),
+        scope_pending: counter("scope_pending"),
+    }
 }
 
 fn append_json_line(store: &mut HashChainStore, line: &str, subject: &str) -> Result<(), String> {
