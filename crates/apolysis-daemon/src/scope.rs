@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use apolysis_accountability::SessionIntent;
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -12,6 +13,7 @@ pub struct ScopeRequest {
     operation: ScopeOperation,
     cgroup_id: u64,
     agent_run_id: Option<String>,
+    agent_intent: Option<SessionIntent>,
     response: oneshot::Sender<Result<(), String>>,
 }
 
@@ -28,6 +30,10 @@ impl ScopeRequest {
         self.agent_run_id.as_deref()
     }
 
+    pub fn agent_intent(&self) -> Option<&SessionIntent> {
+        self.agent_intent.as_ref()
+    }
+
     pub fn complete(self, result: Result<(), String>) {
         let _ = self.response.send(result);
     }
@@ -40,25 +46,38 @@ pub struct ScopeController {
 
 impl ScopeController {
     pub async fn track(&self, cgroup_id: u64) -> Result<(), String> {
-        self.apply(ScopeOperation::Track, cgroup_id, None).await
+        self.apply(ScopeOperation::Track, cgroup_id, None, None)
+            .await
     }
 
     pub async fn untrack(&self, cgroup_id: u64) -> Result<(), String> {
-        self.apply(ScopeOperation::Untrack, cgroup_id, None).await
+        self.apply(ScopeOperation::Untrack, cgroup_id, None, None)
+            .await
     }
 
-    pub async fn track_agent_run(&self, agent_run_id: &str, cgroup_id: u64) -> Result<(), String> {
-        self.apply(ScopeOperation::Track, cgroup_id, Some(agent_run_id))
+    pub async fn track_agent_run(
+        &self,
+        agent_run_id: &str,
+        intent: Option<&SessionIntent>,
+        cgroup_id: u64,
+    ) -> Result<(), String> {
+        self.apply(ScopeOperation::Track, cgroup_id, Some(agent_run_id), intent)
             .await
     }
 
     pub async fn untrack_agent_run(
         &self,
         agent_run_id: &str,
+        intent: Option<&SessionIntent>,
         cgroup_id: u64,
     ) -> Result<(), String> {
-        self.apply(ScopeOperation::Untrack, cgroup_id, Some(agent_run_id))
-            .await
+        self.apply(
+            ScopeOperation::Untrack,
+            cgroup_id,
+            Some(agent_run_id),
+            intent,
+        )
+        .await
     }
 
     async fn apply(
@@ -66,6 +85,7 @@ impl ScopeController {
         operation: ScopeOperation,
         cgroup_id: u64,
         agent_run_id: Option<&str>,
+        agent_intent: Option<&SessionIntent>,
     ) -> Result<(), String> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -73,6 +93,7 @@ impl ScopeController {
                 operation,
                 cgroup_id,
                 agent_run_id: agent_run_id.map(str::to_owned),
+                agent_intent: agent_intent.cloned(),
                 response,
             })
             .map_err(|error| format!("observer scope command queue unavailable: {error}"))?;

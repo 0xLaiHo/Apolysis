@@ -749,6 +749,13 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     assert!(timeline.contains(r#""event_type":"exec""#));
     assert!(timeline.contains(r#""event_type":"credential_read""#));
     assert!(timeline.contains(r#""event_type":"network_connect""#));
+    let credential_read = timeline
+        .lines()
+        .find(|line| line.contains(r#""event_type":"credential_read""#))
+        .expect("credential read event");
+    assert!(credential_read.contains(r#""outcome":"succeeded""#));
+    assert!(credential_read.contains(r#""return_value":"#));
+    assert!(credential_read.contains(r#""errno":null"#));
     let connect = timeline
         .lines()
         .find(|line| line.contains(r#""event_type":"network_connect""#))

@@ -162,9 +162,14 @@ impl DaemonState {
         let mut removed = Vec::new();
         if let Some(scope) = &self.scope {
             for cgroup_id in &closed.cgroup_ids {
-                if let Err(error) = scope.untrack_agent_run(session_id, *cgroup_id).await {
+                if let Err(error) = scope
+                    .untrack_agent_run(session_id, Some(&closed.intent), *cgroup_id)
+                    .await
+                {
                     for removed_id in removed {
-                        let _ = scope.track_agent_run(session_id, removed_id).await;
+                        let _ = scope
+                            .track_agent_run(session_id, Some(&closed.intent), removed_id)
+                            .await;
                     }
                     return Err(error);
                 }
@@ -180,7 +185,10 @@ impl DaemonState {
         {
             if let Some(scope) = &self.scope {
                 for cgroup_id in removed {
-                    if let Err(rollback) = scope.track_agent_run(session_id, cgroup_id).await {
+                    if let Err(rollback) = scope
+                        .track_agent_run(session_id, Some(&closed.intent), cgroup_id)
+                        .await
+                    {
                         return Err(format!("{error}; scope rollback failed: {rollback}"));
                     }
                 }
@@ -291,6 +299,14 @@ impl DaemonState {
             .unwrap_or_else(|| PathBuf::from("/__apolysis_no_workspace__"))
     }
 
+    pub async fn intent_for_session(&self, session_id: &str) -> Option<SessionIntent> {
+        self.registry
+            .read()
+            .await
+            .get(session_id)
+            .map(|state| state.intent.clone())
+    }
+
     pub async fn discover_cgroup(
         &self,
         session_id: &str,
@@ -309,8 +325,11 @@ impl DaemonState {
         let outcome = candidate
             .discover_cgroup(session_id, cgroup_id)
             .map_err(registry_error)?;
+        let scope_intent = candidate.get(session_id).map(|state| state.intent.clone());
         if let Some(scope) = &self.scope {
-            scope.track_agent_run(session_id, cgroup_id).await?;
+            scope
+                .track_agent_run(session_id, scope_intent.as_ref(), cgroup_id)
+                .await?;
         }
 
         let outcome_name = match outcome {
@@ -330,7 +349,10 @@ impl DaemonState {
             .await
         {
             if let Some(scope) = &self.scope {
-                if let Err(rollback) = scope.untrack_agent_run(session_id, cgroup_id).await {
+                if let Err(rollback) = scope
+                    .untrack_agent_run(session_id, scope_intent.as_ref(), cgroup_id)
+                    .await
+                {
                     return Err(format!("{error}; scope rollback failed: {rollback}"));
                 }
             }
@@ -512,16 +534,17 @@ impl DaemonState {
             .write()
             .await
             .insert(session_id.to_string(), reason.to_string());
-        let cgroup_ids = {
+        let degraded = {
             let mut registry = self.registry.write().await;
             registry
                 .degrade(session_id)
-                .map(|state| state.cgroup_ids)
-                .unwrap_or_default()
+                .map(|state| (state.intent, state.cgroup_ids))
         };
-        if let Some(scope) = &self.scope {
+        if let (Some(scope), Ok((intent, cgroup_ids))) = (&self.scope, degraded) {
             for cgroup_id in cgroup_ids {
-                let _ = scope.untrack_agent_run(session_id, cgroup_id).await;
+                let _ = scope
+                    .untrack_agent_run(session_id, Some(&intent), cgroup_id)
+                    .await;
             }
         }
         self.health

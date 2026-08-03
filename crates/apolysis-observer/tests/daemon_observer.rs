@@ -5,8 +5,9 @@ use apolysis_observer::abi::{
     KernelEventKind, FLAG_RESOURCE_TRUNCATED, KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN,
 };
 use apolysis_observer::{
-    network_connect_observation_gaps, DaemonObserver, DaemonObserverConfig, NetworkConnectCounters,
-    ObserverBatchDecoder,
+    file_operation_observation_gaps, network_connect_observation_gaps, DaemonObserver,
+    DaemonObserverConfig, FileOperationCounters, NetworkConnectCounters, ObserverBatchDecoder,
+    OperationPairCounters,
 };
 
 #[test]
@@ -62,6 +63,34 @@ fn network_connect_counters_become_explicit_agent_run_observation_gaps() {
     assert_eq!(gaps.len(), 2);
     assert_eq!(gaps[0].kind, ObservationGapKind::MissingEntry);
     assert_eq!(gaps[0].count, 2);
+    assert_eq!(gaps[1].kind, ObservationGapKind::MissingExit);
+    assert_eq!(gaps[1].count, 3);
+    assert!(gaps[1].detail.contains("pending_at_stop:2"));
+}
+
+#[test]
+fn file_operation_counters_become_operation_specific_observation_gaps() {
+    let gaps = file_operation_observation_gaps(
+        "agent-run-file-gaps",
+        &FileOperationCounters {
+            open: OperationPairCounters {
+                missing_entries: 2,
+                ..OperationPairCounters::default()
+            },
+            rename: OperationPairCounters {
+                missing_exits: 1,
+                pending: 2,
+                ..OperationPairCounters::default()
+            },
+            ..FileOperationCounters::default()
+        },
+    );
+
+    assert_eq!(gaps.len(), 2);
+    assert_eq!(gaps[0].operation, "file_open");
+    assert_eq!(gaps[0].kind, ObservationGapKind::MissingEntry);
+    assert_eq!(gaps[0].count, 2);
+    assert_eq!(gaps[1].operation, "file_rename");
     assert_eq!(gaps[1].kind, ObservationGapKind::MissingExit);
     assert_eq!(gaps[1].count, 3);
     assert!(gaps[1].detail.contains("pending_at_stop:2"));

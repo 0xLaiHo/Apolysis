@@ -47,12 +47,27 @@ struct apolysis_scope_config {
     unsigned int mode;
 };
 
+struct apolysis_operation_pair_counters {
+    unsigned long long missing_entries;
+    unsigned long long missing_exits;
+    unsigned long long pending;
+};
+
+struct apolysis_file_operation_counters {
+    struct apolysis_operation_pair_counters open;
+    struct apolysis_operation_pair_counters create;
+    struct apolysis_operation_pair_counters truncate;
+    struct apolysis_operation_pair_counters unlink;
+    struct apolysis_operation_pair_counters rename;
+};
+
 struct apolysis_observer_counters {
     unsigned long long reserve_failures;
     unsigned long long map_pressure;
     unsigned long long connect_missing_entries;
     unsigned long long connect_missing_exits;
     unsigned long long connect_pending;
+    struct apolysis_file_operation_counters file_operations;
 };
 
 struct apolysis_network_connect_counters {
@@ -63,6 +78,12 @@ struct apolysis_network_connect_counters {
 
 _Static_assert(sizeof(struct apolysis_network_connect_counters) == 24,
                "apolysis network connect counter ABI size mismatch");
+_Static_assert(sizeof(struct apolysis_operation_pair_counters) == 24,
+               "apolysis operation pair counter ABI size mismatch");
+_Static_assert(sizeof(struct apolysis_file_operation_counters) == 120,
+               "apolysis file operation counter ABI size mismatch");
+_Static_assert(sizeof(struct apolysis_observer_counters) == 160,
+               "apolysis observer counter ABI size mismatch");
 
 /*
  * ABI shared between the observer eBPF program and the Rust userspace loader.

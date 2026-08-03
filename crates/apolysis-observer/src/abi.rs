@@ -31,6 +31,50 @@ unsafe impl Pod for NetworkConnectCountersAbi {}
 const _: [(); 24] = [(); std::mem::size_of::<NetworkConnectCountersAbi>()];
 const _: [(); 8] = [(); std::mem::align_of::<NetworkConnectCountersAbi>()];
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub(crate) struct OperationPairCountersAbi {
+    pub(crate) missing_entries: u64,
+    pub(crate) missing_exits: u64,
+    pub(crate) pending: u64,
+}
+
+unsafe impl Pod for OperationPairCountersAbi {}
+
+const _: [(); 24] = [(); std::mem::size_of::<OperationPairCountersAbi>()];
+const _: [(); 8] = [(); std::mem::align_of::<OperationPairCountersAbi>()];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub(crate) struct FileOperationCountersAbi {
+    pub(crate) open: OperationPairCountersAbi,
+    pub(crate) create: OperationPairCountersAbi,
+    pub(crate) truncate: OperationPairCountersAbi,
+    pub(crate) unlink: OperationPairCountersAbi,
+    pub(crate) rename: OperationPairCountersAbi,
+}
+
+unsafe impl Pod for FileOperationCountersAbi {}
+
+const _: [(); 120] = [(); std::mem::size_of::<FileOperationCountersAbi>()];
+const _: [(); 8] = [(); std::mem::align_of::<FileOperationCountersAbi>()];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub(crate) struct ObserverCountersAbi {
+    pub(crate) reserve_failures: u64,
+    pub(crate) map_pressure: u64,
+    pub(crate) connect_missing_entries: u64,
+    pub(crate) connect_missing_exits: u64,
+    pub(crate) connect_pending: u64,
+    pub(crate) file_operations: FileOperationCountersAbi,
+}
+
+unsafe impl Pod for ObserverCountersAbi {}
+
+const _: [(); 160] = [(); std::mem::size_of::<ObserverCountersAbi>()];
+const _: [(); 8] = [(); std::mem::align_of::<ObserverCountersAbi>()];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum TrackedCgroupState {

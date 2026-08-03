@@ -174,7 +174,8 @@ async fn observer_batch_submits_only_records_with_session_ownership() {
             truncations: 1,
         },
     )
-    .await;
+    .await
+    .expect("ingest observer batch");
 
     assert_eq!(summary.submitted, 10);
     assert_eq!(summary.unscoped, 1);
@@ -232,7 +233,8 @@ async fn daemon_exec_persistence_is_content_off_by_default() {
             truncations: 1,
         },
     )
-    .await;
+    .await
+    .expect("ingest observer batch");
     shutdown.send(()).unwrap();
     writer.await.unwrap().expect("writer drain");
 
@@ -288,7 +290,8 @@ async fn observer_batch_appends_accountability_findings_for_registered_intent() 
             truncations: 0,
         },
     )
-    .await;
+    .await
+    .expect("ingest observer batch");
 
     assert_eq!(summary.submitted, 3);
     shutdown.send(()).unwrap();
@@ -390,7 +393,7 @@ fn config() -> DaemonConfig {
     DaemonConfig {
         socket_path: root.join("run/apolysisd.sock"),
         state_dir: root.join("state"),
-        queue_capacity: 8,
+        queue_capacity: 32,
         ..DaemonConfig::default()
     }
 }
