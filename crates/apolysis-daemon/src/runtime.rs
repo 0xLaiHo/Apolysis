@@ -11,8 +11,9 @@ use apolysis_accountability::{
     PushOutcome, QueuePriority, ResourceKind, RuntimeIdentity, SessionIntent,
 };
 use apolysis_core::{
-    new_collector_instance_id, CollectorHealthState, CollectorLifecycleCounters,
-    CollectorLifecycleRecord, CollectorNormalStopReason, RawKernelEvent,
+    new_collector_instance_id, CollectorFailureReason, CollectorHealthState,
+    CollectorLifecycleCounters, CollectorLifecycleRecord, CollectorNormalStopReason,
+    RawKernelEvent,
 };
 use apolysis_observer::{
     raw_event_from_record, scope_observation_gaps, DaemonObserver, DaemonObserverBatch,
@@ -85,6 +86,7 @@ impl ScopeObservationContext {
 pub trait ObserverRuntimeBackend: Send + 'static {
     fn track_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeGeneration, String>;
     fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String>;
+    fn scope_counters(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String>;
     fn drain_batch(&mut self) -> Result<DaemonObserverBatch, String>;
     fn read_batch(
         &mut self,
@@ -99,6 +101,10 @@ impl ObserverRuntimeBackend for DaemonObserver {
 
     fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
         DaemonObserver::untrack_cgroup(self, cgroup_id)
+    }
+
+    fn scope_counters(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
+        DaemonObserver::scope_counters(self, cgroup_id)
     }
 
     fn drain_batch(&mut self) -> Result<DaemonObserverBatch, String> {
@@ -157,10 +163,122 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
     let pipeline = state.pipeline();
     let mut summary = ObserverIngestSummary::default();
     let mut scope_open = true;
+    let checkpoint_interval = state.collector_checkpoint_interval();
+    let mut checkpoint = tokio::time::interval_at(
+        tokio::time::Instant::now() + checkpoint_interval,
+        checkpoint_interval,
+    );
+    checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
+            _ = checkpoint.tick(), if !scope_contexts.is_empty() => {
+                let batch = match backend.drain_batch() {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        let error = format!("failed to drain observer checkpoint: {error}");
+                        return Err(fail_collector_lifecycles(
+                            &state,
+                            &scope_contexts,
+                            &collector_instance_id,
+                            CollectorFailureReason::ObserverFailure,
+                            summary,
+                            &lifecycle_counters,
+                            error,
+                        )
+                        .await);
+                    }
+                };
+                let current = match ingest_observer_batch_confirmed(
+                    &state,
+                    &pipeline,
+                    batch,
+                    &scope_contexts,
+                )
+                .await
+                {
+                    Ok(current) => current,
+                    Err(error) => {
+                        return Err(fail_collector_lifecycles(
+                            &state,
+                            &scope_contexts,
+                            &collector_instance_id,
+                            collector_failure_reason(&error),
+                            summary,
+                            &lifecycle_counters,
+                            error,
+                        )
+                        .await);
+                    }
+                };
+                accumulate_ingest_summary(&mut summary, current);
+                let global = match backend.counters() {
+                    Ok(counters) => counters,
+                    Err(error) => {
+                        return Err(fail_collector_lifecycles(
+                            &state,
+                            &scope_contexts,
+                            &collector_instance_id,
+                            CollectorFailureReason::CounterReadFailure,
+                            summary,
+                            &lifecycle_counters,
+                            error,
+                        )
+                        .await);
+                    }
+                };
+                let mut checkpoints = BTreeMap::new();
+                for (identity, context) in &scope_contexts {
+                    let scoped = match backend.scope_counters(identity.cgroup_id) {
+                        Ok(counters) => counters,
+                        Err(error) => {
+                            return Err(fail_collector_lifecycles(
+                                &state,
+                                &scope_contexts,
+                                &collector_instance_id,
+                                CollectorFailureReason::CounterReadFailure,
+                                summary,
+                                &lifecycle_counters,
+                                error,
+                            )
+                            .await);
+                        }
+                    };
+                    let counters = checkpoints
+                        .entry(context.agent_run_id.clone())
+                        .or_insert_with(|| {
+                            lifecycle_counters
+                                .get(&context.agent_run_id)
+                                .copied()
+                                .unwrap_or_default()
+                        });
+                    add_scope_lifecycle_counters(counters, scoped);
+                }
+                for (agent_run_id, counters) in checkpoints {
+                    if let Err(error) = persist_collector_checkpoint(
+                        &state,
+                        &agent_run_id,
+                        &collector_instance_id,
+                        global,
+                        summary,
+                        counters,
+                    )
+                    .await
+                    {
+                        return Err(fail_collector_lifecycles(
+                            &state,
+                            &scope_contexts,
+                            &collector_instance_id,
+                            CollectorFailureReason::StorageFailure,
+                            summary,
+                            &lifecycle_counters,
+                            error,
+                        )
+                        .await);
+                    }
+                }
+            }
             request = scope_requests.recv(), if scope_open => {
                 match request {
                     Some(request) => {
@@ -302,11 +420,22 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                         match result {
                             Ok(()) => request.complete(Ok(())),
                             Err(error) => {
-                                state.set_ebpf(ComponentState::Unavailable).await;
-                                request.complete(Err(error.clone()));
-                                return Err(format!(
+                                let reason = collector_failure_reason(&error);
+                                let runtime_error = format!(
                                     "observer scope {operation:?} failed for cgroup {cgroup_id}: {error}"
-                                ));
+                                );
+                                let runtime_error = fail_collector_lifecycles(
+                                    &state,
+                                    &scope_contexts,
+                                    &collector_instance_id,
+                                    reason,
+                                    summary,
+                                    &lifecycle_counters,
+                                    runtime_error,
+                                )
+                                .await;
+                                request.complete(Err(error.clone()));
+                                return Err(runtime_error);
                             }
                         }
                     }
@@ -317,16 +446,36 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                 let batch = match batch {
                     Ok(batch) => batch,
                     Err(error) => {
-                        state.set_ebpf(ComponentState::Unavailable).await;
-                        return Err(error);
+                        return Err(fail_collector_lifecycles(
+                            &state,
+                            &scope_contexts,
+                            &collector_instance_id,
+                            CollectorFailureReason::ObserverFailure,
+                            summary,
+                            &lifecycle_counters,
+                            error,
+                        )
+                        .await);
                     }
                 };
                 if batch.abi_mismatches > 0 {
-                    state.set_ebpf(ComponentState::Unavailable).await;
-                    return Err(format!(
+                    summary.abi_mismatches = summary
+                        .abi_mismatches
+                        .saturating_add(batch.abi_mismatches);
+                    let error = format!(
                         "kernel/userspace ABI mismatch: {} incompatible record(s)",
                         batch.abi_mismatches
-                    ));
+                    );
+                    return Err(fail_collector_lifecycles(
+                        &state,
+                        &scope_contexts,
+                        &collector_instance_id,
+                        CollectorFailureReason::AbiMismatch,
+                        summary,
+                        &lifecycle_counters,
+                        error,
+                    )
+                    .await);
                 }
                 let current = match ingest_observer_batch_scoped(
                     &state,
@@ -338,8 +487,16 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                 {
                     Ok(current) => current,
                     Err(error) => {
-                        state.set_ebpf(ComponentState::Unavailable).await;
-                        return Err(error);
+                        return Err(fail_collector_lifecycles(
+                            &state,
+                            &scope_contexts,
+                            &collector_instance_id,
+                            collector_failure_reason(&error),
+                            summary,
+                            &lifecycle_counters,
+                            error,
+                        )
+                        .await);
                     }
                 };
                 accumulate_ingest_summary(&mut summary, current);
@@ -359,10 +516,18 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
         let counters = match backend.untrack_cgroup(cgroup_id) {
             Ok(counters) => counters,
             Err(error) => {
-                state.set_ebpf(ComponentState::Unavailable).await;
-                return Err(format!(
-                    "failed to drain observer scope for cgroup {cgroup_id}: {error}"
-                ));
+                let error =
+                    format!("failed to drain observer scope for cgroup {cgroup_id}: {error}");
+                return Err(fail_collector_lifecycles(
+                    &state,
+                    &scope_contexts,
+                    &collector_instance_id,
+                    CollectorFailureReason::CounterReadFailure,
+                    summary,
+                    &lifecycle_counters,
+                    error,
+                )
+                .await);
             }
         };
         let current = match backend.drain_batch() {
@@ -372,24 +537,48 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                 {
                     Ok(current) => current,
                     Err(error) => {
-                        state.set_ebpf(ComponentState::Unavailable).await;
-                        return Err(error);
+                        return Err(fail_collector_lifecycles(
+                            &state,
+                            &scope_contexts,
+                            &collector_instance_id,
+                            collector_failure_reason(&error),
+                            summary,
+                            &lifecycle_counters,
+                            error,
+                        )
+                        .await);
                     }
                 }
             }
             Err(error) => {
-                state.set_ebpf(ComponentState::Unavailable).await;
-                return Err(format!(
-                    "failed to flush observer scope for cgroup {cgroup_id}: {error}"
-                ));
+                let error =
+                    format!("failed to flush observer scope for cgroup {cgroup_id}: {error}");
+                return Err(fail_collector_lifecycles(
+                    &state,
+                    &scope_contexts,
+                    &collector_instance_id,
+                    CollectorFailureReason::ObserverFailure,
+                    summary,
+                    &lifecycle_counters,
+                    error,
+                )
+                .await);
             }
         };
         accumulate_ingest_summary(&mut summary, current);
         if let Err(error) =
             submit_scope_observation_gaps(&state, &pipeline, cgroup_id, counters, None).await
         {
-            state.set_ebpf(ComponentState::Unavailable).await;
-            return Err(error);
+            return Err(fail_collector_lifecycles(
+                &state,
+                &scope_contexts,
+                &collector_instance_id,
+                collector_failure_reason(&error),
+                summary,
+                &lifecycle_counters,
+                error,
+            )
+            .await);
         }
         if let Some(context) = scope_contexts.get(&ScopeRuntimeIdentity::new(cgroup_id, generation))
         {
@@ -407,12 +596,20 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
     let counters = match backend.counters() {
         Ok(counters) => counters,
         Err(error) => {
-            state.set_ebpf(ComponentState::Unavailable).await;
-            return Err(error);
+            return Err(fail_collector_lifecycles(
+                &state,
+                &scope_contexts,
+                &collector_instance_id,
+                CollectorFailureReason::CounterReadFailure,
+                summary,
+                &lifecycle_counters,
+                error,
+            )
+            .await);
         }
     };
     for agent_run_id in shutdown_agent_runs {
-        persist_collector_stopped(
+        if let Err(error) = persist_collector_stopped(
             &state,
             &agent_run_id,
             &collector_instance_id,
@@ -421,7 +618,19 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
             summary,
             lifecycle_counters.remove(&agent_run_id).unwrap_or_default(),
         )
-        .await?;
+        .await
+        {
+            return Err(fail_collector_lifecycles(
+                &state,
+                &scope_contexts,
+                &collector_instance_id,
+                CollectorFailureReason::StorageFailure,
+                summary,
+                &lifecycle_counters,
+                error,
+            )
+            .await);
+        }
     }
     state.set_ebpf(ComponentState::Unavailable).await;
     Ok(ObserverRuntimeSummary {
@@ -453,11 +662,7 @@ async fn persist_collector_stopped(
     ingest: ObserverIngestSummary,
     mut counters: CollectorLifecycleCounters,
 ) -> Result<(), String> {
-    counters.global_reserve_failures = global.reserve_failures;
-    counters.global_map_pressure = global.map_pressure;
-    counters.global_abi_mismatches = ingest.abi_mismatches;
-    counters.global_decode_failures = ingest.decode_failures;
-    counters.global_truncations = ingest.truncations;
+    apply_global_lifecycle_counters(&mut counters, global, ingest);
     let health = if counters.has_loss() {
         CollectorHealthState::Degraded
     } else {
@@ -473,6 +678,120 @@ async fn persist_collector_stopped(
         ))
         .await
         .map_err(|error| format!("failed to persist collector terminal state: {error}"))
+}
+
+async fn persist_collector_checkpoint(
+    state: &DaemonState,
+    agent_run_id: &str,
+    collector_instance_id: &str,
+    global: DaemonObserverCounters,
+    ingest: ObserverIngestSummary,
+    mut counters: CollectorLifecycleCounters,
+) -> Result<(), String> {
+    apply_global_lifecycle_counters(&mut counters, global, ingest);
+    let health = if counters.has_loss() {
+        CollectorHealthState::Degraded
+    } else {
+        CollectorHealthState::Healthy
+    };
+    state
+        .persist_collector_lifecycle(CollectorLifecycleRecord::checkpoint(
+            agent_run_id,
+            collector_instance_id,
+            health,
+            counters,
+        ))
+        .await
+        .map_err(|error| format!("failed to persist collector checkpoint: {error}"))
+}
+
+fn apply_global_lifecycle_counters(
+    counters: &mut CollectorLifecycleCounters,
+    global: DaemonObserverCounters,
+    ingest: ObserverIngestSummary,
+) {
+    counters.global_reserve_failures = global.reserve_failures;
+    counters.global_map_pressure = global.map_pressure;
+    counters.global_abi_mismatches = ingest.abi_mismatches;
+    counters.global_decode_failures = ingest.decode_failures;
+    counters.global_truncations = ingest.truncations;
+}
+
+async fn fail_collector_lifecycles(
+    state: &DaemonState,
+    scope_contexts: &BTreeMap<ScopeRuntimeIdentity, ScopeObservationContext>,
+    collector_instance_id: &str,
+    reason: CollectorFailureReason,
+    ingest: ObserverIngestSummary,
+    lifecycle_counters: &BTreeMap<String, CollectorLifecycleCounters>,
+    error: String,
+) -> String {
+    state.set_ebpf(ComponentState::Unavailable).await;
+    let mut agent_run_ids: BTreeSet<String> = scope_contexts
+        .values()
+        .map(|context| context.agent_run_id.clone())
+        .collect();
+    agent_run_ids.extend(lifecycle_counters.keys().cloned());
+    let mut terminal_failures = Vec::new();
+    for agent_run_id in agent_run_ids {
+        let mut counters = lifecycle_counters
+            .get(&agent_run_id)
+            .copied()
+            .unwrap_or_default();
+        counters.global_abi_mismatches = ingest.abi_mismatches;
+        counters.global_decode_failures = ingest.decode_failures;
+        counters.global_truncations = ingest.truncations;
+        match reason {
+            CollectorFailureReason::AbiMismatch => {
+                counters.global_abi_mismatches = counters.global_abi_mismatches.max(1);
+            }
+            CollectorFailureReason::DecodeFailure => {
+                counters.global_decode_failures = counters.global_decode_failures.max(1);
+            }
+            _ => {}
+        }
+        if let Err(terminal_error) = state
+            .persist_collector_lifecycle(CollectorLifecycleRecord::failed(
+                &agent_run_id,
+                collector_instance_id,
+                reason,
+                counters,
+            ))
+            .await
+        {
+            terminal_failures.push(format!("{agent_run_id}:{terminal_error}"));
+        }
+    }
+    if terminal_failures.is_empty() {
+        error
+    } else {
+        format!(
+            "{error}; collector terminal persistence failed: {}",
+            terminal_failures.join(",")
+        )
+    }
+}
+
+fn collector_failure_reason(error: &str) -> CollectorFailureReason {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("verifier") {
+        CollectorFailureReason::VerifierFailure
+    } else if normalized.contains("attach") {
+        CollectorFailureReason::AttachFailure
+    } else if normalized.contains("abi mismatch") || normalized.contains("abi_mismatch") {
+        CollectorFailureReason::AbiMismatch
+    } else if normalized.contains("normalize") || normalized.contains("decode") {
+        CollectorFailureReason::DecodeFailure
+    } else if normalized.contains("counter") {
+        CollectorFailureReason::CounterReadFailure
+    } else if normalized.contains("persist")
+        || normalized.contains("writer")
+        || normalized.contains("storage")
+    {
+        CollectorFailureReason::StorageFailure
+    } else {
+        CollectorFailureReason::ObserverFailure
+    }
 }
 
 fn add_scope_lifecycle_counters(

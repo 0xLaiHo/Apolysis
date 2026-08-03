@@ -625,6 +625,18 @@ impl DaemonObserver {
         Ok(counters)
     }
 
+    pub fn scope_counters(
+        &mut self,
+        cgroup_id: u64,
+    ) -> Result<ScopeObservationGapCounters, String> {
+        let generation = self
+            .active_scope_generations
+            .get(&cgroup_id)
+            .copied()
+            .ok_or_else(|| format!("cgroup observer scope {cgroup_id} is not tracked"))?;
+        snapshot_tracked_cgroup(&mut self.ebpf, cgroup_id, generation)
+    }
+
     pub async fn read_batch(&mut self) -> Result<DaemonObserverBatch, String> {
         let records = read_ring_batch(&mut self.ring).await?;
         Ok(self.decoder.decode(records))
@@ -2189,6 +2201,31 @@ fn drain_tracked_cgroup(
     Ok(ScopeObservationGapCounters {
         network_connect: network_snapshot.into(),
         file_operations: file_snapshot.into(),
+    })
+}
+
+fn snapshot_tracked_cgroup(
+    ebpf: &mut Ebpf,
+    cgroup_id: u64,
+    generation: ScopeGeneration,
+) -> Result<ScopeObservationGapCounters, String> {
+    match tracked_cgroup_scope(ebpf, cgroup_id)? {
+        Some(scope)
+            if scope.generation() == generation.get()
+                && scope.state()? == TrackedCgroupState::Active => {}
+        Some(scope) => {
+            return Err(format!(
+                "cgroup observer checkpoint {cgroup_id} generation/state mismatch: expected generation {}, found generation {} in state {:?}",
+                generation.get(),
+                scope.generation(),
+                scope.state()?
+            ));
+        }
+        None => return Err(format!("cgroup observer scope {cgroup_id} is not tracked")),
+    }
+    Ok(ScopeObservationGapCounters {
+        network_connect: read_network_connect_counters(ebpf, cgroup_id)?.into(),
+        file_operations: read_file_operation_counters(ebpf, cgroup_id)?.into(),
     })
 }
 

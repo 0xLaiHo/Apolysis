@@ -173,6 +173,78 @@ async fn observer_shutdown_persists_connect_gaps_to_the_owning_agent_run() {
 }
 
 #[tokio::test]
+async fn observer_runtime_persists_periodic_global_and_scope_loss_checkpoints() {
+    let mut config = config();
+    config.collector_checkpoint_interval = std::time::Duration::from_millis(1);
+    let backend = FakeBackend {
+        operations: Arc::new(Mutex::new(Vec::new())),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        drain_batch: None,
+        scoped_counters: BTreeMap::from([(
+            31,
+            ScopeObservationGapCounters {
+                network_connect: NetworkConnectCounters {
+                    missing_entries: 13,
+                    missing_exits: 17,
+                    pending: 19,
+                },
+                ..ScopeObservationGapCounters::default()
+            },
+        )]),
+    };
+    let (scope, receiver) = scope_channel(2);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (shutdown, shutdown_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, shutdown_receiver).await
+        })
+    };
+
+    state
+        .register(intent("agent-run-checkpoint"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .discover_cgroup("agent-run-checkpoint", 31)
+        .await
+        .expect("associate cgroup");
+    let mut observed = String::new();
+    for _ in 0..100 {
+        observed = timeline(&config, "agent-run-checkpoint");
+        if observed.contains(r#""state":"checkpoint""#) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+
+    assert!(observed.contains(r#""state":"checkpoint""#));
+    assert!(observed.contains(r#""health":"degraded""#));
+    assert!(observed.contains(r#""global_reserve_failures":3"#));
+    assert!(observed.contains(r#""global_map_pressure":2"#));
+    assert!(observed.contains(r#""scope_missing_entries":13"#));
+    assert!(observed.contains(r#""scope_missing_exits":17"#));
+    assert!(observed.contains(r#""scope_pending":19"#));
+
+    shutdown.send(()).expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("clean writer shutdown");
+    cleanup(&config);
+}
+
+#[tokio::test]
 async fn observer_shutdown_persists_file_gaps_to_the_owning_agent_runs() {
     let config = config();
     let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
@@ -425,6 +497,10 @@ async fn normalization_failure_stops_queued_observer_ingest() {
 
     assert!(error.contains("failed to normalize observer record"));
     assert_eq!(state.health().await.ebpf(), ComponentState::Unavailable);
+    let timeline = timeline(&config, "agent-run-normalize");
+    assert!(timeline.contains(r#""state":"failed""#));
+    assert!(timeline.contains(r#""health":"failed""#));
+    assert!(timeline.contains(r#""stop_reason":"decode_failure""#));
     cleanup(&config);
 }
 
@@ -846,6 +922,10 @@ impl ObserverRuntimeBackend for ReuseBackend {
         Ok(ScopeObservationGapCounters::default())
     }
 
+    fn scope_counters(&mut self, _cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
+        Ok(ScopeObservationGapCounters::default())
+    }
+
     fn drain_batch(&mut self) -> Result<DaemonObserverBatch, String> {
         Ok(DaemonObserverBatch::default())
     }
@@ -898,6 +978,17 @@ impl ObserverRuntimeBackend for FakeBackend {
             return Err("scoped counter read failed".to_string());
         }
         Ok(self.scoped_counters.remove(&cgroup_id).unwrap_or_default())
+    }
+
+    fn scope_counters(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
+        if self.fail_untrack == Some(cgroup_id) {
+            return Err("scoped counter read failed".to_string());
+        }
+        Ok(self
+            .scoped_counters
+            .get(&cgroup_id)
+            .copied()
+            .unwrap_or_default())
     }
 
     fn drain_batch(&mut self) -> Result<DaemonObserverBatch, String> {

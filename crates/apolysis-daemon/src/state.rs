@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apolysis_accountability::{
@@ -33,6 +34,7 @@ pub struct DaemonState {
     storage_writable: AtomicBool,
     scope: Option<ScopeController>,
     pipeline: EventPipeline,
+    collector_checkpoint_interval: Duration,
 }
 
 impl DaemonState {
@@ -118,6 +120,7 @@ impl DaemonState {
             storage_writable: AtomicBool::new(true),
             scope,
             pipeline,
+            collector_checkpoint_interval: config.collector_checkpoint_interval,
         })
     }
 
@@ -382,6 +385,10 @@ impl DaemonState {
 
     pub fn pipeline(&self) -> EventPipeline {
         self.pipeline.clone()
+    }
+
+    pub fn collector_checkpoint_interval(&self) -> Duration {
+        self.collector_checkpoint_interval
     }
 
     pub async fn set_ebpf(&self, state: ComponentState) {
