@@ -42,13 +42,19 @@ fn kernel_event_record_decodes_native_endian_fields_and_fixed_buffers() {
     bytes[36..40].copy_from_slice(&1001_u32.to_ne_bytes());
     bytes[40..44].copy_from_slice(&(KernelEventKind::Connect as u32).to_ne_bytes());
     bytes[44..48].copy_from_slice(&3_u32.to_ne_bytes());
-    write_fixed(&mut bytes[56..56 + COMM_LEN], b"python3");
+    bytes[56..64].copy_from_slice(&11_u64.to_ne_bytes());
+    bytes[64..72].copy_from_slice(&22_u64.to_ne_bytes());
+    bytes[72..80].copy_from_slice(&33_u64.to_ne_bytes());
+    bytes[80..88].copy_from_slice(&44_u64.to_ne_bytes());
+    bytes[88..92].copy_from_slice(&5_u32.to_ne_bytes());
+    bytes[92..96].copy_from_slice(&4_u32.to_ne_bytes());
+    write_fixed(&mut bytes[96..96 + COMM_LEN], b"python3");
     write_fixed(
-        &mut bytes[56 + COMM_LEN..56 + COMM_LEN + RESOURCE_LEN],
+        &mut bytes[96 + COMM_LEN..96 + COMM_LEN + RESOURCE_LEN],
         b"1.1.1.1:443",
     );
     write_fixed(
-        &mut bytes[56 + COMM_LEN + RESOURCE_LEN..56 + COMM_LEN + RESOURCE_LEN + ACTION_LEN],
+        &mut bytes[96 + COMM_LEN + RESOURCE_LEN..96 + COMM_LEN + RESOURCE_LEN + ACTION_LEN],
         b"connect",
     );
     write_fixed(
@@ -68,6 +74,12 @@ fn kernel_event_record_decodes_native_endian_fields_and_fixed_buffers() {
     assert_eq!(record.gid, 1001);
     assert_eq!(record.kind().expect("known kind"), KernelEventKind::Connect);
     assert_eq!(record.flags, 3);
+    assert_eq!(record.scope_generation, 11);
+    assert_eq!(record.process_generation, 22);
+    assert_eq!(record.process_start_time_ns, 33);
+    assert_eq!(record.parent_process_generation, 44);
+    assert_eq!(record.exec_generation, 5);
+    assert_eq!(record.parent_exec_generation, 4);
     assert_eq!(record.comm(), "python3");
     assert_eq!(record.resource(), "1.1.1.1:443");
     assert_eq!(record.action(), "connect");
@@ -84,7 +96,7 @@ fn kernel_event_record_rejects_short_ring_buffer_items() {
     assert_eq!(
         error,
         KernelEventDecodeError::UnexpectedRecordLength {
-            expected: 616,
+            expected: 656,
             received: 32,
         }
     );
@@ -94,7 +106,7 @@ fn kernel_event_record_rejects_short_ring_buffer_items() {
 #[test]
 fn kernel_event_record_rejects_an_unsupported_abi_version() {
     let mut bytes = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
-    bytes[0..4].copy_from_slice(&3_u32.to_ne_bytes());
+    bytes[0..4].copy_from_slice(&2_u32.to_ne_bytes());
     bytes[4..8].copy_from_slice(&(KERNEL_EVENT_RECORD_LEN as u32).to_ne_bytes());
 
     let error = KernelEventRecord::decode(&bytes).expect_err("unknown ABI must fail");
@@ -103,7 +115,7 @@ fn kernel_event_record_rejects_an_unsupported_abi_version() {
         error,
         KernelEventDecodeError::UnsupportedAbiVersion {
             expected: KERNEL_ABI_VERSION,
-            received: 3,
+            received: 2,
         }
     );
     assert!(error.is_abi_mismatch());
@@ -111,9 +123,9 @@ fn kernel_event_record_rejects_an_unsupported_abi_version() {
 
 #[test]
 fn kernel_event_record_classifies_a_different_sized_future_abi_by_version() {
-    let mut bytes = vec![0_u8; 624];
-    bytes[0..4].copy_from_slice(&3_u32.to_ne_bytes());
-    bytes[4..8].copy_from_slice(&624_u32.to_ne_bytes());
+    let mut bytes = vec![0_u8; 664];
+    bytes[0..4].copy_from_slice(&4_u32.to_ne_bytes());
+    bytes[4..8].copy_from_slice(&664_u32.to_ne_bytes());
 
     let error = KernelEventRecord::decode(&bytes).expect_err("future ABI must fail");
 
@@ -121,7 +133,7 @@ fn kernel_event_record_classifies_a_different_sized_future_abi_by_version() {
         error,
         KernelEventDecodeError::UnsupportedAbiVersion {
             expected: KERNEL_ABI_VERSION,
-            received: 3,
+            received: 4,
         }
     );
 }
@@ -130,7 +142,7 @@ fn kernel_event_record_classifies_a_different_sized_future_abi_by_version() {
 fn kernel_event_record_rejects_a_declared_record_size_mismatch() {
     let mut bytes = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
     bytes[0..4].copy_from_slice(&KERNEL_ABI_VERSION.to_ne_bytes());
-    bytes[4..8].copy_from_slice(&608_u32.to_ne_bytes());
+    bytes[4..8].copy_from_slice(&648_u32.to_ne_bytes());
 
     let error = KernelEventRecord::decode(&bytes).expect_err("wrong ABI size must fail");
 
@@ -138,7 +150,7 @@ fn kernel_event_record_rejects_a_declared_record_size_mismatch() {
         error,
         KernelEventDecodeError::DeclaredRecordSizeMismatch {
             expected: KERNEL_EVENT_RECORD_LEN as u32,
-            received: 608,
+            received: 648,
         }
     );
     assert!(error.is_abi_mismatch());
@@ -294,6 +306,12 @@ fn empty_record(kind: KernelEventKind) -> KernelEventRecord {
         event_kind: kind as u32,
         flags: 0,
         return_value: 0,
+        scope_generation: 0,
+        process_generation: 0,
+        process_start_time_ns: 0,
+        parent_process_generation: 0,
+        exec_generation: 0,
+        parent_exec_generation: 0,
         comm: [0; COMM_LEN],
         resource: [0; RESOURCE_LEN],
         action: [0; ACTION_LEN],

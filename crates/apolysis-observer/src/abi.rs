@@ -10,8 +10,8 @@ pub const COMM_LEN: usize = 16;
 pub const RESOURCE_LEN: usize = 256;
 pub const ACTION_LEN: usize = 32;
 pub const PAYLOAD_LEN: usize = 256;
-pub const KERNEL_ABI_VERSION: u32 = 2;
-pub const KERNEL_EVENT_RECORD_LEN: usize = 56 + COMM_LEN + RESOURCE_LEN + ACTION_LEN + PAYLOAD_LEN;
+pub const KERNEL_ABI_VERSION: u32 = 3;
+pub const KERNEL_EVENT_RECORD_LEN: usize = 96 + COMM_LEN + RESOURCE_LEN + ACTION_LEN + PAYLOAD_LEN;
 pub const FLAG_RESOURCE_TRUNCATED: u32 = 1 << 0;
 pub const FLAG_PAYLOAD_TRUNCATED: u32 = 1 << 1;
 pub const FLAG_PAYLOAD_SOCKADDR: u32 = 1 << 2;
@@ -180,6 +180,12 @@ pub struct KernelEventRecord {
     pub event_kind: u32,
     pub flags: u32,
     pub return_value: i64,
+    pub scope_generation: u64,
+    pub process_generation: u64,
+    pub process_start_time_ns: u64,
+    pub parent_process_generation: u64,
+    pub exec_generation: u32,
+    pub parent_exec_generation: u32,
     pub comm: [u8; COMM_LEN],
     pub resource: [u8; RESOURCE_LEN],
     pub action: [u8; ACTION_LEN],
@@ -227,13 +233,19 @@ impl KernelEventRecord {
             event_kind: read_u32(bytes, 40),
             flags: read_u32(bytes, 44),
             return_value: read_i64(bytes, 48),
+            scope_generation: read_u64(bytes, 56),
+            process_generation: read_u64(bytes, 64),
+            process_start_time_ns: read_u64(bytes, 72),
+            parent_process_generation: read_u64(bytes, 80),
+            exec_generation: read_u32(bytes, 88),
+            parent_exec_generation: read_u32(bytes, 92),
             comm: [0; COMM_LEN],
             resource: [0; RESOURCE_LEN],
             action: [0; ACTION_LEN],
             payload: [0; PAYLOAD_LEN],
         };
 
-        let mut offset = 56;
+        let mut offset = 96;
         copy_fixed(bytes, &mut offset, &mut record.comm);
         copy_fixed(bytes, &mut offset, &mut record.resource);
         copy_fixed(bytes, &mut offset, &mut record.action);
