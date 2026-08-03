@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stable userspace mirror of the observer ring-buffer ABI.
+//! Stable userspace mirrors of the observer kernel/userspace ABIs.
 
 use std::fmt;
 
@@ -30,6 +30,27 @@ unsafe impl Pod for NetworkConnectCountersAbi {}
 
 const _: [(); 24] = [(); std::mem::size_of::<NetworkConnectCountersAbi>()];
 const _: [(); 8] = [(); std::mem::align_of::<NetworkConnectCountersAbi>()];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TrackedCgroupState {
+    Active = 1,
+    Draining = 2,
+}
+
+impl TryFrom<u8> for TrackedCgroupState {
+    type Error = String;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Active),
+            2 => Ok(Self::Draining),
+            state => Err(format!("unknown cgroup observer scope state: {state}")),
+        }
+    }
+}
+
+const _: [(); 1] = [(); std::mem::size_of::<TrackedCgroupState>()];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KernelEventDecodeError {

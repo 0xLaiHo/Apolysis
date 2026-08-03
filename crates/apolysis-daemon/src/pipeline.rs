@@ -13,6 +13,7 @@ pub struct DaemonRecord {
     pub session_id: String,
     pub priority: QueuePriority,
     pub payload: Value,
+    confirmation_required: bool,
 }
 
 impl DaemonRecord {
@@ -21,7 +22,16 @@ impl DaemonRecord {
             session_id: session_id.into(),
             priority,
             payload,
+            confirmation_required: false,
         }
+    }
+
+    pub(crate) fn require_confirmation(&mut self) {
+        self.confirmation_required = true;
+    }
+
+    pub(crate) fn confirmation_required(&self) -> bool {
+        self.confirmation_required
     }
 }
 
@@ -93,8 +103,9 @@ impl EventPipeline {
 
     pub async fn submit_and_wait(
         &self,
-        record: DaemonRecord,
+        mut record: DaemonRecord,
     ) -> Result<RecordWriteOutcome, String> {
+        record.require_confirmation();
         let (confirmation, receiver) = oneshot::channel();
         match self
             .submit_queued(QueuedRecord {

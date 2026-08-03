@@ -428,6 +428,7 @@ impl DaemonState {
         &self,
         record: DaemonRecord,
     ) -> Result<RecordWriteOutcome, String> {
+        let confirmation_required = record.confirmation_required();
         if !self.storage_writable.load(Ordering::Acquire) {
             return Err(
                 "session storage is unavailable; restart after repairing storage".to_string(),
@@ -444,7 +445,22 @@ impl DaemonState {
         match self.persist_inner(&record.session_id, record.payload).await {
             Ok(()) => Ok(RecordWriteOutcome::Written),
             Err(error) => {
-                self.mark_session_degraded(&record.session_id, &error).await;
+                if confirmation_required {
+                    // The observer runtime is waiting for this write result and
+                    // close may still hold the registry lock. Re-entering scope
+                    // cleanup here would wait on that same runtime. Pause this
+                    // session and let the confirmed failure unwind the caller.
+                    self.paused_sessions
+                        .write()
+                        .await
+                        .insert(record.session_id.clone(), error);
+                    self.health
+                        .write()
+                        .await
+                        .set_storage(ComponentState::Degraded);
+                } else {
+                    self.mark_session_degraded(&record.session_id, &error).await;
+                }
                 Ok(RecordWriteOutcome::Failed)
             }
         }

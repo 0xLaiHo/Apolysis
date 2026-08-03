@@ -23,8 +23,8 @@ use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
 
 use crate::abi::{
-    KernelEventKind, KernelEventRecord, NetworkConnectCountersAbi, FLAG_ARGV_TRUNCATED,
-    FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
+    KernelEventKind, KernelEventRecord, NetworkConnectCountersAbi, TrackedCgroupState,
+    FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
 };
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
@@ -1609,25 +1609,6 @@ pub fn update_tracked_cgroup(ebpf: &mut Ebpf, cgroup_id: u64, present: bool) -> 
 }
 
 const CONNECT_DRAIN_POLL_LIMIT: usize = 4_096;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-enum TrackedCgroupState {
-    Active = 1,
-    Draining = 2,
-}
-
-impl TryFrom<u8> for TrackedCgroupState {
-    type Error = String;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            1 => Ok(Self::Active),
-            2 => Ok(Self::Draining),
-            state => Err(format!("unknown cgroup observer scope state: {state}")),
-        }
-    }
-}
 
 fn track_cgroup_with_connect_counters(ebpf: &mut Ebpf, cgroup_id: u64) -> Result<(), String> {
     match tracked_cgroup_state(ebpf, cgroup_id)? {

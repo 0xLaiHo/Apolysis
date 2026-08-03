@@ -6,7 +6,9 @@ use std::sync::Arc;
 use apolysis_accountability::{
     ActionClass, ComponentState, QueuePriority, ResourceKind, ResourceSelector, SessionIntent,
 };
-use apolysis_daemon::{ingest_observer_batch, DaemonConfig, DaemonRecord, DaemonState};
+use apolysis_daemon::{
+    ingest_observer_batch, DaemonConfig, DaemonRecord, DaemonState, RecordWriteOutcome,
+};
 use apolysis_observer::abi::{
     KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN, FLAG_RETURN_VALUE,
     KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
@@ -100,6 +102,39 @@ async fn timeline_write_failure_degrades_storage_and_writer_continues_other_sess
     )
     .expect("healthy session timeline");
     assert!(healthy_timeline.contains(r#""session_id":"healthy-session""#));
+
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn confirmed_timeline_write_failure_returns_to_the_observer() {
+    let config = config();
+    let blocked_timeline = config.state_dir.join("sessions/gap-session/timeline.jsonl");
+    std::fs::create_dir_all(&blocked_timeline).expect("block gap timeline path");
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    let pipeline = state.pipeline();
+    let (shutdown, receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(receiver).await })
+    };
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        pipeline.submit_and_wait(DaemonRecord::new(
+            "gap-session",
+            QueuePriority::Gap,
+            json!({"record_type":"observation_gap","session_id":"gap-session"}),
+        )),
+    )
+    .await
+    .expect("confirmed write failure must not deadlock")
+    .expect("writer confirmation");
+
+    assert_eq!(outcome, RecordWriteOutcome::Failed);
+    assert_eq!(state.health().await.storage(), ComponentState::Degraded);
+    shutdown.send(()).expect("stop writer");
+    assert_eq!(writer.await.unwrap().expect("writer drain").failed, 1);
 
     cleanup(&config);
 }

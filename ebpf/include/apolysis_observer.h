@@ -36,6 +36,11 @@ enum apolysis_scope_mode {
     APOLYSIS_SCOPE_MULTI_CGROUP = 3,
 };
 
+enum apolysis_cgroup_scope_state {
+    APOLYSIS_CGROUP_ACTIVE = 1,
+    APOLYSIS_CGROUP_DRAINING = 2,
+};
+
 struct apolysis_scope_config {
     unsigned long long cgroup_id;
     unsigned int root_pid;

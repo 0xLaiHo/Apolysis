@@ -15,8 +15,6 @@ char LICENSE[] SEC("license") = "GPL";
 #define APOLYSIS_EXEC_ARG_LEN 32
 #define APOLYSIS_AF_INET 2
 #define APOLYSIS_AF_INET6 10
-#define APOLYSIS_CGROUP_ACTIVE 1
-#define APOLYSIS_CGROUP_DRAINING 2
 
 struct apolysis_pending_exec {
     unsigned int flags;
@@ -319,14 +317,11 @@ static __always_inline unsigned int current_parent_pid(void)
     return BPF_CORE_READ(task, real_parent, tgid);
 }
 
-static __always_inline struct apolysis_kernel_event *reserve_event(unsigned int kind)
+static __always_inline struct apolysis_kernel_event *reserve_event_unchecked(unsigned int kind)
 {
     struct apolysis_kernel_event *event;
     unsigned long long pid_tgid;
     unsigned long long uid_gid;
-
-    if (!current_is_in_scope())
-        return 0;
 
     event = bpf_ringbuf_reserve(&APOLYSIS_EVENTS, sizeof(*event), 0);
     if (!event) {
@@ -348,6 +343,14 @@ static __always_inline struct apolysis_kernel_event *reserve_event(unsigned int 
     event->event_kind = kind;
     bpf_get_current_comm(event->comm, sizeof(event->comm));
     return event;
+}
+
+static __always_inline struct apolysis_kernel_event *reserve_event(unsigned int kind)
+{
+    if (!current_is_in_scope())
+        return 0;
+
+    return reserve_event_unchecked(kind);
 }
 
 static __always_inline void copy_action(struct apolysis_kernel_event *event,
@@ -809,7 +812,13 @@ int apolysis_sys_exit_connect(struct trace_event_raw_sys_exit *ctx)
         return 0;
     }
 
-    event = reserve_event(APOLYSIS_EVENT_CONNECT);
+    /*
+     * connect_pair_is_in_scope made the scope decision while update_scoped
+     * holds the per-cgroup drain barrier. Do not re-read the ACTIVE/DRAINING
+     * state here: userspace may switch it after that decision and waits for
+     * this handler before snapshotting the counters.
+     */
+    event = reserve_event_unchecked(APOLYSIS_EVENT_CONNECT);
     if (event) {
         __builtin_memcpy(event->payload, pending->payload, sizeof(event->payload));
         event->flags |= pending->flags | APOLYSIS_FLAG_RETURN_VALUE;
