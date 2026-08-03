@@ -67,8 +67,8 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
 - Exec 参数与 process command 默认 content-off 持久化，并对凭证和网络内容脱敏。
 - 提供有序 JSONL、输出轮转、可选本地 hash-chain envelope，以及 drop、map pressure、ABI
   mismatch、decode failure 和 truncation 的类型化诊断。
-- 对无法匹配或 collector 停止时仍 pending 的 network connect entry/exit pair 发出显式
-  Observation Gap。
+- 对无法匹配或 collector 停止时仍 pending 的 network connect entry/exit pair 发出归属于
+  Agent Run 的 Observation Gap，并隔离 multi-cgroup daemon 中的不同 scope。
 - 可选摄取 Codex 声明意图并通过启发式关联生成 mismatch finding。
 
 Network connect 现使用有界 entry/exit matching，并报告 return value、errno 以及 succeeded、

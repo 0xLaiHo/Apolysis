@@ -19,7 +19,7 @@ pub use live::{
     network_connect_observation_gaps, observe_live, raw_event_from_record, update_tracked_cgroup,
     AgentDiscoveryRequest, AgentRegistration, AgentRunRequest, DaemonKernelEvent, DaemonObserver,
     DaemonObserverBatch, DaemonObserverConfig, DaemonObserverCounters, LiveObserveRequest,
-    LiveScope, ObserverBatchDecoder,
+    LiveScope, NetworkConnectCounters, ObserverBatchDecoder,
 };
 pub use redaction::{
     redact_command_text_for_persistence, RedactedValue, Redactor, RuntimeEvidencePersistence,

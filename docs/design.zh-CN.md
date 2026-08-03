@@ -138,6 +138,12 @@ attempted、succeeded、failed、denied、pending 与 unknown outcome，并在 c
 record，在 syscall exit 发出 Runtime Observation，并把 Linux return value 映射为
 succeeded、failed、denied 或 pending。无法匹配的 entry 或 exit 会成为显式 Observation Gap。
 
+在 multi-cgroup daemon 模式下，connect 配对丢失会按 cgroup 分别计数，同时保留
+collector-global counter 用于健康诊断。Drain 一个 scope 时会阻止新的 connect entry，快照其
+missing-entry、missing-exit 与 pending 计数；快照前会有界等待正在执行的 collector update
+排空，并在丢弃归属前确认类型化 Observation Gap 已持久化到所属 Agent Run。Drain、快照、
+queue 或 storage 失败会停止 observer runtime，并拒绝把该 run 干净关闭。
+
 全 syscall 采集、prompt/response、TLS plaintext 和通用 kernel enforcement 都不是目标。
 
 ### 5.3 Userspace normalization 与 identity
@@ -263,8 +269,8 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 Implemented today：
 
 - `ebpf/observer` 与 `apolysis-observer`：CO-RE tracepoint、ring buffer、
-  process-tree/cgroup scope、ABI v2、outcome-aware network connect、脱敏和 health/gap
-  diagnostic；
+  process-tree/cgroup scope、ABI v2、outcome-aware network connect、per-cgroup connect
+  gap counter、脱敏和 health/gap diagnostic；
 - `apolysis-cli`：fixture/live observation、托管 Agent launch、可选 Codex intent
   correlation、visibility 与 verification command；
 - `apolysis-core`：当前 JSONL vocabulary、record type 与版本化 Collector Capability
@@ -277,9 +283,10 @@ Implemented today：
   prototype。
 
 Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 同步到稳定
-存储。Network connect 已具备有界 entry/exit outcome 语义；当前 file hook 仍描述 attempt。
-把 outcome 语义扩展到其余 operation set、完整 collector lifecycle record、saved-run viewer
-与有界 Kubernetes Beta 仍是 target。
+存储。Network connect 已具备有界 entry/exit outcome 语义，daemon 会在显式移除 scope 与
+正常关闭时把 connect 配对 gap 持久化到所属 Agent Run。当前 file hook 仍描述 attempt。把
+outcome 语义扩展到其余 operation set、稳定 scope/process generation、完整 collector
+lifecycle record、saved-run viewer 与有界 Kubernetes Beta 仍是 target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃
@@ -293,8 +300,9 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 - 成功 connect 不证明远端 operation 已 commit。
 - 没有额外传播 identity 时，无法区分同进程中的逻辑 Agent；runtime-only attribution 保持
   process-level。
-- Multi-cgroup daemon 会报告 collector-global network correlation counter，但在具备
-  per-cgroup gap attribution 前，不会把它们持久化为 Agent-Run-scoped Observation Gap。
+- Cgroup scope drain 时仍 pending 的 connect entry 会保留在有界配对 map 中，直到 syscall
+  返回或 thread 退出。在这些 entry 完成前把同一 cgroup 重新归属给另一个 Agent Run 尚未经过
+  资格验证；要安全支持 cgroup 复用，仍需稳定的 scope generation。
 - 被攻陷的 kernel 或 privileged host 可以省略或伪造 observation。
 - Kernel version、BTF、hook availability、verifier behavior 与 privilege 限制支持范围。
 

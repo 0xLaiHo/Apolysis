@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -10,8 +11,8 @@ use apolysis_accountability::{
 };
 use apolysis_core::RawKernelEvent;
 use apolysis_observer::{
-    raw_event_from_record, DaemonObserver, DaemonObserverBatch, DaemonObserverCounters, Redactor,
-    RuntimeEvidencePersistence,
+    network_connect_observation_gaps, raw_event_from_record, DaemonObserver, DaemonObserverBatch,
+    DaemonObserverCounters, NetworkConnectCounters, Redactor, RuntimeEvidencePersistence,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -35,7 +36,7 @@ pub struct ObserverRuntimeSummary {
 
 pub trait ObserverRuntimeBackend: Send + 'static {
     fn track_cgroup(&mut self, cgroup_id: u64) -> Result<(), String>;
-    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<(), String>;
+    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<NetworkConnectCounters, String>;
     fn read_batch(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<DaemonObserverBatch, String>> + Send + '_>>;
@@ -47,7 +48,7 @@ impl ObserverRuntimeBackend for DaemonObserver {
         DaemonObserver::track_cgroup(self, cgroup_id)
     }
 
-    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<(), String> {
+    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<NetworkConnectCounters, String> {
         DaemonObserver::untrack_cgroup(self, cgroup_id)
     }
 
@@ -69,6 +70,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
     state: Arc<DaemonState>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<ObserverRuntimeSummary, String> {
+    let mut tracked_cgroups = BTreeSet::new();
     for cgroup_id in initial_cgroups {
         if let Err(error) = backend.track_cgroup(cgroup_id) {
             state.set_ebpf(ComponentState::Unavailable).await;
@@ -76,6 +78,7 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                 "failed to restore observer scope for cgroup {cgroup_id}: {error}"
             ));
         }
+        tracked_cgroups.insert(cgroup_id);
     }
     state.set_ebpf(ComponentState::Ready).await;
     let pipeline = state.pipeline();
@@ -88,11 +91,38 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
             request = scope_requests.recv(), if scope_open => {
                 match request {
                     Some(request) => {
-                        let result = match request.operation() {
-                            ScopeOperation::Track => backend.track_cgroup(request.cgroup_id()),
-                            ScopeOperation::Untrack => backend.untrack_cgroup(request.cgroup_id()),
+                        let cgroup_id = request.cgroup_id();
+                        let agent_run_id = request.agent_run_id().map(str::to_owned);
+                        let operation = request.operation();
+                        let result = match operation {
+                            ScopeOperation::Track => backend.track_cgroup(cgroup_id).map(|()| {
+                                tracked_cgroups.insert(cgroup_id);
+                            }),
+                            ScopeOperation::Untrack => match backend.untrack_cgroup(cgroup_id) {
+                                Ok(counters) => {
+                                    tracked_cgroups.remove(&cgroup_id);
+                                    submit_network_connect_gaps(
+                                        &state,
+                                        &pipeline,
+                                        cgroup_id,
+                                        counters,
+                                        agent_run_id.as_deref(),
+                                    )
+                                    .await
+                                }
+                                Err(error) => Err(error),
+                            },
                         };
-                        request.complete(result);
+                        match result {
+                            Ok(()) => request.complete(Ok(())),
+                            Err(error) => {
+                                state.set_ebpf(ComponentState::Unavailable).await;
+                                request.complete(Err(error.clone()));
+                                return Err(format!(
+                                    "observer scope {operation:?} failed for cgroup {cgroup_id}: {error}"
+                                ));
+                            }
+                        }
                     }
                     None => scope_open = false,
                 }
@@ -128,6 +158,24 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
         }
     }
 
+    for cgroup_id in tracked_cgroups {
+        let counters = match backend.untrack_cgroup(cgroup_id) {
+            Ok(counters) => counters,
+            Err(error) => {
+                state.set_ebpf(ComponentState::Unavailable).await;
+                return Err(format!(
+                    "failed to drain observer scope for cgroup {cgroup_id}: {error}"
+                ));
+            }
+        };
+        if let Err(error) =
+            submit_network_connect_gaps(&state, &pipeline, cgroup_id, counters, None).await
+        {
+            state.set_ebpf(ComponentState::Unavailable).await;
+            return Err(error);
+        }
+    }
+
     let counters = match backend.counters() {
         Ok(counters) => counters,
         Err(error) => {
@@ -140,6 +188,44 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
         counters,
         ingest: summary,
     })
+}
+
+async fn submit_network_connect_gaps(
+    state: &DaemonState,
+    pipeline: &EventPipeline,
+    cgroup_id: u64,
+    counters: NetworkConnectCounters,
+    known_agent_run_id: Option<&str>,
+) -> Result<(), String> {
+    if counters == NetworkConnectCounters::default() {
+        return Ok(());
+    }
+    let agent_run_id = match known_agent_run_id {
+        Some(agent_run_id) => agent_run_id.to_owned(),
+        None => state
+            .session_for_cgroup(cgroup_id)
+            .await
+            .ok_or_else(|| format!("no Agent Run owns observer scope cgroup {cgroup_id}"))?,
+    };
+    for gap in network_connect_observation_gaps(&agent_run_id, &counters) {
+        let payload = serde_json::from_str(&gap.to_json_line())
+            .map_err(|error| format!("failed to encode Observation Gap: {error}"))?;
+        match pipeline
+            .submit_and_wait(DaemonRecord::new(
+                agent_run_id.clone(),
+                QueuePriority::Gap,
+                payload,
+            ))
+            .await
+            .map_err(|error| format!("failed to persist Observation Gap: {error}"))?
+        {
+            crate::RecordWriteOutcome::Written => {}
+            crate::RecordWriteOutcome::Failed => {
+                return Err("failed to persist Observation Gap".to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn ingest_observer_batch(

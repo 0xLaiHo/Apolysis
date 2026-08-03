@@ -115,8 +115,8 @@ Priorities:
   supported operation set;
 - preserve return value and errno semantics while distinguishing attempted,
   succeeded, failed, denied, pending, and unknown;
-- attribute network correlation counters by cgroup before the multi-cgroup
-  daemon persists Agent-Run-scoped Observation Gaps;
+- preserve per-cgroup network correlation counters and qualify isolated
+  Agent-Run gap persistence across scope drain, shutdown, and identity churn;
 - establish stable process identity across PID reuse and exec;
 - preserve cgroup scope and deterministic process lineage;
 - emit collector start, periodic health, loss checkpoints, terminal state, and

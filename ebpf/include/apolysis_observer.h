@@ -36,6 +36,11 @@ enum apolysis_scope_mode {
     APOLYSIS_SCOPE_MULTI_CGROUP = 3,
 };
 
+enum apolysis_cgroup_scope_state {
+    APOLYSIS_CGROUP_ACTIVE = 1,
+    APOLYSIS_CGROUP_DRAINING = 2,
+};
+
 struct apolysis_scope_config {
     unsigned long long cgroup_id;
     unsigned int root_pid;
@@ -49,6 +54,15 @@ struct apolysis_observer_counters {
     unsigned long long connect_missing_exits;
     unsigned long long connect_pending;
 };
+
+struct apolysis_network_connect_counters {
+    unsigned long long missing_entries;
+    unsigned long long missing_exits;
+    unsigned long long pending;
+};
+
+_Static_assert(sizeof(struct apolysis_network_connect_counters) == 24,
+               "apolysis network connect counter ABI size mismatch");
 
 /*
  * ABI shared between the observer eBPF program and the Rust userspace loader.

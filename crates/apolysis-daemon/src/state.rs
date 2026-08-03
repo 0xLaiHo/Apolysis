@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
 
 use crate::{
-    DaemonConfig, DaemonRecord, EventPipeline, RecordWriteOutcome, RuntimeWorkload,
-    ScopeController, WriterSummary,
+    DaemonConfig, DaemonRecord, EventPipeline, RecordDeliveryMode, RecordWriteOutcome,
+    RuntimeWorkload, ScopeController, WriterSummary,
 };
 
 pub struct DaemonState {
@@ -162,9 +162,9 @@ impl DaemonState {
         let mut removed = Vec::new();
         if let Some(scope) = &self.scope {
             for cgroup_id in &closed.cgroup_ids {
-                if let Err(error) = scope.untrack(*cgroup_id).await {
+                if let Err(error) = scope.untrack_agent_run(session_id, *cgroup_id).await {
                     for removed_id in removed {
-                        let _ = scope.track(removed_id).await;
+                        let _ = scope.track_agent_run(session_id, removed_id).await;
                     }
                     return Err(error);
                 }
@@ -180,7 +180,7 @@ impl DaemonState {
         {
             if let Some(scope) = &self.scope {
                 for cgroup_id in removed {
-                    if let Err(rollback) = scope.track(cgroup_id).await {
+                    if let Err(rollback) = scope.track_agent_run(session_id, cgroup_id).await {
                         return Err(format!("{error}; scope rollback failed: {rollback}"));
                     }
                 }
@@ -310,7 +310,7 @@ impl DaemonState {
             .discover_cgroup(session_id, cgroup_id)
             .map_err(registry_error)?;
         if let Some(scope) = &self.scope {
-            scope.track(cgroup_id).await?;
+            scope.track_agent_run(session_id, cgroup_id).await?;
         }
 
         let outcome_name = match outcome {
@@ -330,7 +330,7 @@ impl DaemonState {
             .await
         {
             if let Some(scope) = &self.scope {
-                if let Err(rollback) = scope.untrack(cgroup_id).await {
+                if let Err(rollback) = scope.untrack_agent_run(session_id, cgroup_id).await {
                     return Err(format!("{error}; scope rollback failed: {rollback}"));
                 }
             }
@@ -417,9 +417,9 @@ impl DaemonState {
     ) -> Result<WriterSummary, String> {
         let pipeline = self.pipeline();
         pipeline
-            .run_writer(shutdown, move |record| {
+            .run_writer(shutdown, move |record, delivery_mode| {
                 let state = std::sync::Arc::clone(&self);
-                async move { state.persist_record(record).await }
+                async move { state.persist_record(record, delivery_mode).await }
             })
             .await
     }
@@ -427,6 +427,7 @@ impl DaemonState {
     pub(crate) async fn persist_record(
         &self,
         record: DaemonRecord,
+        delivery_mode: RecordDeliveryMode,
     ) -> Result<RecordWriteOutcome, String> {
         if !self.storage_writable.load(Ordering::Acquire) {
             return Err(
@@ -444,7 +445,22 @@ impl DaemonState {
         match self.persist_inner(&record.session_id, record.payload).await {
             Ok(()) => Ok(RecordWriteOutcome::Written),
             Err(error) => {
-                self.mark_session_degraded(&record.session_id, &error).await;
+                if delivery_mode == RecordDeliveryMode::Confirmed {
+                    // The observer runtime is waiting for this write result and
+                    // close may still hold the registry lock. Re-entering scope
+                    // cleanup here would wait on that same runtime. Pause this
+                    // session and let the confirmed failure unwind the caller.
+                    self.paused_sessions
+                        .write()
+                        .await
+                        .insert(record.session_id.clone(), error);
+                    self.health
+                        .write()
+                        .await
+                        .set_storage(ComponentState::Degraded);
+                } else {
+                    self.mark_session_degraded(&record.session_id, &error).await;
+                }
                 Ok(RecordWriteOutcome::Failed)
             }
         }
@@ -505,7 +521,7 @@ impl DaemonState {
         };
         if let Some(scope) = &self.scope {
             for cgroup_id in cgroup_ids {
-                let _ = scope.untrack(cgroup_id).await;
+                let _ = scope.untrack_agent_run(session_id, cgroup_id).await;
             }
         }
         self.health
