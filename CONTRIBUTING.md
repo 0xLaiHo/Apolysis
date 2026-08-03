@@ -1,10 +1,13 @@
 # Contributing To Apolysis
 
-Thanks for helping improve Apolysis. Keep contributions focused on the project
-scope: an Agent Runtime Evidence & Policy Plane that correlates agent lifecycle
-and protocol claims, customer-controlled runtime evidence, and external
-outcomes. Native Linux eBPF is an optional high-trust source. Apolysis is not an
-orchestrator, sandbox, general MCP or LLM gateway, or SIEM.
+Thanks for helping improve Apolysis. Keep contributions focused on the active
+product scope: an eBPF Agent Runtime Observability Platform for
+operator-controlled Linux environments. The eBPF collector is the required
+primary source; contributions should improve run scoping, supported runtime
+observations, attribution, collector health and gaps, privacy, local storage,
+or the operator investigation workflow. Apolysis is not an orchestrator,
+sandbox, policy-enforcement engine, general MCP or LLM gateway, SIEM, or
+multi-tenant evidence platform.
 
 ## Development Workflow
 

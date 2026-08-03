@@ -6,220 +6,126 @@
 
 [English](README.md) | [Simplified Chinese](README.zh-CN.md)
 
-Apolysis is currently an experimental Linux runtime audit-telemetry and
-accountability layer for AI agent workloads. It records a scoped subset of host
-observations and syscall attempts, then heuristically correlates process, file,
-network, credential, runtime, policy, and declared-intent records into an
-ordered audit timeline.
+Apolysis is an experimental **eBPF Agent Runtime Observability Platform** for
+operator-controlled Linux environments. It groups supported process, file,
+network, and credential-related runtime observations into an Agent Run,
+attributes them to process and workload identities, and makes collector loss,
+truncation, and unsupported paths explicit.
 
-The project is evolving toward an Agent Runtime Evidence & Policy Plane that
-joins hook, SDK, OTLP, MCP, A2A, provider-outcome, and optional eBPF runtime
-evidence across local, CI, vendor-hosted, container, and Kubernetes agent
-environments. It is not a general agent orchestrator, sandbox, MCP gateway, or
-SIEM.
+The project is resetting its scope around this Linux runtime workflow. eBPF is
+the required primary observation source, not an optional add-on to a broader
+cross-provider evidence platform. Apolysis is not an Agent orchestrator,
+sandbox, policy-enforcement engine, MCP gateway, SIEM, or multi-tenant evidence
+SaaS.
 
-![Apolysis live eBPF audit: the agent's declared workload is matched and an undeclared credential-path access attempt is flagged as missing_intent — recorded from a real observe run; the credential path is redacted in the timeline](docs/assets/codex-live-demo/live-ebpf-demo.gif)
+![Apolysis live eBPF audit: the declared Agent workload is matched and an undeclared credential-path access attempt is marked missing_intent; credential paths are redacted in the timeline](docs/assets/codex-live-demo/live-ebpf-demo.gif)
 
 Demo assets: [live asciinema cast](docs/assets/codex-live-demo/live-ebpf-demo.cast),
-[zero-privilege quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast),
+[unprivileged quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast),
 and [public evidence excerpt](docs/codex-live-demo-public-assets.md).
 
-## Try It In Five Minutes (no root)
+## Five-minute unprivileged tour
 
 ```bash
 make build && make quickstart
 ```
 
-This runs the intent-vs-observation accountability flow on a bundled fixture —
-no root, no eBPF — and prints where declared intent and the fixture's observed
-OS events diverge. See [Quickstart](docs/quickstart.md).
+The quickstart runs the observation and optional declared-intent comparison
+against packaged fixtures. It does not require root or eBPF and is intended to
+show the current record and investigation experience. See
+[Quickstart](docs/quickstart.md).
 
-## Audit An Agent In CI (GitHub Action)
+## Product question
 
-```yaml
-# Post-merge evaluation shape only; the current pre-release ref is still legacy.
-- uses: 0xLaiHo/Apolysis@pre-release
-  with:
-    run: 'codex exec --json "run the project tests"'
-    session: agent-task
-```
+For a supported Agent Run, Apolysis should let an operator answer:
 
-Do not use that ref until the open hardening Pull Request is reviewed and
-merged. Production use must pin the later immutable hardened release commit.
+1. Which processes did the Agent start?
+2. Which supported file, network, and credential operations were observed?
+3. Which container, cgroup, Pod, or process identity owns each observation?
+4. Did the operation succeed, fail, or remain unknown?
+5. Was the collector healthy, and where are the observation gaps?
 
-One step records session-scoped kernel observations and syscall attempts for the
-command, prints a digest into the job summary, and uploads the JSONL timeline as
-an artifact. See [GitHub Action](docs/github-action.md).
+The product does not claim that an unobserved operation did not occur. It only
+describes activity inside its declared scope and capability boundary.
 
-## Current Status
+## Active product boundary
 
-`v0.3.0` is the latest public research release with a prebuilt Linux CLI,
-bundled CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed
-release-artifact signing evidence. It fixes an observer race that could drop
-all events for fast commands, adds a correlation summary, and warns when events
-are dropped or truncated.
+| In scope | Not in active scope |
+| --- | --- |
+| Operator-controlled Linux hosts | Vendor-hosted Agent kernels unavailable to the operator |
+| Managed Agent launch, PID-tree, and cgroup scope | General Agent orchestration or sandboxing |
+| Process, selected file, network, and credential observations | Indiscriminate full-syscall or plaintext capture |
+| Local, Docker/containerd, and bounded Kubernetes attribution | Cross-provider Hook, OTLP, MCP, and A2A integration matrix |
+| Collector health, loss, truncation, and capability gaps | Remote outcome verification and portable evidence custody |
+| Local run storage, query, and operator viewer | Multi-tenant Gateway, PostgreSQL/S3 platform, billing, or HA |
+| Review-oriented findings | BPF-LSM blocking, approval workflow, or universal enforcement |
 
-Apolysis is still experimental audit telemetry: current file and network
-tracepoints describe syscall attempts unless an outcome is available; CLI
-timelines are ordinary JSONL, while daemon mode can use a local hash-chain
-envelope. Neither is an independently anchored forensic record.
+Provider or harness metadata may be added later as optional context. It cannot
+replace the eBPF runtime source or silently upgrade an inferred relationship to
+an exact one.
 
-The 26-week production-MVP direction starts with a versioned Agent Execution
-Record, an authenticated Execution Evidence Gateway, durable storage, and
-Minimum Console v0 for run inventory, separate coverage, timeline, source
-health and findings. Later source integrations culminate in Investigation
-Console v1 with Agent Run Graph, cross-run search, and bounded workflow action
-before a controlled partner pilot. Every run will expose semantic, execution,
-and outcome coverage separately.
+## Current capabilities
 
-W1–W2 now has an independent `apolysis-contracts` boundary, versioned record,
-Gateway, coverage, and Query/Console wire types, compatibility fixtures, and
-normative contract documents. The current `pre-release` implementation builds
-on that input with an authenticated application core, a non-durable in-memory
-reference adapter, an initial migration-managed PostgreSQL write adapter for
-the four canonical Gateway operations, and a direct-mTLS full-lifecycle
-transport tracer backed by current PostgreSQL credential authority. These
-prototypes exercise
-server-side grant/policy joins, RFC 8785 golden digest vectors, atomic
-record-append/outbox semantics, encrypted exact-operation replay, one-update
-sequence-range allocation for novel ingest batches, and a bounded finishing
-lifecycle. The PostgreSQL path now revalidates current authority inside each
-lifecycle transaction, binds authentication and durable work to the credential
-epoch, and provides explicit policy and credential rotation that invalidates
-stale leases, join authorizations, and replay.
+- CO-RE eBPF observation of fork, exec, exit, selected file operations, and
+  network connect attempts.
+- PID-tree, single-cgroup, and multi-cgroup observation scopes.
+- Managed local Agent launch and runtime metadata correlation for local,
+  Docker/containerd, and Kubernetes prototypes.
+- Content-off persistence for exec arguments and process commands, with
+  credential and network redaction.
+- Ordered JSONL output, rotation, optional local hash-chain envelopes, and
+  typed diagnostics for drops, map pressure, decode failures, and truncation.
+- Optional Codex declared-intent ingestion and heuristic mismatch findings.
 
-A focused durable lifecycle projection foundation adds organization-qualified
-generations, strict Gateway-ingest-order projection, exact durable watermarks,
-active outbox publication, and from-zero rebuild with atomic cutover. Its read
-surface is a lifecycle-only internal model with a bounded membership cursor,
-not a public Query or Console contract.
+File and network syscall-entry observations currently describe attempts unless
+a supported path supplies an outcome. They do not yet provide a general return
+value and errno contract, and the collector does not observe every Linux
+operation path.
 
-Active W3 delivery also includes an authorized encrypted evidence-object write
-lifecycle with bounded admission, retention, deletion propagation, and cleanup.
-These slices are not production-ready and do not complete W3–W6. A separate real
-PostgreSQL recovery gate now covers graceful database restart, PostgreSQL
-SIGKILL/WAL recovery, and Gateway application-process death before commit,
-after commit, and during replay while preserving rollback or exact convergence
-before a dedicated client acknowledgement is emitted. This qualifies a
-repository/application-process seam, not recovery of the HTTPS Gateway server.
-A sibling real direct-mTLS HTTPS recovery gate now covers one bounded
-late-precommit rollback seam for accepted novel work plus post-commit/pre-ack
-Gateway-server death and exact replay convergence for all four lifecycle routes.
-An additional bounded two-process mTLS gate now qualifies coordinated
-writer/lifecycle races across run creation, one-use join, exact runtime binding,
-event deduplication and cross-run organization sequencing, finalization, and terminal
-irreversibility. A sibling bounded direct-mTLS/PostgreSQL gate now covers
-an additional transaction-boundary join/bind/ingest/finish slice across
-one-use join-grant expiry, finalization deadlines, and last-lease expiry.
-It keeps exact replay stable and novel work fail-closed or deterministically
-incomplete across one-shot SQLSTATE `40001` retries; a focused `finish_run`
-check adds one-shot SQLSTATE `40P01` retry parity. A
-direct-mTLS HTTPS qualification and its repository sibling now cover all four
-exact lifecycle routes across replay-TTL expiry after an exact operation-row
-lock wait. This does not claim the complete mixed
-lifecycle/retry matrix. The remaining process-death and network pre-commit
-timings,
-broader staggered combinations beyond the current focused two-lease shape,
-load, replication, failover, backup/restore, and high
-availability work remains unqualified, as do production KMS integration, database
-row-level-security deployment,
-an authorized object-read resolver, evidence-object projection/read views,
-continuous background reaper operation, and capacity-qualified resource
-limits. The projection does not provide public
-Query authorization, cursor/SSE, Console, coverage, findings, source health, or
-evidence-object lifecycle views; its RLS GUC is defense in depth, not
-authorization. JWT/workload-identity transport profiles, production admission,
-and broader transport load and race qualification also remain open.
-The external exit gate remains open until three qualified
-design partners approve their deployment and data boundaries. The protected
-pre-release line now contains an Action candidate that pins
-its privileged release bundle, rejects caller-selected executable/BPF/output paths, root-seals
-the evidence artifact, and removes security-critical workflow outputs. This is
-not yet an immutable public release: the v0.3.0 Action wrapper retains its legacy
-interface. Even after publication, use a sandbox—not this audit wrapper—when a
-workload may deliberately modify same-UID runner state. The candidate applies
-Linux `no_new_privs` and proves direct sudo is rejected, but it is not a process
-or CI control-plane isolation boundary. It stages the top-level `run` text out
-of observer launch metadata, but its pinned v0.3.0 executable predates the
-content-off persistence seam and may retain child-process argv or reconstructed
-process-command content. Do not put secrets in `run` or argv; immutable
-publication requires a post-content-off bundle and remains a release no-go
-until one exists.
-
-Production implementation now proceeds through the protected `pre-release`
-branch. In current source builds, its first privacy gate makes every local
-observer persistence path content-off by default: exec argv and reconstructed
-process commands are not written to JSONL or daemon hash-chain records. The
-Action exception above ends only when that source is published as an immutable
-bundle. Kernel-side capture is still a transient implementation detail until
-the later capture-off control is added.
-
-## Core Capabilities
-
-- Live and fixture observation for process, file, network, and credential-path
-  events, with content-off persisted exec metadata and explicit
-  attempt/outcome limitations.
-- Managed local agent launch with process-tree attribution for Codex and other
-  command-line agents.
-- Intent ingestion and heuristic correlation for declared tool calls versus
-  observed host-side events.
-- Runtime metadata correlation for local processes, Docker/containerd, and
-  Kubernetes workloads.
-- Ordered JSONL timelines, output rotation, daemon-local hash-chain
-  verification, policy findings, and release-validation gates.
-
-## Current Architecture
+## Target shape
 
 ```text
-Agent / tool runner
-  └─ declared intent logs
-
-Apolysis observer
-  ├─ live eBPF events
-  ├─ process tree attribution
-  ├─ runtime metadata
-  └─ policy evaluation
-
-Apolysis correlation
-  ├─ intent records
-  ├─ observed host events
-  └─ accountability findings
-
-Recorded timeline
-  ├─ JSONL timeline
-  ├─ rotated local files
-  └─ optional hash-chain verification
+Agent command / container / Pod
+  -> Observation Scope
+  -> eBPF Collector
+     - process lifecycle
+     - selected file operations
+     - network connections
+     - collector health and gaps
+  -> userspace normalization and redaction
+  -> bounded local store
+  -> CLI and saved-run viewer
 ```
 
-The design keeps three boundaries separate:
+The privileged collector and non-privileged operator viewer remain separate
+trust boundaries. Remote export and any central multi-tenant evidence plane are
+deferred beyond the bounded beta.
 
-- Intent: what the harness or tool runner declared.
-- Isolation: what the runtime allowed the workload to reach.
-- Evidence: what the host and runtime actually observed.
+## Supported environments
 
-Core crates:
+| Environment | Direction |
+| --- | --- |
+| Local Linux Agent CLI | First stable workflow |
+| Docker/containerd on operator-controlled Linux | Stable target after local collector correctness |
+| Kubernetes node and Pod attribution | Bounded beta after container identity is stable |
+| Linux self-hosted CI runner | Supported through the same managed-run boundary |
+| macOS, Windows, or vendor-managed Agent runtime | Unsupported for eBPF runtime observation |
 
-- `apolysis-cli`: command-line entry point.
-- `apolysis-observer`: fixture and live observer backends.
-- `apolysis-core`: shared JSONL records and schema types.
-- `apolysis-contracts`: versioned production record, Gateway, and Query wire contracts.
-- `apolysis-gateway`: authenticated Gateway application core and in-memory
-  conformance adapter.
-- `apolysis-gateway-postgres`: initial PostgreSQL Gateway write adapter with
-  migration-managed ledger/outbox storage and encrypted replay records.
-- `apolysis-evidence-objects`: authorized encrypted evidence-object write
-  lifecycle with bounded admission, retention, deletion, and provider cleanup.
-- `apolysis-gateway-server`: direct-mTLS full-lifecycle Gateway tracer, current
-  PostgreSQL source authority, and bounded authority-administration tools.
-- `apolysis-projection-postgres`: generation-scoped PostgreSQL lifecycle
-  projector with durable checkpoints, rebuild/cutover, and an internal bounded
-  read model.
-- `apolysis-runtime`: local, Docker, and runtime metadata adapters.
-- `apolysis-policy`: policy parser and decision logic.
-- `apolysis-store`: append-only JSONL and hash-chain storage.
-- `apolysis-daemon`: node-local service for longer-running deployments.
+## Current repository state
 
-## Build And Test
+`v0.3.0` remains the latest public research release and demonstrates the live
+collector, managed Agent launch, JSONL timeline, privacy redaction, and release
+packaging. The current `pre-release` history also contains Gateway,
+PostgreSQL, projection, evidence-object, policy, and production-qualification
+prototypes from the superseded evidence-plane direction. They are not part of
+the active product boundary and will be removed from the active Cargo workspace
+in a dedicated scope-reduction change.
+
+The scope reset is a roadmap decision, not a retroactive production claim.
+Apolysis remains experimental until the supported collector, attribution,
+failure, performance, and privacy paths pass their new bounded beta gates.
+
+## Build and test
 
 ```bash
 make build
@@ -233,27 +139,21 @@ Build only the CO-RE eBPF object:
 make build-ebpf
 ```
 
-Run the capability-aware live observer smoke test on a prepared Linux host:
+Run the opt-in live observer test on a prepared Linux host:
 
 ```bash
 make test-live
 ```
 
-## Example: Audit A Local Agent Command
+Privileged tests skip cleanly when Linux BTF, cgroup v2, tracepoints, or the
+required BPF capabilities are unavailable.
 
-Input:
-
-- Built binary: `target/debug/apolysis`
-- Built BPF object: `target/ebpf/apolysis_observer.bpf.o`
-- Policy file: `policies/local-dev.yaml`
-- Agent command: `codex exec --json "run the project tests"`
-
-Command:
+## Live managed Agent example
 
 ```bash
 sudo -E ./target/debug/apolysis observe \
   --backend live \
-  --session codex-local-audit \
+  --session codex-local-observation \
   --policy policies/local-dev.yaml \
   --output .apolysis/codex-live/timeline.agent-run.jsonl \
   --bpf-object target/ebpf/apolysis_observer.bpf.o \
@@ -262,70 +162,30 @@ sudo -E ./target/debug/apolysis observe \
   --agent-run -- codex exec --json "run the project tests"
 ```
 
-Key parameters:
+Do not place secrets in the managed command or arguments. Raw command content
+is disabled at the persistence boundary, but privileged in-kernel capture and
+third-party workload behavior still require a documented threat model.
 
-- `--backend live`: use the live eBPF observer.
-- `--session`: stable session id written into every record.
-- `--policy`: policy file used for review and notification findings.
-- `--output`: JSONL timeline path.
-- `--bpf-object`: CO-RE observer object loaded by the live backend.
-- `--workspace-root`: workspace boundary used for path handling.
-- `--agent-kind`: agent adapter hint, for example `codex`.
-- `--agent-run -- <command>`: let Apolysis start the agent and own the root
-  process tree instead of asking the operator to find a PID manually.
+## High-level roadmap
 
-Output:
+1. Freeze the eBPF observability product boundary and remove superseded product
+   commitments from active documentation.
+2. Reduce the active workspace to the collector, runtime scope, storage,
+   daemon, CLI, and bounded runtime-attribution modules.
+3. Complete outcome-aware collector semantics, stable runtime identity,
+   health/gap reporting, and the local Agent Run investigation workflow.
+4. Qualify container attribution and then a bounded Kubernetes beta before
+   considering any central platform expansion.
 
-```jsonl
-{"record_type":"event","event_type":"exec","resource":"codex"}
-{"record_type":"event","event_type":"file_open","resource":"path_token:..."}
-{"record_type":"policy_violation","rule_id":"credentials.deny_read","decision":"notify"}
-```
+## Documentation
 
-## Example: Correlate Declared Intent
-
-Input:
-
-- Codex response-item log: `.apolysis/codex-live/codex-response-items.jsonl`
-- Observed timeline: `.apolysis/codex-live/timeline.agent-run.jsonl`
-- Session id: `codex-local-audit`
-
-Commands:
-
-```bash
-./target/debug/apolysis intent ingest \
-  --adapter codex-jsonl \
-  --input .apolysis/codex-live/codex-response-items.jsonl \
-  --session codex-local-audit \
-  --output .apolysis/codex-live/intent.codex.jsonl \
-  --workspace-root "$PWD"
-
-./target/debug/apolysis intent correlate \
-  --intent-input .apolysis/codex-live/intent.codex.jsonl \
-  --timeline-input .apolysis/codex-live/timeline.agent-run.jsonl \
-  --output .apolysis/codex-live/intent-correlation.jsonl
-```
-
-Output:
-
-```jsonl
-{"record_type":"intent","intent_source":"codex","declared_action":"shell.command"}
-{"record_type":"intent_correlation","match_basis":"process_executable"}
-{"record_type":"accountability_finding","kind":"missing_intent","decision":"review"}
-```
-
-Keep generated timelines, Codex logs, and reports under `.apolysis/` or
-`target/`. Do not commit captured workload data or credentials.
-
-## Key Documents
-
+- [Scope decision](docs/adr/0004-focus-on-ebpf-agent-observability.md)
+- [Design](docs/design.md)
+- [Roadmap](docs/roadmap.md)
 - [Quickstart](docs/quickstart.md)
-- [GitHub Action](docs/github-action.md)
 - [JSONL schema](docs/jsonl-schema-v1.md)
 - [Threat model](docs/threat-model.md)
-- [Hash-chain verification](docs/hash-chain-verification.md)
-- [Timeline shipping](docs/timeline-shipping.md)
-- [Codex live demo runbook](docs/codex-live-demo-runbook.md)
-- [Codex live demo launch blog draft](docs/codex-live-demo-launch-blog.md)
+- [Visibility validation](docs/visibility-validation.md)
+- [Live demo runbook](docs/codex-live-demo-runbook.md)
 - [Contributing](CONTRIBUTING.md)
-- [Security](SECURITY.md)
+- [Security policy](SECURITY.md)
