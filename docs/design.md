@@ -191,18 +191,20 @@ and writes the Agent Observation Record.
 Kernel ABI v3 carries a bounded scope generation, process generation, kernel
 process-start timestamp, exec generation, and parent process/exec generations.
 The live userspace boundary attaches the host boot ID read once when the
-collector starts. Process context is keyed by host boot, process generation,
-and exec generation rather than PID; a PID reuse or exec transition therefore
-cannot inherit stale executable context. The process-identity map is bounded
-and reports map pressure instead of silently reusing an older identity.
+collector starts. Process context is keyed by host boot, PID, process
+generation, and exec generation rather than PID alone; a PID reuse or exec
+transition therefore cannot inherit stale executable context. The
+process-identity map and userspace context table are bounded and fail loud on
+pressure instead of silently reusing or dropping identity state.
 
-Attribution is exact only when host boot, process generation, and exec
-generation are present. Missing generations remain inferred with an explicit
-reason; PID-only, command, path, and timestamp joins never become exact. Scope
-generation protects cgroup ownership within one collector lifetime. Collector
-restart remains a visible identity boundary: cross-restart continuity is not
-claimed until lifecycle persistence is implemented. PID namespace, container,
-Pod, and node identity remain additive attribution where available.
+Attribution is exact only when host boot, scope generation, process generation,
+and exec generation are present. Missing generations remain inferred with an
+explicit reason; PID-only, command, path, and timestamp joins never become
+exact. Scope generation protects cgroup ownership within one collector
+lifetime. Collector restart remains a visible identity boundary: cross-restart
+continuity is not claimed until lifecycle persistence is implemented. PID
+namespace, container, Pod, and node identity remain additive attribution where
+available.
 
 ### 5.4 Local store and viewer
 

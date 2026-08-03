@@ -123,7 +123,7 @@ Fields:
   `null`; this is distinct from the boot-relative kernel
   `process_start_time_ns`
 
-Runtime attribution is `exact` only when `host_boot_id`,
+Runtime attribution is `exact` only when `host_boot_id`, `scope_generation`,
 `process_generation`, and `exec_generation` are present. Missing generation
 data remains `inferred` with a reason; PID-only matching is never exact. Scope
 generation prevents numeric cgroup-ID reuse from crossing Agent Runs within

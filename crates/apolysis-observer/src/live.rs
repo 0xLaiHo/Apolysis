@@ -945,7 +945,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                     continue;
                 }
             };
-            let canonical = process_context.observe(&raw, canonicalize(&raw));
+            let canonical = process_context.observe(&raw, canonicalize(&raw))?;
             append_content_off_runtime_event(&raw, &canonical, &redactor, &mut store)?;
             raw_count += 1;
             canonical_count += 1;
@@ -3010,7 +3010,9 @@ mod tests {
         )
         .with_event_id("raw-exec");
 
-        let exec_event = contexts.observe(&exec_raw, canonicalize(&exec_raw));
+        let exec_event = contexts
+            .observe(&exec_raw, canonicalize(&exec_raw))
+            .expect("observe exec context");
 
         assert_eq!(
             exec_event.process_command.as_deref(),
@@ -3043,7 +3045,9 @@ mod tests {
         )
         .with_event_id("raw-exit");
 
-        let exit_event = contexts.observe(&exit_raw, canonicalize(&exit_raw));
+        let exit_event = contexts
+            .observe(&exit_raw, canonicalize(&exit_raw))
+            .expect("observe exit context");
 
         assert_eq!(
             exit_event.process_command.as_deref(),
@@ -3075,7 +3079,9 @@ mod tests {
             "",
         );
 
-        let stale_event = contexts.observe(&stale_raw, canonicalize(&stale_raw));
+        let stale_event = contexts
+            .observe(&stale_raw, canonicalize(&stale_raw))
+            .expect("observe post-exit event");
 
         assert_eq!(stale_event.process_command, None);
         assert_eq!(stale_event.process_executable, None);

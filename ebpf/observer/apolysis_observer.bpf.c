@@ -523,10 +523,13 @@ static __always_inline unsigned int current_parent_pid(void)
 static __always_inline unsigned long long current_process_start_time_ns(void)
 {
     struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
+    struct task_struct *leader = BPF_CORE_READ(task, group_leader);
 
-    if (bpf_core_field_exists(task->start_boottime))
-        return BPF_CORE_READ(task, start_boottime);
-    return BPF_CORE_READ(task, start_time);
+    if (!leader)
+        leader = task;
+    if (bpf_core_field_exists(leader->start_boottime))
+        return BPF_CORE_READ(leader, start_boottime);
+    return BPF_CORE_READ(leader, start_time);
 }
 
 static __always_inline bool ensure_current_process_identity(
@@ -628,6 +631,16 @@ static __always_inline void fill_process_identity(
     event->parent_process_generation = identity->parent_process_generation;
     event->exec_generation = identity->exec_generation;
     event->parent_exec_generation = identity->parent_exec_generation;
+}
+
+static __always_inline void clear_process_identity(
+    struct apolysis_kernel_event *event)
+{
+    event->process_generation = 0;
+    event->process_start_time_ns = 0;
+    event->parent_process_generation = 0;
+    event->exec_generation = 0;
+    event->parent_exec_generation = 0;
 }
 
 static __always_inline struct apolysis_kernel_event *reserve_event_unchecked(unsigned int kind)
@@ -1063,11 +1076,12 @@ int apolysis_sched_process_exec(struct trace_event_raw_sched_process_exec *ctx)
     const char *filename;
     unsigned long long event_cgroup_id;
     bool update_scoped;
+    bool identity_advanced;
     unsigned int pid;
 
     if (!current_is_in_scope())
         return 0;
-    advance_current_exec_generation();
+    identity_advanced = advance_current_exec_generation();
 
     event = reserve_process_event(APOLYSIS_EVENT_EXEC, &event_cgroup_id,
                                   &update_scoped);
@@ -1075,6 +1089,8 @@ int apolysis_sched_process_exec(struct trace_event_raw_sched_process_exec *ctx)
         end_scope_counter_update(event_cgroup_id, update_scoped);
         return 0;
     }
+    if (!identity_advanced)
+        clear_process_identity(event);
 
     filename = (const char *)ctx + (ctx->__data_loc_filename & 0xffff);
     pid = event->pid;
@@ -1126,9 +1142,16 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     unsigned int pid;
     unsigned int identity_pid;
 
-    event = reserve_process_event(APOLYSIS_EVENT_EXIT, &event_cgroup_id,
-                                  &event_update_scoped);
     pid_tgid = bpf_get_current_pid_tgid();
+    identity_pid = (unsigned int)pid_tgid;
+    if (identity_pid == pid_tgid >> 32) {
+        event = reserve_process_event(APOLYSIS_EVENT_EXIT, &event_cgroup_id,
+                                      &event_update_scoped);
+    } else {
+        event = 0;
+        event_cgroup_id = 0;
+        event_update_scoped = false;
+    }
     pending_connect = bpf_map_lookup_elem(&APOLYSIS_PENDING_CONNECTS, &pid_tgid);
     if (pending_connect) {
         connect_cgroup_id = pending_connect->cgroup_id;
@@ -1164,7 +1187,6 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
         pid = ctx->pid;
         bpf_map_delete_elem(&APOLYSIS_TRACKED_PIDS, &pid);
     }
-    identity_pid = pid_tgid >> 32;
     bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &identity_pid);
     return 0;
 }

@@ -447,7 +447,7 @@ pub fn observe_fixture(request: FixtureObserveRequest) -> Result<ObserveResult, 
 
         let raw = parse_fixture_raw_event(raw_line, &request.session_id)?
             .with_event_id(event_ids.next_raw_event_id());
-        let canonical = process_context.observe(&raw, canonicalize(&raw));
+        let canonical = process_context.observe(&raw, canonicalize(&raw))?;
         let (persisted_raw, persisted_canonical) = RuntimeEvidencePersistence::new(&redactor)
             .persist_event(
                 &raw,

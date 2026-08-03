@@ -627,11 +627,12 @@ impl RawKernelEvent {
         self.parent_process_generation = parent_process_generation.filter(|value| *value != 0);
         self.parent_exec_generation = parent_exec_generation;
         if self.host_boot_id.is_some()
+            && self.scope_generation.is_some()
             && self.process_generation.is_some()
             && self.exec_generation.is_some()
         {
             self.relation_status = RuntimeRelation::Exact;
-            self.relation_reason = "host_boot_process_exec_generation".to_string();
+            self.relation_reason = "host_boot_scope_process_exec_generation".to_string();
         } else {
             self.relation_status = RuntimeRelation::Inferred;
             self.relation_reason = "runtime_generation_unavailable".to_string();

@@ -163,16 +163,17 @@ runtime metadata，应用 content-off privacy，并写入 Agent Observation Reco
 
 Kernel ABI v3 携带有界的 scope generation、process generation、kernel process-start
 timestamp、exec generation 以及 parent process/exec generation。Live userspace boundary 会
-附加 collector 启动时读取一次的 host boot ID。Process context 按 host boot、process
-generation 与 exec generation 键控，而不是按 PID 键控，因此 PID reuse 或 exec transition
-不会继承陈旧 executable context。Process-identity map 保持有界；出现 map pressure 时会显式
-报告，而不会静默复用旧 identity。
+附加 collector 启动时读取一次的 host boot ID。Process context 按 host boot、PID、process
+generation 与 exec generation 键控，而不是只按 PID 键控，因此 PID reuse 或 exec transition
+不会继承陈旧 executable context。Process-identity map 与 userspace context table 保持有界；
+出现 pressure 时会 fail loud，而不会静默复用或丢弃 identity state。
 
-只有 host boot、process generation 与 exec generation 都存在时 attribution 才是 exact。
-Generation 缺失时保持 inferred 并给出显式 reason；PID-only、command、path 与 timestamp join
-不会升级为 exact。Scope generation 只保护单次 collector 生命周期内的 cgroup ownership。
-Collector restart 仍是可见 identity boundary：在 lifecycle persistence 实现前，不声明跨重启
-continuity。PID namespace、container、Pod 与 node identity 在可用时仍作为增量 attribution。
+只有 host boot、scope generation、process generation 与 exec generation 都存在时 attribution
+才是 exact。Generation 缺失时保持 inferred 并给出显式 reason；PID-only、command、path 与
+timestamp join 不会升级为 exact。Scope generation 只保护单次 collector 生命周期内的 cgroup
+ownership。Collector restart 仍是可见 identity boundary：在 lifecycle persistence 实现前，
+不声明跨重启 continuity。PID namespace、container、Pod 与 node identity 在可用时仍作为
+增量 attribution。
 
 ### 5.4 本地 Store 与 Viewer
 

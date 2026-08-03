@@ -3,7 +3,8 @@
 use apolysis_core::{
     actors, records, resources, CanonicalEvent, CollectorCapability, CollectorCapabilityManifest,
     EventSource, EventType, ObservationGap, ObservationGapKind, ObserverDiagnostic,
-    ObserverDiagnosticKind, OperationOutcome, OperationResult, RawKernelEvent, SessionIntentRecord,
+    ObserverDiagnosticKind, OperationOutcome, OperationResult, RawKernelEvent, RuntimeRelation,
+    SessionIntentRecord,
 };
 
 #[test]
@@ -283,4 +284,36 @@ fn raw_kernel_event_json_line_keeps_raw_payload_and_runtime_identity() {
     assert!(line.contains(r#""container_id":"container-a""#));
     assert!(line.contains(r#""cgroup_id":"42""#));
     assert!(line.contains(r#""event_id":null"#));
+}
+
+#[test]
+fn runtime_identity_without_scope_generation_is_not_exact() {
+    let raw = RawKernelEvent::new(
+        123,
+        "session-identity",
+        EventSource::KernelTracepoint,
+        "openat2",
+        42,
+        1,
+        1000,
+        1000,
+        "bash",
+        "/workspace/file",
+        "read",
+        None,
+        Some("42".to_string()),
+        "",
+    )
+    .with_process_identity(
+        Some("11111111-2222-3333-4444-555555555555".to_string()),
+        None,
+        Some(100),
+        Some(1_000),
+        Some(1),
+        Some(90),
+        Some(1),
+    );
+
+    assert_eq!(raw.relation_status, RuntimeRelation::Inferred);
+    assert_eq!(raw.relation_reason, "runtime_generation_unavailable");
 }
