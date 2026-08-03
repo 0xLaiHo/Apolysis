@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "linux-x86_64-host-managed",
+      "claim": "beta_supported_after_live_pass",
+      "architectures": ["x86_64"],
+      "kernel_lines": ["6.6"],
+      "required_environment": {
+        "btf_vmlinux": true,
+        "cgroup_v2": true,
+        "tracepoints_complete": true,
+        "capability_modes": ["bpf_perfmon", "sys_admin"],
+        "runtimes": ["host"]
+      },
+      "workloads": {
+        "representative": {
+          "minimum_samples": 10,
+          "maximum_collector_cpu_percent_p95": 5.0,
+          "maximum_collector_peak_rss_mib": 96.0,
+          "maximum_workload_latency_overhead_percent_p95": 10.0,
+          "maximum_event_loss_count": 0
+        }
+      }
+    }
+  ]
+}
