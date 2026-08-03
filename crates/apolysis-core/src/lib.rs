@@ -294,6 +294,7 @@ impl RuntimeRelation {
 pub enum ObservationGapKind {
     MissingEntry,
     MissingExit,
+    CollectorRestart,
 }
 
 impl ObservationGapKind {
@@ -301,6 +302,7 @@ impl ObservationGapKind {
         match self {
             Self::MissingEntry => "missing_entry",
             Self::MissingExit => "missing_exit",
+            Self::CollectorRestart => "collector_restart",
         }
     }
 }

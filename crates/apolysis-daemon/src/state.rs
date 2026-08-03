@@ -11,6 +11,10 @@ use apolysis_accountability::{
     ResourceKind, RetentionPurgeReport, RetentionTier, RuntimeIdentity, SessionIntent,
     SessionRegistry, SessionState,
 };
+use apolysis_core::{
+    CollectorFailureReason, CollectorLifecycleCounters, CollectorLifecycleRecord, ObservationGap,
+    ObservationGapKind,
+};
 use apolysis_store::HashChainStore;
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
@@ -76,6 +80,11 @@ impl DaemonState {
                 )?;
                 recovered_integrity_issue = true;
             }
+            append_incomplete_collector_lifecycles(
+                &mut recovery.store,
+                &session_id,
+                &recovery.records,
+            )?;
             if let Some(recovered) = replay_active_session(&recovery.records, now_unix_ms)? {
                 registry
                     .register(recovered.intent, now_unix_ms)
@@ -573,6 +582,89 @@ impl DaemonState {
             .flush()
             .map_err(|error| format!("failed to flush session timeline: {error}"))
     }
+}
+
+fn append_incomplete_collector_lifecycles(
+    store: &mut HashChainStore,
+    agent_run_id: &str,
+    records: &[apolysis_store::ChainRecord],
+) -> Result<(), String> {
+    let mut instances = BTreeMap::new();
+    let mut order = Vec::new();
+    for record in records {
+        if record.payload.get("record_type").and_then(Value::as_str) != Some("collector_lifecycle")
+        {
+            continue;
+        }
+        let Some(instance_id) = record
+            .payload
+            .get("collector_instance_id")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(state) = record.payload.get("state").and_then(Value::as_str) else {
+            continue;
+        };
+        match state {
+            "started" | "checkpoint" => {
+                if !instances.contains_key(instance_id) {
+                    order.push(instance_id.to_string());
+                }
+                instances.insert(instance_id.to_string(), false);
+            }
+            "stopped" | "failed" => {
+                instances.insert(instance_id.to_string(), true);
+            }
+            _ => {}
+        }
+    }
+
+    let incomplete: Vec<String> = order
+        .into_iter()
+        .filter(|instance_id| instances.get(instance_id) == Some(&false))
+        .collect();
+    if incomplete.is_empty() {
+        return Ok(());
+    }
+
+    for instance_id in incomplete {
+        let gap = ObservationGap::new(
+            agent_run_id,
+            "collector_lifecycle",
+            ObservationGapKind::CollectorRestart,
+            1,
+            format!(
+                "collector_instance:{instance_id},previous lifecycle has no durable terminal record"
+            ),
+        );
+        append_json_line(
+            store,
+            &gap.to_json_line(),
+            "collector restart Observation Gap",
+        )?;
+        let terminal = CollectorLifecycleRecord::failed(
+            agent_run_id,
+            instance_id,
+            CollectorFailureReason::CollectorRestart,
+            CollectorLifecycleCounters::default(),
+        );
+        append_json_line(
+            store,
+            &terminal.to_json_line(),
+            "recovered collector terminal record",
+        )?;
+    }
+    store
+        .flush()
+        .map_err(|error| format!("failed to flush recovered collector lifecycle: {error}"))
+}
+
+fn append_json_line(store: &mut HashChainStore, line: &str, subject: &str) -> Result<(), String> {
+    store
+        .append_json(1, line)
+        .map(|_| ())
+        .map_err(|error| format!("failed to append {subject}: {error}"))
 }
 
 fn registry_error(error: RegistryError) -> String {
