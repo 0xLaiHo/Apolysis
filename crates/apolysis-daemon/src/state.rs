@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
 
 use crate::{
-    DaemonConfig, DaemonRecord, EventPipeline, RecordWriteOutcome, RuntimeWorkload,
-    ScopeController, WriterSummary,
+    DaemonConfig, DaemonRecord, EventPipeline, RecordDeliveryMode, RecordWriteOutcome,
+    RuntimeWorkload, ScopeController, WriterSummary,
 };
 
 pub struct DaemonState {
@@ -417,9 +417,9 @@ impl DaemonState {
     ) -> Result<WriterSummary, String> {
         let pipeline = self.pipeline();
         pipeline
-            .run_writer(shutdown, move |record| {
+            .run_writer(shutdown, move |record, delivery_mode| {
                 let state = std::sync::Arc::clone(&self);
-                async move { state.persist_record(record).await }
+                async move { state.persist_record(record, delivery_mode).await }
             })
             .await
     }
@@ -427,8 +427,8 @@ impl DaemonState {
     pub(crate) async fn persist_record(
         &self,
         record: DaemonRecord,
+        delivery_mode: RecordDeliveryMode,
     ) -> Result<RecordWriteOutcome, String> {
-        let confirmation_required = record.confirmation_required();
         if !self.storage_writable.load(Ordering::Acquire) {
             return Err(
                 "session storage is unavailable; restart after repairing storage".to_string(),
@@ -445,7 +445,7 @@ impl DaemonState {
         match self.persist_inner(&record.session_id, record.payload).await {
             Ok(()) => Ok(RecordWriteOutcome::Written),
             Err(error) => {
-                if confirmation_required {
+                if delivery_mode == RecordDeliveryMode::Confirmed {
                     // The observer runtime is waiting for this write result and
                     // close may still hold the registry lock. Re-entering scope
                     // cleanup here would wait on that same runtime. Pause this

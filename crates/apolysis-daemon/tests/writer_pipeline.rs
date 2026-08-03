@@ -3,7 +3,9 @@
 use std::sync::{Arc, Mutex};
 
 use apolysis_accountability::{PushOutcome, QueuePriority};
-use apolysis_daemon::{DaemonRecord, EventPipeline, RecordWriteOutcome, SubmitError};
+use apolysis_daemon::{
+    DaemonRecord, EventPipeline, RecordDeliveryMode, RecordWriteOutcome, SubmitError,
+};
 use serde_json::json;
 use tokio::sync::oneshot;
 
@@ -30,7 +32,7 @@ async fn protected_records_shed_ordinary_events_and_write_first() {
     let (shutdown, receiver) = oneshot::channel();
     shutdown.send(()).unwrap();
     let summary = pipeline
-        .run_writer(receiver, move |record| {
+        .run_writer(receiver, move |record, _delivery_mode| {
             let sink = Arc::clone(&sink);
             async move {
                 sink.lock().unwrap().push(record.session_id);
@@ -59,7 +61,7 @@ async fn shutdown_stops_admission_and_drains_accepted_records() {
         let pipeline = pipeline.clone();
         tokio::spawn(async move {
             pipeline
-                .run_writer(receiver, move |record| {
+                .run_writer(receiver, move |record, _delivery_mode| {
                     let sink = Arc::clone(&sink);
                     async move {
                         sink.lock().unwrap().push(record.session_id);
@@ -95,7 +97,7 @@ async fn writer_counts_handled_record_failures_and_continues() {
     let (shutdown, receiver) = oneshot::channel();
     shutdown.send(()).unwrap();
     let summary = pipeline
-        .run_writer(receiver, move |record| {
+        .run_writer(receiver, move |record, _delivery_mode| {
             let sink = Arc::clone(&sink);
             async move {
                 if record.session_id == "bad-session" {
@@ -126,11 +128,14 @@ async fn confirmed_submission_waits_for_the_writer_outcome() {
             let mut sink_entered = Some(sink_entered);
             let mut release_sink_receiver = Some(release_sink_receiver);
             pipeline
-                .run_writer(shutdown_receiver, move |_record| {
+                .run_writer(shutdown_receiver, move |_record, delivery_mode| {
                     let sink_entered = sink_entered.take();
                     let release_sink_receiver = release_sink_receiver.take();
                     async move {
-                        sink_entered.expect("single record").send(()).unwrap();
+                        sink_entered
+                            .expect("single record")
+                            .send(delivery_mode)
+                            .unwrap();
                         release_sink_receiver
                             .expect("single record")
                             .await
@@ -150,7 +155,10 @@ async fn confirmed_submission_waits_for_the_writer_outcome() {
         })
     };
 
-    sink_entered_receiver.await.expect("writer receives record");
+    assert_eq!(
+        sink_entered_receiver.await.expect("writer receives record"),
+        RecordDeliveryMode::Confirmed
+    );
     assert!(!confirmation.is_finished());
     release_sink.send(()).expect("release writer");
     assert_eq!(

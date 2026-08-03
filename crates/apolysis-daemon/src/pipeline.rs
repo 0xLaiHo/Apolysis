@@ -13,7 +13,6 @@ pub struct DaemonRecord {
     pub session_id: String,
     pub priority: QueuePriority,
     pub payload: Value,
-    confirmation_required: bool,
 }
 
 impl DaemonRecord {
@@ -22,16 +21,7 @@ impl DaemonRecord {
             session_id: session_id.into(),
             priority,
             payload,
-            confirmation_required: false,
         }
-    }
-
-    pub(crate) fn require_confirmation(&mut self) {
-        self.confirmation_required = true;
-    }
-
-    pub(crate) fn confirmation_required(&self) -> bool {
-        self.confirmation_required
     }
 }
 
@@ -65,6 +55,12 @@ pub enum RecordWriteOutcome {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordDeliveryMode {
+    Queued,
+    Confirmed,
+}
+
 struct PipelineInner {
     queue: Mutex<BoundedPriorityQueue<QueuedRecord>>,
     notify: Notify,
@@ -74,7 +70,27 @@ struct PipelineInner {
 
 struct QueuedRecord {
     record: DaemonRecord,
-    confirmation: Option<oneshot::Sender<Result<RecordWriteOutcome, String>>>,
+    delivery: RecordDelivery,
+}
+
+enum RecordDelivery {
+    Queued,
+    Confirmed(oneshot::Sender<Result<RecordWriteOutcome, String>>),
+}
+
+impl RecordDelivery {
+    fn mode(&self) -> RecordDeliveryMode {
+        match self {
+            Self::Queued => RecordDeliveryMode::Queued,
+            Self::Confirmed(_) => RecordDeliveryMode::Confirmed,
+        }
+    }
+
+    fn complete(self, outcome: Result<RecordWriteOutcome, String>) {
+        if let Self::Confirmed(confirmation) = self {
+            let _ = confirmation.send(outcome);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -97,20 +113,19 @@ impl EventPipeline {
     pub fn submit(&self, record: DaemonRecord) -> Result<PushOutcome, SubmitError> {
         self.submit_queued(QueuedRecord {
             record,
-            confirmation: None,
+            delivery: RecordDelivery::Queued,
         })
     }
 
     pub async fn submit_and_wait(
         &self,
-        mut record: DaemonRecord,
+        record: DaemonRecord,
     ) -> Result<RecordWriteOutcome, String> {
-        record.require_confirmation();
         let (confirmation, receiver) = oneshot::channel();
         match self
             .submit_queued(QueuedRecord {
                 record,
-                confirmation: Some(confirmation),
+                delivery: RecordDelivery::Confirmed(confirmation),
             })
             .map_err(|error| format!("failed to submit record: {error}"))?
         {
@@ -155,7 +170,7 @@ impl EventPipeline {
         mut sink: S,
     ) -> Result<WriterSummary, String>
     where
-        S: FnMut(DaemonRecord) -> F,
+        S: FnMut(DaemonRecord, RecordDeliveryMode) -> F,
         F: Future<Output = Result<RecordWriteOutcome, String>>,
     {
         if self
@@ -172,10 +187,9 @@ impl EventPipeline {
         let mut failed = 0_u64;
         loop {
             if let Some(queued) = self.pop()? {
-                let outcome = sink(queued.record).await;
-                if let Some(confirmation) = queued.confirmation {
-                    let _ = confirmation.send(outcome.clone());
-                }
+                let delivery_mode = queued.delivery.mode();
+                let outcome = sink(queued.record, delivery_mode).await;
+                queued.delivery.complete(outcome.clone());
                 match outcome {
                     Ok(RecordWriteOutcome::Written) => {
                         written = written.saturating_add(1);
