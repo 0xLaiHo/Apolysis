@@ -18,6 +18,22 @@ fi
 
 cargo test --quiet -p apolysis-cli --bin apolysis-qualification
 
+mkdir -p "$repo_root/target/qualification"
+smoke_dir="$(mktemp -d "$repo_root/target/qualification/workload-smoke.XXXXXX")"
+smoke_scratch="$smoke_dir/scratch"
+smoke_output="$smoke_dir/workload-raw.json"
+mkdir "$smoke_scratch"
+cargo run --quiet --manifest-path "$repo_root/Cargo.toml" \
+    -p apolysis-cli --bin apolysis-qualification -- run-workload \
+    "$repo_root" representative "$smoke_scratch" "$smoke_output"
+if ! grep -Fq '"synthetic_workload_only":true' "$smoke_output" ||
+    grep -Fq "$smoke_scratch" "$smoke_output"; then
+    printf 'qualification workload test failed: raw output privacy contract drifted\n' >&2
+    exit 1
+fi
+rm -f "$smoke_output"
+rmdir "$smoke_scratch" "$smoke_dir"
+
 set +e
 malformed_output="$($checker --envelope "$test_envelope" --evidence "$malformed")"
 malformed_status=$?

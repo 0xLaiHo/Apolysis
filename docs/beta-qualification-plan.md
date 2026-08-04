@@ -111,9 +111,11 @@ environment breadth.
 The focused work items must settle these details before their dependent items
 start:
 
-- the Q1 Candidate contract is Linux 6.12/x86_64 native host, but the exact
-  numeric performance budgets and any Supported promotion remain blocked on
-  retained privileged live evidence;
+- the Q1 Candidate contract is Linux 6.12/x86_64 native host and its versioned
+  synthetic workloads, paired capture order, monotonic event window, and exact
+  count reconciliation are fixed, but collector CPU/memory sampling, exact
+  numeric budgets, and any Supported promotion remain blocked on retained
+  privileged live evidence;
 - the saved-run viewer interaction and presentation shape after L2 freezes the
   queryable Agent Observation Record; and
 - the Kubernetes least-privilege deployment shape after container identity and

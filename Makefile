@@ -46,6 +46,7 @@ test-local-agent-command-attribution:
 test-qualification:
 	./scripts/test-qualification-envelope.sh
 
-# Privileged, explicit and non-CI. Produces evidence below target/qualification/.
+# Privileged, explicit and non-CI. Produces paired raw evidence below
+# target/qualification/ and remains non-zero while the profile is Candidate.
 qualify-live:
 	./scripts/capture-qualification-preflight.sh

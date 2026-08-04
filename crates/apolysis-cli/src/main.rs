@@ -202,6 +202,7 @@ async fn observe_command(args: Vec<String>) -> Result<i32, String> {
                     })?,
                 ),
                 output_rotation: request.output_rotation,
+                qualification_telemetry: None,
             })
             .await?;
             Ok(result.agent_exit_code.unwrap_or(0))

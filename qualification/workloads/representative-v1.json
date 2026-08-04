@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "representative",
+  "kind": "operation_mix",
+  "iterations": 25,
+  "operations": [
+    "openat",
+    "creat",
+    "truncate",
+    "renameat2",
+    "unlinkat",
+    "connect",
+    "fork_exit"
+  ],
+  "expected_event_counts": {
+    "connect": 25,
+    "creat": 25,
+    "openat": 25,
+    "renameat2": 25,
+    "sched_process_exit": 25,
+    "sched_process_fork": 25,
+    "truncate": 25,
+    "unlinkat": 25
+  }
+}

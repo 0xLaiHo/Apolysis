@@ -28,7 +28,7 @@
       },
       "workloads": {
         "idle": {
-          "manifest_sha256": null,
+          "manifest_sha256": "dbaa28ab0630445b4a3859dc85a5d3013f1d913ac2ca0bc3912fb98977644756",
           "expected_event_counts": {},
           "minimum_samples": null,
           "minimum_event_rate_per_second": null,
@@ -46,8 +46,17 @@
           "maximum_unexplained_loss_count": 0
         },
         "representative": {
-          "manifest_sha256": null,
-          "expected_event_counts": null,
+          "manifest_sha256": "e22154c7587076eea74928003f1413cf93f4ecef1a3079ea3b6a2d6fc5eee579",
+          "expected_event_counts": {
+            "connect": 25,
+            "creat": 25,
+            "openat": 25,
+            "renameat2": 25,
+            "sched_process_exit": 25,
+            "sched_process_fork": 25,
+            "truncate": 25,
+            "unlinkat": 25
+          },
           "minimum_samples": null,
           "minimum_event_rate_per_second": null,
           "maximum_collector_cpu_percent_p95": null,
@@ -64,8 +73,10 @@
           "maximum_unexplained_loss_count": 0
         },
         "burst": {
-          "manifest_sha256": null,
-          "expected_event_counts": null,
+          "manifest_sha256": "0bcbf35c3dba32f458e94c8d46e246db3544226f26396110c9bd0e7213bdfffc",
+          "expected_event_counts": {
+            "openat": 1300
+          },
           "minimum_samples": null,
           "minimum_event_rate_per_second": null,
           "maximum_collector_cpu_percent_p95": null,

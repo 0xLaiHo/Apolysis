@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "idle",
+  "kind": "idle",
+  "duration_ms": 1000,
+  "expected_event_counts": {}
+}

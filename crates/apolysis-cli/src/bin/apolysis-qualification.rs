@@ -2,15 +2,32 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::CString;
 use std::fs;
+use std::io::Write;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
+use std::time::Duration;
 
+use apolysis_observer::{
+    observe_live, AgentRunRequest, LiveObserveRequest, QualificationTelemetryConfig,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 const TRACEPOINT_MANIFEST: &str =
     include_str!("../../../../qualification/required-tracepoints-v1.txt");
+const IDLE_WORKLOAD_MANIFEST: &[u8] =
+    include_bytes!("../../../../qualification/workloads/idle-v1.json");
+const REPRESENTATIVE_WORKLOAD_MANIFEST: &[u8] =
+    include_bytes!("../../../../qualification/workloads/representative-v1.json");
+const BURST_WORKLOAD_MANIFEST: &[u8] =
+    include_bytes!("../../../../qualification/workloads/burst-v1.json");
+const SUSPEND_DETECTION_TOLERANCE_NS: u64 = 100_000_000;
 const LOSS_COUNTERS: &[&str] = &[
     "ring_buffer_reserve",
     "map_pressure",
@@ -72,15 +89,173 @@ const DISTRIBUTION_METRICS: &[&str] = &[
     "append_lag_ms_max",
 ];
 
-fn main() {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct WorkloadManifest {
+    schema_version: u32,
+    id: String,
+    #[serde(flatten)]
+    kind: WorkloadKind,
+    expected_event_counts: BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WorkloadKind {
+    Idle {
+        duration_ms: u64,
+    },
+    OperationMix {
+        iterations: u64,
+        operations: Vec<SyntheticOperation>,
+    },
+    RateSweep {
+        operation: SyntheticOperation,
+        phases: Vec<RatePhase>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SyntheticOperation {
+    Openat,
+    Creat,
+    Truncate,
+    Renameat2,
+    Unlinkat,
+    Connect,
+    ForkExit,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct RatePhase {
+    rate_per_second: u64,
+    events: u64,
+}
+
+#[derive(Clone, Debug)]
+struct EmbeddedWorkloadManifest {
+    source: &'static [u8],
+    value: WorkloadManifest,
+}
+
+impl EmbeddedWorkloadManifest {
+    fn sha256(&self) -> String {
+        hex_digest(&Sha256::digest(self.source))
+    }
+
+    fn expected_event_counts(&self) -> BTreeMap<String, u64> {
+        self.value.expected_event_counts.clone()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RawWorkloadResult {
+    schema_version: u32,
+    workload: String,
+    workload_manifest_sha256: String,
+    synthetic_workload_only: bool,
+    started_monotonic_ns: u64,
+    ended_monotonic_ns: u64,
+    elapsed_monotonic_ns: u64,
+    workload_user_cpu_ns: u64,
+    workload_system_cpu_ns: u64,
+    workload_self_user_cpu_ns: u64,
+    workload_self_system_cpu_ns: u64,
+    workload_children_user_cpu_ns: u64,
+    workload_children_system_cpu_ns: u64,
+    suspend_detected: bool,
+    expected_event_counts: BTreeMap<String, u64>,
+    completed_event_counts: BTreeMap<String, u64>,
+    operation_latency_ns: BTreeMap<SyntheticOperation, Vec<u64>>,
+    phases: Vec<RawWorkloadPhase>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RawWorkloadPhase {
+    rate_per_second: Option<u64>,
+    requested_events: u64,
+    completed_events: u64,
+    elapsed_monotonic_ns: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CapturedTelemetry {
+    schema_version: u32,
+    clock: String,
+    samples: Vec<CapturedTelemetrySample>,
+    dropped_samples: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CapturedTelemetrySample {
+    event_name: String,
+    kernel_timestamp_ns: u64,
+    decoded_monotonic_ns: u64,
+    appended_monotonic_ns: u64,
+}
+
+#[cfg(test)]
+impl CapturedTelemetrySample {
+    fn new(event_name: &str, kernel: u64, decoded: u64, appended: u64) -> Self {
+        Self {
+            event_name: event_name.to_string(),
+            kernel_timestamp_ns: kernel,
+            decoded_monotonic_ns: decoded,
+            appended_monotonic_ns: appended,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RawLiveTrial {
+    schema_version: u32,
+    workload: String,
+    workload_manifest_sha256: String,
+    workload_raw_sha256: String,
+    timeline_sha256: String,
+    started_monotonic_ns: u64,
+    ended_monotonic_ns: u64,
+    suspend_detected: bool,
+    expected_event_counts: BTreeMap<String, u64>,
+    observed_event_counts: BTreeMap<String, u64>,
+    exact_event_reconciliation: bool,
+    loss_counters: BTreeMap<String, u64>,
+    kernel_to_decode_ns: Vec<u64>,
+    kernel_to_append_ns: Vec<u64>,
+    telemetry_samples_total: usize,
+    telemetry_samples_outside_window: usize,
+    collector_lifecycle: Value,
+}
+
+struct WorkloadScratch {
+    directory: OwnedFd,
+    entry_path: CString,
+    entry_name: CString,
+    renamed_name: CString,
+    dev_null: CString,
+}
+
+#[derive(Clone, Copy)]
+struct CpuUsage {
+    user_ns: u64,
+    system_ns: u64,
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let status = match arguments.first().map(String::as_str) {
         Some("check") => check_command(&arguments[1..]),
         Some("capture-preflight") => capture_command(&arguments[1..]),
+        Some("run-workload") => run_workload_command(&arguments[1..]),
+        Some("measure-live") => measure_live_command(&arguments[1..]).await,
         _ => {
             eprintln!(
                 "usage: apolysis-qualification check <envelope> <evidence> | \
-                 capture-preflight <repo-root> <output>"
+                 capture-preflight <repo-root> <output> | \
+                 run-workload <repo-root> <idle|representative|burst> <scratch-dir> <output> | \
+                 measure-live <repo-root> <bpf-object> \
+                 <idle|representative|burst> <trial-dir>"
             );
             2
         }
@@ -589,6 +764,944 @@ fn deduplicate(reasons: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+fn run_workload_command(arguments: &[String]) -> i32 {
+    if arguments.len() != 4 {
+        eprintln!(
+            "run-workload requires repo-root, idle|representative|burst, scratch-dir, and output"
+        );
+        return 2;
+    }
+    let output = match qualification_output_path(Path::new(&arguments[0]), Path::new(&arguments[3]))
+    {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("qualification workload failed: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = prepare_standalone_workload_identity(Path::new(&arguments[2]), &output) {
+        eprintln!("qualification workload failed: {error}");
+        return 1;
+    }
+    match run_workload(
+        Path::new(&arguments[0]),
+        &arguments[1],
+        Path::new(&arguments[2]),
+    ) {
+        Ok(result) => match serde_json::to_string(&result) {
+            Ok(rendered) => match write_new_private(&output, format!("{rendered}\n").as_bytes()) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("failed to write raw workload result: {error}");
+                    1
+                }
+            },
+            Err(error) => {
+                eprintln!("failed to serialize raw workload result: {error}");
+                1
+            }
+        },
+        Err(error) => {
+            eprintln!("qualification workload failed: {error}");
+            1
+        }
+    }
+}
+
+fn qualification_output_path(repo_root: &Path, output: &Path) -> Result<PathBuf, String> {
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve repo root: {error}"))?;
+    let qualification_root = repo_root
+        .join("target/qualification")
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve target/qualification: {error}"))?;
+    let parent = output
+        .parent()
+        .ok_or_else(|| "qualification output must have a parent directory".to_string())?
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve qualification output parent: {error}"))?;
+    if parent == qualification_root || !parent.starts_with(&qualification_root) {
+        return Err("qualification output must be below a trial directory".to_string());
+    }
+    let name = output
+        .file_name()
+        .ok_or_else(|| "qualification output must name a file".to_string())?;
+    Ok(parent.join(name))
+}
+
+fn write_new_private(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+    file.write_all(contents)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("failed to persist {}: {error}", path.display()))
+}
+
+fn prepare_standalone_workload_identity(scratch_dir: &Path, output: &Path) -> Result<(), String> {
+    // Managed launch restores SUDO_UID/GID. Mirror that identity for the
+    // collector-off arm so only collection changes inside the timed window.
+    // Both arms inherit the invoking shell's cgroup.
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    let Some(uid_text) = env::var("SUDO_UID").ok() else {
+        return Ok(());
+    };
+    let uid = uid_text
+        .parse::<u32>()
+        .map_err(|error| format!("invalid SUDO_UID: {error}"))?;
+    if uid == 0 {
+        return Ok(());
+    }
+    let gid = env::var("SUDO_GID")
+        .map_err(|_| "SUDO_UID is set but SUDO_GID is unavailable".to_string())?
+        .parse::<u32>()
+        .map_err(|error| format!("invalid SUDO_GID: {error}"))?;
+    let output_parent = output
+        .parent()
+        .ok_or_else(|| "qualification output must have a parent".to_string())?;
+    chown_paths_to_operator(&[output_parent, scratch_dir], uid, gid)?;
+    // SAFETY: this command has not started worker threads, and the numeric IDs
+    // came from sudo's identity variables.
+    if unsafe { libc::setgroups(0, std::ptr::null()) } != 0
+        || unsafe { libc::setgid(gid) } != 0
+        || unsafe { libc::setuid(uid) } != 0
+    {
+        return Err(format!(
+            "failed to restore qualification workload identity: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+async fn measure_live_command(arguments: &[String]) -> i32 {
+    if arguments.len() != 4 {
+        eprintln!(
+            "measure-live requires repo-root, production BPF object, workload, and trial-dir"
+        );
+        return 2;
+    }
+    match measure_live_trial(
+        Path::new(&arguments[0]),
+        Path::new(&arguments[1]),
+        &arguments[2],
+        Path::new(&arguments[3]),
+    )
+    .await
+    {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("live qualification measurement failed: {error}");
+            1
+        }
+    }
+}
+
+async fn measure_live_trial(
+    repo_root: &Path,
+    object_path: &Path,
+    workload_id: &str,
+    trial_dir: &Path,
+) -> Result<(), String> {
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve repo root: {error}"))?;
+    let qualification_root = repo_root
+        .join("target/qualification")
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve target/qualification: {error}"))?;
+    let trial_dir = trial_dir
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve live trial directory: {error}"))?;
+    if trial_dir == qualification_root || !trial_dir.starts_with(&qualification_root) {
+        return Err("live trial must be a child of target/qualification".to_string());
+    }
+    if fs::read_dir(&trial_dir)
+        .map_err(|error| format!("failed to inspect live trial directory: {error}"))?
+        .next()
+        .is_some()
+    {
+        return Err("live trial directory must be empty".to_string());
+    }
+    let production_object = repo_root
+        .join("target/ebpf/apolysis_observer.bpf.o")
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve production BPF object: {error}"))?;
+    let object_path = object_path
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve requested BPF object: {error}"))?;
+    if object_path != production_object {
+        return Err("measure-live requires the production BPF object".to_string());
+    }
+
+    let workload_manifest = workload_manifest(workload_id)?;
+    let workload_dir = trial_dir.join("workload");
+    fs::create_dir(&workload_dir)
+        .map_err(|error| format!("failed to create workload directory: {error}"))?;
+    let scratch_dir = workload_dir.join("scratch");
+    fs::create_dir(&scratch_dir)
+        .map_err(|error| format!("failed to create workload scratch: {error}"))?;
+    allow_managed_workload_access(&workload_dir, &scratch_dir)?;
+    let workload_output = workload_dir.join("workload-raw.json");
+    let timeline_output = trial_dir.join("timeline.jsonl");
+    let telemetry_output = trial_dir.join("kernel-latency-raw.json");
+    let live_trial_output = trial_dir.join("live-trial-raw.json");
+    let qualification_binary = env::current_exe()
+        .map_err(|error| format!("failed to resolve qualification binary: {error}"))?;
+    let agent_run = AgentRunRequest::new(
+        "qualification",
+        vec![
+            qualification_binary.display().to_string(),
+            "run-workload".to_string(),
+            repo_root.display().to_string(),
+            workload_id.to_string(),
+            scratch_dir.display().to_string(),
+            workload_output.display().to_string(),
+        ],
+    )?;
+    let expected_samples = workload_manifest
+        .value
+        .expected_event_counts
+        .values()
+        .copied()
+        .sum::<u64>();
+    let max_samples = usize::try_from(expected_samples.saturating_add(8_192))
+        .map_err(|_| "qualification telemetry sample bound exceeds usize".to_string())?;
+    let result = observe_live(LiveObserveRequest {
+        object_path,
+        output_path: timeline_output.clone(),
+        session_id: format!("qualification-{workload_id}-{}", process::id()),
+        scope: None,
+        agent_run: Some(agent_run),
+        agent_registration_path: None,
+        agent_discovery: None,
+        duration: None,
+        workspace_root: repo_root.clone(),
+        output_rotation: None,
+        qualification_telemetry: Some(QualificationTelemetryConfig {
+            output_path: telemetry_output.clone(),
+            max_samples,
+        }),
+    })
+    .await?;
+    if result.agent_exit_code != Some(0) {
+        return Err(format!(
+            "managed qualification workload exited with {:?}",
+            result.agent_exit_code
+        ));
+    }
+
+    let workload: RawWorkloadResult = load_typed_json(&workload_output)?;
+    let telemetry: CapturedTelemetry = load_typed_json(&telemetry_output)?;
+    let collector_lifecycle = terminal_collector_lifecycle(&timeline_output)?;
+    let workload_raw_sha256 = sha256_path(&workload_output)?;
+    let timeline_sha256 = sha256_path(&timeline_output)?;
+    let trial = assemble_live_trial(
+        workload,
+        telemetry,
+        collector_lifecycle,
+        workload_raw_sha256,
+        timeline_sha256,
+    )?;
+    let rendered = serde_json::to_string(&trial)
+        .map_err(|error| format!("failed to serialize raw live trial: {error}"))?;
+    write_new_private(&live_trial_output, format!("{rendered}\n").as_bytes())
+}
+
+fn allow_managed_workload_access(workload_dir: &Path, scratch_dir: &Path) -> Result<(), String> {
+    // The production managed-launch path intentionally restores the invoking
+    // user under sudo. Keep the privileged trial root private and give that
+    // user only the synthetic workload/result subdirectory.
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    let Some(uid) = env::var("SUDO_UID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|uid| *uid != 0)
+    else {
+        return Ok(());
+    };
+    let gid = env::var("SUDO_GID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| "SUDO_UID is set but SUDO_GID is unavailable".to_string())?;
+    chown_paths_to_operator(&[workload_dir, scratch_dir], uid, gid)
+}
+
+fn chown_paths_to_operator(paths: &[&Path], uid: u32, gid: u32) -> Result<(), String> {
+    for path in paths {
+        let path = path_c_string(path)?;
+        // SAFETY: path is valid and each caller bounds it to qualification
+        // output directories resolved below target/qualification.
+        if unsafe { libc::chown(path.as_ptr(), uid, gid) } != 0 {
+            return Err(format!(
+                "failed to grant managed workload trial access: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn load_typed_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
+    let source =
+        fs::read(path).map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    serde_json::from_slice(&source)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+}
+
+fn terminal_collector_lifecycle(timeline: &Path) -> Result<Value, String> {
+    let source = fs::read_to_string(timeline)
+        .map_err(|error| format!("failed to read {}: {error}", timeline.display()))?;
+    let mut terminal = None;
+    for (index, line) in source.lines().enumerate() {
+        let record: Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "failed to parse {} line {}: {error}",
+                timeline.display(),
+                index + 1
+            )
+        })?;
+        if record.get("record_type").and_then(Value::as_str) == Some("collector_lifecycle")
+            && matches!(
+                record.get("state").and_then(Value::as_str),
+                Some("stopped" | "failed")
+            )
+        {
+            terminal = Some(record);
+        }
+    }
+    terminal.ok_or_else(|| "timeline has no terminal collector lifecycle".to_string())
+}
+
+fn workload_manifest(id: &str) -> Result<EmbeddedWorkloadManifest, String> {
+    let source = match id {
+        "idle" => IDLE_WORKLOAD_MANIFEST,
+        "representative" => REPRESENTATIVE_WORKLOAD_MANIFEST,
+        "burst" => BURST_WORKLOAD_MANIFEST,
+        _ => return Err(format!("unknown qualification workload: {id}")),
+    };
+    let value: WorkloadManifest = serde_json::from_slice(source)
+        .map_err(|error| format!("invalid embedded {id} workload manifest: {error}"))?;
+    validate_workload_manifest(id, &value)?;
+    Ok(EmbeddedWorkloadManifest { source, value })
+}
+
+fn validate_workload_manifest(id: &str, manifest: &WorkloadManifest) -> Result<(), String> {
+    if manifest.schema_version != 1 {
+        return Err(format!("{id} workload manifest schema must be 1"));
+    }
+    if manifest.id != id {
+        return Err(format!(
+            "workload manifest id mismatch: expected {id}, found {}",
+            manifest.id
+        ));
+    }
+
+    let mut calculated = BTreeMap::new();
+    match &manifest.kind {
+        WorkloadKind::Idle { duration_ms } => {
+            if *duration_ms == 0 {
+                return Err("idle workload duration must be positive".to_string());
+            }
+        }
+        WorkloadKind::OperationMix {
+            iterations,
+            operations,
+        } => {
+            if *iterations == 0 || operations.is_empty() {
+                return Err(
+                    "operation_mix workload requires positive iterations and operations"
+                        .to_string(),
+                );
+            }
+            for operation in operations {
+                operation.add_expected_events(*iterations, &mut calculated);
+            }
+        }
+        WorkloadKind::RateSweep { operation, phases } => {
+            if phases.is_empty() {
+                return Err("rate_sweep workload requires at least one phase".to_string());
+            }
+            for phase in phases {
+                if phase.rate_per_second == 0 || phase.events == 0 {
+                    return Err(
+                        "rate_sweep phases require positive rates and event counts".to_string()
+                    );
+                }
+                operation.add_expected_events(phase.events, &mut calculated);
+            }
+        }
+    }
+    if calculated != manifest.expected_event_counts {
+        return Err(format!(
+            "{id} expected event counts do not match the declared operations"
+        ));
+    }
+    Ok(())
+}
+
+impl SyntheticOperation {
+    fn add_expected_events(self, count: u64, counts: &mut BTreeMap<String, u64>) {
+        let mut add = |event: &str| {
+            let total = counts.entry(event.to_string()).or_default();
+            *total = total.saturating_add(count);
+        };
+        match self {
+            Self::Openat => add("openat"),
+            Self::Creat => add("creat"),
+            Self::Truncate => add("truncate"),
+            Self::Renameat2 => add("renameat2"),
+            Self::Unlinkat => add("unlinkat"),
+            Self::Connect => add("connect"),
+            Self::ForkExit => {
+                add("sched_process_fork");
+                add("sched_process_exit");
+            }
+        }
+    }
+}
+
+fn run_workload(
+    repo_root: &Path,
+    id: &str,
+    scratch_dir: &Path,
+) -> Result<RawWorkloadResult, String> {
+    let manifest = workload_manifest(id)?;
+    let scratch = WorkloadScratch::prepare(repo_root, scratch_dir)?;
+    scratch.remove_stale_entries()?;
+
+    let started_boottime_ns = clock_ns(libc::CLOCK_BOOTTIME)?;
+    let started_monotonic_ns = clock_ns(libc::CLOCK_MONOTONIC)?;
+    let started_self_cpu = cpu_usage(libc::RUSAGE_SELF)?;
+    let started_children_cpu = cpu_usage(libc::RUSAGE_CHILDREN)?;
+    let mut completed_event_counts = BTreeMap::new();
+    let mut operation_latency_ns = BTreeMap::new();
+    let mut phases = Vec::new();
+
+    match &manifest.value.kind {
+        WorkloadKind::Idle { duration_ms } => {
+            let phase_start = clock_ns(libc::CLOCK_MONOTONIC)?;
+            std::thread::sleep(Duration::from_millis(*duration_ms));
+            let phase_end = clock_ns(libc::CLOCK_MONOTONIC)?;
+            phases.push(RawWorkloadPhase {
+                rate_per_second: None,
+                requested_events: 0,
+                completed_events: 0,
+                elapsed_monotonic_ns: phase_end.saturating_sub(phase_start),
+            });
+        }
+        WorkloadKind::OperationMix {
+            iterations,
+            operations,
+        } => {
+            let phase_start = clock_ns(libc::CLOCK_MONOTONIC)?;
+            for _ in 0..*iterations {
+                for operation in operations {
+                    execute_measured_operation(
+                        *operation,
+                        &scratch,
+                        &mut completed_event_counts,
+                        &mut operation_latency_ns,
+                    )?;
+                }
+            }
+            let phase_end = clock_ns(libc::CLOCK_MONOTONIC)?;
+            phases.push(RawWorkloadPhase {
+                rate_per_second: None,
+                requested_events: manifest.value.expected_event_counts.values().sum(),
+                completed_events: completed_event_counts.values().sum(),
+                elapsed_monotonic_ns: phase_end.saturating_sub(phase_start),
+            });
+        }
+        WorkloadKind::RateSweep {
+            operation,
+            phases: plan,
+        } => {
+            for phase in plan {
+                let phase_start = clock_ns(libc::CLOCK_MONOTONIC)?;
+                let interval_ns = 1_000_000_000_u64 / phase.rate_per_second;
+                for event_index in 0..phase.events {
+                    if event_index > 0 {
+                        sleep_until_monotonic(
+                            phase_start.saturating_add(interval_ns.saturating_mul(event_index)),
+                        )?;
+                    }
+                    execute_measured_operation(
+                        *operation,
+                        &scratch,
+                        &mut completed_event_counts,
+                        &mut operation_latency_ns,
+                    )?;
+                }
+                let phase_end = clock_ns(libc::CLOCK_MONOTONIC)?;
+                phases.push(RawWorkloadPhase {
+                    rate_per_second: Some(phase.rate_per_second),
+                    requested_events: phase.events,
+                    completed_events: phase.events,
+                    elapsed_monotonic_ns: phase_end.saturating_sub(phase_start),
+                });
+            }
+        }
+    }
+
+    let ended_self_cpu = cpu_usage(libc::RUSAGE_SELF)?;
+    let ended_children_cpu = cpu_usage(libc::RUSAGE_CHILDREN)?;
+    let ended_monotonic_ns = clock_ns(libc::CLOCK_MONOTONIC)?;
+    let ended_boottime_ns = clock_ns(libc::CLOCK_BOOTTIME)?;
+    let elapsed_monotonic_ns = ended_monotonic_ns.saturating_sub(started_monotonic_ns);
+    let elapsed_boottime_ns = ended_boottime_ns.saturating_sub(started_boottime_ns);
+    let suspend_detected =
+        elapsed_boottime_ns > elapsed_monotonic_ns.saturating_add(SUSPEND_DETECTION_TOLERANCE_NS);
+    if suspend_detected {
+        return Err(format!("{id} workload crossed a host suspend boundary"));
+    }
+    if completed_event_counts != manifest.value.expected_event_counts {
+        return Err(format!(
+            "{id} completed event counts do not match its versioned manifest"
+        ));
+    }
+
+    let self_user_cpu_ns = ended_self_cpu
+        .user_ns
+        .saturating_sub(started_self_cpu.user_ns);
+    let self_system_cpu_ns = ended_self_cpu
+        .system_ns
+        .saturating_sub(started_self_cpu.system_ns);
+    let children_user_cpu_ns = ended_children_cpu
+        .user_ns
+        .saturating_sub(started_children_cpu.user_ns);
+    let children_system_cpu_ns = ended_children_cpu
+        .system_ns
+        .saturating_sub(started_children_cpu.system_ns);
+    Ok(RawWorkloadResult {
+        schema_version: 1,
+        workload: id.to_string(),
+        workload_manifest_sha256: manifest.sha256(),
+        synthetic_workload_only: true,
+        started_monotonic_ns,
+        ended_monotonic_ns,
+        elapsed_monotonic_ns,
+        workload_user_cpu_ns: self_user_cpu_ns.saturating_add(children_user_cpu_ns),
+        workload_system_cpu_ns: self_system_cpu_ns.saturating_add(children_system_cpu_ns),
+        workload_self_user_cpu_ns: self_user_cpu_ns,
+        workload_self_system_cpu_ns: self_system_cpu_ns,
+        workload_children_user_cpu_ns: children_user_cpu_ns,
+        workload_children_system_cpu_ns: children_system_cpu_ns,
+        suspend_detected: false,
+        expected_event_counts: manifest.value.expected_event_counts,
+        completed_event_counts,
+        operation_latency_ns,
+        phases,
+    })
+}
+
+fn assemble_live_trial(
+    workload: RawWorkloadResult,
+    telemetry: CapturedTelemetry,
+    collector_lifecycle: Value,
+    workload_raw_sha256: String,
+    timeline_sha256: String,
+) -> Result<RawLiveTrial, String> {
+    if workload.suspend_detected {
+        return Err("qualification workload crossed a host suspend boundary".to_string());
+    }
+    if telemetry.schema_version != 1 || telemetry.clock != "clock_monotonic" {
+        return Err("qualification telemetry contract mismatch".to_string());
+    }
+    if collector_lifecycle
+        .get("record_type")
+        .and_then(Value::as_str)
+        != Some("collector_lifecycle")
+        || collector_lifecycle.get("state").and_then(Value::as_str) != Some("stopped")
+    {
+        return Err("timeline has no normal terminal collector lifecycle".to_string());
+    }
+    let counters = collector_lifecycle
+        .get("counters")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "terminal collector lifecycle has no counters".to_string())?;
+    let counter = |name: &str| -> Result<u64, String> {
+        counters
+            .get(name)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("terminal collector lifecycle counter is missing: {name}"))
+    };
+    let mut observed_event_counts = BTreeMap::new();
+    let mut kernel_to_decode_ns = Vec::new();
+    let mut kernel_to_append_ns = Vec::new();
+    let mut outside_window = 0;
+    for sample in &telemetry.samples {
+        if sample.kernel_timestamp_ns < workload.started_monotonic_ns
+            || sample.kernel_timestamp_ns > workload.ended_monotonic_ns
+        {
+            outside_window += 1;
+            continue;
+        }
+        if sample.decoded_monotonic_ns < sample.kernel_timestamp_ns
+            || sample.appended_monotonic_ns < sample.decoded_monotonic_ns
+        {
+            return Err("qualification telemetry timestamps are not monotonic".to_string());
+        }
+        let count = observed_event_counts
+            .entry(sample.event_name.clone())
+            .or_default();
+        *count += 1;
+        kernel_to_decode_ns.push(
+            sample
+                .decoded_monotonic_ns
+                .saturating_sub(sample.kernel_timestamp_ns),
+        );
+        kernel_to_append_ns.push(
+            sample
+                .appended_monotonic_ns
+                .saturating_sub(sample.kernel_timestamp_ns),
+        );
+    }
+
+    let pairing = counter("scope_missing_entries")?
+        .saturating_add(counter("scope_missing_exits")?)
+        .saturating_add(counter("scope_pending")?);
+    let decode = counter("global_abi_mismatches")?
+        .saturating_add(counter("global_decode_failures")?)
+        .saturating_add(counter("global_truncations")?);
+    let loss_counters = BTreeMap::from([
+        (
+            "ring_buffer_reserve".to_string(),
+            counter("global_reserve_failures")?,
+        ),
+        ("map_pressure".to_string(), counter("global_map_pressure")?),
+        ("pairing".to_string(), pairing),
+        ("decode".to_string(), decode),
+        ("queue".to_string(), telemetry.dropped_samples),
+        ("writer".to_string(), 0),
+        ("lifecycle_gap".to_string(), 0),
+    ]);
+    let exact_event_reconciliation = observed_event_counts == workload.expected_event_counts;
+
+    Ok(RawLiveTrial {
+        schema_version: 1,
+        workload: workload.workload,
+        workload_manifest_sha256: workload.workload_manifest_sha256,
+        workload_raw_sha256,
+        timeline_sha256,
+        started_monotonic_ns: workload.started_monotonic_ns,
+        ended_monotonic_ns: workload.ended_monotonic_ns,
+        suspend_detected: workload.suspend_detected,
+        expected_event_counts: workload.expected_event_counts,
+        observed_event_counts,
+        exact_event_reconciliation,
+        loss_counters,
+        kernel_to_decode_ns,
+        kernel_to_append_ns,
+        telemetry_samples_total: telemetry.samples.len(),
+        telemetry_samples_outside_window: outside_window,
+        collector_lifecycle,
+    })
+}
+
+impl WorkloadScratch {
+    fn prepare(repo_root: &Path, scratch_dir: &Path) -> Result<Self, String> {
+        let repo_root = repo_root
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve repo root: {error}"))?;
+        let qualification_root = repo_root
+            .join("target/qualification")
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve target/qualification: {error}"))?;
+        let scratch_dir = scratch_dir
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve workload scratch directory: {error}"))?;
+        if scratch_dir == qualification_root || !scratch_dir.starts_with(&qualification_root) {
+            return Err("workload scratch must be a child of target/qualification".to_string());
+        }
+        if !scratch_dir.is_dir() {
+            return Err("workload scratch must be a directory".to_string());
+        }
+
+        let directory_path = path_c_string(&scratch_dir)?;
+        // SAFETY: directory_path is a valid NUL-terminated path. The returned
+        // descriptor is checked before ownership is transferred to OwnedFd.
+        let directory_fd = unsafe {
+            libc::open(
+                directory_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if directory_fd < 0 {
+            return Err(format!(
+                "failed to open workload scratch directory: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: open returned a new owned descriptor.
+        let directory = unsafe { OwnedFd::from_raw_fd(directory_fd) };
+        Ok(Self {
+            directory,
+            entry_path: path_c_string(&scratch_dir.join("synthetic-entry"))?,
+            entry_name: CString::new("synthetic-entry").expect("static path has no NUL"),
+            renamed_name: CString::new("synthetic-renamed").expect("static path has no NUL"),
+            dev_null: CString::new("/dev/null").expect("static path has no NUL"),
+        })
+    }
+
+    fn remove_stale_entries(&self) -> Result<(), String> {
+        for name in [&self.entry_name, &self.renamed_name] {
+            // SAFETY: the directory descriptor and relative C path are valid.
+            let status = unsafe { libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) };
+            if status != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+                return Err(format!(
+                    "failed to clean synthetic workload entry: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn path_c_string(path: &Path) -> Result<CString, String> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| "qualification path contains a NUL byte".to_string())
+}
+
+fn execute_measured_operation(
+    operation: SyntheticOperation,
+    scratch: &WorkloadScratch,
+    completed: &mut BTreeMap<String, u64>,
+    latency: &mut BTreeMap<SyntheticOperation, Vec<u64>>,
+) -> Result<(), String> {
+    let started = clock_ns(libc::CLOCK_MONOTONIC)?;
+    execute_operation(operation, scratch)?;
+    let ended = clock_ns(libc::CLOCK_MONOTONIC)?;
+    latency
+        .entry(operation)
+        .or_default()
+        .push(ended.saturating_sub(started));
+    operation.add_expected_events(1, completed);
+    Ok(())
+}
+
+fn execute_operation(
+    operation: SyntheticOperation,
+    scratch: &WorkloadScratch,
+) -> Result<(), String> {
+    match operation {
+        SyntheticOperation::Openat => {
+            // SAFETY: dev_null is a valid C path and the return is checked.
+            let fd = unsafe {
+                libc::openat(
+                    libc::AT_FDCWD,
+                    scratch.dev_null.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC,
+                )
+            };
+            close_checked(fd, "openat")
+        }
+        SyntheticOperation::Creat => {
+            // SAFETY: entry_path is a valid C path and the return is checked.
+            let fd = unsafe { libc::creat(scratch.entry_path.as_ptr(), 0o600) };
+            close_checked(fd, "creat")
+        }
+        SyntheticOperation::Truncate => {
+            // SAFETY: entry_path is a valid C path and the return is checked.
+            syscall_status(
+                unsafe { libc::truncate(scratch.entry_path.as_ptr(), 0) },
+                "truncate",
+            )
+        }
+        SyntheticOperation::Renameat2 => {
+            // SAFETY: directory descriptors and relative C paths are valid.
+            let status = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    scratch.directory.as_raw_fd(),
+                    scratch.entry_name.as_ptr(),
+                    scratch.directory.as_raw_fd(),
+                    scratch.renamed_name.as_ptr(),
+                    0,
+                )
+            };
+            syscall_status(status as libc::c_int, "renameat2")
+        }
+        SyntheticOperation::Unlinkat => {
+            // SAFETY: directory descriptor and relative C path are valid.
+            syscall_status(
+                unsafe {
+                    libc::unlinkat(
+                        scratch.directory.as_raw_fd(),
+                        scratch.renamed_name.as_ptr(),
+                        0,
+                    )
+                },
+                "unlinkat",
+            )
+        }
+        SyntheticOperation::Connect => connect_loopback_attempt(),
+        SyntheticOperation::ForkExit => fork_and_wait(),
+    }
+}
+
+fn close_checked(fd: libc::c_int, operation: &str) -> Result<(), String> {
+    if fd < 0 {
+        return Err(format!(
+            "{operation} failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: fd was returned by a successful open syscall and is owned here.
+    if unsafe { libc::close(fd) } != 0 {
+        return Err(format!(
+            "close after {operation} failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+fn syscall_status(status: libc::c_int, operation: &str) -> Result<(), String> {
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{operation} failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+fn connect_loopback_attempt() -> Result<(), String> {
+    // SAFETY: socket arguments are constants and the return is checked.
+    let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    if socket < 0 {
+        return Err(format!(
+            "socket for connect workload failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let address = libc::sockaddr_in {
+        sin_family: libc::AF_INET as libc::sa_family_t,
+        sin_port: 9_u16.to_be(),
+        sin_addr: libc::in_addr {
+            s_addr: u32::from_ne_bytes([127, 0, 0, 1]),
+        },
+        sin_zero: [0; 8],
+    };
+    // A refused connection is intentional: the qualification event contract
+    // counts the attempted connect without starting an untracked server.
+    // SAFETY: address points to a fully initialized sockaddr_in.
+    unsafe {
+        libc::connect(
+            socket,
+            (&address as *const libc::sockaddr_in).cast(),
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        );
+        libc::close(socket);
+    }
+    Ok(())
+}
+
+fn fork_and_wait() -> Result<(), String> {
+    // SAFETY: the child immediately calls the async-signal-safe _exit syscall.
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return Err(format!("fork failed: {}", std::io::Error::last_os_error()));
+    }
+    if child == 0 {
+        // SAFETY: terminate the fork child without invoking Rust destructors.
+        unsafe { libc::_exit(0) }
+    }
+    loop {
+        let mut status = 0;
+        // SAFETY: child is the owned child PID and status is valid writable memory.
+        let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+        if waited == child {
+            return Ok(());
+        }
+        if waited < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return Err(format!(
+            "waitpid failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+}
+
+fn sleep_until_monotonic(deadline_ns: u64) -> Result<(), String> {
+    let deadline = libc::timespec {
+        tv_sec: (deadline_ns / 1_000_000_000) as libc::time_t,
+        tv_nsec: (deadline_ns % 1_000_000_000) as libc::c_long,
+    };
+    loop {
+        // SAFETY: deadline points to a valid absolute CLOCK_MONOTONIC timespec.
+        let status = unsafe {
+            libc::clock_nanosleep(
+                libc::CLOCK_MONOTONIC,
+                libc::TIMER_ABSTIME,
+                &deadline,
+                std::ptr::null_mut(),
+            )
+        };
+        if status == 0 {
+            return Ok(());
+        }
+        if status != libc::EINTR {
+            return Err(format!(
+                "clock_nanosleep failed: {}",
+                std::io::Error::from_raw_os_error(status)
+            ));
+        }
+    }
+}
+
+fn clock_ns(clock: libc::clockid_t) -> Result<u64, String> {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime initializes value on success.
+    if unsafe { libc::clock_gettime(clock, &mut value) } != 0 {
+        return Err(format!(
+            "failed to read qualification clock: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok((value.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(value.tv_nsec as u64))
+}
+
+fn cpu_usage(who: libc::c_int) -> Result<CpuUsage, String> {
+    // SAFETY: zero is a valid initialization for rusage before getrusage fills it.
+    let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+    // SAFETY: usage points to valid writable rusage memory.
+    if unsafe { libc::getrusage(who, &mut usage) } != 0 {
+        return Err(format!(
+            "failed to read workload CPU usage: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(CpuUsage {
+        user_ns: timeval_ns(usage.ru_utime),
+        system_ns: timeval_ns(usage.ru_stime),
+    })
+}
+
+fn timeval_ns(value: libc::timeval) -> u64 {
+    (value.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add((value.tv_usec as u64).saturating_mul(1_000))
+}
+
 fn capture_command(arguments: &[String]) -> i32 {
     if arguments.len() != 2 {
         eprintln!("capture-preflight requires repo-root and output");
@@ -637,20 +1750,30 @@ fn capture_preflight(repo_root: &Path, output: &Path) -> Result<(), String> {
             "append_lag_ms_max": null
         })
     };
-    let result = |workload: &str| {
-        json!({
+    let evidence_root = output
+        .parent()
+        .ok_or_else(|| "preflight evidence output must have a parent".to_string())?;
+    let result = |workload: &str| -> Result<Value, String> {
+        let manifest = workload_manifest(workload)?;
+        let raw_samples_sha256 =
+            sha256_json_tree(&evidence_root.join("measurements").join(workload))?;
+        Ok(json!({
             "workload": workload,
-            "workload_manifest_sha256": null,
-            "raw_samples_sha256": null,
+            "workload_manifest_sha256": manifest.sha256(),
+            "raw_samples_sha256": raw_samples_sha256,
             "measurements": measurements(),
             "integrity": {
-                "expected_event_counts": null,
+                "expected_event_counts": manifest.expected_event_counts(),
                 "observed_event_counts": null,
                 "loss_counters": null,
                 "unexplained_loss_count": null
             }
-        })
+        }))
     };
+    let results = ["idle", "representative", "burst"]
+        .into_iter()
+        .map(result)
+        .collect::<Result<Vec<_>, _>>()?;
     let evidence = json!({
         "schema_version": 1,
         "profile": "linux-x86_64-host-managed",
@@ -684,12 +1807,54 @@ fn capture_preflight(repo_root: &Path, output: &Path) -> Result<(), String> {
             "clock": "clock_monotonic",
             "reject_suspend": true
         },
-        "results": [result("idle"), result("representative"), result("burst")]
+        "results": results
     });
     let rendered = serde_json::to_string_pretty(&evidence)
         .map_err(|error| format!("failed to serialize evidence: {error}"))?;
     fs::write(output, format!("{rendered}\n"))
         .map_err(|error| format!("failed to write {}: {error}", output.display()))
+}
+
+fn sha256_json_tree(root: &Path) -> Result<Option<String>, String> {
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
+        {
+            let path = entry
+                .map_err(|error| format!("failed to read qualification artifact: {error}"))?
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("json" | "jsonl")
+            ) {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut hasher = Sha256::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| "qualification artifact escaped its workload root".to_string())?;
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        hasher.update(relative.as_os_str().as_bytes());
+        hasher.update([0]);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(Some(hex_digest(&hasher.finalize())))
 }
 
 fn sha256_path(path: &Path) -> Result<String, String> {
@@ -745,11 +1910,211 @@ fn command_output(program: &str, arguments: &[&str]) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn repository_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("repository root")
+    }
+
     fn fixture(name: &str) -> Value {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/qualification")
             .join(name);
         load_json(&path).expect("qualification fixture")
+    }
+
+    #[test]
+    fn embedded_workload_manifests_freeze_exact_event_counts() {
+        let idle = workload_manifest("idle").expect("idle manifest");
+        let representative = workload_manifest("representative").expect("representative manifest");
+        let burst = workload_manifest("burst").expect("burst manifest");
+
+        assert_eq!(idle.expected_event_counts(), BTreeMap::new());
+        assert_eq!(
+            representative.expected_event_counts(),
+            BTreeMap::from([
+                ("connect".to_string(), 25),
+                ("creat".to_string(), 25),
+                ("openat".to_string(), 25),
+                ("renameat2".to_string(), 25),
+                ("sched_process_exit".to_string(), 25),
+                ("sched_process_fork".to_string(), 25),
+                ("truncate".to_string(), 25),
+                ("unlinkat".to_string(), 25),
+            ])
+        );
+        assert_eq!(
+            burst.expected_event_counts(),
+            BTreeMap::from([("openat".to_string(), 1_300)])
+        );
+        assert_ne!(idle.sha256(), representative.sha256());
+        assert_ne!(representative.sha256(), burst.sha256());
+    }
+
+    #[test]
+    fn candidate_envelope_references_the_embedded_workload_manifests() {
+        let envelope = load_json(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../qualification/envelope-v1.json"),
+        )
+        .expect("candidate envelope");
+        let workloads = envelope["profiles"][0]["workloads"]
+            .as_object()
+            .expect("candidate workloads");
+
+        for id in ["idle", "representative", "burst"] {
+            let manifest = workload_manifest(id).expect("embedded manifest");
+            assert_eq!(
+                workloads[id]["manifest_sha256"].as_str(),
+                Some(manifest.sha256().as_str())
+            );
+            assert_eq!(
+                workloads[id]["expected_event_counts"],
+                serde_json::to_value(manifest.expected_event_counts())
+                    .expect("serialize expected counts")
+            );
+        }
+    }
+
+    #[test]
+    fn representative_workload_emits_only_non_secret_raw_measurements() {
+        let repo_root = repository_root();
+        let scratch = repo_root
+            .join("target/qualification")
+            .join(format!("unit-workload-{}", process::id()));
+        fs::create_dir_all(&scratch).expect("create qualification scratch");
+
+        let result = run_workload(&repo_root, "representative", &scratch)
+            .expect("run representative workload");
+        fs::remove_dir_all(&scratch).expect("remove qualification scratch");
+
+        assert_eq!(result.workload, "representative");
+        assert_eq!(result.schema_version, 1);
+        assert!(result.synthetic_workload_only);
+        assert!(!result.suspend_detected);
+        assert!(result.ended_monotonic_ns >= result.started_monotonic_ns);
+        assert_eq!(result.completed_event_counts, result.expected_event_counts);
+        assert_eq!(
+            result.workload_user_cpu_ns,
+            result
+                .workload_self_user_cpu_ns
+                .saturating_add(result.workload_children_user_cpu_ns)
+        );
+        assert_eq!(
+            result.workload_system_cpu_ns,
+            result
+                .workload_self_system_cpu_ns
+                .saturating_add(result.workload_children_system_cpu_ns)
+        );
+
+        let rendered = serde_json::to_string(&result).expect("serialize raw result");
+        assert!(!rendered.contains(scratch.to_string_lossy().as_ref()));
+        assert!(!rendered.contains("resource"));
+        assert!(!rendered.contains("payload"));
+    }
+
+    #[test]
+    fn live_trial_uses_only_samples_inside_the_workload_window() {
+        let workload = RawWorkloadResult {
+            schema_version: 1,
+            workload: "representative".to_string(),
+            workload_manifest_sha256: "a".repeat(64),
+            synthetic_workload_only: true,
+            started_monotonic_ns: 100,
+            ended_monotonic_ns: 200,
+            elapsed_monotonic_ns: 100,
+            workload_user_cpu_ns: 10,
+            workload_system_cpu_ns: 5,
+            workload_self_user_cpu_ns: 8,
+            workload_self_system_cpu_ns: 4,
+            workload_children_user_cpu_ns: 2,
+            workload_children_system_cpu_ns: 1,
+            suspend_detected: false,
+            expected_event_counts: BTreeMap::from([("openat".to_string(), 1)]),
+            completed_event_counts: BTreeMap::from([("openat".to_string(), 1)]),
+            operation_latency_ns: BTreeMap::new(),
+            phases: Vec::new(),
+        };
+        let telemetry = CapturedTelemetry {
+            schema_version: 1,
+            clock: "clock_monotonic".to_string(),
+            samples: vec![
+                CapturedTelemetrySample::new("openat", 90, 95, 96),
+                CapturedTelemetrySample::new("openat", 150, 160, 170),
+                CapturedTelemetrySample::new("openat", 210, 220, 230),
+            ],
+            dropped_samples: 0,
+        };
+        let lifecycle = json!({
+            "record_type": "collector_lifecycle",
+            "state": "stopped",
+            "health": "healthy",
+            "counters": {
+                "global_reserve_failures": 0,
+                "global_map_pressure": 0,
+                "global_abi_mismatches": 0,
+                "global_decode_failures": 0,
+                "global_truncations": 0,
+                "scope_missing_entries": 0,
+                "scope_missing_exits": 0,
+                "scope_pending": 0
+            }
+        });
+
+        let trial = assemble_live_trial(
+            workload,
+            telemetry,
+            lifecycle,
+            "b".repeat(64),
+            "c".repeat(64),
+        )
+        .expect("assemble live trial");
+
+        assert_eq!(trial.observed_event_counts, trial.expected_event_counts);
+        assert_eq!(trial.kernel_to_decode_ns, vec![10]);
+        assert_eq!(trial.kernel_to_append_ns, vec![20]);
+        assert_eq!(trial.loss_counters.values().sum::<u64>(), 0);
+        assert!(trial.exact_event_reconciliation);
+    }
+
+    #[test]
+    fn live_trial_rejects_a_workload_that_crossed_suspend() {
+        let workload = RawWorkloadResult {
+            schema_version: 1,
+            workload: "idle".to_string(),
+            workload_manifest_sha256: "a".repeat(64),
+            synthetic_workload_only: true,
+            started_monotonic_ns: 100,
+            ended_monotonic_ns: 200,
+            elapsed_monotonic_ns: 100,
+            workload_user_cpu_ns: 0,
+            workload_system_cpu_ns: 0,
+            workload_self_user_cpu_ns: 0,
+            workload_self_system_cpu_ns: 0,
+            workload_children_user_cpu_ns: 0,
+            workload_children_system_cpu_ns: 0,
+            suspend_detected: true,
+            expected_event_counts: BTreeMap::new(),
+            completed_event_counts: BTreeMap::new(),
+            operation_latency_ns: BTreeMap::new(),
+            phases: Vec::new(),
+        };
+
+        let error = assemble_live_trial(
+            workload,
+            CapturedTelemetry {
+                schema_version: 0,
+                clock: "invalid".to_string(),
+                samples: Vec::new(),
+                dropped_samples: 0,
+            },
+            json!({}),
+            "b".repeat(64),
+            "c".repeat(64),
+        )
+        .expect_err("suspend must invalidate a raw live trial");
+
+        assert!(error.contains("suspend"));
     }
 
     #[test]

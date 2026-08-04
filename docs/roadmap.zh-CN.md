@@ -149,6 +149,8 @@ API 时，run 仍必须有用。
 - 每个 viewer fact 都能解析到 observation、capability、health 或 gap record；
 - 空或不完整 timeline 永远不渲染成 successful 或 complete；
 - privilege separation、本地文件权限、retention 与 redaction 通过有界测试；
+- 资格证据来自版本化 synthetic workload、同一 boot 上交替的 collector-off/on trial、
+  monotonic 原始 latency sample 与准确 event-count reconciliation；
 - collector 满足由保留 live 证据冻结的 workload-specific CPU、memory、latency 与
   event-loss budget；未设置的 Candidate envelope 是显式 no-go，绝不视作隐式通过。
 

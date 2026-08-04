@@ -59,6 +59,73 @@ if ! TMPDIR="$output_dir/tmp" APOLYSIS_REQUIRE_BPF=1 \
     exit 1
 fi
 
+qualification_samples="${APOLYSIS_QUALIFICATION_SAMPLES:-3}"
+if [[ ! "$qualification_samples" =~ ^[1-9][0-9]*$ ]] ||
+    (( qualification_samples > 100 )); then
+    printf 'APOLYSIS_QUALIFICATION_SAMPLES must be an integer from 1 to 100\n' >&2
+    exit 2
+fi
+
+printf 'building the qualification-only workload driver\n'
+if ! cargo build --quiet --manifest-path "$repo_root/Cargo.toml" \
+    -p apolysis-cli --bin apolysis-qualification \
+    >"$output_dir/qualification-build.log" 2>&1; then
+    printf 'qualification workload build failed; see %s\n' \
+        "$output_dir/qualification-build.log" >&2
+    exit 1
+fi
+qualification_binary="$repo_root/target/debug/apolysis-qualification"
+production_object="$repo_root/target/ebpf/apolysis_observer.bpf.o"
+measurement_root="$output_dir/measurements"
+mkdir "$measurement_root"
+
+run_off_trial() {
+    local workload="$1"
+    local trial_dir="$2"
+    mkdir "$trial_dir"
+    mkdir "$trial_dir/scratch"
+    "$qualification_binary" run-workload \
+        "$repo_root" "$workload" "$trial_dir/scratch" \
+        "$trial_dir/workload-raw.json"
+}
+
+run_on_trial() {
+    local workload="$1"
+    local trial_dir="$2"
+    local log_path="$3"
+    mkdir "$trial_dir"
+    "$qualification_binary" measure-live \
+        "$repo_root" "$production_object" "$workload" "$trial_dir" \
+        >"$log_path" 2>&1
+}
+
+printf 'capturing alternating collector-off/on synthetic trials\n'
+for workload in idle representative burst; do
+    workload_root="$measurement_root/$workload"
+    mkdir "$workload_root"
+    for ((sample = 1; sample <= qualification_samples; sample++)); do
+        pair_root="$workload_root/pair-$(printf '%03d' "$sample")"
+        mkdir "$pair_root"
+        if (( sample % 2 == 1 )); then
+            if ! run_off_trial "$workload" "$pair_root/off" \
+                >"$pair_root/off.log" 2>&1 ||
+                ! run_on_trial "$workload" "$pair_root/on" "$pair_root/on.log"; then
+                printf 'qualification trial failed: workload=%s sample=%s; see %s\n' \
+                    "$workload" "$sample" "$pair_root" >&2
+                exit 1
+            fi
+        else
+            if ! run_on_trial "$workload" "$pair_root/on" "$pair_root/on.log" ||
+                ! run_off_trial "$workload" "$pair_root/off" \
+                    >"$pair_root/off.log" 2>&1; then
+                printf 'qualification trial failed: workload=%s sample=%s; see %s\n' \
+                    "$workload" "$sample" "$pair_root" >&2
+                exit 1
+            fi
+        fi
+    done
+done
+
 cargo run --quiet --manifest-path "$repo_root/Cargo.toml" \
     -p apolysis-cli --bin apolysis-qualification -- capture-preflight \
     "$repo_root" "$output_dir/preflight-evidence.json"
