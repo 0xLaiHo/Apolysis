@@ -2,7 +2,7 @@
 
 > [English](design.md) | 简体中文
 > 配套文档：[roadmap.zh-CN.md](roadmap.zh-CN.md)
-> 最后审查：2026-08-03
+> 最后审查：2026-08-04
 
 本文是 Apolysis 做什么、目标系统如何工作、当前已经实现什么以及产品声明止步于何处的
 唯一权威说明。交付顺序、后置项和发布门禁属于 roadmap。
@@ -352,6 +352,9 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
   保守归因到 `file_open`，而不是 create 或 truncate。
 - 被攻陷的 kernel 或 privileged host 可以省略或伪造 observation。
 - Kernel version、BTF、hook availability、verifier behavior 与 privilege 限制支持范围。
+- 当前资格 contract 没有授予任何 Supported profile。Linux 6.12 x86_64 原生 host 仅为
+  Candidate；其他 kernel、architecture 与 container/Kubernetes runtime 在准确、保留的 live
+  证据通过前都保持 Experimental。数值性能预算有意保持未设置。
 
 ## 14. 非目标
 

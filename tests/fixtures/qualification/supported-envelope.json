@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "linux-x86_64-host-managed",
+      "status": "supported",
+      "support_claim": "fixture_only",
+      "architectures": ["x86_64"],
+      "kernel_lines": ["6.12"],
+      "qualified_tuples": [
+        {
+          "id": "fixture-6.12.8-x86_64",
+          "architecture": "x86_64",
+          "kernel_release": "6.12.8-fixture",
+          "btf_vmlinux_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bpf_object_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "tracepoint_format_set_sha256": "13865f530b74943cc47dcba0596994ffedb21c9ca07a17a52e83514d4916dd8f",
+          "source_commit": "0000000000000000000000000000000000000000",
+          "cargo_lock_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        }
+      ],
+      "measurement_protocol": {
+        "percentile_method": "nearest_rank",
+        "interval_method": "bootstrap_percentile_95",
+        "bootstrap_resamples": 10000,
+        "collector_comparison": "alternating_off_on_same_boot",
+        "clock": "clock_monotonic",
+        "reject_suspend": true
+      },
+      "required_environment": {
+        "btf_vmlinux": true,
+        "cgroup_v2": true,
+        "tracepoints_complete": true,
+        "tracepoint_manifest_version": 1,
+        "verifier_load_attach": true,
+        "capability_modes": ["bpf_perfmon"],
+        "runtimes": ["host"]
+      },
+      "workloads": {
+        "idle": {
+          "manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "expected_event_counts": {},
+          "minimum_samples": 10,
+          "minimum_event_rate_per_second": 0.0,
+          "maximum_collector_cpu_percent_p95": 5.0,
+          "maximum_workload_cpu_overhead_percent_p95": 10.0,
+          "maximum_collector_peak_rss_mib": 96.0,
+          "maximum_collector_cgroup_memory_peak_mib": 112.0,
+          "maximum_bpf_memory_mib": 16.0,
+          "maximum_workload_latency_overhead_percent_p95": 10.0,
+          "maximum_observation_lag_ms_p95": 20.0,
+          "maximum_observation_lag_ms_p99": 40.0,
+          "maximum_append_lag_ms_p95": 25.0,
+          "maximum_append_lag_ms_p99": 50.0,
+          "maximum_known_loss_count": 0,
+          "maximum_unexplained_loss_count": 0
+        },
+        "representative": {
+          "manifest_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "expected_event_counts": {"process": 400, "file": 400, "network": 200},
+          "minimum_samples": 10,
+          "minimum_event_rate_per_second": 100.0,
+          "maximum_collector_cpu_percent_p95": 5.0,
+          "maximum_workload_cpu_overhead_percent_p95": 10.0,
+          "maximum_collector_peak_rss_mib": 96.0,
+          "maximum_collector_cgroup_memory_peak_mib": 112.0,
+          "maximum_bpf_memory_mib": 16.0,
+          "maximum_workload_latency_overhead_percent_p95": 10.0,
+          "maximum_observation_lag_ms_p95": 20.0,
+          "maximum_observation_lag_ms_p99": 40.0,
+          "maximum_append_lag_ms_p95": 25.0,
+          "maximum_append_lag_ms_p99": 50.0,
+          "maximum_known_loss_count": 0,
+          "maximum_unexplained_loss_count": 0
+        },
+        "burst": {
+          "manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "expected_event_counts": {"process": 4000, "file": 4000, "network": 2000},
+          "minimum_samples": 10,
+          "minimum_event_rate_per_second": 1000.0,
+          "maximum_collector_cpu_percent_p95": 5.0,
+          "maximum_workload_cpu_overhead_percent_p95": 10.0,
+          "maximum_collector_peak_rss_mib": 96.0,
+          "maximum_collector_cgroup_memory_peak_mib": 112.0,
+          "maximum_bpf_memory_mib": 16.0,
+          "maximum_workload_latency_overhead_percent_p95": 10.0,
+          "maximum_observation_lag_ms_p95": 20.0,
+          "maximum_observation_lag_ms_p99": 40.0,
+          "maximum_append_lag_ms_p95": 25.0,
+          "maximum_append_lag_ms_p99": 50.0,
+          "maximum_known_loss_count": 0,
+          "maximum_unexplained_loss_count": 0
+        }
+      }
+    }
+  ]
+}

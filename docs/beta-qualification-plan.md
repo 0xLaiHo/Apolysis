@@ -48,7 +48,7 @@ semantics, remote outcome verification, and enforcement.
 | C2 Remaining operation outcomes | Add bounded entry/exit results and missing-pair gaps for the supported file operation set | none |
 | C3 Stable Runtime Identity | Survive PID reuse and exec generation without promoting heuristic matches to Exact Relations | none |
 | C4 Collector lifecycle | Persist start, health/loss checkpoints, terminal state, and explicit stop reason; fail loud on incomplete lifecycle | none |
-| Q1 Qualification envelope | Freeze supported kernel/runtime profiles and workload-specific CPU, memory, latency, and event-loss budgets | none |
+| Q1 Qualification envelope | Freeze the candidate kernel/runtime contract and measurement protocol, then grant support only after retained live evidence freezes CPU, memory, latency, and event-loss budgets | none |
 | L1 Protected existing-process attach | Attach with Runtime Identity validation and an explicit late-attach Observation Gap | C3, C4 |
 | L2 Agent Observation Record projection | Produce one queryable run aggregate and summary over observation, capability, identity, health, finding, and gap records | C1, C2, C3, C4 |
 | L3 Non-privileged saved-run viewer | Complete the representative investigation without raw JSONL or privileged access | L2 |
@@ -111,7 +111,9 @@ environment breadth.
 The focused work items must settle these details before their dependent items
 start:
 
-- the exact supported kernel/runtime matrix and performance budgets in Q1;
+- the Q1 Candidate contract is Linux 6.12/x86_64 native host, but the exact
+  numeric performance budgets and any Supported promotion remain blocked on
+  retained privileged live evidence;
 - the saved-run viewer interaction and presentation shape after L2 freezes the
   queryable Agent Observation Record; and
 - the Kubernetes least-privilege deployment shape after container identity and
