@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -18,7 +18,7 @@ use apolysis_core::{
 };
 use apolysis_store::JsonlRotationPolicy;
 use apolysis_store::JsonlStore;
-use aya::maps::{Array, HashMap, MapData, MapError, RingBuf};
+use aya::maps::{Array, HashMap, Map, MapData, MapError, RingBuf};
 use aya::programs::TracePoint;
 use aya::{Ebpf, EbpfLoader, Pod};
 use serde::{Deserialize, Serialize};
@@ -240,6 +240,9 @@ pub struct LiveObserveRequest {
 pub struct QualificationTelemetryConfig {
     pub output_path: PathBuf,
     pub max_samples: usize,
+    pub resource_sample_interval: Duration,
+    pub collector_cgroup_path: PathBuf,
+    pub managed_agent_cgroup_path: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,11 +253,43 @@ struct QualificationTelemetrySample {
     appended_monotonic_ns: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct QualificationResourceSample {
+    monotonic_ns: u64,
+    process_user_cpu_ns: u64,
+    process_system_cpu_ns: u64,
+    process_rss_bytes: u64,
+    process_peak_rss_bytes: u64,
+    collector_cgroup_memory_current_bytes: u64,
+    collector_cgroup_memory_peak_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct QualificationLossSample {
+    monotonic_ns: u64,
+    loss_counters: BTreeMap<&'static str, u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessMemory {
+    rss_bytes: u64,
+    peak_rss_bytes: u64,
+}
+
 #[derive(Debug)]
 struct QualificationTelemetryRecorder {
     max_samples: usize,
     samples: Vec<QualificationTelemetrySample>,
     dropped_samples: u64,
+    resource_samples: Vec<QualificationResourceSample>,
+    resource_sample_interval_ns: u64,
+    resource_sample_gap_limit_ns: u64,
+    resource_sample_max_gap_ns: u64,
+    loss_samples: Vec<QualificationLossSample>,
+    collector_cgroup_path: PathBuf,
+    collector_cgroup_isolated: bool,
+    bpf_map_memory_bytes: u64,
+    bpf_program_memory_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -263,15 +298,72 @@ struct QualificationTelemetryReport<'a> {
     clock: &'static str,
     samples: &'a [QualificationTelemetrySample],
     dropped_samples: u64,
+    resource_sample_interval_ns: u64,
+    resource_sample_gap_limit_ns: u64,
+    resource_sample_max_gap_ns: u64,
+    resource_samples: &'a [QualificationResourceSample],
+    loss_samples: &'a [QualificationLossSample],
+    collector_cgroup_isolated: bool,
+    bpf_map_memory_bytes: u64,
+    bpf_program_memory_bytes: u64,
 }
 
 impl QualificationTelemetryRecorder {
-    fn new(max_samples: usize) -> Self {
+    #[cfg(test)]
+    fn empty_for_test(max_samples: usize) -> Self {
         Self {
+            max_samples,
+            samples: Vec::with_capacity(max_samples),
+            dropped_samples: 0,
+            resource_samples: Vec::new(),
+            resource_sample_interval_ns: 1,
+            resource_sample_gap_limit_ns: 4,
+            resource_sample_max_gap_ns: 0,
+            loss_samples: Vec::new(),
+            collector_cgroup_path: PathBuf::new(),
+            collector_cgroup_isolated: true,
+            bpf_map_memory_bytes: 0,
+            bpf_program_memory_bytes: 0,
+        }
+    }
+
+    fn new(
+        max_samples: usize,
+        resource_sample_interval: Duration,
+        collector_cgroup_path: PathBuf,
+        managed_agent_cgroup_path: &Path,
+        managed_agent_pid: Option<u32>,
+        ebpf: &Ebpf,
+    ) -> Result<Self, String> {
+        if resource_sample_interval.is_zero() {
+            return Err("qualification resource sample interval must be non-zero".to_string());
+        }
+        verify_qualification_cgroup_isolation(
+            &collector_cgroup_path,
+            managed_agent_cgroup_path,
+            managed_agent_pid.ok_or_else(|| {
+                "qualification resource telemetry requires a managed workload".to_string()
+            })?,
+        )?;
+        let (bpf_map_memory_bytes, bpf_program_memory_bytes) = bpf_memory_bytes(ebpf)?;
+        let resource_sample_interval_ns = u64::try_from(resource_sample_interval.as_nanos())
+            .map_err(|_| "qualification resource sample interval exceeds u64".to_string())?;
+        let mut recorder = Self {
             max_samples,
             samples: Vec::with_capacity(max_samples.min(16_384)),
             dropped_samples: 0,
-        }
+            resource_samples: Vec::new(),
+            resource_sample_interval_ns,
+            resource_sample_gap_limit_ns: resource_sample_interval_ns.saturating_mul(4),
+            resource_sample_max_gap_ns: 0,
+            loss_samples: Vec::new(),
+            collector_cgroup_path,
+            collector_cgroup_isolated: true,
+            bpf_map_memory_bytes,
+            bpf_program_memory_bytes,
+        };
+        recorder.record_resource_sample()?;
+        Ok(recorder)
     }
 
     fn record(
@@ -299,7 +391,56 @@ impl QualificationTelemetryRecorder {
             clock: "clock_monotonic",
             samples: &self.samples,
             dropped_samples: self.dropped_samples,
+            resource_sample_interval_ns: self.resource_sample_interval_ns,
+            resource_sample_gap_limit_ns: self.resource_sample_gap_limit_ns,
+            resource_sample_max_gap_ns: self.resource_sample_max_gap_ns,
+            resource_samples: &self.resource_samples,
+            loss_samples: &self.loss_samples,
+            collector_cgroup_isolated: self.collector_cgroup_isolated,
+            bpf_map_memory_bytes: self.bpf_map_memory_bytes,
+            bpf_program_memory_bytes: self.bpf_program_memory_bytes,
         }
+    }
+
+    fn record_resource_sample(&mut self) -> Result<(), String> {
+        let monotonic_ns = monotonic_now_ns()?;
+        if let Some(previous) = self.resource_samples.last() {
+            let gap = monotonic_ns.saturating_sub(previous.monotonic_ns);
+            self.resource_sample_max_gap_ns = self.resource_sample_max_gap_ns.max(gap);
+            if gap > self.resource_sample_gap_limit_ns {
+                return Err(format!(
+                    "qualification resource sample gap {gap}ns exceeds {}ns",
+                    self.resource_sample_gap_limit_ns
+                ));
+            }
+        }
+        let process_cpu = process_cpu_usage()?;
+        let process_memory = read_process_memory(Path::new("/proc/self/status"))?;
+        let cgroup_current = read_u64_file(&self.collector_cgroup_path.join("memory.current"))?;
+        let cgroup_peak = read_u64_file(&self.collector_cgroup_path.join("memory.peak"))?;
+        self.resource_samples.push(QualificationResourceSample {
+            monotonic_ns,
+            process_user_cpu_ns: process_cpu.0,
+            process_system_cpu_ns: process_cpu.1,
+            process_rss_bytes: process_memory.rss_bytes,
+            process_peak_rss_bytes: process_memory.peak_rss_bytes,
+            collector_cgroup_memory_current_bytes: cgroup_current,
+            collector_cgroup_memory_peak_bytes: cgroup_peak,
+        });
+        Ok(())
+    }
+
+    fn record_loss_sample(&mut self, counters: CollectorLifecycleCounters) -> Result<(), String> {
+        let monotonic_ns = self
+            .resource_samples
+            .last()
+            .map(|sample| sample.monotonic_ns)
+            .ok_or_else(|| "qualification loss sample has no resource timestamp".to_string())?;
+        self.loss_samples.push(QualificationLossSample {
+            monotonic_ns,
+            loss_counters: qualification_loss_counters(counters, self.dropped_samples),
+        });
+        Ok(())
     }
 
     fn persist(&self, path: &Path) -> Result<(), String> {
@@ -892,26 +1033,31 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     }
 
     let mut managed_agent = if let Some(agent_run) = request.agent_run.as_ref() {
-        let managed = match spawn_managed_agent(agent_run, &request.workspace_root) {
-            Ok(managed) => managed,
-            Err(error) => {
-                append_diagnostic(
-                    &request.session_id,
-                    ObserverDiagnosticKind::AttachFailure,
-                    1,
-                    &error,
-                    &mut store,
-                )?;
-                append_failed_collector_lifecycle(
-                    &request.session_id,
-                    &collector_instance_id,
-                    CollectorFailureReason::AttachFailure,
-                    CollectorLifecycleCounters::default(),
-                    &mut store,
-                )?;
-                return Err(error);
-            }
-        };
+        let managed_agent_cgroup = request
+            .qualification_telemetry
+            .as_ref()
+            .map(|config| config.managed_agent_cgroup_path.as_path());
+        let managed =
+            match spawn_managed_agent(agent_run, &request.workspace_root, managed_agent_cgroup) {
+                Ok(managed) => managed,
+                Err(error) => {
+                    append_diagnostic(
+                        &request.session_id,
+                        ObserverDiagnosticKind::AttachFailure,
+                        1,
+                        &error,
+                        &mut store,
+                    )?;
+                    append_failed_collector_lifecycle(
+                        &request.session_id,
+                        &collector_instance_id,
+                        CollectorFailureReason::AttachFailure,
+                        CollectorLifecycleCounters::default(),
+                        &mut store,
+                    )?;
+                    return Err(error);
+                }
+            };
         write_agent_supervisor_metadata(&request.session_id, &managed.metadata, &mut store)?;
         Some(managed)
     } else {
@@ -995,6 +1141,57 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         return Err(error);
     }
 
+    let mut qualification_telemetry = match request.qualification_telemetry.as_ref() {
+        Some(config) => match QualificationTelemetryRecorder::new(
+            config.max_samples,
+            config.resource_sample_interval,
+            config.collector_cgroup_path.clone(),
+            &config.managed_agent_cgroup_path,
+            managed_agent.as_ref().map(|agent| agent.metadata.root_pid),
+            &ebpf,
+        ) {
+            Ok(mut recorder) => {
+                let counters = match read_observer_counters(&mut ebpf) {
+                    Ok(counters) => counters,
+                    Err(error) => {
+                        terminate_managed_agent(managed_agent.as_mut()).await;
+                        append_failed_collector_lifecycle(
+                            &request.session_id,
+                            &collector_instance_id,
+                            CollectorFailureReason::CounterReadFailure,
+                            CollectorLifecycleCounters::default(),
+                            &mut store,
+                        )?;
+                        return Err(format!(
+                            "failed to initialize qualification loss telemetry: {error}"
+                        ));
+                    }
+                };
+                recorder.record_loss_sample(live_collector_lifecycle_counters(
+                    DaemonObserverCounters::from(counters),
+                    0,
+                    0,
+                    0,
+                ))?;
+                Some(recorder)
+            }
+            Err(error) => {
+                terminate_managed_agent(managed_agent.as_mut()).await;
+                append_failed_collector_lifecycle(
+                    &request.session_id,
+                    &collector_instance_id,
+                    CollectorFailureReason::ObserverFailure,
+                    CollectorLifecycleCounters::default(),
+                    &mut store,
+                )?;
+                return Err(format!(
+                    "failed to initialize qualification resource telemetry: {error}"
+                ));
+            }
+        },
+        None => None,
+    };
+
     let capability_manifest =
         audit_observer_capability_manifest(&request.session_id, &scope, &loader_plan);
     if let Err(error) = store.append(&capability_manifest) {
@@ -1027,10 +1224,6 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     }
 
     let mut last_lifecycle_counters = CollectorLifecycleCounters::default();
-    let mut qualification_telemetry = request
-        .qualification_telemetry
-        .as_ref()
-        .map(|config| QualificationTelemetryRecorder::new(config.max_samples));
     let run_result: Result<ObserveResult, String> = async {
     let ring_map = ebpf
         .take_map(&loader_plan.ring_buffer_map)
@@ -1062,6 +1255,16 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         LIVE_COLLECTOR_CHECKPOINT_INTERVAL,
     );
     checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let resource_sample_interval = request
+        .qualification_telemetry
+        .as_ref()
+        .map(|config| config.resource_sample_interval)
+        .unwrap_or(Duration::from_secs(1));
+    let mut resource_sampler = tokio::time::interval_at(
+        tokio::time::Instant::now() + resource_sample_interval,
+        resource_sample_interval,
+    );
+    resource_sampler.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         if agent_exit_status.is_none() {
@@ -1080,6 +1283,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
 
         let effective_deadline = earliest_deadline(deadline, agent_drain_deadline);
         let mut checkpoint_due = false;
+        let mut resource_sample_due = false;
         let batch = if let Some(deadline) = effective_deadline {
             tokio::select! {
                 result = read_ring_batch(&mut async_ring) => Some(result?),
@@ -1093,6 +1297,10 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 },
                 _ = checkpoint.tick() => {
                     checkpoint_due = true;
+                    Some(Vec::new())
+                },
+                _ = resource_sampler.tick(), if qualification_telemetry.is_some() => {
+                    resource_sample_due = true;
                     Some(Vec::new())
                 },
                 _ = tokio::time::sleep_until(deadline) => {
@@ -1118,6 +1326,10 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 _ = checkpoint.tick() => {
                     checkpoint_due = true;
                     Some(Vec::new())
+                },
+                _ = resource_sampler.tick(), if qualification_telemetry.is_some() => {
+                    resource_sample_due = true;
+                    Some(Vec::new())
                 }
             }
         };
@@ -1125,6 +1337,19 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         let Some(batch) = batch else {
             break;
         };
+
+        if resource_sample_due {
+            if let Some(telemetry) = qualification_telemetry.as_mut() {
+                telemetry.record_resource_sample()?;
+                let counters = DaemonObserverCounters::from(read_observer_counters(&mut ebpf)?);
+                telemetry.record_loss_sample(live_collector_lifecycle_counters(
+                    counters,
+                    abi_mismatches,
+                    decode_failures,
+                    truncations,
+                ))?;
+            }
+        }
 
         for bytes in batch {
             let record = match KernelEventRecord::decode(&bytes) {
@@ -1316,8 +1541,10 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         .map_err(|error| format!("failed to flush live observer timeline: {error}"))?;
     if let (Some(config), Some(telemetry)) = (
         request.qualification_telemetry.as_ref(),
-        qualification_telemetry.as_ref(),
+        qualification_telemetry.as_mut(),
     ) {
+        telemetry.record_resource_sample()?;
+        telemetry.record_loss_sample(last_lifecycle_counters)?;
         telemetry.persist(&config.output_path)?;
     }
 
@@ -1435,6 +1662,7 @@ pub fn discover_agent_registration(
 fn spawn_managed_agent(
     request: &AgentRunRequest,
     workspace_root: &Path,
+    managed_agent_cgroup: Option<&Path>,
 ) -> Result<ManagedAgentChild, String> {
     // Gate the workload so the observer attaches BEFORE it runs. Without this, a
     // fast command exec()s and exits during the tens of milliseconds the eBPF
@@ -1458,6 +1686,19 @@ fn spawn_managed_agent(
     let gate_write_raw = fds[1];
     // SAFETY: pipe2 returned a valid, owned write fd; wrap it for RAII.
     let gate_write = unsafe { OwnedFd::from_raw_fd(gate_write_raw) };
+    let managed_agent_cgroup_fd = managed_agent_cgroup
+        .map(|path| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path.join("cgroup.procs"))
+                .map_err(|error| {
+                    format!(
+                        "failed to open qualification workload cgroup {}: {error}",
+                        path.display()
+                    )
+                })
+        })
+        .transpose()?;
 
     // fd inherited by the wrapper (cleared of CLOEXEC via dup2) that its `read`
     // waits on. `read` fails on EOF, so a dropped gate (observer setup failed)
@@ -1492,6 +1733,9 @@ fn spawn_managed_agent(
         command.pre_exec(move || {
             if libc::dup2(gate_read, GATE_FD) < 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            if let Some(cgroup_fd) = managed_agent_cgroup_fd.as_ref() {
+                write_self_pid_to_cgroup(cgroup_fd.as_raw_fd())?;
             }
             if let Some((uid, gid)) = managed_uid_gid {
                 if libc::setgroups(0, std::ptr::null()) != 0
@@ -1533,6 +1777,31 @@ fn spawn_managed_agent(
         metadata,
         gate: Some(gate_write),
     })
+}
+
+fn write_self_pid_to_cgroup(fd: libc::c_int) -> std::io::Result<()> {
+    let mut pid = unsafe { libc::getpid() } as u32;
+    let mut buffer = [0_u8; 11];
+    let mut start = buffer.len();
+    loop {
+        start -= 1;
+        buffer[start] = b'0' + (pid % 10) as u8;
+        pid /= 10;
+        if pid == 0 {
+            break;
+        }
+    }
+    let mut written = 0;
+    let bytes = &buffer[start..];
+    while written < bytes.len() {
+        let status =
+            unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        if status < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        written += status as usize;
+    }
+    Ok(())
 }
 
 async fn terminate_managed_agent(agent: Option<&mut ManagedAgentChild>) {
@@ -2635,6 +2904,33 @@ fn live_collector_lifecycle_counters(
     }
 }
 
+fn qualification_loss_counters(
+    counters: CollectorLifecycleCounters,
+    dropped_samples: u64,
+) -> BTreeMap<&'static str, u64> {
+    BTreeMap::from([
+        ("ring_buffer_reserve", counters.global_reserve_failures),
+        ("map_pressure", counters.global_map_pressure),
+        (
+            "pairing",
+            counters
+                .scope_missing_entries
+                .saturating_add(counters.scope_missing_exits)
+                .saturating_add(counters.scope_pending),
+        ),
+        (
+            "decode",
+            counters
+                .global_abi_mismatches
+                .saturating_add(counters.global_decode_failures)
+                .saturating_add(counters.global_truncations),
+        ),
+        ("queue", dropped_samples),
+        ("writer", 0),
+        ("lifecycle_gap", 0),
+    ])
+}
+
 fn live_collector_failure_reason(error: &str) -> CollectorFailureReason {
     let error = error.to_ascii_lowercase();
     if error.contains("collector lifecycle stop") || error.contains("flush live observer timeline")
@@ -2780,6 +3076,203 @@ fn monotonic_now_ns() -> Result<u64, String> {
         ));
     }
     Ok(value.tv_sec as u64 * 1_000_000_000 + value.tv_nsec as u64)
+}
+
+fn process_cpu_usage() -> Result<(u64, u64), String> {
+    // SAFETY: zero is a valid initialization for rusage before getrusage fills it.
+    let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+    // SAFETY: usage points to valid writable rusage memory.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return Err(format!(
+            "failed to read collector CPU usage: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok((timeval_ns(usage.ru_utime), timeval_ns(usage.ru_stime)))
+}
+
+fn timeval_ns(value: libc::timeval) -> u64 {
+    (value.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add((value.tv_usec as u64).saturating_mul(1_000))
+}
+
+fn read_process_memory(path: &Path) -> Result<ProcessMemory, String> {
+    let source = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read collector memory {}: {error}",
+            path.display()
+        )
+    })?;
+    parse_proc_status_memory(&source)
+}
+
+fn parse_proc_status_memory(source: &str) -> Result<ProcessMemory, String> {
+    let kib = |name: &str| -> Result<u64, String> {
+        let value = source
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .ok_or_else(|| format!("collector process status is missing {name}"))?;
+        let mut parts = value.split_whitespace();
+        let amount = parts
+            .next()
+            .ok_or_else(|| format!("collector process status has empty {name}"))?
+            .parse::<u64>()
+            .map_err(|error| format!("collector process status has invalid {name}: {error}"))?;
+        if parts.next() != Some("kB") || parts.next().is_some() {
+            return Err(format!("collector process status has invalid {name} unit"));
+        }
+        Ok(amount.saturating_mul(1024))
+    };
+    Ok(ProcessMemory {
+        rss_bytes: kib("VmRSS:")?,
+        peak_rss_bytes: kib("VmHWM:")?,
+    })
+}
+
+fn read_u64_file(path: &Path) -> Result<u64, String> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    source
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("{} is not an unsigned integer: {error}", path.display()))
+}
+
+fn verify_qualification_cgroup_isolation(
+    collector: &Path,
+    workload: &Path,
+    managed_agent_pid: u32,
+) -> Result<(), String> {
+    let mount = Path::new("/sys/fs/cgroup")
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve cgroup v2 mount: {error}"))?;
+    let collector = collector
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve collector cgroup: {error}"))?;
+    let workload = workload
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve managed workload cgroup: {error}"))?;
+    if !collector.starts_with(&mount)
+        || !workload.starts_with(&mount)
+        || collector.parent() != workload.parent()
+        || collector == workload
+    {
+        return Err(
+            "qualification collector/workload cgroups are not isolated siblings".to_string(),
+        );
+    }
+    let membership = fs::read_to_string("/proc/self/cgroup")
+        .map_err(|error| format!("failed to read collector cgroup membership: {error}"))?
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| "collector has no unified cgroup v2 membership".to_string())?
+        .to_string();
+    let current = mount
+        .join(
+            Path::new(&membership)
+                .strip_prefix(Path::new("/"))
+                .unwrap_or(Path::new(&membership)),
+        )
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve collector cgroup membership: {error}"))?;
+    if current != collector {
+        return Err("qualification collector is not in the declared collector cgroup".to_string());
+    }
+    if read_cgroup_pids(&collector)? != vec![std::process::id()]
+        || read_cgroup_pids(&workload)? != vec![managed_agent_pid]
+    {
+        return Err(
+            "qualification cgroups contain processes outside the collector/workload pair"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn read_cgroup_pids(cgroup: &Path) -> Result<Vec<u32>, String> {
+    let source = fs::read_to_string(cgroup.join("cgroup.procs"))
+        .map_err(|error| format!("failed to read {} cgroup.procs: {error}", cgroup.display()))?;
+    let mut pids = source
+        .lines()
+        .map(|line| {
+            line.parse::<u32>()
+                .map_err(|error| format!("invalid cgroup PID {line}: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    pids.sort_unstable();
+    Ok(pids)
+}
+
+fn bpf_memory_bytes(ebpf: &Ebpf) -> Result<(u64, u64), String> {
+    let mut map_ids = BTreeSet::new();
+    let mut map_bytes = 0_u64;
+    for (name, map) in ebpf.maps() {
+        let info =
+            map_info(map).map_err(|error| format!("failed to inspect BPF map {name}: {error}"))?;
+        if map_ids.insert(info.id()) {
+            let fd = info
+                .fd()
+                .map_err(|error| format!("failed to open BPF map {name} info fd: {error}"))?;
+            let path = PathBuf::from(format!("/proc/self/fdinfo/{}", fd.as_fd().as_raw_fd()));
+            let source = fs::read_to_string(&path)
+                .map_err(|error| format!("failed to read BPF map {name} fdinfo: {error}"))?;
+            map_bytes = map_bytes.saturating_add(parse_fdinfo_memlock(&source)?);
+        }
+    }
+
+    let mut program_ids = BTreeSet::new();
+    let mut program_bytes = 0_u64;
+    for (name, program) in ebpf.programs() {
+        let info = program
+            .info()
+            .map_err(|error| format!("failed to inspect BPF program {name}: {error}"))?;
+        if program_ids.insert(info.id()) {
+            program_bytes =
+                program_bytes.saturating_add(u64::from(info.memory_locked().map_err(|error| {
+                    format!("failed to read BPF program {name} memlock: {error}")
+                })?));
+        }
+    }
+    Ok((map_bytes, program_bytes))
+}
+
+fn map_info(map: &Map) -> Result<aya::maps::MapInfo, MapError> {
+    let data = match map {
+        Map::Array(data)
+        | Map::BloomFilter(data)
+        | Map::CpuMap(data)
+        | Map::DevMap(data)
+        | Map::DevMapHash(data)
+        | Map::HashMap(data)
+        | Map::LpmTrie(data)
+        | Map::LruHashMap(data)
+        | Map::PerCpuArray(data)
+        | Map::PerCpuHashMap(data)
+        | Map::PerCpuLruHashMap(data)
+        | Map::PerfEventArray(data)
+        | Map::ProgramArray(data)
+        | Map::Queue(data)
+        | Map::RingBuf(data)
+        | Map::SockHash(data)
+        | Map::SockMap(data)
+        | Map::Stack(data)
+        | Map::StackTraceMap(data)
+        | Map::Unsupported(data)
+        | Map::XskMap(data) => data,
+    };
+    data.info()
+}
+
+fn parse_fdinfo_memlock(source: &str) -> Result<u64, String> {
+    let value = source
+        .lines()
+        .find_map(|line| line.strip_prefix("memlock:"))
+        .ok_or_else(|| "BPF fdinfo is missing memlock".to_string())?;
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("BPF fdinfo has invalid memlock: {error}"))
 }
 
 fn read_host_boot_id_at(path: impl AsRef<Path>) -> Result<String, String> {
@@ -3099,7 +3592,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut managed = spawn_managed_agent(&request, Path::new(".")).unwrap();
+        let mut managed = spawn_managed_agent(&request, Path::new("."), None).unwrap();
         // The child is blocked in pre_exec before running the workload.
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert!(
@@ -3679,7 +4172,7 @@ mod tests {
 
     #[test]
     fn qualification_telemetry_is_bounded_and_contains_no_event_content() {
-        let mut telemetry = QualificationTelemetryRecorder::new(1);
+        let mut telemetry = QualificationTelemetryRecorder::empty_for_test(1);
         telemetry.record("openat", 10, 20, 30);
         telemetry.record("connect", 40, 50, 60);
 
@@ -3691,9 +4184,9 @@ mod tests {
         assert_eq!(telemetry.samples[0].appended_monotonic_ns, 30);
 
         let rendered = serde_json::to_string(&telemetry.report()).expect("serialize telemetry");
-        assert!(!rendered.contains("resource"));
         assert!(!rendered.contains("payload"));
         assert!(!rendered.contains("action"));
+        assert!(!rendered.contains("collector_cgroup_path"));
     }
 
     #[test]
@@ -3707,7 +4200,7 @@ mod tests {
         let output = root.join("telemetry.json");
         std::os::unix::fs::symlink(&protected_target, &output).expect("create telemetry symlink");
 
-        let mut telemetry = QualificationTelemetryRecorder::new(1);
+        let mut telemetry = QualificationTelemetryRecorder::empty_for_test(1);
         telemetry.record("openat", 10, 20, 30);
         let error = telemetry
             .persist(&output)
@@ -3717,6 +4210,28 @@ mod tests {
         assert!(!protected_target.exists());
         std::fs::remove_file(output).expect("remove telemetry symlink");
         std::fs::remove_dir(root).expect("remove telemetry test root");
+    }
+
+    #[test]
+    fn qualification_resource_parser_requires_rss_and_peak_rss() {
+        let status = "Name:\tapolysis\nVmPeak:\t  9999 kB\nVmRSS:\t  2048 kB\nVmHWM:\t  3072 kB\n";
+
+        let memory = parse_proc_status_memory(status).expect("parse process memory");
+
+        assert_eq!(memory.rss_bytes, 2 * 1024 * 1024);
+        assert_eq!(memory.peak_rss_bytes, 3 * 1024 * 1024);
+        assert!(parse_proc_status_memory("Name:\tapolysis\nVmRSS:\t1 kB\n").is_err());
+    }
+
+    #[test]
+    fn qualification_bpf_memlock_parser_is_strict() {
+        assert_eq!(
+            parse_fdinfo_memlock("pos:\t0\nflags:\t02000002\nmemlock:\t4096\n")
+                .expect("parse BPF memlock"),
+            4096
+        );
+        assert!(parse_fdinfo_memlock("pos:\t0\nflags:\t02000002\n").is_err());
+        assert!(parse_fdinfo_memlock("memlock:\tnot-a-number\n").is_err());
     }
 
     struct FakeProc<'a> {
