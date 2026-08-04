@@ -70,6 +70,9 @@ an exact one.
   operations, and outcome-aware network connect operations.
 - A versioned kernel/userspace ABI and per-Agent-Run capability manifest that
   states the attached event sources and supported outcome semantics.
+- Per-Agent-Run collector lifecycle records with durable starts, periodic
+  health/loss checkpoints, explicit normal or failed terminal states, and a
+  persisted restart gap when the daemon recovers an unfinished instance.
 - Stable in-run runtime identity across PID reuse, exec, and numeric cgroup-ID
   reuse, with exact versus inferred attribution recorded explicitly.
 - PID-tree, single-cgroup, and multi-cgroup observation scopes.
@@ -177,7 +180,7 @@ third-party workload behavior still require a documented threat model.
 
 1. Keep the active workspace bounded to eBPF collection, Observation Scope,
    attribution, local storage, daemon, CLI, and operator investigation.
-2. Complete collector lifecycle, health/gap reporting, and the local Agent Run
+2. Qualify collector lifecycle, health/gap reporting, and the local Agent Run
    investigation workflow while preserving outcome-aware semantics and stable
    in-run runtime identity.
 3. Qualify container attribution and then a bounded Kubernetes beta before

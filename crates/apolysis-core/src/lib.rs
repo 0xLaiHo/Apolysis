@@ -26,7 +26,282 @@ pub trait JsonLine {
 }
 
 pub const COLLECTOR_CAPABILITY_SCHEMA_VERSION: u32 = 1;
+pub const COLLECTOR_LIFECYCLE_SCHEMA_VERSION: u32 = 1;
 pub const OBSERVATION_GAP_SCHEMA_VERSION: u32 = 1;
+
+pub fn new_collector_instance_id() -> Result<String, String> {
+    let value = std::fs::read_to_string("/proc/sys/kernel/random/uuid")
+        .map_err(|error| format!("failed to allocate collector instance ID: {error}"))?;
+    let value = value.trim();
+    let valid = value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    if !valid {
+        return Err("kernel returned an invalid collector instance ID".to_string());
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectorLifecycleState {
+    Started,
+    Checkpoint,
+    Stopped,
+    Failed,
+}
+
+impl CollectorLifecycleState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Checkpoint => "checkpoint",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectorHealthState {
+    Healthy,
+    Degraded,
+    Failed,
+}
+
+impl CollectorHealthState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectorNormalStopReason {
+    AgentRunClosed,
+    DaemonShutdown,
+    DurationElapsed,
+    AgentExited,
+    ShutdownSignal,
+}
+
+impl CollectorNormalStopReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentRunClosed => "agent_run_closed",
+            Self::DaemonShutdown => "daemon_shutdown",
+            Self::DurationElapsed => "duration_elapsed",
+            Self::AgentExited => "agent_exited",
+            Self::ShutdownSignal => "shutdown_signal",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectorFailureReason {
+    AttachFailure,
+    VerifierFailure,
+    AbiMismatch,
+    DecodeFailure,
+    CounterReadFailure,
+    StorageFailure,
+    ObserverFailure,
+    CollectorRestart,
+    IncompleteTerminalFlush,
+}
+
+impl CollectorFailureReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AttachFailure => "attach_failure",
+            Self::VerifierFailure => "verifier_failure",
+            Self::AbiMismatch => "abi_mismatch",
+            Self::DecodeFailure => "decode_failure",
+            Self::CounterReadFailure => "counter_read_failure",
+            Self::StorageFailure => "storage_failure",
+            Self::ObserverFailure => "observer_failure",
+            Self::CollectorRestart => "collector_restart",
+            Self::IncompleteTerminalFlush => "incomplete_terminal_flush",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CollectorLifecycleCounters {
+    pub global_reserve_failures: u64,
+    pub global_map_pressure: u64,
+    pub global_abi_mismatches: u64,
+    pub global_decode_failures: u64,
+    pub global_truncations: u64,
+    pub scope_missing_entries: u64,
+    pub scope_missing_exits: u64,
+    pub scope_pending: u64,
+}
+
+impl CollectorLifecycleCounters {
+    pub fn has_loss(self) -> bool {
+        self.global_reserve_failures > 0
+            || self.global_map_pressure > 0
+            || self.global_abi_mismatches > 0
+            || self.global_decode_failures > 0
+            || self.global_truncations > 0
+            || self.scope_missing_entries > 0
+            || self.scope_missing_exits > 0
+    }
+
+    fn checkpoint_health(self) -> CollectorHealthState {
+        if self.has_loss() {
+            CollectorHealthState::Degraded
+        } else {
+            CollectorHealthState::Healthy
+        }
+    }
+
+    fn terminal_health(self) -> CollectorHealthState {
+        if self.has_loss() || self.scope_pending > 0 {
+            CollectorHealthState::Degraded
+        } else {
+            CollectorHealthState::Healthy
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectorLifecycleRecord {
+    schema_version: u32,
+    timestamp_unix_ms: u128,
+    agent_run_id: String,
+    collector_instance_id: String,
+    state: CollectorLifecycleState,
+    health: CollectorHealthState,
+    stop_reason: Option<&'static str>,
+    counters: CollectorLifecycleCounters,
+}
+
+impl CollectorLifecycleRecord {
+    pub fn started(
+        agent_run_id: impl Into<String>,
+        collector_instance_id: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            agent_run_id,
+            collector_instance_id,
+            CollectorLifecycleState::Started,
+            CollectorHealthState::Healthy,
+            None,
+            CollectorLifecycleCounters::default(),
+        )
+    }
+
+    pub fn checkpoint(
+        agent_run_id: impl Into<String>,
+        collector_instance_id: impl Into<String>,
+        counters: CollectorLifecycleCounters,
+    ) -> Self {
+        Self::new(
+            agent_run_id,
+            collector_instance_id,
+            CollectorLifecycleState::Checkpoint,
+            counters.checkpoint_health(),
+            None,
+            counters,
+        )
+    }
+
+    pub fn stopped(
+        agent_run_id: impl Into<String>,
+        collector_instance_id: impl Into<String>,
+        reason: CollectorNormalStopReason,
+        counters: CollectorLifecycleCounters,
+    ) -> Self {
+        Self::new(
+            agent_run_id,
+            collector_instance_id,
+            CollectorLifecycleState::Stopped,
+            counters.terminal_health(),
+            Some(reason.as_str()),
+            counters,
+        )
+    }
+
+    pub fn failed(
+        agent_run_id: impl Into<String>,
+        collector_instance_id: impl Into<String>,
+        reason: CollectorFailureReason,
+        counters: CollectorLifecycleCounters,
+    ) -> Self {
+        Self::new(
+            agent_run_id,
+            collector_instance_id,
+            CollectorLifecycleState::Failed,
+            CollectorHealthState::Failed,
+            Some(reason.as_str()),
+            counters,
+        )
+    }
+
+    fn new(
+        agent_run_id: impl Into<String>,
+        collector_instance_id: impl Into<String>,
+        state: CollectorLifecycleState,
+        health: CollectorHealthState,
+        stop_reason: Option<&'static str>,
+        counters: CollectorLifecycleCounters,
+    ) -> Self {
+        Self {
+            schema_version: COLLECTOR_LIFECYCLE_SCHEMA_VERSION,
+            timestamp_unix_ms: now_unix_ms(),
+            agent_run_id: agent_run_id.into(),
+            collector_instance_id: collector_instance_id.into(),
+            state,
+            health,
+            stop_reason,
+            counters,
+        }
+    }
+
+    pub fn with_timestamp(mut self, timestamp_unix_ms: u128) -> Self {
+        self.timestamp_unix_ms = timestamp_unix_ms;
+        self
+    }
+
+    pub fn to_json_line(&self) -> String {
+        <Self as JsonLine>::to_json_line(self)
+    }
+
+    pub fn agent_run_id(&self) -> &str {
+        &self.agent_run_id
+    }
+}
+
+impl JsonLine for CollectorLifecycleRecord {
+    fn to_json_line(&self) -> String {
+        format!(
+            "{{\"record_type\":{},\"schema_version\":{},\"timestamp_unix_ms\":{},\"agent_run_id\":{},\"collector\":{},\"collector_instance_id\":{},\"state\":{},\"health\":{},\"stop_reason\":{},\"counters\":{{\"global_reserve_failures\":{},\"global_map_pressure\":{},\"global_abi_mismatches\":{},\"global_decode_failures\":{},\"global_truncations\":{},\"scope_missing_entries\":{},\"scope_missing_exits\":{},\"scope_pending\":{}}}}}",
+            json_string(records::COLLECTOR_LIFECYCLE),
+            self.schema_version,
+            self.timestamp_unix_ms,
+            json_string(&self.agent_run_id),
+            json_string("apolysis_observer"),
+            json_string(&self.collector_instance_id),
+            json_string(self.state.as_str()),
+            json_string(self.health.as_str()),
+            optional_json_string(self.stop_reason),
+            self.counters.global_reserve_failures,
+            self.counters.global_map_pressure,
+            self.counters.global_abi_mismatches,
+            self.counters.global_decode_failures,
+            self.counters.global_truncations,
+            self.counters.scope_missing_entries,
+            self.counters.scope_missing_exits,
+            self.counters.scope_pending,
+        )
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeRelation {
@@ -51,6 +326,7 @@ impl RuntimeRelation {
 pub enum ObservationGapKind {
     MissingEntry,
     MissingExit,
+    CollectorRestart,
 }
 
 impl ObservationGapKind {
@@ -58,6 +334,7 @@ impl ObservationGapKind {
         match self {
             Self::MissingEntry => "missing_entry",
             Self::MissingExit => "missing_exit",
+            Self::CollectorRestart => "collector_restart",
         }
     }
 }

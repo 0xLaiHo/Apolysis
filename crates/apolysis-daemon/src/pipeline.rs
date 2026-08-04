@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,13 +63,22 @@ pub enum RecordDeliveryMode {
 }
 
 struct PipelineInner {
-    queue: Mutex<BoundedPriorityQueue<QueuedRecord>>,
+    state: Mutex<PipelineState>,
     notify: Notify,
+    progress: Notify,
     accepting: AtomicBool,
     writer_started: AtomicBool,
 }
 
+struct PipelineState {
+    queue: BoundedPriorityQueue<QueuedRecord>,
+    next_sequence: u64,
+    pending: BTreeSet<u64>,
+    writer_failure: Option<String>,
+}
+
 struct QueuedRecord {
+    sequence: u64,
     record: DaemonRecord,
     delivery: RecordDelivery,
 }
@@ -102,8 +112,14 @@ impl EventPipeline {
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Arc::new(PipelineInner {
-                queue: Mutex::new(BoundedPriorityQueue::new(capacity)),
+                state: Mutex::new(PipelineState {
+                    queue: BoundedPriorityQueue::new(capacity),
+                    next_sequence: 1,
+                    pending: BTreeSet::new(),
+                    writer_failure: None,
+                }),
                 notify: Notify::new(),
+                progress: Notify::new(),
                 accepting: AtomicBool::new(true),
                 writer_started: AtomicBool::new(false),
             }),
@@ -112,6 +128,7 @@ impl EventPipeline {
 
     pub fn submit(&self, record: DaemonRecord) -> Result<PushOutcome, SubmitError> {
         self.submit_queued(QueuedRecord {
+            sequence: 0,
             record,
             delivery: RecordDelivery::Queued,
         })
@@ -124,6 +141,7 @@ impl EventPipeline {
         let (confirmation, receiver) = oneshot::channel();
         match self
             .submit_queued(QueuedRecord {
+                sequence: 0,
                 record,
                 delivery: RecordDelivery::Confirmed(confirmation),
             })
@@ -145,25 +163,76 @@ impl EventPipeline {
         if !self.inner.accepting.load(Ordering::Acquire) {
             return Err(SubmitError::Closed);
         }
-        let mut queue = self
+        let mut state = self
             .inner
-            .queue
+            .state
             .lock()
             .map_err(|_| SubmitError::Unavailable)?;
         if !self.inner.accepting.load(Ordering::Acquire) {
             return Err(SubmitError::Closed);
         }
-        let outcome = queue.push(queued.record.priority, queued);
-        drop(queue);
+        let sequence = state.next_sequence;
+        state.next_sequence = state
+            .next_sequence
+            .checked_add(1)
+            .ok_or(SubmitError::Unavailable)?;
+        let mut queued = queued;
+        queued.sequence = sequence;
+        let priority = queued.record.priority;
+        let (outcome, evicted) = state.queue.push_with_evicted(priority, queued);
+        if matches!(
+            outcome,
+            PushOutcome::Accepted | PushOutcome::AcceptedAfterShedding { .. }
+        ) {
+            state.pending.insert(sequence);
+        }
+        if let Some(evicted) = evicted {
+            state.pending.remove(&evicted.sequence);
+            evicted.delivery.complete(Err(
+                "record was shed from the Ordinary queue before writer confirmation".to_string(),
+            ));
+        }
+        drop(state);
+        self.inner.progress.notify_waiters();
         self.inner.notify.notify_one();
         Ok(outcome)
     }
 
+    pub async fn fence(&self) -> Result<(), String> {
+        let target = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .map_err(|_| "event pipeline queue is unavailable".to_string())?;
+            state.next_sequence.saturating_sub(1)
+        };
+        loop {
+            let progress = self.inner.progress.notified();
+            {
+                let state = self
+                    .inner
+                    .state
+                    .lock()
+                    .map_err(|_| "event pipeline queue is unavailable".to_string())?;
+                if let Some(error) = &state.writer_failure {
+                    return Err(format!(
+                        "event pipeline writer stopped before fence: {error}"
+                    ));
+                }
+                if state.pending.range(..=target).next().is_none() {
+                    return Ok(());
+                }
+            }
+            progress.await;
+        }
+    }
+
     pub fn stats(&self) -> Result<QueueStats, SubmitError> {
         self.inner
-            .queue
+            .state
             .lock()
-            .map(|queue| queue.stats().clone())
+            .map(|state| state.queue.stats().clone())
             .map_err(|_| SubmitError::Unavailable)
     }
 
@@ -191,7 +260,9 @@ impl EventPipeline {
         loop {
             if let Some(queued) = self.pop()? {
                 let delivery_mode = queued.delivery.mode();
+                let sequence = queued.sequence;
                 let outcome = sink(queued.record, delivery_mode).await;
+                self.complete_sequence(sequence, outcome.as_ref().err().cloned())?;
                 queued.delivery.complete(outcome.clone());
                 match outcome {
                     Ok(RecordWriteOutcome::Written) => {
@@ -202,6 +273,7 @@ impl EventPipeline {
                     }
                     Err(error) => {
                         self.inner.accepting.store(false, Ordering::Release);
+                        self.set_writer_failure(&error)?;
                         return Err(error);
                     }
                 }
@@ -228,9 +300,36 @@ impl EventPipeline {
 
     fn pop(&self) -> Result<Option<QueuedRecord>, String> {
         self.inner
-            .queue
+            .state
             .lock()
             .map_err(|_| "event pipeline queue is unavailable".to_string())
-            .map(|mut queue| queue.pop())
+            .map(|mut state| state.queue.pop())
+    }
+
+    fn complete_sequence(&self, sequence: u64, error: Option<String>) -> Result<(), String> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| "event pipeline queue is unavailable".to_string())?;
+        state.pending.remove(&sequence);
+        if let Some(error) = error {
+            state.writer_failure = Some(error);
+        }
+        drop(state);
+        self.inner.progress.notify_waiters();
+        Ok(())
+    }
+
+    fn set_writer_failure(&self, error: &str) -> Result<(), String> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| "event pipeline queue is unavailable".to_string())?;
+        state.writer_failure = Some(error.to_string());
+        drop(state);
+        self.inner.progress.notify_waiters();
+        Ok(())
     }
 }

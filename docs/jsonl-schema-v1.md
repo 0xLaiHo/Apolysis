@@ -74,6 +74,62 @@ is attached. Network connect declares those outcomes plus `pending` only when
 both entry and exit hooks are attached. Exec declares `succeeded` only when
 the observation-producing `sched/sched_process_exec` hook is attached.
 
+### `collector_lifecycle`
+
+Collector lifecycle records make the collector's observation boundary visible
+for one Agent Run. One opaque `collector_instance_id` is shared by every Agent
+Run observed by the same collector process. Consumers must evaluate the
+ordered state sequence rather than infer health from an otherwise quiet
+timeline.
+
+Fields:
+
+- `record_type`: always `collector_lifecycle`
+- `schema_version`: lifecycle schema version, currently `1`
+- `timestamp_unix_ms`: lifecycle record timestamp
+- `agent_run_id`: owning Agent Run identifier
+- `collector`: collector identifier, currently `apolysis_observer`
+- `collector_instance_id`: opaque UUID allocated for one collector process; it
+  contains no PID, boot ID, hostname, or credential
+- `state`: `started`, `checkpoint`, `stopped`, or `failed`
+- `health`: `healthy`, `degraded`, or `failed`
+- `stop_reason`: `null` for `started` and `checkpoint`; a normal terminal uses
+  `agent_run_closed`, `daemon_shutdown`, `duration_elapsed`, `agent_exited`, or
+  `shutdown_signal`; a failed terminal uses `attach_failure`,
+  `verifier_failure`, `abi_mismatch`, `decode_failure`,
+  `counter_read_failure`, `storage_failure`, `observer_failure`,
+  `collector_restart`, or `incomplete_terminal_flush`
+- `counters`: cumulative loss counters plus the current pending gauge,
+  containing
+  `global_reserve_failures`, `global_map_pressure`,
+  `global_abi_mismatches`, `global_decode_failures`, `global_truncations`,
+  `scope_missing_entries`, `scope_missing_exits`, and `scope_pending`
+
+The standalone live collector writes the capability manifest and `started`
+record, synchronizes both, and only then releases a managed Agent. The daemon
+writes `started` before completing dynamic scope registration. Both emit
+periodic `checkpoint` records even when no events arrive. `global_*` counters
+describe collector-wide state and retain that name when repeated in each
+active Agent Run; `scope_*` counters contain only the owning Observation
+Scope's summed network and selected-file pairing state. In standalone mode
+this is the one requested scope; the daemon sums only cgroups owned by that
+Agent Run. Any non-zero loss counter makes a checkpoint or normal terminal
+`degraded`. `scope_pending` alone is an in-flight gauge and does not degrade an
+active checkpoint; it does degrade a terminal because those operations remain
+unmatched when collection stops.
+
+For daemon timelines, a checkpoint or terminal waits on a sequence fence for
+all pipeline records admitted before the boundary, then appends directly to the
+per-run hash chain. Lifecycle boundaries therefore do not consume bounded
+queue capacity and cannot be dropped merely because that queue is full.
+
+Normal completion drains confirmed events and persists Observation Gaps before
+writing `stopped`. A fatal collector path writes `failed` when the timeline is
+still writable. Daemon recovery treats an instance with `started` or
+`checkpoint` but no terminal as incomplete and appends exactly one
+`collector_restart` gap and recovered failed terminal. A missing terminal in a
+standalone timeline remains an incompleteness signal for consumers.
+
 ### `event`
 
 Canonical event records describe normalized runtime, metadata, process, file,
@@ -306,11 +362,13 @@ Fields:
 - `timestamp_unix_ms`: gap reporting timestamp
 - `agent_run_id`: Agent Run identifier
 - `operation`: affected operation: `network_connect`, `file_open`,
-  `file_create`, `file_truncate`, `file_unlink`, or `file_rename`
-- `kind`: `missing_entry` or `missing_exit`
+  `file_create`, `file_truncate`, `file_unlink`, `file_rename`, or
+  `collector_lifecycle`
+- `kind`: `missing_entry`, `missing_exit`, or `collector_restart`
 - `count`: affected operation count
 - `detail`: bounded diagnostic context. Missing-exit details distinguish
-  kernel-reported losses from entries still pending when the collector stops.
+  kernel-reported losses from entries still pending when the collector stops;
+  collector-restart details identify only the opaque unfinished instance.
 
 The managed single-Agent-Run live observer persists these records directly.
 The multi-cgroup daemon snapshots connect and file gap counters per cgroup and
@@ -425,6 +483,8 @@ jq -c 'select(.record_type=="intent") | {intent_source,intent_id,tool_name,decla
 jq -c 'select(.record_type=="intent_correlation") | {intent_source,intent_id,match_basis,raw_event_id,event_type,pid,resource}' intent-correlation.jsonl
 
 jq -c 'select(.record_type=="accountability_finding") | {kind,decision,evidence_ref,reason}' intent-correlation.jsonl
+
+jq -c 'select(.record_type=="collector_lifecycle") | {agent_run_id,collector_instance_id,state,health,stop_reason,counters}' timeline.jsonl
 ```
 
 Legacy `v0.3.0` research timelines may contain `session`, `policy_violation`,

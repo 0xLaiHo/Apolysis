@@ -9,6 +9,8 @@
 
 /// JSONL record type names used by every storage backend.
 pub mod records {
+    /// One collector instance's start, health/loss checkpoint, or terminal state.
+    pub const COLLECTOR_LIFECYCLE: &str = "collector_lifecycle";
     /// The versioned runtime-observation boundary declared at collector start.
     pub const COLLECTOR_CAPABILITY_MANIFEST: &str = "collector_capability_manifest";
     /// A normalized event emitted by a runtime, observer, or metadata adapter.
