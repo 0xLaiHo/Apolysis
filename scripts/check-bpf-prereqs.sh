@@ -3,6 +3,7 @@
 
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="${1:-build}"
 require_bpf="${APOLYSIS_REQUIRE_BPF:-0}"
 
@@ -57,21 +58,8 @@ if [[ "$mode" == "live" ]]; then
         skip_or_fail "tracefs events are unavailable; mount tracefs at /sys/kernel/tracing"
 
     while IFS=/ read -r category name; do
+        [[ -z "$category" || "$category" == \#* ]] && continue
         [[ -r "$tracefs/events/$category/$name/id" ]] ||
             skip_or_fail "required tracepoint is unavailable: $category/$name"
-    done <<'EOF'
-sched/sched_process_fork
-sched/sched_process_exec
-sched/sched_process_exit
-syscalls/sys_enter_execve
-syscalls/sys_enter_execveat
-syscalls/sys_enter_openat
-syscalls/sys_enter_openat2
-syscalls/sys_enter_creat
-syscalls/sys_enter_truncate
-syscalls/sys_enter_unlinkat
-syscalls/sys_enter_renameat2
-syscalls/sys_enter_connect
-syscalls/sys_exit_connect
-EOF
+    done <"$repo_root/qualification/required-tracepoints-v1.txt"
 fi

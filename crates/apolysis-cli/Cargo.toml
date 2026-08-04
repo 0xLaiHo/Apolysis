@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+default-run = "apolysis"
 
 [dependencies]
 apolysis-accountability = { path = "../apolysis-accountability" }
@@ -13,8 +14,13 @@ apolysis-kubernetes = { path = "../apolysis-kubernetes" }
 apolysis-store = { path = "../apolysis-store" }
 apolysis-visibility = { path = "../apolysis-visibility" }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }
 
 [[bin]]
 name = "apolysis"
 path = "src/main.rs"
+
+[[bin]]
+name = "apolysis-qualification"
+path = "src/bin/apolysis-qualification.rs"

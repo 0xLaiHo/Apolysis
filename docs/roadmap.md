@@ -3,7 +3,7 @@
 > English | [Simplified Chinese](roadmap.zh-CN.md)
 > Companion document: [design.md](design.md)
 > Execution plan: [beta-qualification-plan.md](beta-qualification-plan.md)
-> Last reviewed: 2026-08-03
+> Last reviewed: 2026-08-04
 
 This roadmap directs Apolysis toward a bounded eBPF Agent runtime
 observability beta. It records sequencing, deferrals, no-go criteria, and the
@@ -170,8 +170,9 @@ Exit conditions:
 - an empty or partial timeline never renders as successful or complete;
 - privilege separation, local file permissions, retention, and redaction pass
   their bounded tests;
-- the collector meets a workload-specific CPU, memory, latency, and event-loss
-  envelope frozen before beta qualification.
+- the collector meets workload-specific CPU, memory, latency, and event-loss
+  budgets frozen from retained live evidence; an unset Candidate envelope is
+  a visible no-go, never an implied pass.
 
 ### 4. Add container attribution and Kubernetes beta
 

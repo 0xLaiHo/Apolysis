@@ -751,6 +751,23 @@ mod tests {
     }
 
     #[test]
+    fn qualification_tracepoint_manifest_matches_the_production_loader_plan() {
+        let plan = AyaLoaderPlan::audit_observer_default("target/ebpf/apolysis_observer.bpf.o");
+        let manifest = include_str!("../../../qualification/required-tracepoints-v1.txt");
+        let declared = manifest
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                line.split_once('/')
+                    .map(|(category, name)| TracepointAttach::new(category, name))
+                    .expect("qualification tracepoint entries use category/name")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(declared, plan.tracepoints);
+    }
+
+    #[test]
     fn host_observer_default_runner_plan_keeps_optional_runners_disabled() {
         let plan = ObserverRunnerPlan::host_observer_default();
 
