@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "burst",
+  "kind": "rate_sweep",
+  "operation": "openat",
+  "phases": [
+    {
+      "rate_per_second": 100,
+      "events": 100
+    },
+    {
+      "rate_per_second": 500,
+      "events": 200
+    },
+    {
+      "rate_per_second": 2000,
+      "events": 1000
+    }
+  ],
+  "expected_event_counts": {
+    "openat": 1300
+  }
+}

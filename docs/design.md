@@ -413,7 +413,10 @@ them as historical implementation input; they do not define this architecture.
 - The current qualification contract grants no Supported profile. Linux 6.12
   x86_64 native host is Candidate only; other kernels, architectures, and
   container/Kubernetes runtimes remain Experimental until exact retained live
-  evidence passes. Numeric performance budgets are intentionally unset.
+  evidence passes. The deterministic content-free workloads and paired raw
+  capture harness freeze expected event counts and monotonic latency samples,
+  but collector CPU, process/cgroup/BPF memory, conservative numeric budgets,
+  and retained privileged repetitions are still required for promotion.
 
 ## 14. Non-goals
 
