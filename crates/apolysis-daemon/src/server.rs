@@ -9,6 +9,7 @@ use apolysis_accountability::{
     decode_intent_frame, AdapterKind, ComponentState, HealthSnapshot, IntentError, IntentRequest,
     RetentionTier, SessionState, MAX_INTENT_FRAME_BYTES,
 };
+use apolysis_core::{new_collector_instance_id, CollectorFailureReason};
 use apolysis_observer::{DaemonObserver, DaemonObserverConfig};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -74,18 +75,16 @@ pub async fn serve(
         .map_err(|error| format!("failed to bind daemon socket: {error}"))?;
     std::fs::set_permissions(&config.socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|error| format!("failed to set daemon socket permissions: {error}"))?;
-    let observer_setup = config.bpf_object.as_ref().and_then(|object_path| {
-        match DaemonObserver::load(DaemonObserverConfig::new(object_path)) {
+    let (observer_setup, observer_setup_failure) = match config.bpf_object.as_ref() {
+        Some(object_path) => match DaemonObserver::load(DaemonObserverConfig::new(object_path)) {
             Ok(observer) => {
                 let (scope, receiver) = scope_channel(config.scope_command_capacity);
-                Some((observer, scope, receiver))
+                (Some((observer, scope, receiver)), None)
             }
-            Err(error) => {
-                eprintln!("apolysisd: observer unavailable: {error}");
-                None
-            }
-        }
-    });
+            Err(error) => (None, Some(error)),
+        },
+        None => (None, None),
+    };
     let scope = observer_setup.as_ref().map(|(_, scope, _)| scope.clone());
     let state = match DaemonState::new_with_scope(&config, scope) {
         Ok(state) => Arc::new(state),
@@ -95,6 +94,30 @@ pub async fn serve(
             return Err(error);
         }
     };
+    if let Some(error) = observer_setup_failure {
+        let collector_instance_id = match new_collector_instance_id() {
+            Ok(instance_id) => instance_id,
+            Err(instance_error) => {
+                drop(listener);
+                remove_socket_if_socket(&config.socket_path)?;
+                return Err(format!("observer unavailable: {error}; {instance_error}"));
+            }
+        };
+        if let Err(persist_error) = state
+            .persist_collector_failure_for_tracked_runs(
+                &collector_instance_id,
+                observer_setup_failure_reason(&error),
+            )
+            .await
+        {
+            drop(listener);
+            remove_socket_if_socket(&config.socket_path)?;
+            return Err(format!(
+                "observer unavailable: {error}; failed to persist collector setup failure: {persist_error}"
+            ));
+        }
+        eprintln!("apolysisd: observer unavailable: {error}");
+    }
     let (metrics_shutdown, mut metrics_task) =
         match start_metrics_listener(config.metrics_listen, Arc::clone(&state)).await {
             Ok(metrics) => metrics,
@@ -263,6 +286,15 @@ pub async fn serve(
     match accept_error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+fn observer_setup_failure_reason(error: &str) -> CollectorFailureReason {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("verifier") {
+        CollectorFailureReason::VerifierFailure
+    } else {
+        CollectorFailureReason::AttachFailure
     }
 }
 

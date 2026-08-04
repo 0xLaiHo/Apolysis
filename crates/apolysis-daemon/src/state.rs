@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use apolysis_accountability::{
@@ -10,6 +11,10 @@ use apolysis_accountability::{
     EvidenceBoundary, HealthSnapshot, ObservedEffect, QueueStats, RegisterOutcome, RegistryError,
     ResourceKind, RetentionPurgeReport, RetentionTier, RuntimeIdentity, SessionIntent,
     SessionRegistry, SessionState,
+};
+use apolysis_core::{
+    CollectorFailureReason, CollectorLifecycleCounters, CollectorLifecycleRecord, ObservationGap,
+    ObservationGapKind,
 };
 use apolysis_store::HashChainStore;
 use serde_json::{json, Value};
@@ -29,6 +34,7 @@ pub struct DaemonState {
     storage_writable: AtomicBool,
     scope: Option<ScopeController>,
     pipeline: EventPipeline,
+    collector_checkpoint_interval: Duration,
 }
 
 impl DaemonState {
@@ -76,6 +82,11 @@ impl DaemonState {
                 )?;
                 recovered_integrity_issue = true;
             }
+            append_incomplete_collector_lifecycles(
+                &mut recovery.store,
+                &session_id,
+                &recovery.records,
+            )?;
             if let Some(recovered) = replay_active_session(&recovery.records, now_unix_ms)? {
                 registry
                     .register(recovered.intent, now_unix_ms)
@@ -109,6 +120,7 @@ impl DaemonState {
             storage_writable: AtomicBool::new(true),
             scope,
             pipeline,
+            collector_checkpoint_interval: config.collector_checkpoint_interval,
         })
     }
 
@@ -375,12 +387,51 @@ impl DaemonState {
         self.pipeline.clone()
     }
 
+    pub fn collector_checkpoint_interval(&self) -> Duration {
+        self.collector_checkpoint_interval
+    }
+
     pub async fn set_ebpf(&self, state: ComponentState) {
         self.health.write().await.set_ebpf(state);
     }
 
     pub async fn set_adapter(&self, adapter: AdapterKind, state: ComponentState) {
         self.health.write().await.set_adapter(adapter, state);
+    }
+
+    pub async fn persist_collector_lifecycle(
+        &self,
+        record: CollectorLifecycleRecord,
+    ) -> Result<(), String> {
+        let agent_run_id = record.agent_run_id().to_string();
+        let payload = serde_json::from_str(&record.to_json_line())
+            .map_err(|error| format!("failed to encode collector lifecycle: {error}"))?;
+        self.persist(&agent_run_id, payload).await
+    }
+
+    pub async fn persist_collector_failure_for_tracked_runs(
+        &self,
+        collector_instance_id: &str,
+        reason: CollectorFailureReason,
+    ) -> Result<usize, String> {
+        let agent_run_ids: BTreeSet<String> = {
+            let registry = self.registry.read().await;
+            registry
+                .tracked_cgroups()
+                .into_iter()
+                .filter_map(|cgroup_id| registry.session_for_cgroup(cgroup_id).map(str::to_string))
+                .collect()
+        };
+        for agent_run_id in &agent_run_ids {
+            self.persist_collector_lifecycle(CollectorLifecycleRecord::failed(
+                agent_run_id,
+                collector_instance_id,
+                reason,
+                CollectorLifecycleCounters::default(),
+            ))
+            .await?;
+        }
+        Ok(agent_run_ids.len())
     }
 
     pub async fn ingest_runtime_workload(
@@ -447,7 +498,7 @@ impl DaemonState {
     }
 
     pub(crate) async fn persist_record(
-        &self,
+        self: &std::sync::Arc<Self>,
         record: DaemonRecord,
         delivery_mode: RecordDeliveryMode,
     ) -> Result<RecordWriteOutcome, String> {
@@ -467,25 +518,21 @@ impl DaemonState {
         match self.persist_inner(&record.session_id, record.payload).await {
             Ok(()) => Ok(RecordWriteOutcome::Written),
             Err(error) => {
-                if delivery_mode == RecordDeliveryMode::Confirmed {
-                    // The observer runtime is waiting for this write result and
-                    // close may still hold the registry lock. Re-entering scope
-                    // cleanup here would wait on that same runtime. Pause this
-                    // session and let the confirmed failure unwind the caller.
-                    self.paused_sessions
-                        .write()
-                        .await
-                        .insert(record.session_id.clone(), error);
-                    self.health
-                        .write()
-                        .await
-                        .set_storage(ComponentState::Degraded);
-                } else {
-                    self.mark_session_degraded(&record.session_id, &error).await;
+                let first_failure = self.pause_session(&record.session_id, &error).await;
+                if delivery_mode == RecordDeliveryMode::Queued && first_failure {
+                    let state = std::sync::Arc::clone(self);
+                    let session_id = record.session_id.clone();
+                    tokio::spawn(async move {
+                        state.degrade_session_and_fail_scopes(&session_id).await;
+                    });
                 }
                 Ok(RecordWriteOutcome::Failed)
             }
         }
+    }
+
+    pub(crate) async fn session_is_paused(&self, session_id: &str) -> bool {
+        self.paused_sessions.read().await.contains_key(session_id)
     }
 
     async fn persist(&self, session_id: &str, payload: Value) -> Result<(), String> {
@@ -529,11 +576,21 @@ impl DaemonState {
         Ok(())
     }
 
-    async fn mark_session_degraded(&self, session_id: &str, reason: &str) {
-        self.paused_sessions
+    async fn pause_session(&self, session_id: &str, reason: &str) -> bool {
+        let first_failure = self
+            .paused_sessions
             .write()
             .await
-            .insert(session_id.to_string(), reason.to_string());
+            .insert(session_id.to_string(), reason.to_string())
+            .is_none();
+        self.health
+            .write()
+            .await
+            .set_storage(ComponentState::Degraded);
+        first_failure
+    }
+
+    async fn degrade_session_and_fail_scopes(&self, session_id: &str) {
         let degraded = {
             let mut registry = self.registry.write().await;
             registry
@@ -542,15 +599,24 @@ impl DaemonState {
         };
         if let (Some(scope), Ok((intent, cgroup_ids))) = (&self.scope, degraded) {
             for cgroup_id in cgroup_ids {
-                let _ = scope
-                    .untrack_agent_run(session_id, Some(&intent), cgroup_id)
-                    .await;
+                if scope
+                    .fail_agent_run(
+                        session_id,
+                        Some(&intent),
+                        cgroup_id,
+                        CollectorFailureReason::StorageFailure,
+                    )
+                    .await
+                    .is_err()
+                {
+                    self.health
+                        .write()
+                        .await
+                        .set_ebpf(ComponentState::Unavailable);
+                    break;
+                }
             }
         }
-        self.health
-            .write()
-            .await
-            .set_storage(ComponentState::Degraded);
     }
 
     async fn persist_inner(&self, session_id: &str, payload: Value) -> Result<(), String> {
@@ -573,6 +639,137 @@ impl DaemonState {
             .flush()
             .map_err(|error| format!("failed to flush session timeline: {error}"))
     }
+}
+
+fn append_incomplete_collector_lifecycles(
+    store: &mut HashChainStore,
+    agent_run_id: &str,
+    records: &[apolysis_store::ChainRecord],
+) -> Result<(), String> {
+    let mut instances = BTreeMap::new();
+    let mut order = Vec::new();
+    let mut recovered_gaps = BTreeSet::new();
+    for record in records {
+        let record_type = record.payload.get("record_type").and_then(Value::as_str);
+        if record_type == Some("observation_gap")
+            && record.payload.get("operation").and_then(Value::as_str)
+                == Some("collector_lifecycle")
+            && record.payload.get("kind").and_then(Value::as_str) == Some("collector_restart")
+        {
+            if let Some(instance_id) = record
+                .payload
+                .get("detail")
+                .and_then(Value::as_str)
+                .and_then(recovered_instance_id)
+            {
+                recovered_gaps.insert(instance_id.to_string());
+            }
+        }
+        if record_type != Some("collector_lifecycle") {
+            continue;
+        }
+        let Some(instance_id) = record
+            .payload
+            .get("collector_instance_id")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(state) = record.payload.get("state").and_then(Value::as_str) else {
+            continue;
+        };
+        match state {
+            "started" | "checkpoint" => {
+                if !instances.contains_key(instance_id) {
+                    order.push(instance_id.to_string());
+                }
+                instances.insert(
+                    instance_id.to_string(),
+                    (false, lifecycle_counters(&record.payload)),
+                );
+            }
+            "stopped" | "failed" => {
+                instances.insert(
+                    instance_id.to_string(),
+                    (true, lifecycle_counters(&record.payload)),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let incomplete: Vec<(String, CollectorLifecycleCounters)> = order
+        .into_iter()
+        .filter_map(|instance_id| match instances.get(&instance_id) {
+            Some((false, counters)) => Some((instance_id, *counters)),
+            _ => None,
+        })
+        .collect();
+    if incomplete.is_empty() {
+        return Ok(());
+    }
+
+    for (instance_id, counters) in incomplete {
+        if !recovered_gaps.contains(&instance_id) {
+            let gap = ObservationGap::new(
+                agent_run_id,
+                "collector_lifecycle",
+                ObservationGapKind::CollectorRestart,
+                1,
+                format!(
+                    "collector_instance:{instance_id},previous lifecycle has no durable terminal record"
+                ),
+            );
+            append_json_line(
+                store,
+                &gap.to_json_line(),
+                "collector restart Observation Gap",
+            )?;
+        }
+        let terminal = CollectorLifecycleRecord::failed(
+            agent_run_id,
+            instance_id,
+            CollectorFailureReason::CollectorRestart,
+            counters,
+        );
+        append_json_line(
+            store,
+            &terminal.to_json_line(),
+            "recovered collector terminal record",
+        )?;
+    }
+    store
+        .flush()
+        .map_err(|error| format!("failed to flush recovered collector lifecycle: {error}"))
+}
+
+fn recovered_instance_id(detail: &str) -> Option<&str> {
+    detail
+        .strip_prefix("collector_instance:")
+        .and_then(|detail| detail.split_once(',').map(|(instance_id, _)| instance_id))
+        .filter(|instance_id| !instance_id.is_empty())
+}
+
+fn lifecycle_counters(payload: &Value) -> CollectorLifecycleCounters {
+    let counters = &payload["counters"];
+    let counter = |name| counters.get(name).and_then(Value::as_u64).unwrap_or(0);
+    CollectorLifecycleCounters {
+        global_reserve_failures: counter("global_reserve_failures"),
+        global_map_pressure: counter("global_map_pressure"),
+        global_abi_mismatches: counter("global_abi_mismatches"),
+        global_decode_failures: counter("global_decode_failures"),
+        global_truncations: counter("global_truncations"),
+        scope_missing_entries: counter("scope_missing_entries"),
+        scope_missing_exits: counter("scope_missing_exits"),
+        scope_pending: counter("scope_pending"),
+    }
+}
+
+fn append_json_line(store: &mut HashChainStore, line: &str, subject: &str) -> Result<(), String> {
+    store
+        .append_json(1, line)
+        .map(|_| ())
+        .map_err(|error| format!("failed to append {subject}: {error}"))
 }
 
 fn registry_error(error: RegistryError) -> String {
@@ -696,4 +893,111 @@ fn current_unix_ms() -> Result<u64, String> {
         .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
         .as_millis();
     u64::try_from(millis).map_err(|_| "current Unix timestamp exceeds u64".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    use apolysis_accountability::{ActionClass, QueuePriority, DEFAULT_TENANT_ID};
+    use serde_json::json;
+
+    use super::*;
+    use crate::{scope_channel, DaemonRecord, ScopeOperation};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[tokio::test]
+    async fn queued_write_failure_releases_the_writer_before_scope_cleanup() {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let config = DaemonConfig {
+            state_dir: std::env::temp_dir().join(format!(
+                "apolysis-writer-scope-failure-{}-{id}",
+                std::process::id()
+            )),
+            ..DaemonConfig::default()
+        };
+        let (scope, mut requests) = scope_channel(1);
+        let scope_filler = scope.clone();
+        let state = Arc::new(
+            DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+        );
+        let agent_run_id = "agent-run-writer-scope-failure";
+        {
+            let mut registry = state.registry.write().await;
+            registry
+                .register(test_intent(agent_run_id), 1_700_000_000_000)
+                .expect("register test Agent Run");
+            registry
+                .discover_cgroup(agent_run_id, 71)
+                .expect("associate test cgroup");
+        }
+        std::fs::create_dir_all(
+            config
+                .state_dir
+                .join("sessions")
+                .join(agent_run_id)
+                .join("timeline.jsonl"),
+        )
+        .expect("block timeline path with a directory");
+
+        let filler = tokio::spawn(async move { scope_filler.track(99).await });
+        tokio::task::yield_now().await;
+
+        let pipeline = state.pipeline();
+        let (shutdown, shutdown_receiver) = oneshot::channel();
+        let writer = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.run_writer(shutdown_receiver).await })
+        };
+        let registry_guard = state.registry.write().await;
+        pipeline
+            .submit(DaemonRecord::new(
+                agent_run_id,
+                QueuePriority::Ordinary,
+                json!({"record_type":"forced_write_failure"}),
+            ))
+            .expect("admit failing record");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), pipeline.fence())
+            .await
+            .expect("writer fence completes while the registry is locked")
+            .expect("writer fence");
+        drop(registry_guard);
+        let filler_request =
+            tokio::time::timeout(std::time::Duration::from_secs(1), requests.recv())
+                .await
+                .expect("pre-existing scope request")
+                .expect("scope request channel");
+        assert_eq!(filler_request.operation(), ScopeOperation::Track);
+        filler_request.complete(Ok(()));
+        filler.await.unwrap().expect("complete queue filler");
+        let request = tokio::time::timeout(std::time::Duration::from_secs(1), requests.recv())
+            .await
+            .expect("scope cleanup signal waits for channel capacity")
+            .expect("scope cleanup request");
+        assert_eq!(request.operation(), ScopeOperation::Untrack);
+        assert_eq!(
+            request.failure_reason(),
+            Some(CollectorFailureReason::StorageFailure)
+        );
+        request.complete(Err("test scope worker stopped".to_string()));
+        shutdown.send(()).expect("request writer shutdown");
+        assert_eq!(writer.await.unwrap().expect("writer drain").failed, 1);
+        std::fs::remove_dir_all(&config.state_dir).expect("clean test state");
+    }
+
+    fn test_intent(agent_run_id: &str) -> SessionIntent {
+        SessionIntent {
+            schema_version: 1,
+            tenant_id: DEFAULT_TENANT_ID.to_string(),
+            retention_tier: RetentionTier::Standard,
+            session_id: agent_run_id.to_string(),
+            expires_at_unix_ms: 4_102_444_800_000,
+            declared_actions: vec![ActionClass::Test],
+            allowed_resources: Vec::new(),
+            workload_selectors: Vec::new(),
+        }
+    }
 }

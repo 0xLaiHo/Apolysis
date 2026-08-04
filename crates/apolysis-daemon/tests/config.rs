@@ -38,6 +38,8 @@ fn parses_bounded_runtime_configuration() {
             "127.0.0.1:9909",
             "--shutdown-drain-ms",
             "3000",
+            "--collector-checkpoint-ms",
+            "15000",
         ]
         .into_iter()
         .map(str::to_string),
@@ -82,6 +84,10 @@ fn parses_bounded_runtime_configuration() {
         Some("127.0.0.1:9909".parse::<SocketAddr>().unwrap())
     );
     assert_eq!(config.shutdown_drain_timeout, Duration::from_secs(3));
+    assert_eq!(
+        config.collector_checkpoint_interval,
+        Duration::from_secs(15)
+    );
 }
 
 #[test]
@@ -92,6 +98,7 @@ fn rejects_zero_runtime_bounds() {
         vec!["--runtime-adapter-scan-ms", "0"],
         vec!["--runtime-adapter-seen-capacity", "0"],
         vec!["--shutdown-drain-ms", "0"],
+        vec!["--collector-checkpoint-ms", "0"],
     ] {
         let error = DaemonConfig::from_args(arguments.into_iter().map(str::to_string))
             .expect_err("zero runtime bound must fail");

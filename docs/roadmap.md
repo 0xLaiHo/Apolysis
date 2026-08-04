@@ -121,8 +121,8 @@ Priorities:
   collector lifetime;
 - preserve generation-qualified cgroup scope and deterministic process
   lineage;
-- emit collector start, periodic health, loss checkpoints, terminal state, and
-  explicit stop reason;
+- preserve durable collector start, periodic cumulative health/loss
+  checkpoints, explicit terminal reasons, and idempotent restart-gap recovery;
 - fail loud on reserve failure, map pressure, truncation, decode failure,
   attach failure, ABI mismatch, restart, and incomplete flush;
 - retain content-off persistence and secret/path redaction.

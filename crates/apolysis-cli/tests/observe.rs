@@ -709,7 +709,7 @@ fn live_managed_agent_starts_after_the_capability_manifest_is_durable() {
             "--",
             "sh",
             "-c",
-            r#"grep -q '"record_type":"collector_capability_manifest"' "$1""#,
+            r#"grep -q '"record_type":"collector_capability_manifest"' "$1" && grep -q '"state":"started"' "$1""#,
             "sh",
             output.to_str().expect("utf-8 output path"),
         ])
@@ -732,11 +732,32 @@ fn live_managed_agent_starts_after_the_capability_manifest_is_durable() {
         .lines()
         .position(|line| line.contains(r#""record_type":"collector_capability_manifest""#))
         .expect("capability manifest record");
+    let lifecycle_start_index = timeline
+        .lines()
+        .position(|line| {
+            line.contains(r#""record_type":"collector_lifecycle""#)
+                && line.contains(r#""state":"started""#)
+        })
+        .expect("collector lifecycle start");
     let first_kernel_event_index = timeline
         .lines()
         .position(|line| line.contains(r#""record_type":"raw_kernel_event""#))
         .expect("managed Agent kernel event");
-    assert!(manifest_index < first_kernel_event_index);
+    let summary_index = timeline
+        .lines()
+        .position(|line| line.contains(r#""kind":"summary""#))
+        .expect("observer summary");
+    let lifecycle_stop_index = timeline
+        .lines()
+        .position(|line| {
+            line.contains(r#""record_type":"collector_lifecycle""#)
+                && line.contains(r#""state":"stopped""#)
+                && line.contains(r#""stop_reason":"agent_exited""#)
+        })
+        .expect("collector lifecycle stop");
+    assert!(manifest_index < lifecycle_start_index);
+    assert!(lifecycle_start_index < first_kernel_event_index);
+    assert!(summary_index < lifecycle_stop_index);
 
     let _ = std::fs::remove_file(output);
 }
@@ -814,6 +835,17 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     assert!(timeline.contains(r#""event_type":"exec""#));
     assert!(timeline.contains(r#""event_type":"credential_read""#));
     assert!(timeline.contains(r#""event_type":"network_connect""#));
+    let lifecycle_start_index = timeline
+        .lines()
+        .position(|line| {
+            line.contains(r#""record_type":"collector_lifecycle""#)
+                && line.contains(r#""state":"started""#)
+        })
+        .expect("collector lifecycle start");
+    let first_kernel_event_index = timeline
+        .lines()
+        .position(|line| line.contains(r#""record_type":"raw_kernel_event""#))
+        .expect("first raw kernel event");
     let credential_read = timeline
         .lines()
         .find(|line| line.contains(r#""event_type":"credential_read""#))
@@ -834,6 +866,20 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     assert!(connect.contains(r#""return_value":0"#));
     assert!(connect.contains(r#""errno":null"#));
     assert!(timeline.contains(r#""kind":"summary""#));
+    let summary_index = timeline
+        .lines()
+        .position(|line| line.contains(r#""kind":"summary""#))
+        .expect("observer summary");
+    let lifecycle_stop_index = timeline
+        .lines()
+        .position(|line| {
+            line.contains(r#""record_type":"collector_lifecycle""#)
+                && line.contains(r#""state":"stopped""#)
+                && line.contains(r#""stop_reason":"duration_elapsed""#)
+        })
+        .expect("collector lifecycle stop");
+    assert!(lifecycle_start_index < first_kernel_event_index);
+    assert!(summary_index < lifecycle_stop_index);
     assert!(!timeline.contains(credential_path.to_str().expect("utf-8 credential path")));
     assert!(!timeline.contains("APOLYSIS_TEST_SECRET"));
     assert!(!timeline.contains("127.0.0.1"));

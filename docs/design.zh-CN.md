@@ -175,9 +175,9 @@ generation 都存在时 attribution 才是 exact。Fork identity 在观测到 ch
 provisional；始终未成为 process identity 的 thread-clone candidate 保持 inferred，并在 task exit
 时丢弃。Generation 缺失时保持 inferred 并给出显式 reason；PID-only、command、path 与
 timestamp join 不会升级为 exact。Scope generation 只保护单次 collector 生命周期内的 cgroup
-ownership。Collector restart 仍是可见 identity boundary：在 lifecycle persistence 实现前，
-不声明跨重启 continuity。PID namespace、container、Pod 与 node identity 在可用时仍作为
-增量 attribution。
+ownership。Collector restart 仍是可见 identity boundary。Lifecycle recovery 会记录未完成
+实例及其 restart gap，但不会跨越该边界声明 identity continuity。PID namespace、container、
+Pod 与 node identity 在可用时仍作为增量 attribution。
 
 ### 5.4 本地 Store 与 Viewer
 
@@ -217,8 +217,27 @@ Remote export、custody、organization authorization、object storage、跨 run 
 - truncation 与 decoding state；
 - relation status 与 reason。
 
-Collector lifecycle record 携带 start、capability manifest、周期 health、loss counter、
-terminal state 与 stop reason。缺少 terminal record 本身就是 Observation Gap。
+Collector lifecycle record 为每个 collector process 使用一个不透明 instance ID，并为每次
+Agent Run 维护一条 record stream。`started` 会在放行托管 Agent 或完成 daemon scope 注册前
+持久化。周期 `checkpoint` 携带累计 loss counter 与当前 `scope_pending` in-flight gauge，即使
+workload 安静也会发出。`global_*` counter 描述 collector 全局丢失；复制到每个 active run
+时仍保留该命名。`scope_*` counter 只包含所属 Observation Scope 的 entry/exit 配对状态；对
+daemon 而言，它只汇总属于该 Agent Run 的 cgroup。非零 loss counter 会让 checkpoint 标记为
+`degraded`。采集仍活跃时，只有 pending 仍保持 healthy；到 terminal 时，它代表停止时未匹配的
+工作，因此会使 terminal degraded。
+
+Daemon checkpoint 与 terminal 会先等待 sequence fence；该 fence 覆盖 boundary 之前所有已被
+pipeline 接纳的 record。随后 lifecycle boundary 直接追加到每个 Agent Run 的 hash chain，因此
+bounded queue 即使已满也不能丢弃它，后来的高优先级流量也不能让它越过旧 evidence。普通 writer
+失败会暂停受影响的 Agent Run，并异步发送 scope failure；唯一 writer 不会同步等待 observer
+untrack，也不会等待该 untrack 产生的 failed terminal。
+
+正常路径会先确认 event drain 与 Observation Gap 已持久化，再写入带显式 reason 的
+`stopped`。致命 attach、verifier、ABI、decoder、counter、observer 或可写 storage 路径会在
+timeline 仍可写时记录 `failed`。Daemon 恢复时，缺少 `stopped` 或 `failed` 的 `started` /
+`checkpoint` 实例会得到一次 `collector_restart` Observation Gap 和一个恢复生成的 failed
+terminal；重复恢复不会重复写入。Standalone timeline 缺少 terminal 时仍是不完整证据，即使
+原进程已无法补写 gap。
 
 Consumer 忽略未知的增量 field。不兼容的 ABI 或 schema change 必须使用新版本并显式 decode
 failure，不能 best-effort 误解。
@@ -295,23 +314,23 @@ Implemented today：
 - `ebpf/observer` 与 `apolysis-observer`：CO-RE tracepoint、ring buffer、
   process-tree/cgroup scope、ABI v3、有界 process/exec 与 cgroup scope generation、
   outcome-aware 选定文件操作与 network connect、per-cgroup operation gap counter、脱敏和
-  health/gap diagnostic；
+  lifecycle checkpoint/terminal 以及 health/gap diagnostic；
 - `apolysis-cli`：fixture/live observation、托管 Agent launch、可选 Codex intent
   correlation、visibility 与 verification command；
-- `apolysis-core`：当前 JSONL vocabulary、record type 与版本化 Collector Capability
-  manifest；
+- `apolysis-core`：当前 JSONL vocabulary、record type、版本化 Collector Capability
+  manifest 与 collector lifecycle schema；
 - `apolysis-store`：rotation 与可选本地 hash-chain envelope；
 - `apolysis-accountability`：可选声明意图对比与面向复查的 finding；
 - `apolysis-kubernetes` 与 `apolysis-visibility`：有界 runtime metadata 与 visibility
   boundary assessment；
-- `apolysis-daemon`：long-lived observer、有界 queue、本地 socket 与 runtime registration
-  prototype。
+- `apolysis-daemon`：long-lived observer、有界 queue、本地 socket、runtime registration
+  prototype、scoped lifecycle persistence 与幂等的未完成实例恢复。
 
-Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 同步到稳定
-存储。选定文件操作与 network connect 已具备有界 entry/exit outcome 语义，daemon 会在显式
-移除 scope 与正常关闭时把这些配对 gap 持久化到所属 Agent Run。单次运行内稳定的
-scope/process generation 已实现。完整 collector lifecycle record 与 restart-gap persistence、
-saved-run viewer 和有界 Kubernetes Beta 仍是 target。
+Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 与 lifecycle
+start 同步到稳定存储。选定文件操作与 network connect 已具备有界 entry/exit outcome 语义，
+daemon 会在显式移除 scope 与正常关闭时把这些配对 gap 持久化到所属 Agent Run。单次运行内
+稳定的 scope/process generation、周期累计 lifecycle checkpoint、显式 terminal reason 与
+restart-gap recovery 已实现。Saved-run viewer 和有界 Kubernetes Beta 仍是 target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃

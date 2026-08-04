@@ -105,7 +105,8 @@ enforcement。
   churn 下隔离的 Agent-Run gap 持久化；
 - 保持单次 collector 生命周期内抵御 PID reuse 与 exec 的稳定 process identity；
 - 保留带 generation 限定的 cgroup scope 与 deterministic process lineage；
-- 发出 collector start、周期 health、loss checkpoint、terminal state 和显式 stop reason；
+- 保持持久化 collector start、周期累计 health/loss checkpoint、显式 terminal reason 与幂等
+  restart-gap recovery；
 - 对 reserve failure、map pressure、truncation、decode failure、attach failure、ABI
   mismatch、restart 与 incomplete flush fail loud；
 - 保持 content-off persistence 与 secret/path redaction。
