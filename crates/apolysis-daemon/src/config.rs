@@ -26,6 +26,7 @@ pub struct DaemonConfig {
     pub metrics_listen: Option<SocketAddr>,
     pub request_timeout: Duration,
     pub shutdown_drain_timeout: Duration,
+    pub collector_checkpoint_interval: Duration,
 }
 
 impl Default for DaemonConfig {
@@ -51,6 +52,7 @@ impl Default for DaemonConfig {
             metrics_listen: None,
             request_timeout: Duration::from_secs(5),
             shutdown_drain_timeout: Duration::from_secs(5),
+            collector_checkpoint_interval: Duration::from_secs(30),
         }
     }
 }
@@ -104,6 +106,10 @@ impl DaemonConfig {
                 "--shutdown-drain-ms" => {
                     config.shutdown_drain_timeout = Duration::from_millis(parse_u64(option, value)?)
                 }
+                "--collector-checkpoint-ms" => {
+                    config.collector_checkpoint_interval =
+                        Duration::from_millis(parse_u64(option, value)?)
+                }
                 unknown => return Err(format!("unknown argument: {unknown}")),
             }
             index += 1;
@@ -128,6 +134,9 @@ impl DaemonConfig {
         }
         if config.shutdown_drain_timeout.is_zero() {
             return Err("--shutdown-drain-ms must be greater than zero".to_string());
+        }
+        if config.collector_checkpoint_interval.is_zero() {
+            return Err("--collector-checkpoint-ms must be greater than zero".to_string());
         }
         Ok(config)
     }

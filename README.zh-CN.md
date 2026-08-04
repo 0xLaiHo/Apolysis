@@ -61,6 +61,8 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
 - 通过 CO-RE eBPF 观测 fork、exec、exit、outcome-aware 选定文件操作和 network connect。
 - 提供版本化 kernel/userspace ABI，并为每次 Agent Run 写入 capability manifest，明确实际挂载的
   event source 与支持的 outcome 语义。
+- 为每次 Agent Run 写入 collector lifecycle record，包括持久化 start、周期 health/loss
+  checkpoint、明确的正常或失败 terminal state；daemon 恢复未完成实例时会持久化 restart gap。
 - 在一次 collector 运行内提供可抵御 PID reuse、exec 与数字 cgroup ID 复用的稳定 runtime
   identity，并显式记录 exact 或 inferred attribution。
 - 支持 PID-tree、单 cgroup 与多 cgroup Observation Scope。
@@ -161,7 +163,7 @@ sudo -E ./target/debug/apolysis observe \
 
 1. 保持活跃 workspace 只包含 eBPF collection、Observation Scope、attribution、本地 storage、
    daemon、CLI 与操作者调查能力。
-2. 在保持 outcome-aware 语义与单次运行内稳定 runtime identity 的同时，完成 collector
+2. 在保持 outcome-aware 语义与单次运行内稳定 runtime identity 的同时，验证 collector
    lifecycle、health/gap 报告和本地 Agent Run 调查 workflow。
 3. 先验证 container 归属，再交付有界 Kubernetes Beta；在此之前不扩张中央平台。
 
