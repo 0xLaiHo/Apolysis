@@ -58,10 +58,20 @@ Qualification separates three modes:
    pressure, storage failure, or latency violation. It discovers a capacity
    boundary and cannot itself qualify a loss-free rated workload.
 
+The version 1 manifests are embedded in the qualification-only binary and
+retained under `qualification/workloads/`. `idle` holds a one-second empty
+window. `representative` performs 25 rounds of `openat`, `creat`, `truncate`,
+`renameat2`, `unlinkat`, loopback `connect`, and fork/exit, for 200 expected
+events. `burst` offers 100, 500, and 2,000 `openat` events per second, for 1,300
+expected events. Only kernel timestamps inside the workload's monotonic
+start/end window participate in reconciliation, excluding loader and raw-file
+write activity.
+
 For paired collector-off/on trials, retain raw samples and report at least:
 
 - collector userspace CPU and the workload CPU/wall-time delta, because BPF
-  execution also runs on the triggering task's syscall path;
+  execution also runs on the triggering task's syscall path; raw workload CPU
+  includes both `RUSAGE_SELF` and waited `RUSAGE_CHILDREN`;
 - process RSS/peak RSS, collector-cgroup memory, and BPF map/program memory as
   separate values;
 - workload overhead plus kernel-to-decode and kernel-to-append p50, p95, p99,
@@ -100,9 +110,25 @@ APOLYSIS_CONFIRM_QUALIFICATION=1 make qualify-live
 
 The command writes only below `target/qualification/<UTC timestamp>/`. A
 missing prerequisite fails visibly; it does not turn into a passing skip. The
-capture intentionally leaves measurements unset, writes a failed decision, and
-returns non-zero while the profile is Candidate. It is an input to the
-subsequent deterministic performance run, not a support certificate.
+capture runs the three versioned workloads in alternating same-boot
+collector-off/on order (three pairs by default), retains content-free workload,
+timeline, lifecycle, and kernel-to-decode/append nanosecond samples, then writes
+a failed decision and returns non-zero while the profile is Candidate. Set
+`APOLYSIS_QUALIFICATION_SAMPLES` from 1 through 100 to change the raw repetition
+count; this does not waive the reviewed sample-size or budget decision. The
+current bundle intentionally leaves aggregate CPU and memory measurements and
+numeric budgets unset, so it is evidence input rather than a support
+certificate.
+
+The production `apolysis` CLI exposes no qualification timing option. The
+separate harness enables a bounded in-memory timing recorder through the
+observer library, persists only event names and monotonic timestamps after the
+run, and rejects samples outside the synthetic workload window during raw-trial
+assembly. Runs spanning suspend fail rather than entering the bundle. Under
+`sudo`, off/on workloads both restore the same invoking UID/GID; the privileged
+trial root stays root-owned, while only a dedicated synthetic workload/result
+subdirectory is delegated. Privileged raw files use exclusive, no-symlink
+creation. Workload files contain no resource path, payload, or command content.
 
 Promotion to Supported requires a reviewed change that links retained raw live
 results, freezes numeric budgets in the machine envelope, changes the profile

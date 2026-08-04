@@ -20,8 +20,8 @@ pub use live::{
     raw_event_from_record, scope_observation_gaps, AgentDiscoveryRequest, AgentRegistration,
     AgentRunRequest, DaemonKernelEvent, DaemonObserver, DaemonObserverBatch, DaemonObserverConfig,
     DaemonObserverCounters, FileOperationCounters, LiveObserveRequest, LiveScope,
-    NetworkConnectCounters, ObserverBatchDecoder, OperationPairCounters, ScopeGeneration,
-    ScopeObservationGapCounters,
+    NetworkConnectCounters, ObserverBatchDecoder, OperationPairCounters,
+    QualificationTelemetryConfig, ScopeGeneration, ScopeObservationGapCounters,
 };
 pub use redaction::{
     redact_command_text_for_persistence, RedactedValue, Redactor, RuntimeEvidencePersistence,

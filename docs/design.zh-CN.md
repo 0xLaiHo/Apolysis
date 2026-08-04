@@ -354,7 +354,9 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 - Kernel version、BTF、hook availability、verifier behavior 与 privilege 限制支持范围。
 - 当前资格 contract 没有授予任何 Supported profile。Linux 6.12 x86_64 原生 host 仅为
   Candidate；其他 kernel、architecture 与 container/Kubernetes runtime 在准确、保留的 live
-  证据通过前都保持 Experimental。数值性能预算有意保持未设置。
+  证据通过前都保持 Experimental。确定性的 content-free workload 与配对原始采集 harness 已
+  冻结 expected event count 和 monotonic latency sample，但晋级仍需要 collector CPU、
+  process/cgroup/BPF memory、保守数值 budget 和保留的 privileged 重复证据。
 
 ## 14. 非目标
 

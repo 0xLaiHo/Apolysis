@@ -50,10 +50,18 @@ Shell preflight 与 Rust regression test 共用 tracepoint manifest；后者把�
 3. `burst` 逐级提高 event rate，直至首次出现可检测 loss、pressure、storage failure 或
    latency violation；它只用于发现容量边界，不能凭带 loss 的结果通过 rated workload。
 
+Version 1 manifest 被嵌入 qualification-only binary，并保留在
+`qualification/workloads/`。`idle` 保持一秒空窗口；`representative` 执行 25 轮
+`openat`、`creat`、`truncate`、`renameat2`、`unlinkat`、loopback `connect` 与
+fork/exit，共预期 200 个 event；`burst` 分别提供每秒 100、500 与 2,000 个 `openat`
+event，共预期 1,300 个 event。只有位于 workload monotonic start/end window 内的 kernel
+timestamp 才参与 reconciliation，从而排除 loader 与原始文件写入活动。
+
 Collector-off/on 配对 trial 必须保留原始样本，并至少报告：
 
 - collector userspace CPU 以及 workload CPU/wall-time delta，因为 BPF 也在触发 syscall 的
-  task 路径执行；
+  task 路径执行；原始 workload CPU 同时包含 `RUSAGE_SELF` 与已 wait 的
+  `RUSAGE_CHILDREN`；
 - process RSS/peak RSS、collector-cgroup memory 与 BPF map/program memory，三者分开；
 - workload overhead，以及 kernel-to-decode 和 kernel-to-append 的 p50、p95、p99、最大值、
   样本数与区间方法；append latency 不是 durable latency；
@@ -86,8 +94,20 @@ APOLYSIS_CONFIRM_QUALIFICATION=1 make qualify-live
 ```
 
 该命令只写入 `target/qualification/<UTC timestamp>/`。缺少前置条件会显式失败，不会变成
-通过的 skip。Profile 仍为 Candidate 且 measurement 未设置时，capture 会有意写入 failed
-decision 并返回非零；它是后续确定性性能运行的输入，不是支持证书。
+通过的 skip。Capture 会按同一 boot 内交替的 collector-off/on 顺序运行三个版本化 workload
+（默认三对），保留 content-free workload、timeline、lifecycle 与 kernel-to-decode/append
+纳秒样本；profile 仍为 Candidate 时，它会写入 failed decision 并返回非零。可以把
+`APOLYSIS_QUALIFICATION_SAMPLES` 设为 1 到 100 以改变原始重复次数，但这不会豁免 reviewed
+sample-size 或 budget 决策。当前 bundle 有意不设置聚合 CPU、memory measurement 与数值
+budget，因此它只是证据输入，不是支持证书。
+
+Production `apolysis` CLI 不暴露 qualification timing option。独立 harness 通过 observer
+library 启用有界内存 timing recorder，在 run 结束后仅持久化 event name 与 monotonic
+timestamp，并在组装 raw trial 时拒绝 synthetic workload window 之外的 sample；跨 suspend
+的 run 会失败而不会进入 bundle。在 `sudo` 下，off/on workload 都恢复为同一个调用者
+UID/GID；privileged trial root 保持 root-owned，只委托专用 synthetic workload/result
+子目录。Privileged 原始文件使用 exclusive、no-symlink 创建。Workload 文件不包含 resource
+path、payload 或 command content。
 
 晋级到 Supported 必须通过 reviewed change 链接保留的 live 原始结果，在机器包络中冻结
 数值预算并修改 profile status，对每个声明 tuple 重新运行 checker，同时确认隐私与过载行为。

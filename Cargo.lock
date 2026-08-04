@@ -27,6 +27,8 @@ dependencies = [
  "apolysis-observer",
  "apolysis-store",
  "apolysis-visibility",
+ "libc",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",

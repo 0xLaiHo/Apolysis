@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,7 +21,7 @@ use apolysis_store::JsonlStore;
 use aya::maps::{Array, HashMap, MapData, MapError, RingBuf};
 use aya::programs::TracePoint;
 use aya::{Ebpf, EbpfLoader, Pod};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
@@ -229,6 +231,101 @@ pub struct LiveObserveRequest {
     pub duration: Option<Duration>,
     pub workspace_root: PathBuf,
     pub output_rotation: Option<JsonlRotationPolicy>,
+    /// Optional raw monotonic timing samples for the separate qualification
+    /// harness. The production CLI always leaves this disabled.
+    pub qualification_telemetry: Option<QualificationTelemetryConfig>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QualificationTelemetryConfig {
+    pub output_path: PathBuf,
+    pub max_samples: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct QualificationTelemetrySample {
+    event_name: String,
+    kernel_timestamp_ns: u64,
+    decoded_monotonic_ns: u64,
+    appended_monotonic_ns: u64,
+}
+
+#[derive(Debug)]
+struct QualificationTelemetryRecorder {
+    max_samples: usize,
+    samples: Vec<QualificationTelemetrySample>,
+    dropped_samples: u64,
+}
+
+#[derive(Serialize)]
+struct QualificationTelemetryReport<'a> {
+    schema_version: u32,
+    clock: &'static str,
+    samples: &'a [QualificationTelemetrySample],
+    dropped_samples: u64,
+}
+
+impl QualificationTelemetryRecorder {
+    fn new(max_samples: usize) -> Self {
+        Self {
+            max_samples,
+            samples: Vec::with_capacity(max_samples.min(16_384)),
+            dropped_samples: 0,
+        }
+    }
+
+    fn record(
+        &mut self,
+        event_name: &str,
+        kernel_timestamp_ns: u64,
+        decoded_monotonic_ns: u64,
+        appended_monotonic_ns: u64,
+    ) {
+        if self.samples.len() == self.max_samples {
+            self.dropped_samples = self.dropped_samples.saturating_add(1);
+            return;
+        }
+        self.samples.push(QualificationTelemetrySample {
+            event_name: event_name.to_string(),
+            kernel_timestamp_ns,
+            decoded_monotonic_ns,
+            appended_monotonic_ns,
+        });
+    }
+
+    fn report(&self) -> QualificationTelemetryReport<'_> {
+        QualificationTelemetryReport {
+            schema_version: 1,
+            clock: "clock_monotonic",
+            samples: &self.samples,
+            dropped_samples: self.dropped_samples,
+        }
+    }
+
+    fn persist(&self, path: &Path) -> Result<(), String> {
+        let rendered = serde_json::to_string(&self.report())
+            .map_err(|error| format!("failed to serialize qualification telemetry: {error}"))?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| {
+                format!(
+                    "failed to create qualification telemetry {}: {error}",
+                    path.display()
+                )
+            })?;
+        file.write_all(format!("{rendered}\n").as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|error| {
+                format!(
+                    "failed to persist qualification telemetry {}: {error}",
+                    path.display()
+                )
+            })
+    }
 }
 
 impl LiveObserveRequest {
@@ -238,6 +335,16 @@ impl LiveObserveRequest {
                 "BPF object does not exist: {}",
                 self.object_path.display()
             ));
+        }
+        if let Some(telemetry) = self.qualification_telemetry.as_ref() {
+            if telemetry.max_samples == 0 {
+                return Err("qualification telemetry max_samples must be positive".to_string());
+            }
+            if telemetry.output_path == self.output_path {
+                return Err(
+                    "qualification telemetry output must differ from the timeline".to_string(),
+                );
+            }
         }
         if self.agent_run.is_some() && self.scope.is_some() {
             return Err(
@@ -920,6 +1027,10 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     }
 
     let mut last_lifecycle_counters = CollectorLifecycleCounters::default();
+    let mut qualification_telemetry = request
+        .qualification_telemetry
+        .as_ref()
+        .map(|config| QualificationTelemetryRecorder::new(config.max_samples));
     let run_result: Result<ObserveResult, String> = async {
     let ring_map = ebpf
         .take_map(&loader_plan.ring_buffer_map)
@@ -1028,6 +1139,11 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                     continue;
                 }
             };
+            let decoded_monotonic_ns = if qualification_telemetry.is_some() {
+                Some(monotonic_now_ns()?)
+            } else {
+                None
+            };
             if record.flags & (FLAG_RESOURCE_TRUNCATED | FLAG_PAYLOAD_TRUNCATED) != 0 {
                 truncations += 1;
             }
@@ -1045,6 +1161,16 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             };
             let canonical = process_context.observe(&raw, canonicalize(&raw))?;
             append_content_off_runtime_event(&raw, &canonical, &redactor, &mut store)?;
+            if let (Some(telemetry), Some(decoded_monotonic_ns)) =
+                (qualification_telemetry.as_mut(), decoded_monotonic_ns)
+            {
+                telemetry.record(
+                    &raw.event_name,
+                    record.timestamp_ns,
+                    decoded_monotonic_ns,
+                    monotonic_now_ns()?,
+                );
+            }
             raw_count += 1;
             canonical_count += 1;
         }
@@ -1188,6 +1314,12 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     store
         .flush()
         .map_err(|error| format!("failed to flush live observer timeline: {error}"))?;
+    if let (Some(config), Some(telemetry)) = (
+        request.qualification_telemetry.as_ref(),
+        qualification_telemetry.as_ref(),
+    ) {
+        telemetry.persist(&config.output_path)?;
+    }
 
     Ok(ObserveResult {
         raw_events: raw_count,
@@ -1340,8 +1472,11 @@ fn spawn_managed_agent(
         .args(request.args())
         .current_dir(workspace_root)
         .kill_on_drop(true);
-    if let Some(run_as) = current_managed_agent_run_as() {
-        command.uid(run_as.uid).gid(run_as.gid);
+    let managed_identity = current_managed_agent_run_as();
+    let managed_uid_gid = managed_identity
+        .as_ref()
+        .map(|run_as| (run_as.uid, run_as.gid));
+    if let Some(run_as) = managed_identity {
         if let Some(home) = run_as.home {
             command.env("HOME", home);
         }
@@ -1349,13 +1484,22 @@ fn spawn_managed_agent(
             command.env("CODEX_HOME", codex_home);
         }
     }
-    // SAFETY: runs post-fork/pre-exec, async-signal-safe only. dup2 the gate read
-    // end onto GATE_FD (which clears CLOEXEC), so it survives the wrapper's exec
-    // and the shell can read it; the original CLOEXEC fds close on exec.
+    // SAFETY: runs post-fork/pre-exec and uses async-signal-safe syscalls only.
+    // dup2 keeps the gate through the wrapper exec. When sudo identity
+    // restoration applies, supplementary groups are cleared before gid/uid so
+    // the managed and collector-off workloads have the same least privilege.
     unsafe {
         command.pre_exec(move || {
             if libc::dup2(gate_read, GATE_FD) < 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            if let Some((uid, gid)) = managed_uid_gid {
+                if libc::setgroups(0, std::ptr::null()) != 0
+                    || libc::setgid(gid) != 0
+                    || libc::setuid(uid) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });
@@ -3524,12 +3668,55 @@ mod tests {
             duration: None,
             workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             output_rotation: None,
+            qualification_telemetry: None,
         };
 
         assert_eq!(
             request.validate(),
             Err("--agent-run cannot be combined with --scope-pid or --scope-cgroup".to_string())
         );
+    }
+
+    #[test]
+    fn qualification_telemetry_is_bounded_and_contains_no_event_content() {
+        let mut telemetry = QualificationTelemetryRecorder::new(1);
+        telemetry.record("openat", 10, 20, 30);
+        telemetry.record("connect", 40, 50, 60);
+
+        assert_eq!(telemetry.samples.len(), 1);
+        assert_eq!(telemetry.dropped_samples, 1);
+        assert_eq!(telemetry.samples[0].event_name, "openat");
+        assert_eq!(telemetry.samples[0].kernel_timestamp_ns, 10);
+        assert_eq!(telemetry.samples[0].decoded_monotonic_ns, 20);
+        assert_eq!(telemetry.samples[0].appended_monotonic_ns, 30);
+
+        let rendered = serde_json::to_string(&telemetry.report()).expect("serialize telemetry");
+        assert!(!rendered.contains("resource"));
+        assert!(!rendered.contains("payload"));
+        assert!(!rendered.contains("action"));
+    }
+
+    #[test]
+    fn qualification_telemetry_refuses_a_symlink_output() {
+        let root = std::env::temp_dir().join(format!(
+            "apolysis-qualification-telemetry-symlink-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create telemetry test root");
+        let protected_target = root.join("protected-target.json");
+        let output = root.join("telemetry.json");
+        std::os::unix::fs::symlink(&protected_target, &output).expect("create telemetry symlink");
+
+        let mut telemetry = QualificationTelemetryRecorder::new(1);
+        telemetry.record("openat", 10, 20, 30);
+        let error = telemetry
+            .persist(&output)
+            .expect_err("telemetry must reject a symlink output");
+
+        assert!(error.contains("failed to create qualification telemetry"));
+        assert!(!protected_target.exists());
+        std::fs::remove_file(output).expect("remove telemetry symlink");
+        std::fs::remove_dir(root).expect("remove telemetry test root");
     }
 
     struct FakeProc<'a> {

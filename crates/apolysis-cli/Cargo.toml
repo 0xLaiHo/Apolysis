@@ -13,6 +13,8 @@ apolysis-observer = { path = "../apolysis-observer" }
 apolysis-kubernetes = { path = "../apolysis-kubernetes" }
 apolysis-store = { path = "../apolysis-store" }
 apolysis-visibility = { path = "../apolysis-visibility" }
+libc = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }
