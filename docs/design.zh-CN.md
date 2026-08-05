@@ -355,8 +355,9 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 - 当前资格 contract 没有授予任何 Supported profile。Linux 6.12 x86_64 原生 host 仅为
   Candidate；其他 kernel、architecture 与 container/Kubernetes runtime 在准确、保留的 live
   证据通过前都保持 Experimental。确定性的 content-free workload 与配对原始采集 harness 已
-  冻结 expected event count 和 monotonic latency sample，但晋级仍需要 collector CPU、
-  process/cgroup/BPF memory、保守数值 budget 和保留的 privileged 重复证据。
+  冻结 expected event count、monotonic latency sample、隔离的 collector
+  CPU/process/cgroup/BPF memory sample 与 pair-level bootstrap summary，并把 burst loss
+  归因到独立 rate phase；晋级仍需要保守数值 budget 和足量、保留的 privileged 重复证据。
 
 ## 14. 非目标
 
