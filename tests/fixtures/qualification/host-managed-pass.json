@@ -38,6 +38,7 @@
     "source_commit": "0000000000000000000000000000000000000000",
     "bpf_object_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "cargo_lock_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "measurement_summary_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
     "synthetic_workload_only": true
   },
   "measurement_protocol": {

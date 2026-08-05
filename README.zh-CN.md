@@ -119,8 +119,9 @@ sandbox execution 与广泛的 production-qualification 原型已移出活跃 bu
 隐私路径通过新的有界 Beta 门禁前，Apolysis 仍是实验性项目。
 首个资格 contract 现仅把 Linux 6.12/x86_64 原生 host 命名为 Candidate；当前尚无
 Supported 环境，数值性能预算仍由证据门禁。仓库已提供版本化、content-free 的 synthetic
-workload 和显式的 collector-off/on 配对原始采集路径，但没有保留的 privileged 证据时，
-这些输出不会授予支持。详见
+workload；显式 collector-off/on 路径现会保留 monotonic latency、隔离的 collector resource
+sample、按 phase 归因的 burst loss 与 pair-bootstrap summary，但没有保留的 privileged 证据和
+reviewed 数值 budget 时，这些输出不会授予支持。详见
 [Beta 资格包络](docs/qualification-envelope.zh-CN.md)。
 
 ## 构建与测试

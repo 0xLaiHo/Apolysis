@@ -414,9 +414,11 @@ them as historical implementation input; they do not define this architecture.
   x86_64 native host is Candidate only; other kernels, architectures, and
   container/Kubernetes runtimes remain Experimental until exact retained live
   evidence passes. The deterministic content-free workloads and paired raw
-  capture harness freeze expected event counts and monotonic latency samples,
-  but collector CPU, process/cgroup/BPF memory, conservative numeric budgets,
-  and retained privileged repetitions are still required for promotion.
+  capture harness freeze expected event counts, monotonic latency samples,
+  isolated collector CPU/process/cgroup/BPF memory samples, and pair-level
+  bootstrap summaries, with burst loss attributed to separate rate phases.
+  Conservative numeric budgets and enough retained privileged repetitions are
+  still required for promotion.
 
 ## 14. Non-goals
 

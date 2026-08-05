@@ -83,10 +83,8 @@ run_off_trial() {
     local workload="$1"
     local trial_dir="$2"
     mkdir "$trial_dir"
-    mkdir "$trial_dir/scratch"
-    "$qualification_binary" run-workload \
-        "$repo_root" "$workload" "$trial_dir/scratch" \
-        "$trial_dir/workload-raw.json"
+    "$qualification_binary" measure-off \
+        "$repo_root" "$workload" "$trial_dir"
 }
 
 run_on_trial() {
@@ -126,6 +124,10 @@ for workload in idle representative burst; do
     done
 done
 
+printf 'summarizing paired qualification resources and latency\n'
+"$qualification_binary" summarize \
+    "$repo_root" "$measurement_root" "$output_dir/measurement-summary.json"
+
 cargo run --quiet --manifest-path "$repo_root/Cargo.toml" \
     -p apolysis-cli --bin apolysis-qualification -- capture-preflight \
     "$repo_root" "$output_dir/preflight-evidence.json"
@@ -143,7 +145,8 @@ case "$decision_status" in
         printf 'qualification profile passed: %s\n' "$output_dir"
         ;;
     1)
-        printf 'preflight captured; numeric workloads remain unqualified: %s\n' "$output_dir"
+        printf 'paired measurements captured; numeric budgets remain unqualified: %s\n' \
+            "$output_dir"
         exit 1
         ;;
     *)

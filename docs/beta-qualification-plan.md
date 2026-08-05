@@ -112,9 +112,10 @@ The focused work items must settle these details before their dependent items
 start:
 
 - the Q1 Candidate contract is Linux 6.12/x86_64 native host and its versioned
-  synthetic workloads, paired capture order, monotonic event window, and exact
-  count reconciliation are fixed, but collector CPU/memory sampling, exact
-  numeric budgets, and any Supported promotion remain blocked on retained
+  synthetic workloads, paired capture order, monotonic event window, exact
+  count reconciliation, isolated collector resource sampling, and pair-level
+  bootstrap summary with phase-scoped burst loss are fixed, but exact numeric
+  budgets and any Supported promotion remain blocked on enough retained
   privileged live evidence;
 - the saved-run viewer interaction and presentation shape after L2 freezes the
   queryable Agent Observation Record; and

@@ -63,9 +63,13 @@ retained under `qualification/workloads/`. `idle` holds a one-second empty
 window. `representative` performs 25 rounds of `openat`, `creat`, `truncate`,
 `renameat2`, `unlinkat`, loopback `connect`, and fork/exit, for 200 expected
 events. `burst` offers 100, 500, and 2,000 `openat` events per second, for 1,300
-expected events. Only kernel timestamps inside the workload's monotonic
-start/end window participate in reconciliation, excluding loader and raw-file
-write activity.
+expected events. Each burst rate has its own monotonic window, followed by a
+150-millisecond settling gap; event rate, latency, and loss-counter deltas are
+attributed to that phase instead of a blended run total. The summary reports
+the first phase with detected loss and rejects any rate, order, event-count, or
+phase-window plan that differs from the embedded manifest. Only kernel
+timestamps inside the workload's monotonic start/end window participate in
+reconciliation, excluding loader and raw-file write activity.
 
 For paired collector-off/on trials, retain raw samples and report at least:
 
@@ -80,11 +84,40 @@ For paired collector-off/on trials, retain raw samples and report at least:
 - expected, observed, and lost counts for every event class, including reserve,
   map-pressure, pairing, decode, queue, writer, and lifecycle-gap counters.
 
-Version 1 fixes nearest-rank percentiles, a 95% percentile-bootstrap interval
-with 10,000 resamples, alternating collector-off/on trials on the same boot,
-`CLOCK_MONOTONIC`, and rejection of runs that span suspend. Each workload
-manifest freezes its expected event-class counts; evidence must match that map
-before observed counts are reconciled.
+The qualification harness samples collector `RUSAGE_SELF`, `VmRSS`/`VmHWM`, and
+collector-cgroup `memory.current`/`memory.peak` every 25 milliseconds, with an
+initial and terminal bracket sample. It captures BPF map/program `memlock` once
+after the production object is loaded and attached. The harness creates
+an ephemeral subtree below the caller's current cgroup and places the collector
+and synthetic workload in sibling cgroups; it never reports their mixed parent
+memory as collector memory. An outer supervisor moves a fresh collector process
+into its cgroup before exec, so runtime and BPF allocations do not predate the
+measurement cgroup. The inner collector verifies its `/proc/self/cgroup`
+membership and the exact collector/workload `cgroup.procs` membership before it
+records isolation. Missing writable cgroup-v2 delegation, the memory controller,
+`memory.peak`, process status fields, BPF `memlock`, a sample on either side of
+the workload window, or a sampling gap above four intervals (100 milliseconds)
+fails the trial. Burst phase boundaries must be bracketed within the same gap
+limit. The exact subtree is removed after both processes leave it. Sampling work
+is included in collector CPU and is therefore a conservative harness cost.
+
+Each pair retains signed workload CPU and wall-time deltas. The published
+one-sided overhead estimate clamps only a negative aggregate bound to zero; the
+signed paired samples remain in the summary. `workload_latency_overhead` is the
+paired workload wall-time delta. Event rate uses the pair median; CPU and
+overhead metrics use nearest-rank p95 across pairs; RSS, cgroup, and BPF memory
+use the maximum; lag p50/p95/p99 values first summarize each collector-on trial
+and then use the matching nearest-rank percentile across pairs. Maximum lag is
+the maximum of the per-trial maxima.
+
+Version 1 fixes nearest-rank percentiles and a deterministic 95%
+percentile-bootstrap interval with 10,000 resamples. The resampling unit is the
+whole off/on pair, not individual eBPF events. Trials alternate collector-off
+and collector-on order on the same boot and use `CLOCK_MONOTONIC`. Comparing
+`CLOCK_BOOTTIME` with `CLOCK_MONOTONIC` rejects suspend drift for every raw
+workload, off/on pair, and complete evidence bundle. Each workload manifest
+freezes its expected event-class counts; evidence must match that map before
+observed counts are reconciled.
 
 At the rated representative envelope, known and unexplained event loss must
 both be zero. CPU, memory, latency, repetition count, and the rated event rate
@@ -112,23 +145,37 @@ The command writes only below `target/qualification/<UTC timestamp>/`. A
 missing prerequisite fails visibly; it does not turn into a passing skip. The
 capture runs the three versioned workloads in alternating same-boot
 collector-off/on order (three pairs by default), retains content-free workload,
-timeline, lifecycle, and kernel-to-decode/append nanosecond samples, then writes
-a failed decision and returns non-zero while the profile is Candidate. Set
+timeline, lifecycle, kernel-to-decode/append nanosecond samples, and separated
+collector process/cgroup/BPF resource samples. It writes
+`measurement-summary.json` with pair-level measurements and bootstrap intervals,
+then writes a failed decision and returns non-zero while the profile is
+Candidate. Set
 `APOLYSIS_QUALIFICATION_SAMPLES` from 1 through 100 to change the raw repetition
 count; this does not waive the reviewed sample-size or budget decision. The
-current bundle intentionally leaves aggregate CPU and memory measurements and
-numeric budgets unset, so it is evidence input rather than a support
-certificate.
+current bundle computes aggregates but intentionally leaves numeric budgets
+unset, so it is evidence input rather than a support certificate.
+
+Before writing the preflight bundle, the harness recomputes the canonical JSON
+tree digest for every workload, requires the summary to contain that same raw
+digest and workload-manifest digest, and records the summary file SHA-256 in
+preflight provenance. The Supported checker requires that provenance field to
+be a valid SHA-256. A summary therefore cannot silently refer to different raw
+evidence.
 
 The production `apolysis` CLI exposes no qualification timing option. The
 separate harness enables a bounded in-memory timing recorder through the
-observer library, persists only event names and monotonic timestamps after the
-run, and rejects samples outside the synthetic workload window during raw-trial
-assembly. Runs spanning suspend fail rather than entering the bundle. Under
-`sudo`, off/on workloads both restore the same invoking UID/GID; the privileged
-trial root stays root-owned, while only a dedicated synthetic workload/result
-subdirectory is delegated. Privileged raw files use exclusive, no-symlink
-creation. Workload files contain no resource path, payload, or command content.
+observer library and a bounded qualification-only resource sampler. Timing data
+persists only event names and monotonic timestamps; resource data persists only
+numeric CPU/memory samples and whether cgroup isolation was active. Raw-trial
+assembly rejects latency samples outside the synthetic workload window and
+resource samples that do not bracket it, sampling gaps above the fixed limit,
+decreasing cumulative loss counters, and burst counters that cannot be
+attributed exactly to their phases. Runs spanning suspend fail rather than
+entering the bundle. Under `sudo`, off/on workloads both restore the same
+invoking UID/GID; the privileged trial root stays root-owned, while only a
+dedicated synthetic workload/result subdirectory is delegated. Privileged raw
+files use exclusive, no-symlink creation. Workload and summary files contain no
+resource path, cgroup path, payload, or command content.
 
 Promotion to Supported requires a reviewed change that links retained raw live
 results, freezes numeric budgets in the machine envelope, changes the profile

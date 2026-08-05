@@ -97,9 +97,9 @@
 以下细节必须由相应聚焦工作项解决，之后才能开始其依赖项：
 
 - Q1 Candidate contract 已收敛为 Linux 6.12/x86_64 原生 host，并已冻结版本化 synthetic
-  workload、配对采集顺序、monotonic event window 与准确 count reconciliation；但 collector
-  CPU/memory sampling、准确数值 budget 与任何 Supported 晋级仍受保留的 privileged live
-  证据阻塞；
+  workload、配对采集顺序、monotonic event window、准确 count reconciliation、隔离的
+  collector resource sampling，以及包含按 phase 归因 burst loss 的 pair-level bootstrap
+  summary；但准确数值 budget 与任何 Supported 晋级仍受足量、保留的 privileged live 证据阻塞；
 - L2 冻结可查询 Agent Observation Record 后，saved-run viewer 的 interaction 与展示形态；
 - container identity 与 runtime recovery 验证后，Kubernetes least-privilege deployment
   形态。

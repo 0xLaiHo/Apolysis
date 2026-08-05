@@ -8,6 +8,7 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::time::Duration;
@@ -19,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
+#[path = "apolysis-qualification/summary.rs"]
+mod apolysis_qualification_summary;
+
 const TRACEPOINT_MANIFEST: &str =
     include_str!("../../../../qualification/required-tracepoints-v1.txt");
 const IDLE_WORKLOAD_MANIFEST: &[u8] =
@@ -28,6 +32,8 @@ const REPRESENTATIVE_WORKLOAD_MANIFEST: &[u8] =
 const BURST_WORKLOAD_MANIFEST: &[u8] =
     include_bytes!("../../../../qualification/workloads/burst-v1.json");
 const SUSPEND_DETECTION_TOLERANCE_NS: u64 = 100_000_000;
+const RATE_PHASE_SETTLE_DURATION: Duration = Duration::from_millis(150);
+const QUALIFICATION_RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_millis(25);
 const LOSS_COUNTERS: &[&str] = &[
     "ring_buffer_reserve",
     "map_pressure",
@@ -154,6 +160,9 @@ struct RawWorkloadResult {
     workload: String,
     workload_manifest_sha256: String,
     synthetic_workload_only: bool,
+    host_boot_id_sha256: String,
+    started_boottime_ns: u64,
+    ended_boottime_ns: u64,
     started_monotonic_ns: u64,
     ended_monotonic_ns: u64,
     elapsed_monotonic_ns: u64,
@@ -173,25 +182,67 @@ struct RawWorkloadResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct RawWorkloadPhase {
     rate_per_second: Option<u64>,
+    started_monotonic_ns: u64,
+    ended_monotonic_ns: u64,
     requested_events: u64,
     completed_events: u64,
     elapsed_monotonic_ns: u64,
+    expected_event_counts: BTreeMap<String, u64>,
+    completed_event_counts: BTreeMap<String, u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct CapturedTelemetry {
     schema_version: u32,
     clock: String,
     samples: Vec<CapturedTelemetrySample>,
     dropped_samples: u64,
+    resource_sample_interval_ns: u64,
+    resource_sample_gap_limit_ns: u64,
+    resource_sample_max_gap_ns: u64,
+    resource_samples: Vec<CapturedResourceSample>,
+    loss_samples: Vec<CapturedLossSample>,
+    collector_cgroup_isolated: bool,
+    bpf_map_memory_bytes: u64,
+    bpf_program_memory_bytes: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct CapturedTelemetrySample {
     event_name: String,
     kernel_timestamp_ns: u64,
     decoded_monotonic_ns: u64,
     appended_monotonic_ns: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CapturedResourceSample {
+    monotonic_ns: u64,
+    process_user_cpu_ns: u64,
+    process_system_cpu_ns: u64,
+    process_rss_bytes: u64,
+    process_peak_rss_bytes: u64,
+    collector_cgroup_memory_current_bytes: u64,
+    collector_cgroup_memory_peak_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CapturedLossSample {
+    monotonic_ns: u64,
+    loss_counters: BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RawLivePhase {
+    rate_per_second: Option<u64>,
+    started_monotonic_ns: u64,
+    ended_monotonic_ns: u64,
+    expected_event_counts: BTreeMap<String, u64>,
+    observed_event_counts: BTreeMap<String, u64>,
+    exact_event_reconciliation: bool,
+    loss_counters: BTreeMap<String, u64>,
+    kernel_to_decode_ns: Vec<u64>,
+    kernel_to_append_ns: Vec<u64>,
 }
 
 #[cfg(test)]
@@ -206,13 +257,14 @@ impl CapturedTelemetrySample {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RawLiveTrial {
     schema_version: u32,
     workload: String,
     workload_manifest_sha256: String,
     workload_raw_sha256: String,
     timeline_sha256: String,
+    telemetry_sha256: String,
     started_monotonic_ns: u64,
     ended_monotonic_ns: u64,
     suspend_detected: bool,
@@ -224,6 +276,14 @@ struct RawLiveTrial {
     kernel_to_append_ns: Vec<u64>,
     telemetry_samples_total: usize,
     telemetry_samples_outside_window: usize,
+    resource_sample_interval_ns: u64,
+    resource_sample_gap_limit_ns: u64,
+    resource_sample_max_gap_ns: u64,
+    collector_resource_samples: Vec<CapturedResourceSample>,
+    collector_cgroup_isolated: bool,
+    bpf_map_memory_bytes: u64,
+    bpf_program_memory_bytes: u64,
+    phases: Vec<RawLivePhase>,
     collector_lifecycle: Value,
 }
 
@@ -233,6 +293,13 @@ struct WorkloadScratch {
     entry_name: CString,
     renamed_name: CString,
     dev_null: CString,
+}
+
+struct QualificationCgroups {
+    root: PathBuf,
+    collector: PathBuf,
+    workload: PathBuf,
+    active: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -248,19 +315,42 @@ async fn main() {
         Some("check") => check_command(&arguments[1..]),
         Some("capture-preflight") => capture_command(&arguments[1..]),
         Some("run-workload") => run_workload_command(&arguments[1..]),
-        Some("measure-live") => measure_live_command(&arguments[1..]).await,
+        Some("measure-off") => measure_off_command(&arguments[1..]),
+        Some("measure-live") => measure_live_command(&arguments[1..]),
+        Some("measure-live-inner") => measure_live_inner_command(&arguments[1..]).await,
+        Some("summarize") => summarize_command(&arguments[1..]),
         _ => {
             eprintln!(
                 "usage: apolysis-qualification check <envelope> <evidence> | \
                  capture-preflight <repo-root> <output> | \
                  run-workload <repo-root> <idle|representative|burst> <scratch-dir> <output> | \
+                 measure-off <repo-root> <idle|representative|burst> <trial-dir> | \
                  measure-live <repo-root> <bpf-object> \
-                 <idle|representative|burst> <trial-dir>"
+                 <idle|representative|burst> <trial-dir> | \
+                 summarize <repo-root> <measurement-root> <output>"
             );
             2
         }
     };
     process::exit(status);
+}
+
+fn summarize_command(arguments: &[String]) -> i32 {
+    if arguments.len() != 3 {
+        eprintln!("summarize requires repo-root, measurement-root, and output");
+        return 2;
+    }
+    match apolysis_qualification_summary::summarize_measurements(
+        Path::new(&arguments[0]),
+        Path::new(&arguments[1]),
+        Path::new(&arguments[2]),
+    ) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("qualification summary failed: {error}");
+            1
+        }
+    }
 }
 
 fn check_command(arguments: &[String]) -> i32 {
@@ -486,6 +576,12 @@ fn validate_environment(
     let cargo_lock_hash = provenance.get("cargo_lock_sha256").and_then(Value::as_str);
     if !cargo_lock_hash.is_some_and(is_sha256) {
         reasons.push("provenance.cargo_lock_sha256".to_string());
+    }
+    let measurement_summary_hash = provenance
+        .get("measurement_summary_sha256")
+        .and_then(Value::as_str);
+    if !measurement_summary_hash.is_some_and(is_sha256) {
+        reasons.push("provenance.measurement_summary_sha256".to_string());
     }
     if provenance.get("synthetic_workload_only") != Some(&Value::Bool(true)) {
         reasons.push("provenance.synthetic_workload_only".to_string());
@@ -881,11 +977,30 @@ fn prepare_standalone_workload_identity(scratch_dir: &Path, output: &Path) -> Re
     Ok(())
 }
 
-async fn measure_live_command(arguments: &[String]) -> i32 {
+fn measure_live_command(arguments: &[String]) -> i32 {
     if arguments.len() != 4 {
         eprintln!(
             "measure-live requires repo-root, production BPF object, workload, and trial-dir"
         );
+        return 2;
+    }
+    match measure_live_supervised(
+        Path::new(&arguments[0]),
+        Path::new(&arguments[1]),
+        &arguments[2],
+        Path::new(&arguments[3]),
+    ) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("live qualification measurement failed: {error}");
+            1
+        }
+    }
+}
+
+async fn measure_live_inner_command(arguments: &[String]) -> i32 {
+    if arguments.len() != 6 {
+        eprintln!("internal live measurement contract mismatch");
         return 2;
     }
     match measure_live_trial(
@@ -893,13 +1008,143 @@ async fn measure_live_command(arguments: &[String]) -> i32 {
         Path::new(&arguments[1]),
         &arguments[2],
         Path::new(&arguments[3]),
+        Path::new(&arguments[4]),
+        Path::new(&arguments[5]),
     )
     .await
     {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("live qualification measurement failed: {error}");
+            eprintln!("inner live qualification measurement failed: {error}");
             1
+        }
+    }
+}
+
+fn measure_live_supervised(
+    repo_root: &Path,
+    object_path: &Path,
+    workload_id: &str,
+    trial_dir: &Path,
+) -> Result<(), String> {
+    let (repo_root, trial_dir) = resolve_empty_trial(repo_root, trial_dir, "live")?;
+    let object_path = resolve_production_object(&repo_root, object_path)?;
+    workload_manifest(workload_id)?;
+    let mut cgroups = QualificationCgroups::create()?;
+    let run = (|| {
+        let cgroup_fd = fs::OpenOptions::new()
+            .write(true)
+            .open(cgroups.collector.join("cgroup.procs"))
+            .map_err(|error| format!("failed to open qualification collector cgroup: {error}"))?;
+        let qualification_binary = env::current_exe()
+            .map_err(|error| format!("failed to resolve qualification binary: {error}"))?;
+        let mut command = Command::new(qualification_binary);
+        command
+            .arg("measure-live-inner")
+            .arg(&repo_root)
+            .arg(&object_path)
+            .arg(workload_id)
+            .arg(&trial_dir)
+            .arg(&cgroups.collector)
+            .arg(&cgroups.workload);
+        // SAFETY: only async-signal-safe getpid/write calls run after fork,
+        // before the fresh collector image is exec'd in its own cgroup.
+        unsafe {
+            command.pre_exec(move || write_self_pid_to_cgroup(cgroup_fd.as_raw_fd()));
+        }
+        let status = command
+            .status()
+            .map_err(|error| format!("failed to start cgroup-isolated live collector: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "cgroup-isolated live collector exited with {status}"
+            ))
+        }
+    })();
+    let cleanup = cgroups.finish();
+    finish_qualification_cgroups(run, cleanup)
+}
+
+fn measure_off_command(arguments: &[String]) -> i32 {
+    if arguments.len() != 3 {
+        eprintln!("measure-off requires repo-root, workload, and trial-dir");
+        return 2;
+    }
+    match measure_off_trial(
+        Path::new(&arguments[0]),
+        &arguments[1],
+        Path::new(&arguments[2]),
+    ) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("collector-off qualification measurement failed: {error}");
+            1
+        }
+    }
+}
+
+fn measure_off_trial(repo_root: &Path, workload_id: &str, trial_dir: &Path) -> Result<(), String> {
+    let (repo_root, trial_dir) = resolve_empty_trial(repo_root, trial_dir, "collector-off")?;
+    workload_manifest(workload_id)?;
+    let workload_dir = trial_dir.join("workload");
+    fs::create_dir(&workload_dir)
+        .map_err(|error| format!("failed to create workload directory: {error}"))?;
+    let scratch_dir = workload_dir.join("scratch");
+    fs::create_dir(&scratch_dir)
+        .map_err(|error| format!("failed to create workload scratch: {error}"))?;
+    allow_managed_workload_access(&workload_dir, &scratch_dir)?;
+    let workload_output = workload_dir.join("workload-raw.json");
+    let mut cgroups = QualificationCgroups::create()?;
+    let run = (|| {
+        let qualification_binary = env::current_exe()
+            .map_err(|error| format!("failed to resolve qualification binary: {error}"))?;
+        let cgroup_fd = fs::OpenOptions::new()
+            .write(true)
+            .open(cgroups.workload.join("cgroup.procs"))
+            .map_err(|error| format!("failed to open qualification workload cgroup: {error}"))?;
+        let mut command = Command::new(qualification_binary);
+        command.args([
+            "run-workload",
+            repo_root
+                .to_str()
+                .ok_or_else(|| "repo root is not valid UTF-8".to_string())?,
+            workload_id,
+            scratch_dir
+                .to_str()
+                .ok_or_else(|| "workload scratch is not valid UTF-8".to_string())?,
+            workload_output
+                .to_str()
+                .ok_or_else(|| "workload output is not valid UTF-8".to_string())?,
+        ]);
+        // SAFETY: only async-signal-safe getpid/write calls run after fork.
+        unsafe {
+            command.pre_exec(move || write_self_pid_to_cgroup(cgroup_fd.as_raw_fd()));
+        }
+        let status = command
+            .status()
+            .map_err(|error| format!("failed to start collector-off workload: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("collector-off workload exited with {status}"))
+        }
+    })();
+    let cleanup = cgroups.finish();
+    finish_qualification_cgroups(run, cleanup)
+}
+
+fn finish_qualification_cgroups(
+    run: Result<(), String>,
+    cleanup: Result<(), String>,
+) -> Result<(), String> {
+    match (run, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(cleanup_error)) => Err(format!("cgroup cleanup failed: {cleanup_error}")),
+        (Err(error), Err(cleanup_error)) => {
+            Err(format!("{error}; cgroup cleanup failed: {cleanup_error}"))
         }
     }
 }
@@ -909,37 +1154,13 @@ async fn measure_live_trial(
     object_path: &Path,
     workload_id: &str,
     trial_dir: &Path,
+    collector_cgroup: &Path,
+    workload_cgroup: &Path,
 ) -> Result<(), String> {
-    let repo_root = repo_root
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve repo root: {error}"))?;
-    let qualification_root = repo_root
-        .join("target/qualification")
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve target/qualification: {error}"))?;
-    let trial_dir = trial_dir
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve live trial directory: {error}"))?;
-    if trial_dir == qualification_root || !trial_dir.starts_with(&qualification_root) {
-        return Err("live trial must be a child of target/qualification".to_string());
-    }
-    if fs::read_dir(&trial_dir)
-        .map_err(|error| format!("failed to inspect live trial directory: {error}"))?
-        .next()
-        .is_some()
-    {
-        return Err("live trial directory must be empty".to_string());
-    }
-    let production_object = repo_root
-        .join("target/ebpf/apolysis_observer.bpf.o")
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve production BPF object: {error}"))?;
-    let object_path = object_path
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve requested BPF object: {error}"))?;
-    if object_path != production_object {
-        return Err("measure-live requires the production BPF object".to_string());
-    }
+    let (repo_root, trial_dir) = resolve_empty_trial(repo_root, trial_dir, "live")?;
+    let object_path = resolve_production_object(&repo_root, object_path)?;
+    let (collector_cgroup, workload_cgroup) =
+        resolve_isolated_cgroups(collector_cgroup, workload_cgroup)?;
 
     let workload_manifest = workload_manifest(workload_id)?;
     let workload_dir = trial_dir.join("workload");
@@ -988,6 +1209,9 @@ async fn measure_live_trial(
         qualification_telemetry: Some(QualificationTelemetryConfig {
             output_path: telemetry_output.clone(),
             max_samples,
+            resource_sample_interval: QUALIFICATION_RESOURCE_SAMPLE_INTERVAL,
+            collector_cgroup_path: collector_cgroup,
+            managed_agent_cgroup_path: workload_cgroup,
         }),
     })
     .await?;
@@ -1003,16 +1227,281 @@ async fn measure_live_trial(
     let collector_lifecycle = terminal_collector_lifecycle(&timeline_output)?;
     let workload_raw_sha256 = sha256_path(&workload_output)?;
     let timeline_sha256 = sha256_path(&timeline_output)?;
+    let telemetry_sha256 = sha256_path(&telemetry_output)?;
     let trial = assemble_live_trial(
         workload,
         telemetry,
         collector_lifecycle,
         workload_raw_sha256,
         timeline_sha256,
+        telemetry_sha256,
     )?;
     let rendered = serde_json::to_string(&trial)
         .map_err(|error| format!("failed to serialize raw live trial: {error}"))?;
     write_new_private(&live_trial_output, format!("{rendered}\n").as_bytes())
+}
+
+fn resolve_production_object(repo_root: &Path, object_path: &Path) -> Result<PathBuf, String> {
+    let production_object = repo_root
+        .join("target/ebpf/apolysis_observer.bpf.o")
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve production BPF object: {error}"))?;
+    let object_path = object_path
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve requested BPF object: {error}"))?;
+    if object_path != production_object {
+        return Err("measure-live requires the production BPF object".to_string());
+    }
+    Ok(object_path)
+}
+
+fn resolve_isolated_cgroups(
+    collector: &Path,
+    workload: &Path,
+) -> Result<(PathBuf, PathBuf), String> {
+    let mount = Path::new("/sys/fs/cgroup")
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve cgroup v2 mount: {error}"))?;
+    let collector = collector
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve collector cgroup: {error}"))?;
+    let workload = workload
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve workload cgroup: {error}"))?;
+    let shared_parent = collector.parent().filter(|parent| {
+        workload.parent() == Some(*parent)
+            && parent
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("apolysis-qualification-"))
+    });
+    if !collector.starts_with(&mount)
+        || !workload.starts_with(&mount)
+        || collector.file_name().and_then(|name| name.to_str()) != Some("collector")
+        || workload.file_name().and_then(|name| name.to_str()) != Some("workload")
+        || shared_parent.is_none()
+    {
+        return Err("qualification collector/workload cgroup contract mismatch".to_string());
+    }
+    let current = current_cgroup_path(&mount)?;
+    if current != collector {
+        return Err("qualification collector was not exec'd in its isolated cgroup".to_string());
+    }
+    let collector_pids = read_cgroup_pids(&collector)?;
+    if collector_pids != vec![process::id()] || !read_cgroup_pids(&workload)?.is_empty() {
+        return Err("qualification cgroups were populated before collector startup".to_string());
+    }
+    for required in [
+        collector.join("memory.current"),
+        collector.join("memory.peak"),
+        workload.join("cgroup.procs"),
+    ] {
+        if !required.is_file() {
+            return Err(format!(
+                "qualification cgroup controller file is unavailable: {}",
+                required.display()
+            ));
+        }
+    }
+    Ok((collector, workload))
+}
+
+fn read_cgroup_pids(cgroup: &Path) -> Result<Vec<u32>, String> {
+    let source = fs::read_to_string(cgroup.join("cgroup.procs"))
+        .map_err(|error| format!("failed to read {} cgroup.procs: {error}", cgroup.display()))?;
+    let mut pids = source
+        .lines()
+        .map(|line| {
+            line.parse::<u32>()
+                .map_err(|error| format!("invalid cgroup PID {line}: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    pids.sort_unstable();
+    Ok(pids)
+}
+
+fn current_cgroup_path(mount: &Path) -> Result<PathBuf, String> {
+    let relative = current_cgroup_relative_path()?;
+    mount
+        .join(relative.strip_prefix(Path::new("/")).unwrap_or(&relative))
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve current cgroup: {error}"))
+}
+
+fn resolve_empty_trial(
+    repo_root: &Path,
+    trial_dir: &Path,
+    kind: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve repo root: {error}"))?;
+    let qualification_root = repo_root
+        .join("target/qualification")
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve target/qualification: {error}"))?;
+    let trial_dir = trial_dir
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve {kind} trial directory: {error}"))?;
+    if trial_dir == qualification_root || !trial_dir.starts_with(&qualification_root) {
+        return Err(format!(
+            "{kind} trial must be a child of target/qualification"
+        ));
+    }
+    if fs::read_dir(&trial_dir)
+        .map_err(|error| format!("failed to inspect {kind} trial directory: {error}"))?
+        .next()
+        .is_some()
+    {
+        return Err(format!("{kind} trial directory must be empty"));
+    }
+    Ok((repo_root, trial_dir))
+}
+
+impl QualificationCgroups {
+    fn create() -> Result<Self, String> {
+        let mount = Path::new("/sys/fs/cgroup");
+        if !mount.join("cgroup.controllers").is_file() {
+            return Err("qualification requires a unified cgroup v2 mount".to_string());
+        }
+        let relative = current_cgroup_relative_path()?;
+        let parent = mount.join(relative.strip_prefix(Path::new("/")).unwrap_or(&relative));
+        let parent = parent
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve current cgroup: {error}"))?;
+        let mount = mount
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve cgroup v2 mount: {error}"))?;
+        if !parent.starts_with(&mount) {
+            return Err("current cgroup escaped the cgroup v2 mount".to_string());
+        }
+        let nonce = clock_ns(libc::CLOCK_MONOTONIC)?;
+        let root = parent.join(format!("apolysis-qualification-{}-{nonce}", process::id()));
+        let collector = root.join("collector");
+        let workload = root.join("workload");
+        fs::create_dir(&root).map_err(|error| {
+            format!(
+                "failed to create qualification cgroup {}: {error}",
+                root.display()
+            )
+        })?;
+        let mut guard = Self {
+            root,
+            collector,
+            workload,
+            active: true,
+        };
+        let setup = (|| {
+            let controllers = fs::read_to_string(guard.root.join("cgroup.controllers"))
+                .map_err(|error| format!("failed to read delegated cgroup controllers: {error}"))?;
+            if !controllers
+                .split_whitespace()
+                .any(|controller| controller == "memory")
+            {
+                return Err(
+                    "qualification requires a delegated cgroup v2 memory controller".to_string(),
+                );
+            }
+            fs::write(guard.root.join("cgroup.subtree_control"), "+memory").map_err(|error| {
+                format!("failed to enable qualification memory controller: {error}")
+            })?;
+            fs::create_dir(&guard.collector).map_err(|error| {
+                format!("failed to create collector qualification cgroup: {error}")
+            })?;
+            fs::create_dir(&guard.workload).map_err(|error| {
+                format!("failed to create workload qualification cgroup: {error}")
+            })?;
+            for required in [
+                guard.collector.join("cgroup.procs"),
+                guard.collector.join("memory.current"),
+                guard.collector.join("memory.peak"),
+                guard.workload.join("cgroup.procs"),
+            ] {
+                if !required.is_file() {
+                    return Err(format!(
+                        "qualification cgroup controller file is unavailable: {}",
+                        required.display()
+                    ));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = setup {
+            let cleanup = guard.finish();
+            return Err(match cleanup {
+                Ok(()) => error,
+                Err(cleanup_error) => format!("{error}; cleanup failed: {cleanup_error}"),
+            });
+        }
+        Ok(guard)
+    }
+
+    fn finish(&mut self) -> Result<(), String> {
+        if !self.active {
+            return Ok(());
+        }
+        let mut errors = Vec::new();
+        for path in [&self.workload, &self.collector, &self.root] {
+            if let Err(error) = fs::remove_dir(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    errors.push(format!(
+                        "failed to remove qualification cgroup {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if errors.is_empty() {
+            self.active = false;
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+impl Drop for QualificationCgroups {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
+}
+
+fn current_cgroup_relative_path() -> Result<PathBuf, String> {
+    let source = fs::read_to_string("/proc/self/cgroup")
+        .map_err(|error| format!("failed to read current cgroup: {error}"))?;
+    let path = source
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| "current process has no unified cgroup v2 membership".to_string())?;
+    if !path.starts_with('/') || path.contains("/../") || path.ends_with("/..") {
+        return Err("current cgroup v2 membership path is invalid".to_string());
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn write_self_pid_to_cgroup(fd: libc::c_int) -> std::io::Result<()> {
+    let mut pid = unsafe { libc::getpid() } as u32;
+    let mut buffer = [0_u8; 11];
+    let mut start = buffer.len();
+    loop {
+        start -= 1;
+        buffer[start] = b'0' + (pid % 10) as u8;
+        pid /= 10;
+        if pid == 0 {
+            break;
+        }
+    }
+    let mut written = 0;
+    let bytes = &buffer[start..];
+    while written < bytes.len() {
+        let status =
+            unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        if status < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        written += status as usize;
+    }
+    Ok(())
 }
 
 fn allow_managed_workload_access(workload_dir: &Path, scratch_dir: &Path) -> Result<(), String> {
@@ -1194,9 +1683,13 @@ fn run_workload(
             let phase_end = clock_ns(libc::CLOCK_MONOTONIC)?;
             phases.push(RawWorkloadPhase {
                 rate_per_second: None,
+                started_monotonic_ns: phase_start,
+                ended_monotonic_ns: phase_end,
                 requested_events: 0,
                 completed_events: 0,
                 elapsed_monotonic_ns: phase_end.saturating_sub(phase_start),
+                expected_event_counts: BTreeMap::new(),
+                completed_event_counts: BTreeMap::new(),
             });
         }
         WorkloadKind::OperationMix {
@@ -1217,16 +1710,20 @@ fn run_workload(
             let phase_end = clock_ns(libc::CLOCK_MONOTONIC)?;
             phases.push(RawWorkloadPhase {
                 rate_per_second: None,
+                started_monotonic_ns: phase_start,
+                ended_monotonic_ns: phase_end,
                 requested_events: manifest.value.expected_event_counts.values().sum(),
                 completed_events: completed_event_counts.values().sum(),
                 elapsed_monotonic_ns: phase_end.saturating_sub(phase_start),
+                expected_event_counts: manifest.value.expected_event_counts.clone(),
+                completed_event_counts: completed_event_counts.clone(),
             });
         }
         WorkloadKind::RateSweep {
             operation,
             phases: plan,
         } => {
-            for phase in plan {
+            for (phase_index, phase) in plan.iter().enumerate() {
                 let phase_start = clock_ns(libc::CLOCK_MONOTONIC)?;
                 let interval_ns = 1_000_000_000_u64 / phase.rate_per_second;
                 for event_index in 0..phase.events {
@@ -1243,12 +1740,21 @@ fn run_workload(
                     )?;
                 }
                 let phase_end = clock_ns(libc::CLOCK_MONOTONIC)?;
+                let mut phase_event_counts = BTreeMap::new();
+                operation.add_expected_events(phase.events, &mut phase_event_counts);
                 phases.push(RawWorkloadPhase {
                     rate_per_second: Some(phase.rate_per_second),
+                    started_monotonic_ns: phase_start,
+                    ended_monotonic_ns: phase_end,
                     requested_events: phase.events,
                     completed_events: phase.events,
                     elapsed_monotonic_ns: phase_end.saturating_sub(phase_start),
+                    expected_event_counts: phase_event_counts.clone(),
+                    completed_event_counts: phase_event_counts,
                 });
+                if phase_index + 1 < plan.len() {
+                    std::thread::sleep(RATE_PHASE_SETTLE_DURATION);
+                }
             }
         }
     }
@@ -1287,6 +1793,9 @@ fn run_workload(
         workload: id.to_string(),
         workload_manifest_sha256: manifest.sha256(),
         synthetic_workload_only: true,
+        host_boot_id_sha256: host_boot_id_sha256()?,
+        started_boottime_ns,
+        ended_boottime_ns,
         started_monotonic_ns,
         ended_monotonic_ns,
         elapsed_monotonic_ns,
@@ -1304,12 +1813,19 @@ fn run_workload(
     })
 }
 
+fn host_boot_id_sha256() -> Result<String, String> {
+    let source = fs::read("/proc/sys/kernel/random/boot_id")
+        .map_err(|error| format!("failed to read host boot identity: {error}"))?;
+    Ok(hex_digest(&Sha256::digest(source)))
+}
+
 fn assemble_live_trial(
     workload: RawWorkloadResult,
     telemetry: CapturedTelemetry,
     collector_lifecycle: Value,
     workload_raw_sha256: String,
     timeline_sha256: String,
+    telemetry_sha256: String,
 ) -> Result<RawLiveTrial, String> {
     if workload.suspend_detected {
         return Err("qualification workload crossed a host suspend boundary".to_string());
@@ -1317,6 +1833,88 @@ fn assemble_live_trial(
     if telemetry.schema_version != 1 || telemetry.clock != "clock_monotonic" {
         return Err("qualification telemetry contract mismatch".to_string());
     }
+    if telemetry.resource_sample_interval_ns == 0
+        || telemetry.resource_sample_gap_limit_ns
+            != telemetry.resource_sample_interval_ns.saturating_mul(4)
+        || telemetry.resource_sample_max_gap_ns > telemetry.resource_sample_gap_limit_ns
+        || !telemetry.collector_cgroup_isolated
+    {
+        return Err("qualification resource telemetry is not isolated".to_string());
+    }
+    let actual_max_gap = telemetry
+        .resource_samples
+        .windows(2)
+        .map(|pair| pair[1].monotonic_ns.saturating_sub(pair[0].monotonic_ns))
+        .max()
+        .unwrap_or(0);
+    if actual_max_gap != telemetry.resource_sample_max_gap_ns {
+        return Err("qualification resource sample gap metadata mismatch".to_string());
+    }
+    if telemetry.loss_samples.len() != telemetry.resource_samples.len()
+        || telemetry
+            .loss_samples
+            .iter()
+            .zip(&telemetry.resource_samples)
+            .any(|(loss, resource)| {
+                loss.monotonic_ns != resource.monotonic_ns
+                    || loss
+                        .loss_counters
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<BTreeSet<_>>()
+                        != LOSS_COUNTERS.iter().copied().collect::<BTreeSet<_>>()
+            })
+    {
+        return Err("qualification loss sample contract mismatch".to_string());
+    }
+    if telemetry.loss_samples.windows(2).any(|samples| {
+        LOSS_COUNTERS
+            .iter()
+            .any(|name| samples[0].loss_counters.get(*name) > samples[1].loss_counters.get(*name))
+    }) {
+        return Err("qualification loss counters regressed between samples".to_string());
+    }
+    if telemetry.resource_samples.windows(2).any(|pair| {
+        pair[0].monotonic_ns >= pair[1].monotonic_ns
+            || pair[0].process_user_cpu_ns > pair[1].process_user_cpu_ns
+            || pair[0].process_system_cpu_ns > pair[1].process_system_cpu_ns
+            || pair[0].process_peak_rss_bytes > pair[1].process_peak_rss_bytes
+            || pair[0].collector_cgroup_memory_peak_bytes
+                > pair[1].collector_cgroup_memory_peak_bytes
+    }) {
+        return Err(
+            "qualification resource samples are not cumulative monotonic samples".to_string(),
+        );
+    }
+    let resource_start = telemetry
+        .resource_samples
+        .iter()
+        .rposition(|sample| sample.monotonic_ns <= workload.started_monotonic_ns)
+        .ok_or_else(|| "qualification resources do not bracket workload start".to_string())?;
+    let resource_end = telemetry
+        .resource_samples
+        .iter()
+        .position(|sample| sample.monotonic_ns >= workload.ended_monotonic_ns)
+        .ok_or_else(|| "qualification resources do not bracket workload end".to_string())?;
+    if resource_end <= resource_start {
+        return Err("qualification resource sample window is invalid".to_string());
+    }
+    if workload
+        .started_monotonic_ns
+        .saturating_sub(telemetry.resource_samples[resource_start].monotonic_ns)
+        > telemetry.resource_sample_gap_limit_ns
+        || telemetry.resource_samples[resource_end]
+            .monotonic_ns
+            .saturating_sub(workload.ended_monotonic_ns)
+            > telemetry.resource_sample_gap_limit_ns
+    {
+        return Err(
+            "qualification resource samples are too far from workload boundaries".to_string(),
+        );
+    }
+    let collector_resource_samples =
+        telemetry.resource_samples[resource_start..=resource_end].to_vec();
+    let phases = assemble_live_phases(&workload.phases, &telemetry)?;
     if collector_lifecycle
         .get("record_type")
         .and_then(Value::as_str)
@@ -1393,6 +1991,7 @@ fn assemble_live_trial(
         workload_manifest_sha256: workload.workload_manifest_sha256,
         workload_raw_sha256,
         timeline_sha256,
+        telemetry_sha256,
         started_monotonic_ns: workload.started_monotonic_ns,
         ended_monotonic_ns: workload.ended_monotonic_ns,
         suspend_detected: workload.suspend_detected,
@@ -1404,8 +2003,113 @@ fn assemble_live_trial(
         kernel_to_append_ns,
         telemetry_samples_total: telemetry.samples.len(),
         telemetry_samples_outside_window: outside_window,
+        resource_sample_interval_ns: telemetry.resource_sample_interval_ns,
+        resource_sample_gap_limit_ns: telemetry.resource_sample_gap_limit_ns,
+        resource_sample_max_gap_ns: telemetry.resource_sample_max_gap_ns,
+        collector_resource_samples,
+        collector_cgroup_isolated: telemetry.collector_cgroup_isolated,
+        bpf_map_memory_bytes: telemetry.bpf_map_memory_bytes,
+        bpf_program_memory_bytes: telemetry.bpf_program_memory_bytes,
+        phases,
         collector_lifecycle,
     })
+}
+
+fn assemble_live_phases(
+    workload_phases: &[RawWorkloadPhase],
+    telemetry: &CapturedTelemetry,
+) -> Result<Vec<RawLivePhase>, String> {
+    workload_phases
+        .iter()
+        .map(|phase| {
+            if phase.started_monotonic_ns >= phase.ended_monotonic_ns
+                || phase.elapsed_monotonic_ns
+                    != phase
+                        .ended_monotonic_ns
+                        .saturating_sub(phase.started_monotonic_ns)
+                || phase.completed_event_counts != phase.expected_event_counts
+            {
+                return Err("qualification workload phase contract mismatch".to_string());
+            }
+            let mut observed_event_counts = BTreeMap::new();
+            let mut kernel_to_decode_ns = Vec::new();
+            let mut kernel_to_append_ns = Vec::new();
+            for sample in telemetry.samples.iter().filter(|sample| {
+                sample.kernel_timestamp_ns >= phase.started_monotonic_ns
+                    && sample.kernel_timestamp_ns <= phase.ended_monotonic_ns
+            }) {
+                *observed_event_counts
+                    .entry(sample.event_name.clone())
+                    .or_default() += 1;
+                kernel_to_decode_ns.push(
+                    sample
+                        .decoded_monotonic_ns
+                        .saturating_sub(sample.kernel_timestamp_ns),
+                );
+                kernel_to_append_ns.push(
+                    sample
+                        .appended_monotonic_ns
+                        .saturating_sub(sample.kernel_timestamp_ns),
+                );
+            }
+            let loss_start = telemetry
+                .loss_samples
+                .iter()
+                .rposition(|sample| sample.monotonic_ns <= phase.started_monotonic_ns)
+                .ok_or_else(|| {
+                    "qualification loss samples do not bracket phase start".to_string()
+                })?;
+            let loss_end = telemetry
+                .loss_samples
+                .iter()
+                .position(|sample| sample.monotonic_ns >= phase.ended_monotonic_ns)
+                .ok_or_else(|| "qualification loss samples do not bracket phase end".to_string())?;
+            if loss_end <= loss_start
+                || phase
+                    .started_monotonic_ns
+                    .saturating_sub(telemetry.loss_samples[loss_start].monotonic_ns)
+                    > telemetry.resource_sample_gap_limit_ns
+                || telemetry.loss_samples[loss_end]
+                    .monotonic_ns
+                    .saturating_sub(phase.ended_monotonic_ns)
+                    > telemetry.resource_sample_gap_limit_ns
+            {
+                return Err(
+                    "qualification loss samples are too far from phase boundaries".to_string(),
+                );
+            }
+            let loss_counters = LOSS_COUNTERS
+                .iter()
+                .map(|name| {
+                    let start = telemetry.loss_samples[loss_start]
+                        .loss_counters
+                        .get(*name)
+                        .copied()
+                        .ok_or_else(|| format!("phase loss sample is missing {name}"))?;
+                    let end = telemetry.loss_samples[loss_end]
+                        .loss_counters
+                        .get(*name)
+                        .copied()
+                        .ok_or_else(|| format!("phase loss sample is missing {name}"))?;
+                    let delta = end.checked_sub(start).ok_or_else(|| {
+                        format!("phase loss counter {name} regressed between samples")
+                    })?;
+                    Ok(((*name).to_string(), delta))
+                })
+                .collect::<Result<BTreeMap<_, _>, String>>()?;
+            Ok(RawLivePhase {
+                rate_per_second: phase.rate_per_second,
+                started_monotonic_ns: phase.started_monotonic_ns,
+                ended_monotonic_ns: phase.ended_monotonic_ns,
+                expected_event_counts: phase.expected_event_counts.clone(),
+                exact_event_reconciliation: observed_event_counts == phase.expected_event_counts,
+                observed_event_counts,
+                loss_counters,
+                kernel_to_decode_ns,
+                kernel_to_append_ns,
+            })
+        })
+        .collect()
 }
 
 impl WorkloadScratch {
@@ -1753,10 +2457,34 @@ fn capture_preflight(repo_root: &Path, output: &Path) -> Result<(), String> {
     let evidence_root = output
         .parent()
         .ok_or_else(|| "preflight evidence output must have a parent".to_string())?;
+    let measurement_summary_path = evidence_root.join("measurement-summary.json");
+    let measurement_summary_sha256 = sha256_path(&measurement_summary_path)?;
+    let measurement_summary = load_json(&measurement_summary_path)?;
+    let summary_results = measurement_summary
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "measurement summary has no results".to_string())?;
     let result = |workload: &str| -> Result<Value, String> {
         let manifest = workload_manifest(workload)?;
         let raw_samples_sha256 =
             sha256_json_tree(&evidence_root.join("measurements").join(workload))?;
+        let summary_result = summary_results
+            .iter()
+            .find(|result| result.get("workload").and_then(Value::as_str) == Some(workload))
+            .ok_or_else(|| format!("measurement summary is missing {workload}"))?;
+        if summary_result
+            .get("raw_samples_sha256")
+            .and_then(Value::as_str)
+            != raw_samples_sha256.as_deref()
+            || summary_result
+                .get("workload_manifest_sha256")
+                .and_then(Value::as_str)
+                != Some(manifest.sha256().as_str())
+        {
+            return Err(format!(
+                "measurement summary digest contract mismatch for {workload}"
+            ));
+        }
         Ok(json!({
             "workload": workload,
             "workload_manifest_sha256": manifest.sha256(),
@@ -1797,7 +2525,8 @@ fn capture_preflight(repo_root: &Path, output: &Path) -> Result<(), String> {
             "bpf_object_sha256": sha256_path(&bpf_object)?,
             "cargo_lock_sha256": sha256_path(&repo_root.join("Cargo.lock"))?,
             "synthetic_workload_only": true,
-            "rustc_version": command_output("rustc", &["--version"])?
+            "rustc_version": command_output("rustc", &["--version"])?,
+            "measurement_summary_sha256": measurement_summary_sha256.clone()
         },
         "measurement_protocol": {
             "percentile_method": "nearest_rank",
@@ -2020,6 +2749,9 @@ mod tests {
             workload: "representative".to_string(),
             workload_manifest_sha256: "a".repeat(64),
             synthetic_workload_only: true,
+            host_boot_id_sha256: "d".repeat(64),
+            started_boottime_ns: 100,
+            ended_boottime_ns: 200,
             started_monotonic_ns: 100,
             ended_monotonic_ns: 200,
             elapsed_monotonic_ns: 100,
@@ -2044,6 +2776,48 @@ mod tests {
                 CapturedTelemetrySample::new("openat", 210, 220, 230),
             ],
             dropped_samples: 0,
+            resource_sample_interval_ns: 26,
+            resource_sample_gap_limit_ns: 104,
+            resource_sample_max_gap_ns: 102,
+            resource_samples: vec![
+                CapturedResourceSample {
+                    monotonic_ns: 99,
+                    process_user_cpu_ns: 1,
+                    process_system_cpu_ns: 2,
+                    process_rss_bytes: 1024,
+                    process_peak_rss_bytes: 2048,
+                    collector_cgroup_memory_current_bytes: 4096,
+                    collector_cgroup_memory_peak_bytes: 8192,
+                },
+                CapturedResourceSample {
+                    monotonic_ns: 201,
+                    process_user_cpu_ns: 4,
+                    process_system_cpu_ns: 6,
+                    process_rss_bytes: 2048,
+                    process_peak_rss_bytes: 3072,
+                    collector_cgroup_memory_current_bytes: 5120,
+                    collector_cgroup_memory_peak_bytes: 9216,
+                },
+            ],
+            loss_samples: vec![
+                CapturedLossSample {
+                    monotonic_ns: 99,
+                    loss_counters: LOSS_COUNTERS
+                        .iter()
+                        .map(|name| ((*name).to_string(), 0))
+                        .collect(),
+                },
+                CapturedLossSample {
+                    monotonic_ns: 201,
+                    loss_counters: LOSS_COUNTERS
+                        .iter()
+                        .map(|name| ((*name).to_string(), 0))
+                        .collect(),
+                },
+            ],
+            collector_cgroup_isolated: true,
+            bpf_map_memory_bytes: 4096,
+            bpf_program_memory_bytes: 8192,
         };
         let lifecycle = json!({
             "record_type": "collector_lifecycle",
@@ -2061,12 +2835,28 @@ mod tests {
             }
         });
 
+        let mut regressed = telemetry.clone();
+        regressed.loss_samples[0]
+            .loss_counters
+            .insert("queue".to_string(), 1);
+        let error = assemble_live_trial(
+            workload.clone(),
+            regressed,
+            lifecycle.clone(),
+            "b".repeat(64),
+            "c".repeat(64),
+            "e".repeat(64),
+        )
+        .expect_err("loss counter regression must fail closed");
+        assert!(error.contains("regressed"));
+
         let trial = assemble_live_trial(
             workload,
             telemetry,
             lifecycle,
             "b".repeat(64),
             "c".repeat(64),
+            "e".repeat(64),
         )
         .expect("assemble live trial");
 
@@ -2075,6 +2865,10 @@ mod tests {
         assert_eq!(trial.kernel_to_append_ns, vec![20]);
         assert_eq!(trial.loss_counters.values().sum::<u64>(), 0);
         assert!(trial.exact_event_reconciliation);
+        assert_eq!(trial.collector_resource_samples.len(), 2);
+        assert!(trial.collector_cgroup_isolated);
+        assert_eq!(trial.bpf_map_memory_bytes, 4096);
+        assert_eq!(trial.bpf_program_memory_bytes, 8192);
     }
 
     #[test]
@@ -2084,6 +2878,9 @@ mod tests {
             workload: "idle".to_string(),
             workload_manifest_sha256: "a".repeat(64),
             synthetic_workload_only: true,
+            host_boot_id_sha256: "d".repeat(64),
+            started_boottime_ns: 100,
+            ended_boottime_ns: 200,
             started_monotonic_ns: 100,
             ended_monotonic_ns: 200,
             elapsed_monotonic_ns: 100,
@@ -2107,10 +2904,19 @@ mod tests {
                 clock: "invalid".to_string(),
                 samples: Vec::new(),
                 dropped_samples: 0,
+                resource_sample_interval_ns: 0,
+                resource_sample_gap_limit_ns: 0,
+                resource_sample_max_gap_ns: 0,
+                resource_samples: Vec::new(),
+                loss_samples: Vec::new(),
+                collector_cgroup_isolated: false,
+                bpf_map_memory_bytes: 0,
+                bpf_program_memory_bytes: 0,
             },
             json!({}),
             "b".repeat(64),
             "c".repeat(64),
+            "e".repeat(64),
         )
         .expect_err("suspend must invalidate a raw live trial");
 
@@ -2153,6 +2959,22 @@ mod tests {
         let reasons = evaluate(&envelope, &evidence);
         assert!(reasons.contains(&"environment.qualified_tuple".to_string()));
         assert!(reasons.contains(&"environment.tracepoint_format_sha256".to_string()));
+    }
+
+    #[test]
+    fn rejects_missing_or_invalid_measurement_summary_provenance() {
+        let envelope = fixture("supported-envelope.json");
+        let mut evidence = fixture("host-managed-pass.json");
+        evidence["provenance"]
+            .as_object_mut()
+            .expect("provenance")
+            .remove("measurement_summary_sha256");
+        assert!(evaluate(&envelope, &evidence)
+            .contains(&"provenance.measurement_summary_sha256".to_string()));
+
+        evidence["provenance"]["measurement_summary_sha256"] = json!("not-a-sha256");
+        assert!(evaluate(&envelope, &evidence)
+            .contains(&"provenance.measurement_summary_sha256".to_string()));
     }
 
     #[test]

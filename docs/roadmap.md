@@ -171,8 +171,9 @@ Exit conditions:
 - privilege separation, local file permissions, retention, and redaction pass
   their bounded tests;
 - qualification evidence comes from versioned synthetic workloads, alternating
-  same-boot collector-off/on trials, monotonic raw latency samples, and exact
-  event-count reconciliation;
+  same-boot collector-off/on trials, monotonic raw latency and isolated
+  collector-resource samples, paired bootstrap summaries, phase-scoped burst
+  loss, and exact event-count reconciliation;
 - the collector meets workload-specific CPU, memory, latency, and event-loss
   budgets frozen from retained live evidence; an unset Candidate envelope is
   a visible no-go, never an implied pass.

@@ -54,7 +54,10 @@ Version 1 manifest 被嵌入 qualification-only binary，并保留在
 `qualification/workloads/`。`idle` 保持一秒空窗口；`representative` 执行 25 轮
 `openat`、`creat`、`truncate`、`renameat2`、`unlinkat`、loopback `connect` 与
 fork/exit，共预期 200 个 event；`burst` 分别提供每秒 100、500 与 2,000 个 `openat`
-event，共预期 1,300 个 event。只有位于 workload monotonic start/end window 内的 kernel
+event，共预期 1,300 个 event。每个 burst rate 都有独立 monotonic window，并在其后保留
+150 毫秒 settle gap；event rate、latency 与 loss-counter delta 按 phase 归因，不与整个 run
+混合。Summary 会报告首次检测到 loss 的 phase，并拒绝任何偏离嵌入 manifest 的 rate、顺序、
+event count 或 phase-window 计划。只有位于 workload monotonic start/end window 内的 kernel
 timestamp 才参与 reconciliation，从而排除 loader 与原始文件写入活动。
 
 Collector-off/on 配对 trial 必须保留原始样本，并至少报告：
@@ -68,10 +71,33 @@ Collector-off/on 配对 trial 必须保留原始样本，并至少报告：
 - 每类 event 的 expected、observed 和 lost count，包括 reserve、map pressure、pairing、
   decode、queue、writer 与 lifecycle-gap counter。
 
-Version 1 固定 nearest-rank percentile、10,000 次重采样的 95% percentile-bootstrap interval、
-同一次 boot 上交替 collector-off/on、`CLOCK_MONOTONIC`，并拒绝跨 suspend 的 run。每个
-workload manifest 冻结预期 event-class count；evidence 必须先匹配该 map，再核对 observed
-count。
+Qualification harness 每 25 毫秒采样 collector `RUSAGE_SELF`、`VmRSS`/`VmHWM` 与
+collector-cgroup `memory.current`/`memory.peak`，并保留首尾 bracket sample；production
+object 完成 load 与 attach 后，BPF map/program `memlock` 单独采集一次。Harness 在调用者当前
+cgroup 下创建临时 subtree，把 collector 与 synthetic workload 放入兄弟 cgroup；绝不会把
+二者混合的父 cgroup memory 报成 collector memory。
+外层 supervisor 会先把全新的 collector process 移入其 cgroup，再执行 exec，因此 runtime
+和 BPF allocation 不会早于 measurement cgroup。内层 collector 会在记录 isolation 前验证
+自己的 `/proc/self/cgroup` membership，以及准确的 collector/workload `cgroup.procs`
+membership。缺少可写 cgroup-v2 delegation、memory controller、`memory.peak`、process
+status field、BPF `memlock`、workload window 任一侧没有 sample，或 sampling gap 超过四个
+interval（100 毫秒），都会使 trial 失败。Burst phase boundary 也必须在相同 gap limit 内被
+前后 bracket。两个 process 离开后，精确删除该 subtree。采样本身的工作计入 collector CPU，
+因此是保守的 harness cost。
+
+每个 pair 保留带符号的 workload CPU 与 wall-time delta。发布的一侧 overhead estimate 只把
+负的聚合边界截为零；summary 中仍保留带符号 paired sample。
+`workload_latency_overhead` 指配对 workload wall-time delta。Event rate 取 pair 中位数；CPU
+与 overhead metric 对 pair 使用 nearest-rank p95；RSS、cgroup 与 BPF memory 取最大值；lag
+p50/p95/p99 先汇总每个 collector-on trial，再对 pair 使用相同的 nearest-rank percentile；
+最大 lag 取各 trial 最大值中的最大值。
+
+Version 1 固定 nearest-rank percentile，以及 10,000 次重采样的确定性 95%
+percentile-bootstrap interval。重采样单位是完整 off/on pair，不是单个 eBPF event。Trial 在
+同一次 boot 上交替 collector-off/on 顺序并使用 `CLOCK_MONOTONIC`。通过比较
+`CLOCK_BOOTTIME` 与 `CLOCK_MONOTONIC`，每个 raw workload、off/on pair 和完整 evidence
+bundle 都会拒绝 suspend drift。每个 workload manifest 冻结预期 event-class count；evidence
+必须先匹配该 map，再核对 observed count。
 
 Rated representative envelope 要求 known 与 unexplained event loss 都为零。CPU、memory、
 latency、重复次数和 rated event rate 在 version 1 中保持 `null`，直到 privileged 6.12 host
@@ -95,19 +121,29 @@ APOLYSIS_CONFIRM_QUALIFICATION=1 make qualify-live
 
 该命令只写入 `target/qualification/<UTC timestamp>/`。缺少前置条件会显式失败，不会变成
 通过的 skip。Capture 会按同一 boot 内交替的 collector-off/on 顺序运行三个版本化 workload
-（默认三对），保留 content-free workload、timeline、lifecycle 与 kernel-to-decode/append
-纳秒样本；profile 仍为 Candidate 时，它会写入 failed decision 并返回非零。可以把
+（默认三对），保留 content-free workload、timeline、lifecycle、kernel-to-decode/append
+纳秒样本，以及彼此分离的 collector process/cgroup/BPF resource sample。它会写入带
+pair-level measurement 与 bootstrap interval 的 `measurement-summary.json`；profile 仍为
+Candidate 时，再写入 failed decision 并返回非零。可以把
 `APOLYSIS_QUALIFICATION_SAMPLES` 设为 1 到 100 以改变原始重复次数，但这不会豁免 reviewed
-sample-size 或 budget 决策。当前 bundle 有意不设置聚合 CPU、memory measurement 与数值
-budget，因此它只是证据输入，不是支持证书。
+sample-size 或 budget 决策。当前 bundle 会计算 aggregate，但有意不设置数值 budget，因此
+它只是证据输入，不是支持证书。
+
+写入 preflight bundle 前，harness 会重新计算每个 workload 的 canonical JSON tree digest，
+要求 summary 包含相同的 raw digest 与 workload-manifest digest，并把 summary 文件 SHA-256
+记录到 preflight provenance；Supported checker 要求该 provenance field 是有效 SHA-256。
+因此 summary 无法静默引用另一份 raw evidence。
 
 Production `apolysis` CLI 不暴露 qualification timing option。独立 harness 通过 observer
-library 启用有界内存 timing recorder，在 run 结束后仅持久化 event name 与 monotonic
-timestamp，并在组装 raw trial 时拒绝 synthetic workload window 之外的 sample；跨 suspend
-的 run 会失败而不会进入 bundle。在 `sudo` 下，off/on workload 都恢复为同一个调用者
-UID/GID；privileged trial root 保持 root-owned，只委托专用 synthetic workload/result
-子目录。Privileged 原始文件使用 exclusive、no-symlink 创建。Workload 文件不包含 resource
-path、payload 或 command content。
+library 启用有界内存 timing recorder 与有界 qualification-only resource sampler。Timing
+data 只持久化 event name 与 monotonic timestamp；resource data 只持久化数值 CPU/memory
+sample 和 cgroup isolation 是否生效。Raw-trial assembly 会拒绝 synthetic workload window
+之外的 latency sample、不能前后 bracket 该 window 的 resource sample、超过固定限制的
+sampling gap、发生回退的累计 loss counter，以及无法准确归因到各 phase 的 burst counter；
+跨 suspend 的 run 会失败而不会进入 bundle。在 `sudo` 下，off/on workload 都恢复为同一个
+调用者 UID/GID；privileged trial root 保持 root-owned，只委托专用 synthetic workload/result
+子目录。Privileged 原始文件使用 exclusive、no-symlink 创建。Workload 与 summary 文件不
+包含 resource path、cgroup path、payload 或 command content。
 
 晋级到 Supported 必须通过 reviewed change 链接保留的 live 原始结果，在机器包络中冻结
 数值预算并修改 profile status，对每个声明 tuple 重新运行 checker，同时确认隐私与过载行为。
