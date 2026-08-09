@@ -2,9 +2,10 @@
 
 use apolysis_core::{OperationOutcome, OperationResult, RuntimeRelation};
 use apolysis_observer::abi::{
-    KernelEventDecodeError, KernelEventKind, KernelEventRecord, TrackedCgroupScopeAbi, ACTION_LEN,
-    COMM_LEN, FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED,
-    FLAG_RETURN_VALUE, KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
+    KernelEventDecodeError, KernelEventKind, KernelEventRecord, TrackedCgroupScopeAbi,
+    TrackedProcessIdentityAbi, ACTION_LEN, COMM_LEN, FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR,
+    FLAG_PAYLOAD_TRUNCATED, FLAG_RETURN_VALUE, KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN,
+    PAYLOAD_LEN, RESOURCE_LEN,
 };
 use apolysis_observer::raw_event_from_record;
 
@@ -23,6 +24,19 @@ fn tracked_cgroup_scope_abi_carries_a_nonzero_generation() {
     assert_eq!(scope.generation(), 7);
     assert!(scope.is_active());
     assert!(TrackedCgroupScopeAbi::active(0).is_err());
+}
+
+#[test]
+fn tracked_process_identity_abi_freezes_the_expected_start_window_layout() {
+    let identity = TrackedProcessIdentityAbi::expected(1_230_000_000, 1_240_000_000)
+        .expect("create expected process identity");
+
+    assert_eq!(std::mem::size_of::<TrackedProcessIdentityAbi>(), 24);
+    assert_eq!(std::mem::align_of::<TrackedProcessIdentityAbi>(), 8);
+    assert_eq!(identity.start_boottime_ns(), 1_230_000_000);
+    assert_eq!(identity.start_boottime_upper_ns(), 1_240_000_000);
+    assert!(identity.is_expected());
+    assert!(TrackedProcessIdentityAbi::expected(10, 10).is_err());
 }
 
 #[test]

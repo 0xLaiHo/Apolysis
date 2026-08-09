@@ -66,8 +66,11 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
 - 在一次 collector 运行内提供可抵御 PID reuse、exec 与数字 cgroup ID 复用的稳定 runtime
   identity，并显式记录 exact 或 inferred attribution。
 - 支持 PID-tree、单 cgroup 与多 cgroup Observation Scope。
-- 支持托管本地 Agent 启动，以及 local、Docker/containerd 和 Kubernetes 原型的 runtime
-  metadata 关联。
+- 支持托管本地 Agent 启动，以及带显式 late-attach Collection Boundary 的 protected
+  existing-process attach。
+- Existing-process admission 只对当前 root 做资格校验；本次 run 的 exact event identity
+  从 activation 后开始。
+- 支持 local、Docker/containerd 和 Kubernetes 原型的 runtime metadata 关联。
 - Exec 参数与 process command 默认 content-off 持久化，并对凭证和网络内容脱敏。
 - 提供有序 JSONL、输出轮转、可选本地 hash-chain envelope，以及 drop、map pressure、ABI
   mismatch、decode failure 和 truncation 的类型化诊断。

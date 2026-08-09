@@ -2,7 +2,7 @@
 
 > [English](design.md) | 简体中文
 > 配套文档：[roadmap.zh-CN.md](roadmap.zh-CN.md)
-> 最后审查：2026-08-04
+> 最后审查：2026-08-10
 
 本文是 Apolysis 做什么、目标系统如何工作、当前已经实现什么以及产品声明止步于何处的
 唯一权威说明。交付顺序、后置项和发布门禁属于 roadmap。
@@ -113,12 +113,34 @@ Agent command / self-hosted CI job / container / Pod
 每条观测都属于一个显式 run scope。受支持的 scope mode 是：
 
 - 从启动前开始观测其 process tree 的托管 Agent command；
-- 带 PID reuse 防护的现有 process tree；
+- 仅通过显式 Agent registration 或自动 discovery 准入的受保护现有 process tree；
 - 一个 container 或 workload cgroup；
 - 由 node daemon 管理的有界 cgroup 集合。
 
-Managed launch 是首选本地 workflow，因为 collector 可以在 Agent 启动前完成 attach。Attach
-到已运行进程可能错过之前的活动，必须记录这一 gap。
+Managed launch 是首选本地 workflow，因为 collector 可以在 Agent 启动前完成 attach。
+Protected existing-process attach 是封闭的准入面：原始 `--scope-pid` 会被拒绝，root 必须来自
+`--agent-registration` 或 `--agent-discover`。显式 registration 会对照当前 host boot ID、root
+start tick、executable、command fingerprint 与 canonical workspace boundary，在 collector 打开
+root pidfd 时完成资格校验；root 的 live cwd 必须解析到该 boundary 或其子目录。匹配成功记录
+`root_selection:registration_qualified`：它只限定该
+anchor 时可见的 root，不证明从 registration 创建以来的连续性。Discovery 从 live process state
+派生 identity material，要求唯一最佳 candidate，并保持 root selection 为 `inferred`。
+
+每个获准 seed 的 root 或 lineage candidate 都必须是活着的 non-zombie thread-group leader。
+Snapshot 后会为每个 candidate 打开 pidfd，并在 map insertion 前后检查其 liveness、lineage
+以及 initial PID/time namespace membership，
+形成 per-seeded-candidate pidfd sandwich；candidate 在插入后退出时由 exit hook 移除。选定 root
+在 activation 全程继续由 pidfd 锚定。Observer 与 target 必须共享 initial PID namespace，以及
+同一个 initial、unshifted time namespace。Scope 从 inactive 开始，先 attach tracepoint，再进入
+process-tree seeding：先 seed registration-qualified 或 inferred root，再通过多轮 process-tree
+snapshot 补充缺失 TGID，并在 activation 前后重新限定 root identity。只有这些步骤成功后 scope
+才进入 active。该流程关闭 seeded candidate 在 anchor 后的退出与换代竞态，但不证明
+pre-anchor selection continuity。
+
+Activation 之前的活动属于 unknown history。因此每次成功的 protected attach 都必须先持久化
+恰好一条 `operation:"collector_lifecycle"`、`count:1` 的 `late_attach` Observation Gap，然后才是
+capability manifest 与 `started` lifecycle record。这里的 count 表示一个 unknown-history
+Collection Boundary，不是缺失 syscall 或 event 数量的估计。
 
 不允许默认使用 host-wide scope。Collector 可以为开发提供显式 diagnostic mode，但它不是
 受支持的 Agent Run profile。
@@ -179,6 +201,16 @@ ownership。Collector restart 仍是可见 identity boundary。Lifecycle recover
 实例及其 restart gap，但不会跨越该边界声明 identity continuity。PID namespace、container、
 Pod 与 node identity 在可用时仍作为增量 attribution。
 
+Protected attach 会把初始 process 与 thread identifier 归一化为 TGID，并要求 root 是活着的
+thread-group leader。一个 `/proc` start tick 会转换成 boot-time 半开区间
+`[start_tick * tick_ns, (start_tick + 1) * tick_ns)`。匹配的 kernel bookkeeping 可以在 seeding
+阶段或之后，把内部 tracked membership 提升为 exact group-leader start time；后续匹配必须使用该
+nanosecond value。只有 activation 后实际发出的 event，才由匹配的 kernel start time 与
+process、exec generation 在本次 collector run 内获得 exact event identity。该 identity 与
+pre-anchor root-selection confidence 相互独立：显式 registration 为
+`registration_qualified`，discovery 保持 `inferred`；二者都不是 event relation status，也不
+证明连续性。
+
 ### 5.4 本地 Store 与 Viewer
 
 首个产品保持 local-first。Store 有界、安全轮转，并保留显式 run start、capability、health
@@ -225,6 +257,15 @@ workload 安静也会发出。`global_*` counter 描述 collector 全局丢失�
 daemon 而言，它只汇总属于该 Agent Run 的 cgroup。非零 loss counter 会让 checkpoint 标记为
 `degraded`。采集仍活跃时，只有 pending 仍保持 healthy；到 terminal 时，它代表停止时未匹配的
 工作，因此会使 terminal degraded。
+
+对 protected existing-process attach，durable start boundary 按以下顺序追加并同步：mandatory
+`late_attach` gap、Collector Capability manifest、`started`。Gap 的 `count:1` 表示一个
+unknown-history Collection Boundary。其 `root_selection` detail 描述
+`registration_qualified` registration 或 `inferred` discovery selection；它不会扩展或覆盖 event
+规范中的 `exact`、`inferred`、`ambiguous` 与 `unattributed` relation status。
+`registration_qualified` 只描述打开 pidfd 时可见的 root，不证明 pre-anchor continuity。
+这三条 record 会作为一个 durable batch 序列化：rotation 对整个 batch 只评估一次；write 或
+sync 失败时，active file 会先截断回 batch 写入前的长度，然后 attach 才失败。
 
 Daemon checkpoint 与 terminal 会先等待 sequence fence；该 fence 覆盖 boundary 之前所有已被
 pipeline 接纳的 record。随后 lifecycle boundary 直接追加到每个 Agent Run 的 hash chain，因此
@@ -285,6 +326,9 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 - Prompt、response、raw tool payload 与完整 argv 默认 content-off。
 - 持久化 executable identity 经过 allowlist 且有界；secret value 与 private path 在存储前
   脱敏。
+- Registration 的 host/start/executable/command-fingerprint/workspace value 是资格校验输入。
+  完整 executable path、workspace path 与 command fingerprint 不跨越 persistence seam；只保留
+  有界 identity 与脱敏 supervisor metadata。
 - Raw kernel payload 只是有界实现细节，没有显式 review profile 时不得跨越 persistence
   seam。
 - Observation Scope 防止意外 host-wide collection。
@@ -313,10 +357,12 @@ Implemented today：
 
 - `ebpf/observer` 与 `apolysis-observer`：CO-RE tracepoint、ring buffer、
   process-tree/cgroup scope、ABI v3、有界 process/exec 与 cgroup scope generation、
-  outcome-aware 选定文件操作与 network connect、per-cgroup operation gap counter、脱敏和
-  lifecycle checkpoint/terminal 以及 health/gap diagnostic；
-- `apolysis-cli`：fixture/live observation、托管 Agent launch、可选 Codex intent
-  correlation、visibility 与 verification command；
+  outcome-aware 选定文件操作与 network connect、protected existing-process TGID seeding、
+  per-cgroup operation gap counter、脱敏、lifecycle checkpoint/terminal 以及 health/gap
+  diagnostic；
+- `apolysis-cli`：fixture/live observation、托管 Agent launch、通过 registration 或 discovery
+  完成的 protected existing-process attach、可选 Codex intent correlation、visibility 与
+  verification command；
 - `apolysis-core`：当前 JSONL vocabulary、record type、版本化 Collector Capability
   manifest 与 collector lifecycle schema；
 - `apolysis-store`：rotation 与可选本地 hash-chain envelope；
@@ -327,7 +373,8 @@ Implemented today：
   prototype、scoped lifecycle persistence 与幂等的未完成实例恢复。
 
 Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 与 lifecycle
-start 同步到稳定存储。选定文件操作与 network connect 已具备有界 entry/exit outcome 语义，
+start 同步到稳定存储；对 protected existing-process attach，它会先持久化唯一的 unknown-history
+`late_attach` boundary。选定文件操作与 network connect 已具备有界 entry/exit outcome 语义，
 daemon 会在显式移除 scope 与正常关闭时把这些配对 gap 持久化到所属 Agent Run。单次运行内
 稳定的 scope/process generation、周期累计 lifecycle checkpoint、显式 terminal reason 与
 restart-gap recovery 已实现。Saved-run viewer 和有界 Kubernetes Beta 仍是 target。
@@ -344,6 +391,15 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 - 成功 connect 不证明远端 operation 已 commit。
 - 没有额外传播 identity 时，无法区分同进程中的逻辑 Agent；runtime-only attribution 保持
   process-level。
+- Protected existing-process attach 只支持 initial PID namespace，以及共享的 initial、
+  unshifted time namespace。
+- Per-seeded-candidate pidfd sandwich 与 exit hook 会关闭 candidate 锚定后的退出与换代竞态，
+  但不能建立 pre-anchor selection continuity：external-registration root 可能在 registration
+  创建到 root `pidfd_open` 之间，被具有相同 PID、USER_HZ tick、executable 与 command 的进程
+  替换；lineage candidate 也可能在 snapshot 到 `pidfd_open` 之间，被具有相同 PID、tick 与
+  lineage 的进程替换。这些有界 same-tick ambiguity 限制 selection claim；但 activation 后的
+  kernel start time、process generation 与 exec generation 仍在本次 collector run 内提供 exact
+  event identity。
 - Cgroup scope drain 时仍 pending 的 connect 或 file entry 会保留在有界配对 map 中，直到
   syscall 返回或 thread 退出。它们捕获的 scope generation 会阻止其在数字 cgroup ID 复用后
   跨入后续 Agent Run；但 generation allocator 属于 observer-lifetime state，不能建立跨

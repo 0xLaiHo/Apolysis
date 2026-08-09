@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,8 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use apolysis_core::{
     actors, new_collector_instance_id, resources, CanonicalEvent, CollectorFailureReason,
     CollectorLifecycleCounters, CollectorLifecycleRecord, CollectorNormalStopReason, EventSource,
-    EventType, ObservationGap, ObservationGapKind, ObserverDiagnostic, ObserverDiagnosticKind,
-    OperationOutcome, OperationResult, RawKernelEvent,
+    EventType, JsonLine, ObservationGap, ObservationGapKind, ObserverDiagnostic,
+    ObserverDiagnosticKind, OperationOutcome, OperationResult, RawKernelEvent,
 };
 use apolysis_store::JsonlRotationPolicy;
 use apolysis_store::JsonlStore;
@@ -31,7 +31,8 @@ const LIVE_COLLECTOR_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
 use crate::abi::{
     FileOperationCountersAbi, KernelEventKind, KernelEventRecord, NetworkConnectCountersAbi,
     ObserverCountersAbi, OperationPairCountersAbi, TrackedCgroupScopeAbi, TrackedCgroupState,
-    FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
+    TrackedProcessIdentityAbi, FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED,
+    FLAG_RESOURCE_TRUNCATED,
 };
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
@@ -53,6 +54,102 @@ impl LiveScope {
             Self::Cgroup(id) => format!("mode:cgroup,cgroup_id:{id}"),
             Self::ProcessTree(pid) => format!("mode:process_tree,root_pid:{pid}"),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ProcessRuntimeIdentity {
+    pub pid: u32,
+    pub start_time_ticks: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessLineageIdentity {
+    runtime: ProcessRuntimeIdentity,
+    ppid: u32,
+    tgid: u32,
+}
+
+#[derive(Debug)]
+struct AnchoredProcessIdentity {
+    lineage: ProcessLineageIdentity,
+    pidfd: OwnedFd,
+}
+
+impl ProcessRuntimeIdentity {
+    pub fn new(pid: u32, start_time_ticks: u64) -> Result<Self, String> {
+        if pid == 0 {
+            return Err("process runtime identity PID must be non-zero".to_string());
+        }
+        Ok(Self {
+            pid,
+            start_time_ticks,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartBoottimeWindow {
+    pub lower_ns: u64,
+    pub upper_ns: u64,
+}
+
+impl StartBoottimeWindow {
+    pub fn new(lower_ns: u64, upper_ns: u64) -> Result<Self, String> {
+        if lower_ns >= upper_ns {
+            return Err("process start boottime window must be non-empty".to_string());
+        }
+        Ok(Self { lower_ns, upper_ns })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcStartClock {
+    tick_ns: u64,
+}
+
+impl ProcStartClock {
+    pub fn new(ticks_per_second: u64) -> Result<Self, String> {
+        const NSEC_PER_SEC: u64 = 1_000_000_000;
+        if ticks_per_second == 0 {
+            return Err("proc clock ticks per second must be non-zero".to_string());
+        }
+        if !NSEC_PER_SEC.is_multiple_of(ticks_per_second) {
+            return Err(format!(
+                "proc clock rate {ticks_per_second} does not divide one second into integral nanoseconds"
+            ));
+        }
+        Ok(Self {
+            tick_ns: NSEC_PER_SEC / ticks_per_second,
+        })
+    }
+
+    pub fn host() -> Result<Self, String> {
+        let offsets = fs::read_to_string("/proc/self/timens_offsets")
+            .map_err(|_| "failed to read observer time namespace offsets".to_string())?;
+        validate_initial_time_namespace_offsets(&offsets)?;
+        // SAFETY: sysconf reads a process-wide immutable clock conversion value.
+        let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if ticks_per_second <= 0 {
+            return Err("failed to read the host proc clock rate".to_string());
+        }
+        Self::new(ticks_per_second as u64)
+    }
+
+    pub fn start_boottime_window(
+        self,
+        identity: ProcessRuntimeIdentity,
+    ) -> Result<StartBoottimeWindow, String> {
+        let lower_ns = identity
+            .start_time_ticks
+            .checked_mul(self.tick_ns)
+            .ok_or_else(|| "process start boottime lower bound overflowed".to_string())?;
+        let upper_ns = identity
+            .start_time_ticks
+            .checked_add(1)
+            .and_then(|ticks| ticks.checked_mul(self.tick_ns))
+            .ok_or_else(|| "process start boottime upper bound overflowed".to_string())?;
+        StartBoottimeWindow::new(lower_ns, upper_ns)
     }
 }
 
@@ -88,6 +185,95 @@ pub fn discover_process_tree_scope_pids(
     }
 
     Ok(pids.into_iter().collect())
+}
+
+pub fn discover_process_tree_scope_identities(
+    root_pid: u32,
+    proc_root: impl AsRef<Path>,
+) -> Result<Vec<ProcessRuntimeIdentity>, String> {
+    Ok(discover_process_tree_scope_lineages(root_pid, proc_root)?
+        .into_iter()
+        .map(|identity| identity.runtime)
+        .collect())
+}
+
+fn discover_process_tree_scope_lineages(
+    root_pid: u32,
+    proc_root: impl AsRef<Path>,
+) -> Result<Vec<ProcessLineageIdentity>, String> {
+    let proc_root = proc_root.as_ref();
+    let root = read_process_lineage_identity_at(proc_root, root_pid).ok_or_else(|| {
+        format!("process-tree root runtime identity is unavailable: pid={root_pid}")
+    })?;
+    if root.tgid != root_pid {
+        return Err(format!(
+            "process-tree root must identify a thread-group leader: pid={root_pid},tgid={}",
+            root.tgid
+        ));
+    }
+
+    let entries = fs::read_dir(proc_root)
+        .map_err(|error| format!("failed to scan process identities: {error}"))?;
+    let mut snapshot = BTreeMap::new();
+    for entry in entries.filter_map(Result::ok) {
+        let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
+        let Some(identity) = read_process_lineage_identity_at(proc_root, pid) else {
+            continue;
+        };
+        if identity.tgid == pid {
+            snapshot.insert(pid, identity);
+        }
+    }
+    snapshot.insert(root_pid, root);
+
+    let mut children_by_parent = BTreeMap::<u32, Vec<ProcessLineageIdentity>>::new();
+    for identity in snapshot.values().copied() {
+        if identity.runtime.pid != root_pid {
+            children_by_parent
+                .entry(identity.ppid)
+                .or_default()
+                .push(identity);
+        }
+    }
+
+    let mut accepted = BTreeMap::from([(root_pid, root)]);
+    let mut pending = VecDeque::from([root_pid]);
+    while let Some(parent_pid) = pending.pop_front() {
+        let Some(expected_parent) = accepted.get(&parent_pid).copied() else {
+            continue;
+        };
+        let Some(actual_parent) = read_process_lineage_identity_at(proc_root, parent_pid) else {
+            continue;
+        };
+        if actual_parent.runtime != expected_parent.runtime || actual_parent.tgid != parent_pid {
+            continue;
+        }
+        for candidate in children_by_parent.get(&parent_pid).into_iter().flatten() {
+            let pid = candidate.runtime.pid;
+            if accepted.contains_key(&pid) {
+                continue;
+            }
+            let Some(actual) = read_process_lineage_identity_at(proc_root, pid) else {
+                continue;
+            };
+            if actual != *candidate || actual.tgid != pid {
+                continue;
+            }
+            accepted.insert(pid, actual);
+            pending.push_back(pid);
+        }
+    }
+
+    let final_root = read_process_lineage_identity_at(proc_root, root_pid).ok_or_else(|| {
+        format!("process-tree root runtime identity is unavailable: pid={root_pid}")
+    })?;
+    if final_root.runtime != root.runtime || final_root.tgid != root_pid {
+        return Err("process-tree root identity changed during lineage snapshot".to_string());
+    }
+
+    Ok(accepted.into_values().collect())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -127,6 +313,7 @@ pub struct AgentRegistration {
     pub kind: String,
     pub pid: u32,
     pub start_time_ticks: u64,
+    pub host_boot_id: String,
     pub workspace_root: PathBuf,
     pub executable: String,
     pub command_fingerprint: String,
@@ -137,18 +324,10 @@ pub struct AgentRegistration {
 impl AgentRegistration {
     pub fn from_json_file(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
-        let input = fs::read_to_string(path).map_err(|error| {
-            format!(
-                "failed to read agent registration {}: {error}",
-                path.display()
-            )
-        })?;
-        let registration = serde_json::from_str::<Self>(&input).map_err(|error| {
-            format!(
-                "failed to parse agent registration {}: {error}",
-                path.display()
-            )
-        })?;
+        let input = fs::read_to_string(path)
+            .map_err(|error| format!("failed to read agent registration: {error}"))?;
+        let registration = serde_json::from_str::<Self>(&input)
+            .map_err(|error| format!("failed to parse agent registration: {error}"))?;
         registration.validate()?;
         Ok(registration)
     }
@@ -160,8 +339,8 @@ impl AgentRegistration {
         if self.pid == 0 {
             return Err("agent registration pid must be non-zero".to_string());
         }
-        if self.start_time_ticks == 0 {
-            return Err("agent registration start_time_ticks must be non-zero".to_string());
+        if !valid_host_boot_id(&self.host_boot_id) {
+            return Err("agent registration host_boot_id must be a UUID".to_string());
         }
         if !self.workspace_root.is_absolute() {
             return Err("agent registration workspace_root must be absolute".to_string());
@@ -175,29 +354,51 @@ impl AgentRegistration {
         Ok(())
     }
 
-    pub fn validate_proc_identity(&self, proc_root: impl AsRef<Path>) -> Result<(), String> {
+    pub fn validate_runtime_identity(
+        &self,
+        proc_root: impl AsRef<Path>,
+        current_host_boot_id: &str,
+    ) -> Result<ProcessRuntimeIdentity, String> {
         self.validate()?;
-        let actual = read_process_start_time_ticks_at(proc_root, self.pid).ok_or_else(|| {
+        if !valid_host_boot_id(current_host_boot_id) {
+            return Err("current host boot identity is invalid".to_string());
+        }
+        if !self.host_boot_id.eq_ignore_ascii_case(current_host_boot_id) {
+            return Err("agent registration host boot identity mismatch".to_string());
+        }
+        let actual = read_proc_identity(proc_root.as_ref(), self.pid).ok_or_else(|| {
             format!(
                 "agent registration PID identity is unavailable before attach: pid={}",
                 self.pid
             )
         })?;
-        if actual != self.start_time_ticks {
+        if actual.start_time_ticks != self.start_time_ticks {
             return Err(format!(
-                "agent registration rejected possible PID reuse: pid={},expected_start_time_ticks={},actual_start_time_ticks={actual}",
-                self.pid, self.start_time_ticks
+                "agent registration rejected possible PID reuse: pid={},expected_start_time_ticks={},actual_start_time_ticks={}",
+                self.pid, self.start_time_ticks, actual.start_time_ticks
             ));
         }
-        Ok(())
+        if actual.executable != self.executable {
+            return Err(format!(
+                "agent registration executable identity mismatch: pid={}",
+                self.pid
+            ));
+        }
+        if actual.command_fingerprint != self.command_fingerprint {
+            return Err(format!(
+                "agent registration command identity mismatch: pid={}",
+                self.pid
+            ));
+        }
+        ProcessRuntimeIdentity::new(self.pid, self.start_time_ticks)
     }
 
-    fn into_metadata(self, supervisor_mode: impl Into<String>) -> AgentScopeMetadata {
+    fn to_metadata(&self, supervisor_mode: impl Into<String>) -> AgentScopeMetadata {
         AgentScopeMetadata {
             supervisor_mode: supervisor_mode.into(),
-            kind: self.kind,
+            kind: self.kind.clone(),
             root_pid: self.pid,
-            executable: self.executable,
+            executable: self.executable.clone(),
             workspace_root: self.workspace_root.display().to_string(),
             start_time_ticks: Some(self.start_time_ticks),
         }
@@ -517,6 +718,12 @@ impl LiveObserveRequest {
                 "--agent-registration cannot be combined with --agent-discover".to_string(),
             );
         }
+        if matches!(self.scope, Some(LiveScope::ProcessTree(_))) {
+            return Err(
+                "--scope-pid is not a protected existing-process attach; use --agent-registration, --agent-discover, or --agent-run"
+                    .to_string(),
+            );
+        }
 
         let scope_modes = usize::from(self.scope.is_some())
             + usize::from(self.agent_run.is_some())
@@ -593,7 +800,7 @@ fn current_managed_agent_run_as() -> Option<ManagedAgentRunAs> {
     })
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct AgentScopeMetadata {
     supervisor_mode: String,
     kind: String,
@@ -601,6 +808,84 @@ struct AgentScopeMetadata {
     executable: String,
     workspace_root: String,
     start_time_ticks: Option<u64>,
+}
+
+#[derive(Debug)]
+struct PreparedExistingProcessAttach {
+    registration: AgentRegistration,
+    metadata: AgentScopeMetadata,
+    workspace_root: PathBuf,
+    clock: ProcStartClock,
+    root_pidfd: OwnedFd,
+    provenance: &'static str,
+    root_selection: &'static str,
+}
+
+impl PreparedExistingProcessAttach {
+    fn prepare(
+        registration: AgentRegistration,
+        supervisor_mode: &'static str,
+        root_selection: &'static str,
+        workspace_root: &Path,
+        current_host_boot_id: &str,
+    ) -> Result<Self, String> {
+        let workspace_root =
+            validate_workspace_boundary(&registration.workspace_root, workspace_root)?;
+        let root_pidfd = open_pidfd(registration.pid)?;
+        ensure_pidfd_alive(&root_pidfd)?;
+        validate_native_pid_namespace(registration.pid)?;
+        validate_same_time_namespace(registration.pid)?;
+        validate_process_workspace_boundary_at("/proc", registration.pid, &workspace_root)?;
+        let clock = ProcStartClock::host()?;
+        let root_identity =
+            registration.validate_runtime_identity("/proc", current_host_boot_id)?;
+        let identities = discover_process_tree_scope_identities(registration.pid, "/proc")?;
+        if identities
+            .iter()
+            .find(|identity| identity.pid == registration.pid)
+            .copied()
+            != Some(root_identity)
+        {
+            return Err("process-tree root identity changed during attach preparation".to_string());
+        }
+        ensure_pidfd_alive(&root_pidfd)?;
+        let metadata = registration.to_metadata(supervisor_mode);
+        Ok(Self {
+            registration,
+            metadata,
+            workspace_root,
+            clock,
+            root_pidfd,
+            provenance: supervisor_mode,
+            root_selection,
+        })
+    }
+
+    fn root_pid(&self) -> u32 {
+        self.registration.pid
+    }
+
+    fn validate_root(&self, current_host_boot_id: &str) -> Result<(), String> {
+        ensure_pidfd_alive(&self.root_pidfd)?;
+        validate_native_pid_namespace(self.registration.pid)?;
+        validate_same_time_namespace(self.registration.pid)?;
+        validate_process_workspace_boundary_at(
+            "/proc",
+            self.registration.pid,
+            &self.workspace_root,
+        )?;
+        self.registration
+            .validate_runtime_identity("/proc", current_host_boot_id)?;
+        ensure_pidfd_alive(&self.root_pidfd)?;
+        Ok(())
+    }
+
+    fn late_attach_detail(&self) -> String {
+        format!(
+            "collection_boundary:protected_existing_process_attach,history:unknown,provenance:{},root_selection:{}",
+            self.provenance, self.root_selection
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -913,6 +1198,10 @@ struct ScopeConfig {
 
 unsafe impl Pod for ScopeConfig {}
 
+const SCOPE_MODE_INACTIVE: u32 = 0;
+const SCOPE_MODE_CGROUP: u32 = 1;
+const SCOPE_MODE_PID_TREE: u32 = 2;
+const SCOPE_MODE_PID_TREE_SEEDING: u32 = 4;
 impl From<NetworkConnectCountersAbi> for NetworkConnectCounters {
     fn from(counters: NetworkConnectCountersAbi) -> Self {
         Self {
@@ -984,7 +1273,27 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         request.output_rotation,
         &mut store,
     )?;
-    let registered_agent = match resolve_registered_agent(&request) {
+    let current_host_boot_id = match read_host_boot_id_at("/proc/sys/kernel/random/boot_id") {
+        Ok(host_boot_id) => host_boot_id,
+        Err(error) => {
+            append_diagnostic(
+                &request.session_id,
+                ObserverDiagnosticKind::AttachFailure,
+                1,
+                "host boot identity is unavailable before attach",
+                &mut store,
+            )?;
+            append_failed_collector_lifecycle(
+                &request.session_id,
+                &collector_instance_id,
+                CollectorFailureReason::AttachFailure,
+                CollectorLifecycleCounters::default(),
+                &mut store,
+            )?;
+            return Err(error);
+        }
+    };
+    let registered_agent = match resolve_registered_agent(&request, &current_host_boot_id) {
         Ok(agent) => agent,
         Err(error) => {
             append_diagnostic(
@@ -1011,7 +1320,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         .or_else(|| {
             registered_agent
                 .as_ref()
-                .map(|agent| LiveScope::ProcessTree(agent.root_pid))
+                .map(|agent| LiveScope::ProcessTree(agent.root_pid()))
         })
         .unwrap_or_else(|| LiveScope::ProcessTree(std::process::id()));
     if let Err(error) = validate_live_prerequisites(&prerequisite_scope, &loader_plan) {
@@ -1064,7 +1373,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         None
     };
     if let Some(agent) = registered_agent.as_ref() {
-        write_agent_supervisor_metadata(&request.session_id, agent, &mut store)?;
+        write_agent_supervisor_metadata(&request.session_id, &agent.metadata, &mut store)?;
     }
     let scope = managed_agent
         .as_ref()
@@ -1072,7 +1381,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         .or_else(|| {
             registered_agent
                 .as_ref()
-                .map(|agent| LiveScope::ProcessTree(agent.root_pid))
+                .map(|agent| LiveScope::ProcessTree(agent.root_pid()))
         })
         .or_else(|| request.scope.clone())
         .expect("live request validation requires a scope or managed agent");
@@ -1099,7 +1408,7 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             return Err(format!("BPF load or verifier failure: {error:#}"));
         }
     };
-    if let Err(error) = configure_scope(&mut ebpf, &scope) {
+    if let Err(error) = configure_scope_inactive(&mut ebpf, &scope) {
         terminate_managed_agent(managed_agent.as_mut()).await;
         append_diagnostic(
             &request.session_id,
@@ -1135,6 +1444,30 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
             &request.session_id,
             &collector_instance_id,
             reason,
+            CollectorLifecycleCounters::default(),
+            &mut store,
+        )?;
+        return Err(error);
+    }
+
+    if let Err(error) = prepare_scope_after_tracepoint_attach(
+        &mut ebpf,
+        &scope,
+        registered_agent.as_ref(),
+        &current_host_boot_id,
+    ) {
+        terminate_managed_agent(managed_agent.as_mut()).await;
+        append_diagnostic(
+            &request.session_id,
+            ObserverDiagnosticKind::AttachFailure,
+            1,
+            &error,
+            &mut store,
+        )?;
+        append_failed_collector_lifecycle(
+            &request.session_id,
+            &collector_instance_id,
+            CollectorFailureReason::AttachFailure,
             CollectorLifecycleCounters::default(),
             &mut store,
         )?;
@@ -1192,28 +1525,56 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         None => None,
     };
 
-    let capability_manifest =
-        audit_observer_capability_manifest(&request.session_id, &scope, &loader_plan);
-    if let Err(error) = store.append(&capability_manifest) {
+    let activation_result = match registered_agent.as_ref() {
+        Some(agent) => {
+            activate_existing_process_scope(&mut ebpf, &scope, agent, &current_host_boot_id)
+        }
+        None => activate_scope(&mut ebpf, &scope),
+    };
+    if let Err(error) = activation_result {
         terminate_managed_agent(managed_agent.as_mut()).await;
-        return Err(format!(
-            "failed to write collector capability manifest: {error}"
-        ));
+        append_diagnostic(
+            &request.session_id,
+            ObserverDiagnosticKind::AttachFailure,
+            1,
+            &error,
+            &mut store,
+        )?;
+        append_failed_collector_lifecycle(
+            &request.session_id,
+            &collector_instance_id,
+            CollectorFailureReason::AttachFailure,
+            CollectorLifecycleCounters::default(),
+            &mut store,
+        )?;
+        return Err(error);
     }
-    if let Err(error) = store.append(&CollectorLifecycleRecord::started(
+
+    let late_attach_detail = registered_agent
+        .as_ref()
+        .map(PreparedExistingProcessAttach::late_attach_detail);
+    if let Err(error) = persist_collector_start_boundary(
         &request.session_id,
         &collector_instance_id,
-    )) {
+        &scope,
+        &loader_plan,
+        late_attach_detail.as_deref(),
+        &mut store,
+    ) {
+        let _ = set_scope_config(&mut ebpf, &scope, SCOPE_MODE_INACTIVE);
         terminate_managed_agent(managed_agent.as_mut()).await;
-        return Err(format!(
-            "failed to write collector lifecycle start: {error}"
-        ));
-    }
-    if let Err(error) = store.flush_and_sync() {
-        terminate_managed_agent(managed_agent.as_mut()).await;
-        return Err(format!(
-            "failed to persist collector capability manifest and lifecycle start: {error}"
-        ));
+        return match append_failed_collector_lifecycle(
+            &request.session_id,
+            &collector_instance_id,
+            CollectorFailureReason::StorageFailure,
+            CollectorLifecycleCounters::default(),
+            &mut store,
+        ) {
+            Ok(()) => Err(error),
+            Err(lifecycle_error) => Err(format!(
+                "{error}; additionally failed to persist collector failure lifecycle: {lifecycle_error}"
+            )),
+        };
     }
 
     // Tracepoints are attached, the pid tree is registered, and the declared
@@ -1232,7 +1593,8 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         .map_err(|error| format!("failed to open observer ring buffer: {error}"))?;
     let mut async_ring = AsyncFd::new(ring_buffer)
         .map_err(|error| format!("failed to poll observer ring buffer: {error}"))?;
-    let calibration = ObserverBatchDecoder::capture()?;
+    let calibration =
+        ObserverBatchDecoder::capture_with_host_boot_id(current_host_boot_id.clone())?;
     let deadline = request
         .duration
         .map(|duration| tokio::time::Instant::now() + duration);
@@ -1579,22 +1941,36 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
 
 fn resolve_registered_agent(
     request: &LiveObserveRequest,
-) -> Result<Option<AgentScopeMetadata>, String> {
+    current_host_boot_id: &str,
+) -> Result<Option<PreparedExistingProcessAttach>, String> {
     if let Some(path) = request.agent_registration_path.as_deref() {
         let registration = AgentRegistration::from_json_file(path)?;
-        registration.validate_proc_identity("/proc")?;
-        return Ok(Some(registration.into_metadata("external_registration")));
+        return PreparedExistingProcessAttach::prepare(
+            registration,
+            "external_registration",
+            "registration_qualified",
+            &request.workspace_root,
+            current_host_boot_id,
+        )
+        .map(Some);
     }
 
     if let Some(discovery) = request.agent_discovery.as_ref() {
-        let registration = discover_agent_registration(
+        let registration = discover_agent_registration_with_boot_id(
             discovery,
             "/proc",
             &request.session_id,
             &request.workspace_root,
+            current_host_boot_id,
         )?;
-        registration.validate_proc_identity("/proc")?;
-        return Ok(Some(registration.into_metadata("proc_discovery")));
+        return PreparedExistingProcessAttach::prepare(
+            registration,
+            "proc_discovery",
+            "inferred",
+            &request.workspace_root,
+            current_host_boot_id,
+        )
+        .map(Some);
     }
 
     Ok(None)
@@ -1605,6 +1981,22 @@ pub fn discover_agent_registration(
     proc_root: impl AsRef<Path>,
     session_id: &str,
     workspace_root: &Path,
+) -> Result<AgentRegistration, String> {
+    discover_agent_registration_with_boot_id(
+        request,
+        proc_root,
+        session_id,
+        workspace_root,
+        &read_host_boot_id_at("/proc/sys/kernel/random/boot_id")?,
+    )
+}
+
+fn discover_agent_registration_with_boot_id(
+    request: &AgentDiscoveryRequest,
+    proc_root: impl AsRef<Path>,
+    session_id: &str,
+    workspace_root: &Path,
+    host_boot_id: &str,
 ) -> Result<AgentRegistration, String> {
     let proc_root = proc_root.as_ref();
     let identities = read_proc_identities(proc_root)?;
@@ -1627,10 +2019,7 @@ pub fn discover_agent_registration(
         .collect::<Vec<_>>();
 
     if candidates.is_empty() {
-        return Err(format!(
-            "agent discovery found no matching {} process",
-            request.kind
-        ));
+        return Err("agent discovery found no matching process".to_string());
     }
 
     candidates.sort_by(|left, right| {
@@ -1656,7 +2045,7 @@ pub fn discover_agent_registration(
 
     Ok(top[0]
         .identity
-        .to_registration(&request.kind, workspace_root))
+        .to_registration(&request.kind, workspace_root, host_boot_id.to_string()))
 }
 
 fn spawn_managed_agent(
@@ -1906,6 +2295,206 @@ fn read_process_start_time_ticks(pid: u32) -> Option<u64> {
     read_process_start_time_ticks_at("/proc", pid)
 }
 
+fn validate_workspace_boundary(
+    registered_workspace: &Path,
+    requested_workspace: &Path,
+) -> Result<PathBuf, String> {
+    let registered = fs::canonicalize(registered_workspace)
+        .map_err(|_| "agent registration workspace boundary is unavailable".to_string())?;
+    let requested = fs::canonicalize(requested_workspace)
+        .map_err(|_| "requested workspace boundary is unavailable".to_string())?;
+    if registered != requested {
+        return Err("agent registration workspace boundary mismatch".to_string());
+    }
+    Ok(requested)
+}
+
+fn validate_process_workspace_boundary_at(
+    proc_root: impl AsRef<Path>,
+    pid: u32,
+    workspace_root: &Path,
+) -> Result<(), String> {
+    let cwd = fs::canonicalize(proc_root.as_ref().join(pid.to_string()).join("cwd"))
+        .map_err(|_| "existing-process root workspace identity is unavailable".to_string())?;
+    if cwd != workspace_root && !cwd.starts_with(workspace_root) {
+        return Err("existing-process root workspace boundary mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn validate_same_time_namespace(pid: u32) -> Result<(), String> {
+    let namespace_inode = fs::metadata("/proc/self/ns/time")
+        .map_err(|_| "observer time namespace identity is unavailable".to_string())?
+        .ino();
+    validate_initial_time_namespace_inode(namespace_inode)?;
+    validate_matching_namespace_links(
+        "/proc/self/ns/time",
+        format!("/proc/{pid}/ns/time"),
+        "observer time namespace identity is unavailable",
+        "target time namespace identity is unavailable",
+        "protected existing-process attach requires the observer and target to share a time namespace",
+    )
+}
+
+fn validate_initial_time_namespace_inode(inode: u64) -> Result<(), String> {
+    // Linux UAPI `TIME_NS_INIT_INO`; zero offsets alone do not prove that the
+    // observer is in the initial time namespace.
+    const TIME_NS_INIT_INO: u64 = 0xEFFF_FFFA;
+    if inode != TIME_NS_INIT_INO {
+        return Err(
+            "protected existing-process attach requires the initial time namespace".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_native_pid_namespace(pid: u32) -> Result<(), String> {
+    let status = fs::read_to_string("/proc/self/status")
+        .map_err(|_| "observer PID namespace identity is unavailable".to_string())?;
+    validate_initial_pid_namespace_status(&status)?;
+    let namespace_inode = fs::metadata("/proc/self/ns/pid")
+        .map_err(|_| "observer PID namespace identity is unavailable".to_string())?
+        .ino();
+    validate_initial_pid_namespace_inode(namespace_inode)?;
+    validate_matching_namespace_links(
+        "/proc/self/ns/pid",
+        format!("/proc/{pid}/ns/pid"),
+        "observer PID namespace identity is unavailable",
+        "target PID namespace identity is unavailable",
+        "protected process-tree attach requires the observer and target to share the initial PID namespace",
+    )
+}
+
+fn validate_matching_namespace_links(
+    observer_path: impl AsRef<Path>,
+    target_path: impl AsRef<Path>,
+    observer_unavailable: &str,
+    target_unavailable: &str,
+    mismatch: &str,
+) -> Result<(), String> {
+    let observer = fs::read_link(observer_path).map_err(|_| observer_unavailable.to_string())?;
+    let target = fs::read_link(target_path).map_err(|_| target_unavailable.to_string())?;
+    if observer != target {
+        return Err(mismatch.to_string());
+    }
+    Ok(())
+}
+
+fn validate_initial_pid_namespace_inode(inode: u64) -> Result<(), String> {
+    // Linux UAPI `PID_NS_INIT_INO`; unlike NSpid, this remains stable when a
+    // nested PID namespace mounts its own procfs view.
+    const PID_NS_INIT_INO: u64 = 0xEFFF_FFFC;
+    if inode != PID_NS_INIT_INO {
+        return Err("protected process-tree attach requires the initial PID namespace".to_string());
+    }
+    Ok(())
+}
+
+fn validate_initial_pid_namespace_status(status: &str) -> Result<(), String> {
+    let pids = status
+        .lines()
+        .find_map(|line| line.strip_prefix("NSpid:"))
+        .ok_or_else(|| "observer initial PID namespace identity is unavailable".to_string())?
+        .split_whitespace()
+        .map(|value| value.parse::<u32>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "observer initial PID namespace identity is invalid".to_string())?;
+    if pids.len() != 1 || pids[0] == 0 {
+        return Err("protected process-tree attach requires the initial PID namespace".to_string());
+    }
+    Ok(())
+}
+
+fn open_pidfd(pid: u32) -> Result<OwnedFd, String> {
+    // SAFETY: pidfd_open receives a numeric PID and zero flags, and returns a new fd on success.
+    let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0_u32) as libc::c_int };
+    if raw_fd < 0 {
+        return Err(format!(
+            "failed to anchor existing-process runtime identity: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: pidfd_open returned ownership of this valid file descriptor.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
+}
+
+fn ensure_pidfd_alive(pidfd: &OwnedFd) -> Result<(), String> {
+    let mut pollfd = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: pollfd points to one initialized element and the timeout is non-blocking.
+    let result = unsafe { libc::poll(&mut pollfd, 1, 0) };
+    if result < 0 {
+        return Err(format!(
+            "failed to validate existing-process liveness: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if result != 0 {
+        return Err("existing process exited before protected attach activation".to_string());
+    }
+    Ok(())
+}
+
+fn discover_anchored_process_tree_scope_identities(
+    root_pid: u32,
+) -> Result<Vec<AnchoredProcessIdentity>, String> {
+    let lineages = discover_process_tree_scope_lineages(root_pid, "/proc")?;
+    let mut anchors = Vec::with_capacity(lineages.len());
+    for lineage in lineages {
+        anchors.push(AnchoredProcessIdentity {
+            pidfd: open_pidfd(lineage.runtime.pid)?,
+            lineage,
+        });
+    }
+    validate_anchored_process_identities(&anchors)?;
+    Ok(anchors)
+}
+
+fn validate_anchored_process_identity(anchor: &AnchoredProcessIdentity) -> Result<(), String> {
+    ensure_pidfd_alive(&anchor.pidfd)?;
+    validate_native_pid_namespace(anchor.lineage.runtime.pid)?;
+    validate_same_time_namespace(anchor.lineage.runtime.pid)?;
+    let current = read_process_lineage_identity_at(Path::new("/proc"), anchor.lineage.runtime.pid)
+        .ok_or_else(|| {
+            "existing process identity became unavailable before protected attach activation"
+                .to_string()
+        })?;
+    if current != anchor.lineage || current.tgid != current.runtime.pid {
+        return Err(
+            "existing process identity changed before protected attach activation".to_string(),
+        );
+    }
+    ensure_pidfd_alive(&anchor.pidfd)?;
+    Ok(())
+}
+
+fn validate_anchored_process_identities(anchors: &[AnchoredProcessIdentity]) -> Result<(), String> {
+    for anchor in anchors {
+        validate_anchored_process_identity(anchor)?;
+    }
+    Ok(())
+}
+
+fn with_stable_anchored_process_identities<T>(
+    anchors: &[AnchoredProcessIdentity],
+    update: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    with_identity_validation_sandwich(|| validate_anchored_process_identities(anchors), update)
+}
+
+fn with_identity_validation_sandwich<T>(
+    mut validate: impl FnMut() -> Result<(), String>,
+    update: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    validate()?;
+    let output = update()?;
+    validate()?;
+    Ok(output)
+}
+
 fn read_process_start_time_ticks_at(proc_root: impl AsRef<Path>, pid: u32) -> Option<u64> {
     let stat = read_proc_stat(proc_root.as_ref(), pid)?;
     parse_proc_stat_start_time_ticks(&stat)
@@ -1940,11 +2529,17 @@ impl ProcIdentity {
         }
     }
 
-    fn to_registration(&self, kind: &str, workspace_root: &Path) -> AgentRegistration {
+    fn to_registration(
+        &self,
+        kind: &str,
+        workspace_root: &Path,
+        host_boot_id: String,
+    ) -> AgentRegistration {
         AgentRegistration {
             kind: kind.to_string(),
             pid: self.pid,
             start_time_ticks: self.start_time_ticks,
+            host_boot_id,
             workspace_root: workspace_root.to_path_buf(),
             executable: if self.executable.is_empty() {
                 self.comm.clone()
@@ -1965,13 +2560,7 @@ struct AgentDiscoveryCandidate {
 
 impl AgentDiscoveryCandidate {
     fn summary(&self) -> String {
-        format!(
-            "pid={},score={},executable={},command={}",
-            self.identity.pid,
-            self.score,
-            self.identity.executable,
-            self.identity.command()
-        )
+        format!("pid={},score={}", self.identity.pid, self.score)
     }
 }
 
@@ -1983,38 +2572,38 @@ fn read_proc_identities(proc_root: &Path) -> Result<Vec<ProcIdentity>, String> {
         let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
             continue;
         };
-        let Some(stat) = read_proc_stat(proc_root, pid) else {
-            continue;
-        };
-        let Some(ppid) = parse_proc_stat_ppid(&stat) else {
-            continue;
-        };
-        let Some(start_time_ticks) = parse_proc_stat_start_time_ticks(&stat) else {
-            continue;
-        };
-        let comm = parse_proc_stat_comm(&stat).unwrap_or_else(|| pid.to_string());
-        let command_args = read_proc_cmdline(proc_root, pid);
-        let executable = fs::read_link(proc_root.join(pid.to_string()).join("exe"))
-            .map(|path| path.display().to_string())
-            .unwrap_or_default();
-        let cwd = fs::read_link(proc_root.join(pid.to_string()).join("cwd")).ok();
-        let fingerprint_input = if command_args.is_empty() {
-            comm.as_bytes().to_vec()
-        } else {
-            command_args.join("\0").into_bytes()
-        };
-        identities.push(ProcIdentity {
-            pid,
-            ppid,
-            start_time_ticks,
-            comm,
-            executable,
-            cwd,
-            command_args,
-            command_fingerprint: command_fingerprint(&fingerprint_input),
-        });
+        if let Some(identity) = read_proc_identity(proc_root, pid) {
+            identities.push(identity);
+        }
     }
     Ok(identities)
+}
+
+fn read_proc_identity(proc_root: &Path, pid: u32) -> Option<ProcIdentity> {
+    let stat = read_proc_stat(proc_root, pid)?;
+    let ppid = parse_proc_stat_ppid(&stat)?;
+    let start_time_ticks = parse_proc_stat_start_time_ticks(&stat)?;
+    let comm = parse_proc_stat_comm(&stat).unwrap_or_else(|| pid.to_string());
+    let command_args = read_proc_cmdline(proc_root, pid);
+    let executable = fs::read_link(proc_root.join(pid.to_string()).join("exe"))
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let cwd = fs::read_link(proc_root.join(pid.to_string()).join("cwd")).ok();
+    let fingerprint_input = if command_args.is_empty() {
+        comm.as_bytes().to_vec()
+    } else {
+        command_args.join("\0").into_bytes()
+    };
+    Some(ProcIdentity {
+        pid,
+        ppid,
+        start_time_ticks,
+        comm,
+        executable,
+        cwd,
+        command_args,
+        command_fingerprint: command_fingerprint(&fingerprint_input),
+    })
 }
 
 fn score_discovery_candidate(
@@ -2099,6 +2688,38 @@ fn read_proc_cmdline(proc_root: &Path, pid: u32) -> Vec<String> {
         .collect()
 }
 
+fn read_process_tgid_at(proc_root: &Path, pid: u32) -> Option<u32> {
+    let status = fs::read_to_string(proc_root.join(pid.to_string()).join("status")).ok()?;
+    status.lines().find_map(|line| {
+        line.strip_prefix("Tgid:")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+    })
+}
+
+fn read_process_lineage_identity_at(proc_root: &Path, pid: u32) -> Option<ProcessLineageIdentity> {
+    let stat = read_proc_stat(proc_root, pid)?;
+    if matches!(parse_proc_stat_state(&stat)?, 'Z' | 'X' | 'x') {
+        return None;
+    }
+    Some(ProcessLineageIdentity {
+        runtime: ProcessRuntimeIdentity {
+            pid,
+            start_time_ticks: parse_proc_stat_start_time_ticks(&stat)?,
+        },
+        ppid: parse_proc_stat_ppid(&stat)?,
+        tgid: read_process_tgid_at(proc_root, pid)?,
+    })
+}
+
+fn parse_proc_stat_state(stat: &str) -> Option<char> {
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .next()?
+        .chars()
+        .next()
+}
+
 fn parse_proc_stat_comm(stat: &str) -> Option<String> {
     let start = stat.find(" (")? + 2;
     let end = stat.rfind(") ")?;
@@ -2120,7 +2741,7 @@ fn command_fingerprint(bytes: &[u8]) -> String {
 }
 
 fn live_scope_requirement() -> String {
-    "live observer requires exactly one of --scope-cgroup, --scope-pid, --agent-run, --agent-registration, or --agent-discover".to_string()
+    "live observer requires exactly one of --scope-cgroup, --agent-run, --agent-registration, or --agent-discover".to_string()
 }
 
 fn redact_command(command: &[String]) -> Vec<String> {
@@ -2240,17 +2861,68 @@ async fn shutdown_signal() -> Result<(), String> {
     }
 }
 
-fn configure_scope(ebpf: &mut Ebpf, scope: &LiveScope) -> Result<(), String> {
+fn configure_scope_inactive(ebpf: &mut Ebpf, scope: &LiveScope) -> Result<(), String> {
+    set_scope_config(ebpf, scope, SCOPE_MODE_INACTIVE)
+}
+
+fn attached_scope_preparation_mode(scope: &LiveScope, protected_existing_process: bool) -> u32 {
+    match scope {
+        LiveScope::ProcessTree(_) if protected_existing_process => SCOPE_MODE_PID_TREE_SEEDING,
+        _ => SCOPE_MODE_INACTIVE,
+    }
+}
+
+fn prepare_scope_after_tracepoint_attach(
+    ebpf: &mut Ebpf,
+    scope: &LiveScope,
+    existing_process: Option<&PreparedExistingProcessAttach>,
+    current_host_boot_id: &str,
+) -> Result<(), String> {
+    let LiveScope::ProcessTree(root_pid) = scope else {
+        return Ok(());
+    };
+    validate_native_pid_namespace(*root_pid)?;
+    match existing_process {
+        Some(existing) => {
+            set_scope_config(ebpf, scope, attached_scope_preparation_mode(scope, true))?;
+            existing.validate_root(current_host_boot_id)?;
+            let root = ProcessRuntimeIdentity::new(
+                existing.registration.pid,
+                existing.registration.start_time_ticks,
+            )?;
+            seed_process_tree_identities(ebpf, &[root], existing.clock, true)?;
+            existing.validate_root(current_host_boot_id)?;
+            let identities = discover_anchored_process_tree_scope_identities(*root_pid)?;
+            seed_anchored_process_tree_identities(ebpf, &identities, existing.clock, false)?;
+            existing.validate_root(current_host_boot_id)
+        }
+        None => {
+            let clock = ProcStartClock::host()?;
+            let identities = discover_process_tree_scope_identities(*root_pid, "/proc")?;
+            seed_process_tree_identities(ebpf, &identities, clock, true)
+        }
+    }
+}
+
+fn activate_scope(ebpf: &mut Ebpf, scope: &LiveScope) -> Result<(), String> {
+    let mode = match scope {
+        LiveScope::Cgroup(_) => SCOPE_MODE_CGROUP,
+        LiveScope::ProcessTree(_) => SCOPE_MODE_PID_TREE,
+    };
+    set_scope_config(ebpf, scope, mode)
+}
+
+fn set_scope_config(ebpf: &mut Ebpf, scope: &LiveScope, mode: u32) -> Result<(), String> {
     let config = match scope {
         LiveScope::Cgroup(cgroup_id) => ScopeConfig {
             cgroup_id: *cgroup_id,
             root_pid: 0,
-            mode: 1,
+            mode,
         },
         LiveScope::ProcessTree(root_pid) => ScopeConfig {
             cgroup_id: 0,
             root_pid: *root_pid,
-            mode: 2,
+            mode,
         },
     };
     let config_map = ebpf
@@ -2260,21 +2932,78 @@ fn configure_scope(ebpf: &mut Ebpf, scope: &LiveScope) -> Result<(), String> {
         .map_err(|error| format!("invalid APOLYSIS_CONFIG map: {error}"))?;
     config_array
         .set(0, config, 0)
-        .map_err(|error| format!("failed to configure live observer scope: {error}"))?;
+        .map_err(|error| format!("failed to configure live observer scope: {error}"))
+}
 
-    if let LiveScope::ProcessTree(root_pid) = scope {
-        let tracked_map = ebpf
-            .map_mut("APOLYSIS_TRACKED_PIDS")
-            .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_PIDS".to_string())?;
-        let mut tracked = HashMap::<_, u32, u8>::try_from(tracked_map)
-            .map_err(|error| format!("invalid APOLYSIS_TRACKED_PIDS map: {error}"))?;
-        for pid in discover_process_tree_scope_pids(*root_pid, "/proc")? {
-            tracked
-                .insert(pid, 1, 0)
-                .map_err(|error| format!("failed to seed process-tree scope pid {pid}: {error}"))?;
+fn seed_process_tree_identities(
+    ebpf: &mut Ebpf,
+    identities: &[ProcessRuntimeIdentity],
+    clock: ProcStartClock,
+    replace_existing: bool,
+) -> Result<(), String> {
+    let tracked_map = ebpf
+        .map_mut("APOLYSIS_TRACKED_PIDS")
+        .ok_or_else(|| "missing BPF map: APOLYSIS_TRACKED_PIDS".to_string())?;
+    let mut tracked = HashMap::<_, u32, TrackedProcessIdentityAbi>::try_from(tracked_map)
+        .map_err(|error| format!("invalid APOLYSIS_TRACKED_PIDS map: {error}"))?;
+    for identity in identities {
+        let window = clock.start_boottime_window(*identity)?;
+        let membership = TrackedProcessIdentityAbi::expected(window.lower_ns, window.upper_ns)?;
+        if !replace_existing {
+            match tracked.get(&identity.pid, 0) {
+                Ok(_) => continue,
+                Err(MapError::KeyNotFound) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "failed to inspect process-tree runtime identity pid={}: {error}",
+                        identity.pid
+                    ));
+                }
+            }
+        }
+        let flags = if replace_existing { 0 } else { 1 };
+        if let Err(error) = tracked.insert(identity.pid, membership, flags) {
+            if !replace_existing && tracked.get(&identity.pid, 0).is_ok() {
+                continue;
+            }
+            return Err(format!(
+                "failed to seed process-tree runtime identity pid={}: {error}",
+                identity.pid
+            ));
         }
     }
     Ok(())
+}
+
+fn seed_anchored_process_tree_identities(
+    ebpf: &mut Ebpf,
+    anchors: &[AnchoredProcessIdentity],
+    clock: ProcStartClock,
+    replace_existing: bool,
+) -> Result<(), String> {
+    let identities = anchors
+        .iter()
+        .map(|anchor| anchor.lineage.runtime)
+        .collect::<Vec<_>>();
+    with_stable_anchored_process_identities(anchors, || {
+        seed_process_tree_identities(ebpf, &identities, clock, replace_existing)
+    })
+}
+
+fn activate_existing_process_scope(
+    ebpf: &mut Ebpf,
+    scope: &LiveScope,
+    existing: &PreparedExistingProcessAttach,
+    current_host_boot_id: &str,
+) -> Result<(), String> {
+    existing.validate_root(current_host_boot_id)?;
+    let before_activation = discover_anchored_process_tree_scope_identities(existing.root_pid())?;
+    seed_anchored_process_tree_identities(ebpf, &before_activation, existing.clock, false)?;
+    existing.validate_root(current_host_boot_id)?;
+    activate_scope(ebpf, scope)?;
+    let after_activation = discover_anchored_process_tree_scope_identities(existing.root_pid())?;
+    seed_anchored_process_tree_identities(ebpf, &after_activation, existing.clock, false)?;
+    existing.validate_root(current_host_boot_id)
 }
 
 fn proc_task_ids(proc_root: &Path, pid: u32) -> Vec<u32> {
@@ -2953,6 +3682,36 @@ fn live_collector_failure_reason(error: &str) -> CollectorFailureReason {
     }
 }
 
+fn persist_collector_start_boundary(
+    agent_run_id: &str,
+    collector_instance_id: &str,
+    scope: &LiveScope,
+    loader_plan: &AyaLoaderPlan,
+    late_attach_detail: Option<&str>,
+    store: &mut JsonlStore,
+) -> Result<(), String> {
+    let late_attach = late_attach_detail.map(|detail| {
+        ObservationGap::new(
+            agent_run_id,
+            "collector_lifecycle",
+            ObservationGapKind::LateAttach,
+            1,
+            detail,
+        )
+    });
+    let capability = audit_observer_capability_manifest(agent_run_id, scope, loader_plan);
+    let started = CollectorLifecycleRecord::started(agent_run_id, collector_instance_id);
+    let mut records = Vec::<&dyn JsonLine>::with_capacity(3);
+    if let Some(gap) = late_attach.as_ref() {
+        records.push(gap);
+    }
+    records.push(&capability);
+    records.push(&started);
+    store.append_batch_and_sync(&records).map_err(|error| {
+        format!("failed to persist collector start boundary to stable storage: {error}")
+    })
+}
+
 fn append_failed_collector_lifecycle(
     agent_run_id: &str,
     collector_instance_id: &str,
@@ -3015,6 +3774,11 @@ impl ObserverBatchDecoder {
     }
 
     fn capture() -> Result<Self, String> {
+        let host_boot_id = read_host_boot_id_at("/proc/sys/kernel/random/boot_id")?;
+        Self::capture_with_host_boot_id(host_boot_id)
+    }
+
+    fn capture_with_host_boot_id(host_boot_id: impl Into<String>) -> Result<Self, String> {
         let unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
@@ -3022,7 +3786,7 @@ impl ObserverBatchDecoder {
         Ok(Self {
             monotonic_ns: monotonic_now_ns()?,
             unix_ms,
-            host_boot_id: Some(read_host_boot_id_at("/proc/sys/kernel/random/boot_id")?),
+            host_boot_id: Some(host_boot_id.into()),
         })
     }
 
@@ -3284,18 +4048,59 @@ fn read_host_boot_id_at(path: impl AsRef<Path>) -> Result<String, String> {
         )
     })?;
     let boot_id = boot_id.trim();
-    let valid = boot_id.len() == 36
+    if !valid_host_boot_id(boot_id) {
+        return Err(format!("invalid host boot identity in {}", path.display()));
+    }
+    Ok(boot_id.to_ascii_lowercase())
+}
+
+fn valid_host_boot_id(boot_id: &str) -> bool {
+    boot_id.len() == 36
         && boot_id.char_indices().all(|(index, character)| {
             if matches!(index, 8 | 13 | 18 | 23) {
                 character == '-'
             } else {
                 character.is_ascii_hexdigit()
             }
-        });
-    if !valid {
-        return Err(format!("invalid host boot identity in {}", path.display()));
+        })
+}
+
+fn validate_initial_time_namespace_offsets(input: &str) -> Result<(), String> {
+    let mut monotonic = false;
+    let mut boottime = false;
+    for line in input.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(clock) = fields.next() else {
+            continue;
+        };
+        let seconds = fields
+            .next()
+            .ok_or_else(|| "invalid observer time namespace offsets".to_string())?
+            .parse::<i64>()
+            .map_err(|_| "invalid observer time namespace offsets".to_string())?;
+        let nanoseconds = fields
+            .next()
+            .ok_or_else(|| "invalid observer time namespace offsets".to_string())?
+            .parse::<u32>()
+            .map_err(|_| "invalid observer time namespace offsets".to_string())?;
+        if fields.next().is_some() {
+            return Err("invalid observer time namespace offsets".to_string());
+        }
+        if seconds != 0 || nanoseconds != 0 {
+            return Err(
+                "protected existing-process attach requires the initial time namespace".to_string(),
+            );
+        }
+        match clock {
+            "monotonic" => monotonic = true,
+            "boottime" => boottime = true,
+            _ => {}
+        }
     }
-    Ok(boot_id.to_ascii_lowercase())
+    if !monotonic || !boottime {
+        return Err("observer time namespace offsets are incomplete".to_string());
+    }
+    Ok(())
 }
 
 pub fn raw_event_from_record(
@@ -3425,6 +4230,31 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn identity_validation_sandwich_rejects_post_update_churn() {
+        let identity_is_stable = std::cell::Cell::new(true);
+        let validations = std::cell::Cell::new(0_u32);
+
+        let error = with_identity_validation_sandwich(
+            || {
+                validations.set(validations.get() + 1);
+                if identity_is_stable.get() {
+                    Ok(())
+                } else {
+                    Err("existing process exited before protected attach activation".to_string())
+                }
+            },
+            || {
+                identity_is_stable.set(false);
+                Ok(())
+            },
+        )
+        .expect_err("post-update validation must reject identity churn");
+
+        assert_eq!(validations.get(), 2);
+        assert!(error.contains("exited before protected attach activation"));
+    }
+
+    #[test]
     fn standalone_lifecycle_checkpoint_keeps_global_and_scope_loss_explicit() {
         let counters = live_collector_lifecycle_counters(
             DaemonObserverCounters {
@@ -3507,6 +4337,125 @@ mod tests {
 
         std::fs::write(&boot_id, "not a boot id\n").expect("write invalid boot identity fixture");
         assert!(read_host_boot_id_at(&boot_id).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protected_attach_binds_the_root_cwd_to_the_canonical_workspace() {
+        let root = temp_proc_root("protected-attach-workspace");
+        let _ = std::fs::remove_dir_all(&root);
+        let proc_root = root.join("proc");
+        let pid_root = proc_root.join("101");
+        let workspace = root.join("workspace");
+        let workspace_child = workspace.join("src");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&pid_root).expect("create fake proc root");
+        std::fs::create_dir_all(&workspace_child).expect("create workspace child");
+        std::fs::create_dir_all(&outside).expect("create outside directory");
+        let canonical_workspace = std::fs::canonicalize(&workspace).expect("canonical workspace");
+
+        symlink(&workspace_child, pid_root.join("cwd")).expect("link in-workspace cwd");
+        validate_process_workspace_boundary_at(&proc_root, 101, &canonical_workspace)
+            .expect("workspace descendants are inside the boundary");
+
+        std::fs::remove_file(pid_root.join("cwd")).expect("replace fake cwd");
+        symlink(&outside, pid_root.join("cwd")).expect("link outside cwd");
+        let error = validate_process_workspace_boundary_at(&proc_root, 101, &canonical_workspace)
+            .expect_err("an outside cwd must fail closed");
+        assert!(error.contains("workspace boundary mismatch"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protected_attach_rejects_non_initial_time_namespace_offsets() {
+        validate_initial_time_namespace_offsets(
+            "monotonic           0         0\nboottime            0         0\n",
+        )
+        .expect("initial time namespace");
+
+        let error = validate_initial_time_namespace_offsets(
+            "monotonic           1         0\nboottime            0         0\n",
+        )
+        .expect_err("non-initial time namespace must fail closed");
+
+        assert!(error.contains("initial time namespace"));
+        validate_initial_time_namespace_inode(0xEFFF_FFFA)
+            .expect("Linux initial time namespace inode");
+        assert!(validate_initial_time_namespace_inode(0xF000_0001).is_err());
+    }
+
+    #[test]
+    fn protected_attach_requires_the_initial_pid_namespace() {
+        validate_initial_pid_namespace_status("Name:\tapolysis\nNSpid:\t101\n")
+            .expect("one visible PID is the initial namespace");
+
+        let error = validate_initial_pid_namespace_status("Name:\tapolysis\nNSpid:\t4101\t101\n")
+            .expect_err("nested PID namespaces must fail closed");
+
+        assert!(error.contains("initial PID namespace"));
+        assert!(validate_initial_pid_namespace_status("Name:\tapolysis\n").is_err());
+        validate_initial_pid_namespace_inode(0xEFFF_FFFC)
+            .expect("Linux initial PID namespace inode");
+        assert!(validate_initial_pid_namespace_inode(0xF000_0001).is_err());
+    }
+
+    #[test]
+    fn seeded_candidate_namespace_links_fail_closed_on_nested_identity() {
+        let root = temp_proc_root("candidate-namespace-links");
+        let _ = std::fs::remove_dir_all(&root);
+        let observer_pid = root.join("self/ns/pid");
+        let candidate_pid = root.join("200/ns/pid");
+        let observer_time = root.join("self/ns/time");
+        let candidate_time = root.join("200/ns/time");
+        std::fs::create_dir_all(observer_pid.parent().expect("observer namespace parent"))
+            .expect("create observer namespace parent");
+        std::fs::create_dir_all(candidate_pid.parent().expect("candidate namespace parent"))
+            .expect("create candidate namespace parent");
+        symlink("pid:[4026531836]", &observer_pid).expect("link observer PID namespace");
+        symlink("pid:[4026531836]", &candidate_pid).expect("link candidate PID namespace");
+        symlink("time:[4026531834]", &observer_time).expect("link observer time namespace");
+        symlink("time:[4026531834]", &candidate_time).expect("link candidate time namespace");
+
+        validate_matching_namespace_links(
+            &observer_pid,
+            &candidate_pid,
+            "observer PID unavailable",
+            "candidate PID unavailable",
+            "PID namespace mismatch",
+        )
+        .expect("matching PID namespace");
+        validate_matching_namespace_links(
+            &observer_time,
+            &candidate_time,
+            "observer time unavailable",
+            "candidate time unavailable",
+            "time namespace mismatch",
+        )
+        .expect("matching time namespace");
+
+        std::fs::remove_file(&candidate_pid).expect("replace candidate PID namespace");
+        symlink("pid:[5000000001]", &candidate_pid).expect("link nested PID namespace");
+        assert!(validate_matching_namespace_links(
+            &observer_pid,
+            &candidate_pid,
+            "observer PID unavailable",
+            "candidate PID unavailable",
+            "PID namespace mismatch",
+        )
+        .is_err());
+
+        std::fs::remove_file(&candidate_time).expect("replace candidate time namespace");
+        symlink("time:[5000000002]", &candidate_time).expect("link shifted time namespace");
+        assert!(validate_matching_namespace_links(
+            &observer_time,
+            &candidate_time,
+            "observer time unavailable",
+            "candidate time unavailable",
+            "time namespace mismatch",
+        )
+        .is_err());
+
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4040,6 +4989,7 @@ mod tests {
             kind: "codex".to_string(),
             pid: 101,
             start_time_ticks: 9_999,
+            host_boot_id: "11111111-2222-3333-4444-555555555555".to_string(),
             workspace_root: PathBuf::from("/workspace/apolysis"),
             executable: "/usr/bin/codex".to_string(),
             command_fingerprint: "sha256:test".to_string(),
@@ -4047,7 +4997,7 @@ mod tests {
         };
 
         let error = registration
-            .validate_proc_identity(&proc_root)
+            .validate_runtime_identity(&proc_root, "11111111-2222-3333-4444-555555555555")
             .expect_err("registration with stale start time must fail closed");
 
         assert!(error.contains("PID reuse"));
@@ -4056,6 +5006,95 @@ mod tests {
         assert!(error.contains("actual_start_time_ticks=9001"));
 
         let _ = std::fs::remove_dir_all(&proc_root);
+    }
+
+    #[test]
+    fn tracked_process_membership_carries_a_bounded_start_identity() {
+        let clock = ProcStartClock::new(100).expect("proc clock");
+        let identity = ProcessRuntimeIdentity::new(101, 123).expect("process identity");
+
+        let window = clock
+            .start_boottime_window(identity)
+            .expect("tracked start window");
+        let membership = TrackedProcessIdentityAbi::expected(window.lower_ns, window.upper_ns)
+            .expect("tracked membership");
+
+        assert_eq!(membership.start_boottime_ns(), 1_230_000_000);
+        assert_eq!(membership.start_boottime_upper_ns(), 1_240_000_000);
+        assert!(membership.is_expected());
+        assert_eq!(std::mem::size_of::<TrackedProcessIdentityAbi>(), 24);
+    }
+
+    #[test]
+    fn protected_existing_process_only_seeds_after_tracepoint_attach() {
+        assert_eq!(SCOPE_MODE_INACTIVE, 0);
+        assert_eq!(
+            attached_scope_preparation_mode(&LiveScope::ProcessTree(101), true),
+            SCOPE_MODE_PID_TREE_SEEDING
+        );
+        assert_eq!(
+            attached_scope_preparation_mode(&LiveScope::ProcessTree(101), false),
+            SCOPE_MODE_INACTIVE
+        );
+        assert_eq!(
+            attached_scope_preparation_mode(&LiveScope::Cgroup(202), true),
+            SCOPE_MODE_INACTIVE
+        );
+    }
+
+    #[test]
+    fn protected_attach_boundary_is_durable_before_capability_and_start() {
+        let output = temp_proc_root("protected-attach-start-boundary").with_extension("jsonl");
+        let archive = PathBuf::from(format!("{}.1", output.display()));
+        let _ = std::fs::remove_file(&output);
+        let _ = std::fs::remove_file(&archive);
+        let mut store = JsonlStore::create_with_rotation(
+            &output,
+            JsonlRotationPolicy {
+                max_file_bytes: 1,
+                max_archived_files: 1,
+            },
+        )
+        .expect("create rotating boundary timeline");
+        write_runtime_metadata_event(
+            "agent-run-protected-attach",
+            actors::OBSERVER,
+            "boundary-preface",
+            "present",
+            &mut store,
+        )
+        .expect("write boundary preface");
+        let plan = AyaLoaderPlan::audit_observer_default("observer.bpf.o");
+        let detail = "collection_boundary:protected_existing_process_attach,history:unknown,provenance:external_registration,root_selection:registration_qualified";
+
+        persist_collector_start_boundary(
+            "agent-run-protected-attach",
+            "collector-instance-protected-attach",
+            &LiveScope::ProcessTree(101),
+            &plan,
+            Some(detail),
+            &mut store,
+        )
+        .expect("persist protected attach boundary");
+
+        let timeline = std::fs::read_to_string(&output).expect("read boundary timeline");
+        let gap = timeline.find(r#""kind":"late_attach""#).expect("late gap");
+        let capability = timeline
+            .find(r#""record_type":"collector_capability_manifest""#)
+            .expect("capability manifest");
+        let started = timeline
+            .find(r#""state":"started""#)
+            .expect("collector start");
+        assert!(gap < capability && capability < started);
+        assert!(timeline.contains(r#""operation":"collector_lifecycle""#));
+        assert!(timeline.contains(r#""count":1"#));
+        assert!(timeline.contains(detail));
+        assert_eq!(timeline.matches(r#""kind":"late_attach""#).count(), 1);
+        let rotated = std::fs::read_to_string(&archive).expect("read rotated preface");
+        assert!(rotated.contains("boundary-preface"));
+
+        let _ = std::fs::remove_file(output);
+        let _ = std::fs::remove_file(archive);
     }
 
     #[test]
@@ -4069,9 +5108,9 @@ mod tests {
                     ppid: 1,
                     start_time_ticks: 7_000 + pid as u64,
                     comm: "codex",
-                    executable: "/usr/bin/codex",
+                    executable: "/private/operator/bin/codex",
                     cwd: "/workspace/apolysis",
-                    argv: &["codex", "resume", "session-a"],
+                    argv: &["codex", "resume", "session-a", "--token", "do-not-persist"],
                 },
             );
         }
@@ -4088,6 +5127,8 @@ mod tests {
         assert!(error.contains("agent discovery is ambiguous"));
         assert!(error.contains("pid=201"));
         assert!(error.contains("pid=202"));
+        assert!(!error.contains("/private/operator"));
+        assert!(!error.contains("do-not-persist"));
 
         let _ = std::fs::remove_dir_all(&proc_root);
     }
