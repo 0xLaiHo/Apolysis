@@ -77,10 +77,14 @@
 
 - Managed launch 与 protected attach 都声明其 collection boundary。
 - `apolysis run project` 从 plain 连续 rotation set 或完整验证的 hash chain 生成确定性的
-  single-run aggregate；chain payload 在验证完成前不会暴露。
+  single-run aggregate；chain payload 在验证完成前不会暴露。Batch、byte 与 record 限制覆盖
+  组合后的全部 input。
 - Malformed 或 mixed-run input、content-policy violation、非法 lifecycle order 与重复
   canonical observation 会 fail closed。Mixed source integrity 与未知增量 record 为
   indeterminate；gap、loss 与缺失 terminal 不能成为 complete。
+- Partial 或伪造 capability contract 与无法解析的 Finding evidence reference 会成为 typed
+  issue，不能成为 complete。Exact identity 要求 canonical post-activation kernel relation 与
+  完整稳定 tuple。
 - Projection output 通过私有 atomic file 发布，拒绝 symlink、非普通文件或 input-alias target；
   发布前失败不会修改 source file 或既有 output，也不会回显 payload。
 - Protected attach 仅允许显式 registration 或唯一 inferred discovery；原始 `--scope-pid` 会被

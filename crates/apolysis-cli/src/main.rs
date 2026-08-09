@@ -12,6 +12,7 @@ use std::time::Duration;
 use apolysis_accountability::{
     project_agent_run, AccountabilityFinding, AgentRunRecordBatch, EvidenceBoundary,
     FindingDecision, FindingKind, RuntimeIdentity, FINDING_SCHEMA_V1,
+    MAX_AGENT_RUN_PROJECTION_BATCHES, MAX_AGENT_RUN_PROJECTION_RECORDS,
 };
 use apolysis_core::{now_unix_ms, JsonLine, SessionIntentRecord};
 use apolysis_observer::{
@@ -20,6 +21,7 @@ use apolysis_observer::{
 };
 use apolysis_store::{
     read_agent_run_records, HashChainStore, JsonlRotationPolicy, LocalRecordFormat,
+    MAX_SAVED_RUN_BYTES,
 };
 use apolysis_visibility::{assess_visibility, RuntimeVisibilityProfile, VisibilityInput};
 use cli::{commands, options, values};
@@ -60,9 +62,19 @@ fn run_project_command(args: Vec<String>) -> Result<i32, String> {
     let request = ProjectRunRequest::parse(args)?;
     let mut batches = Vec::with_capacity(request.input_paths.len());
     let mut source_paths = Vec::new();
+    let mut total_input_bytes = 0_u64;
+    let mut total_input_records = 0_u64;
     for input_path in &request.input_paths {
         let batch = read_agent_run_records(input_path)
             .map_err(|error| format!("failed to read Agent Run input: {error}"))?;
+        let batch_records = u64::try_from(batch.records.len())
+            .map_err(|_| "Agent Run input exceeded the total record limit".to_string())?;
+        accumulate_projection_input_budget(
+            &mut total_input_bytes,
+            &mut total_input_records,
+            batch.source_bytes,
+            batch_records,
+        )?;
         source_paths.extend(batch.source_paths().iter().cloned());
         batches.push(match batch.format {
             LocalRecordFormat::PlainJsonl => AgentRunRecordBatch::plain(batch.records),
@@ -79,6 +91,29 @@ fn run_project_command(args: Vec<String>) -> Result<i32, String> {
     output.push(b'\n');
     write_private_atomic(&request.output_path, &output)?;
     Ok(0)
+}
+
+fn accumulate_projection_input_budget(
+    total_bytes: &mut u64,
+    total_records: &mut u64,
+    batch_bytes: u64,
+    batch_records: u64,
+) -> Result<(), String> {
+    let next_bytes = total_bytes
+        .checked_add(batch_bytes)
+        .ok_or_else(|| "Agent Run input exceeded the total byte limit".to_string())?;
+    if next_bytes > MAX_SAVED_RUN_BYTES {
+        return Err("Agent Run input exceeded the total byte limit".to_string());
+    }
+    let next_records = total_records
+        .checked_add(batch_records)
+        .ok_or_else(|| "Agent Run input exceeded the total record limit".to_string())?;
+    if next_records > MAX_AGENT_RUN_PROJECTION_RECORDS {
+        return Err("Agent Run input exceeded the total record limit".to_string());
+    }
+    *total_bytes = next_bytes;
+    *total_records = next_records;
+    Ok(())
 }
 
 async fn intent_command(args: Vec<String>) -> Result<i32, String> {
@@ -400,6 +435,11 @@ impl ProjectRunRequest {
             match args[i].as_str() {
                 options::INPUT => {
                     i += 1;
+                    if input_paths.len() >= MAX_AGENT_RUN_PROJECTION_BATCHES {
+                        return Err(
+                            "Agent Run projection exceeded the input batch count limit".to_string()
+                        );
+                    }
                     input_paths.push(PathBuf::from(args.get(i).cloned().ok_or_else(|| {
                         format!("missing {} value\n{}", options::INPUT, usage())
                     })?));
@@ -1593,7 +1633,14 @@ fn usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{evidence_loss_warning, executable_matches, observer_evidence_loss};
+    use super::{
+        accumulate_projection_input_budget, evidence_loss_warning, executable_matches,
+        observer_evidence_loss, ProjectRunRequest,
+    };
+    use apolysis_accountability::{
+        MAX_AGENT_RUN_PROJECTION_BATCHES, MAX_AGENT_RUN_PROJECTION_RECORDS,
+    };
+    use apolysis_store::MAX_SAVED_RUN_BYTES;
 
     #[test]
     fn evidence_loss_is_summed_and_warned() {
@@ -1631,5 +1678,36 @@ mod tests {
         // Different executables must not match, and a missing path never matches.
         assert!(!executable_matches("cargo", Some("/usr/bin/rustc")));
         assert!(!executable_matches("cargo", None));
+    }
+
+    #[test]
+    fn project_request_rejects_too_many_inputs_before_reading_them() {
+        let mut args = vec!["run".to_string(), "project".to_string()];
+        for _ in 0..=MAX_AGENT_RUN_PROJECTION_BATCHES {
+            args.push("--input".to_string());
+            args.push("timeline.jsonl".to_string());
+        }
+        args.push("--output".to_string());
+        args.push("record.json".to_string());
+
+        let error = ProjectRunRequest::parse(args).expect_err("batch limit must be preflighted");
+        assert!(error.contains("batch count"), "{error}");
+    }
+
+    #[test]
+    fn projection_input_budget_is_global_across_batches() {
+        let mut total_bytes = MAX_SAVED_RUN_BYTES - 1;
+        let mut total_records = MAX_AGENT_RUN_PROJECTION_RECORDS - 1;
+        let error = accumulate_projection_input_budget(&mut total_bytes, &mut total_records, 2, 1)
+            .expect_err("combined byte limit must fail");
+        assert!(error.contains("byte limit"), "{error}");
+        assert_eq!(total_bytes, MAX_SAVED_RUN_BYTES - 1);
+        assert_eq!(total_records, MAX_AGENT_RUN_PROJECTION_RECORDS - 1);
+
+        total_bytes = 0;
+        total_records = MAX_AGENT_RUN_PROJECTION_RECORDS;
+        let error = accumulate_projection_input_budget(&mut total_bytes, &mut total_records, 0, 1)
+            .expect_err("combined record limit must fail");
+        assert!(error.contains("record limit"), "{error}");
     }
 }

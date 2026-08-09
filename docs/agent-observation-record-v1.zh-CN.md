@@ -61,7 +61,10 @@ verdict。即使存在其他 issue，active 或 failed lifecycle 仍然可见。
 
 Complete evidence 要求一个兼容的 content-off capability manifest、合法且正常结束的
 lifecycle、至少一个受支持的 Runtime Observation，并且不存在 loss、gap、diagnostic、
-integrity 或 capability issue。缺少 lifecycle、不受支持或缺失的 outcome、collector
+integrity 或 capability issue。对于 v1，兼容表示完整的当前 `apolysis_observer`
+operation/source/outcome contract；缺少 operation 或 source/outcome set 不匹配会产生
+`unsupported_capability`。如果 Finding 的 `evidence_ref` 无法解析到投影中的 canonical
+observation，则产生 `unresolved_finding_evidence`。缺少 lifecycle、不受支持或缺失的 outcome、collector
 loss、gap、integrity finding 和非零 failure diagnostic 均不能被判为 complete。Mixed
 integrity 和未知的 additive record 会使原本形似完整的 run 变为 indeterminate。
 
@@ -71,6 +74,10 @@ integrity 和未知的 additive record 会使原本形似完整的 run 变为 in
 process generation、kernel process-start time 和 exec generation 组成。相同的精确 tuple
 会折叠为按首次出现稳定分配的 `identity-1`、`identity-2` 等 ID。Inferred、ambiguous
 和 unattributed observation 不会被提升或合并为精确 identity。
+Exact projection 还要求 `event_source:kernel_tracepoint`、非空的 canonical
+`raw_event_id`，以及 relation reason
+`host_boot_scope_process_start_exec_generation`。不受支持或 heuristic relation 不能创建
+exact identity。
 
 投影只接受 `content_off` capability manifest，并拒绝非 null 的旧版
 `process_command`。Finding kind、decision 和 evidence boundary 都经过类型约束。
@@ -90,7 +97,7 @@ Finding reason 与普通 Gap detail 从有界词汇派生，不复制自由格�
 
 ## 限制与发布
 
-- saved-run input 总量不超过 128 MiB；
+- 所有 `--input` 合计的 saved-run input 不超过 128 MiB；
 - 每行 JSONL 不超过 1 MiB；
 - 源 record 不超过 1,000,000 条；
 - numeric rotation archive 不超过 1,024 个；

@@ -207,12 +207,17 @@ was blocked, rolled back, or contained.
   changes during the read.
 - Bound saved-run bytes, line width, record count, rotation files, projection
   batches, value depth, collection size, and copied strings. Verify a complete
-  hash chain before exposing any payload to projection.
+  hash chain before exposing any payload to projection. Apply byte and record
+  budgets across every input composed by one command.
 - Fail closed for mixed Agent Runs, invalid lifecycle order, incompatible or
   malformed records, duplicate canonical observations, and content-policy
   violations. Mixed integrity and unknown additive records cannot be complete.
 - Canonicalize free-form Finding reasons and Gap details, and keep error text
   free of record payloads and conflicting run identifiers.
+- Require the full current v1 operation/source/outcome capability contract for
+  complete evidence, resolve Finding references to projected canonical
+  observations, and admit Exact Runtime Identity only from canonical
+  post-activation kernel relations with a complete stable tuple.
 - Publish projection output through an exclusive mode-`0600` same-directory
   temporary file, sync file and parent, atomically rename it, and reject path or
   inode aliases to every active or rotated input.

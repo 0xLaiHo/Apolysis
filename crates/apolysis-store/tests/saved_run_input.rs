@@ -33,6 +33,7 @@ fn plain_rotated_run_reads_oldest_archive_before_the_active_file() {
         json!({
             "format": format!("{:?}", batch.format),
             "source_files": batch.source_files,
+            "source_bytes": batch.source_bytes,
             "ordinals": batch
                 .records
                 .iter()
@@ -42,6 +43,7 @@ fn plain_rotated_run_reads_oldest_archive_before_the_active_file() {
         json!({
             "format": format!("{:?}", LocalRecordFormat::PlainJsonl),
             "source_files": 3,
+            "source_bytes": 108,
             "ordinals": [1, 2, 3]
         })
     );

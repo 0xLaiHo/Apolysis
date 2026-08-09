@@ -81,16 +81,26 @@ impl HashChainStore {
         let path = path.as_ref().to_path_buf();
         let bytes = std::fs::read(&path).map_err(io_error)?;
         let total_bytes = bytes.len() as u64;
-        let validation = verify_existing(&bytes);
+        let validation = scan_existing(&bytes);
         let valid_bytes = validation.valid_len as u64;
-        let failure = validation.failure.or_else(|| {
-            (valid_bytes != total_bytes).then(|| {
+        let failure = validation
+            .failure
+            .as_ref()
+            .map(|failure| {
                 format!(
-                    "invalid or truncated tail after valid prefix at byte {}",
-                    validation.valid_len
+                    "hash-chain integrity failure at {:?}: {}",
+                    Some(failure.sequence),
+                    failure.detail
                 )
             })
-        });
+            .or_else(|| {
+                (valid_bytes != total_bytes).then(|| {
+                    format!(
+                        "invalid or truncated tail after valid prefix at byte {}",
+                        validation.valid_len
+                    )
+                })
+            });
         Ok(HashChainVerificationReport {
             path,
             passed: failure.is_none(),
@@ -197,22 +207,20 @@ impl HashChainStore {
     }
 }
 
-struct Validation {
+struct ChainScan {
     sequence: u64,
     previous_hash: String,
     valid_len: usize,
     records: Vec<ChainRecord>,
+    failure: Option<ChainScanFailure>,
 }
 
-struct ReadonlyValidation {
+struct ChainScanFailure {
     sequence: u64,
-    previous_hash: String,
-    valid_len: usize,
-    records: Vec<ChainRecord>,
-    failure: Option<String>,
+    detail: String,
 }
 
-fn verify_existing(bytes: &[u8]) -> ReadonlyValidation {
+fn scan_existing(bytes: &[u8]) -> ChainScan {
     let mut sequence = 0_u64;
     let mut previous_hash = ZERO_HASH.to_string();
     let mut valid_len = 0_usize;
@@ -232,22 +240,21 @@ fn verify_existing(bytes: &[u8]) -> ReadonlyValidation {
                 valid_len = valid_len.saturating_add(chunk.len());
             }
             Err(detail) => {
-                return ReadonlyValidation {
+                return ChainScan {
                     sequence,
                     previous_hash,
                     valid_len,
                     records,
-                    failure: Some(format!(
-                        "hash-chain integrity failure at {:?}: {}",
-                        Some(expected_sequence),
-                        detail
-                    )),
+                    failure: Some(ChainScanFailure {
+                        sequence: expected_sequence,
+                        detail,
+                    }),
                 };
             }
         }
     }
 
-    ReadonlyValidation {
+    ChainScan {
         sequence,
         previous_hash,
         valid_len,
@@ -257,11 +264,11 @@ fn verify_existing(bytes: &[u8]) -> ReadonlyValidation {
 }
 
 pub(crate) fn decode_verified_chain(bytes: &[u8]) -> Result<Vec<ChainRecord>, StoreError> {
-    let validation = verify_existing(bytes);
-    if let Some(detail) = validation.failure {
+    let validation = scan_existing(bytes);
+    if let Some(failure) = validation.failure {
         return Err(StoreError::Integrity {
-            sequence: validation.sequence.checked_add(1),
-            detail,
+            sequence: Some(failure.sequence),
+            detail: failure.detail,
         });
     }
     if validation.valid_len != bytes.len() {
@@ -273,52 +280,27 @@ pub(crate) fn decode_verified_chain(bytes: &[u8]) -> Result<Vec<ChainRecord>, St
     Ok(validation.records)
 }
 
-fn validate_existing(bytes: &[u8]) -> Result<Validation, StoreError> {
-    let mut sequence = 0_u64;
-    let mut previous_hash = ZERO_HASH.to_string();
-    let mut valid_len = 0_usize;
-    let mut records = Vec::new();
+fn validate_existing(bytes: &[u8]) -> Result<ChainScan, StoreError> {
+    let mut validation = scan_existing(bytes);
     let trailing_bytes = !bytes.is_empty() && !bytes.ends_with(b"\n");
-
-    for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
-        if !chunk.ends_with(b"\n") {
-            break;
-        }
-        let line = &chunk[..chunk.len() - 1];
-        let expected_sequence = sequence.saturating_add(1);
-        let result = validate_line(line, expected_sequence, &previous_hash);
-        match result {
-            Ok(record) => {
-                sequence = record.sequence;
-                previous_hash = record.record_hash.clone();
-                records.push(record);
-                valid_len = valid_len.saturating_add(chunk.len());
-            }
-            Err(detail) => {
-                let remainder = &bytes[valid_len.saturating_add(chunk.len())..];
-                let has_later_complete_line = remainder.contains(&b'\n');
-                if has_later_complete_line || trailing_bytes {
-                    return Err(StoreError::Integrity {
-                        sequence: Some(expected_sequence),
-                        detail,
-                    });
-                }
-                return Ok(Validation {
-                    sequence,
-                    previous_hash,
-                    valid_len,
-                    records,
-                });
-            }
+    if let Some(failure) = validation.failure.take() {
+        let invalid_and_remainder = &bytes[validation.valid_len..];
+        let invalid_line_end = invalid_and_remainder
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(|| StoreError::Integrity {
+                sequence: Some(failure.sequence),
+                detail: failure.detail.clone(),
+            })?;
+        let remainder = &invalid_and_remainder[invalid_line_end + 1..];
+        if remainder.contains(&b'\n') || trailing_bytes {
+            return Err(StoreError::Integrity {
+                sequence: Some(failure.sequence),
+                detail: failure.detail,
+            });
         }
     }
-
-    Ok(Validation {
-        sequence,
-        previous_hash,
-        valid_len,
-        records,
-    })
+    Ok(validation)
 }
 
 fn validate_line(

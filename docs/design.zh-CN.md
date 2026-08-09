@@ -221,7 +221,8 @@ V1 saved-run 读取路径会把 active file 与连续数字 archive 作为同一
 最旧 archive 到 active 的顺序读取；它拒绝 symlink、非普通文件、读取期间变化、截断、格式错误
 和混合 envelope，并在暴露 payload 前验证完整 hash chain。Byte、line 与 record 都有明确上限。
 Source order 是权威顺序；wall-clock timestamp 不会修复或重排非法 lifecycle。Plain 与 verified
-输入可以显式组合，但 mixed integrity 始终可见，不能产生 complete evidence。
+输入可以显式组合，但 mixed integrity 始终可见，不能产生 complete evidence。Batch、byte 与
+record budget 作用于整个组合命令，而不是分别作用于每个 `--input`。
 
 `apolysis-accountability` 会把这些 typed source record 纯函数式折叠为恰好一份 Agent
 Observation Record。Agent Observation Summary 保持 Evidence State、Collector Health 与
@@ -229,6 +230,10 @@ Review State 相互独立。缺失 lifecycle、不支持的 outcome、diagnostic
 record 与 source-integrity finding 会保留为可查询限制；mixed Agent Run、损坏 storage、非法
 lifecycle 顺序、重复 canonical observation、不兼容 schema 与 content-policy violation 会
 fail closed。自由文本 Finding reason 与 Gap detail 会 canonicalize，而不是复制到派生 artifact。
+Complete evidence 要求完整的当前 v1 operation/source/outcome capability contract。Partial 或
+伪造 manifest 与无法解析的 Finding reference 会作为 typed issue 保留，不能成为 complete。
+只有携带 canonical generation-based relation reason 与完整稳定 tuple 的 post-activation kernel
+observation 才能进入 Exact Runtime Identity。
 
 `apolysis run project --input <path> [--input <path> ...] --output <path>` 是该 projection
 的非特权 adapter。它通过同目录私有 temporary file 写入确定性 JSON，完成 sync 后原子发布，

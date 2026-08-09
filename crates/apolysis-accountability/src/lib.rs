@@ -21,12 +21,13 @@ pub use intent::{
 };
 pub use projection::{
     project_agent_run, AgentObservationRecord, AgentObservationSummary, AgentRunRecordBatch,
-    CollectorHealthProjection, EvidenceState, ObservationRecordSourceIntegrity,
-    ProjectedCapability, ProjectedCapabilityManifest, ProjectedCollectorLifecycle,
-    ProjectedFinding, ProjectedLifecycleCounters, ProjectedObservationGap,
-    ProjectedRuntimeIdentity, ProjectedRuntimeObservation, ProjectionError, ProjectionIssue,
-    ProjectionIssueCode, ReviewState, AGENT_OBSERVATION_RECORD_SCHEMA_V1,
-    MAX_AGENT_RUN_PROJECTION_BATCHES, MAX_AGENT_RUN_PROJECTION_RECORDS,
+    CollectorHealthProjection, CollectorLifecycleHealth, CollectorLifecycleState,
+    CollectorStopReason, EvidenceState, ObservationRecordSourceIntegrity, ProjectedCapability,
+    ProjectedCapabilityManifest, ProjectedCollectorLifecycle, ProjectedFinding,
+    ProjectedLifecycleCounters, ProjectedObservationGap, ProjectedRuntimeIdentity,
+    ProjectedRuntimeObservation, ProjectionError, ProjectionIssue, ProjectionIssueCode,
+    ReviewState, AGENT_OBSERVATION_RECORD_SCHEMA_V1, MAX_AGENT_RUN_PROJECTION_BATCHES,
+    MAX_AGENT_RUN_PROJECTION_RECORDS,
 };
 pub use queue::{BoundedPriorityQueue, PushOutcome, QueuePriority, QueueStats};
 pub use session::{

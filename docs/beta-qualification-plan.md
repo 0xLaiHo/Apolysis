@@ -88,11 +88,15 @@ environment breadth.
 - Managed launch and protected attach both declare their collection boundary.
 - `apolysis run project` produces a deterministic single-run aggregate from a
   plain contiguous rotation set or a fully verified hash chain; chain payloads
-  are not exposed before verification.
+  are not exposed before verification. Batch, byte, and record limits cover all
+  composed inputs together.
 - Malformed or mixed-run input, content-policy violations, illegal lifecycle
   order, and duplicate canonical observations fail closed. Mixed source
   integrity and unknown additive records are indeterminate; gaps, loss, and a
   missing terminal cannot be complete.
+- Partial or fictitious capability contracts and unresolved Finding evidence
+  references are typed issues and cannot be complete. Exact identity requires
+  a canonical post-activation kernel relation and its full stable tuple.
 - Projection output is published through a private atomic file, refuses
   symlink, non-regular, or input-alias targets, and preserves source files and
   any existing output on pre-publication failure without echoing payloads.

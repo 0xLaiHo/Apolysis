@@ -6,23 +6,7 @@ use serde_json::{json, Value};
 #[test]
 fn complete_agent_run_projects_one_queryable_aggregate_and_summary() {
     let record = project_agent_run([AgentRunRecordBatch::plain(vec![
-        json!({
-            "record_type": "collector_capability_manifest",
-            "schema_version": 1,
-            "timestamp_unix_ms": 1000,
-            "agent_run_id": "run-42",
-            "collector": "apolysis_observer",
-            "collector_version": "0.1.0",
-            "kernel_abi_version": 3,
-            "kernel_record_size": 656,
-            "observation_scope": "process_tree",
-            "privacy_profile": "content_off",
-            "capabilities": [{
-                "operation": "network_connect",
-                "event_sources": ["syscalls/sys_enter_connect", "syscalls/sys_exit_connect"],
-                "outcomes": ["succeeded", "failed", "denied", "pending"]
-            }]
-        }),
+        capability("run-42", 1000),
         json!({
             "record_type": "collector_lifecycle",
             "schema_version": 1,
@@ -60,7 +44,7 @@ fn complete_agent_run_projects_one_queryable_aggregate_and_summary() {
             "parent_process_generation": 3,
             "parent_exec_generation": 1,
             "relation_status": "exact",
-            "relation_reason": "kernel_runtime_identity",
+            "relation_reason": "host_boot_scope_process_start_exec_generation",
             "process_command": null,
             "process_executable": "executable_ref:agent",
             "process_started_at_unix_ms": null
@@ -349,11 +333,18 @@ fn undeclared_outcome_is_queryable_but_forces_incomplete_evidence() {
             "evidence_state": "incomplete",
             "observation_count": 1,
             "outcomes": {"denied": 1},
-            "issues": [{
-                "code": "unsupported_outcome",
-                "source_ordinal": 3,
-                "count": 1
-            }]
+            "issues": [
+                {
+                    "code": "unsupported_capability",
+                    "source_ordinal": 1,
+                    "count": 1
+                },
+                {
+                    "code": "unsupported_outcome",
+                    "source_ordinal": 3,
+                    "count": 1
+                }
+            ]
         })
     );
 }
@@ -967,6 +958,164 @@ fn ordinary_gap_detail_is_canonicalized_without_private_source_text() {
     assert_eq!(record.observation_gaps[0].detail, "bounded_loss_counter");
 }
 
+#[test]
+fn partial_or_fictitious_capability_contracts_cannot_be_complete() {
+    let mut partial = capability("run-partial-capability", 1000);
+    partial["capabilities"] = json!([{
+        "operation": "network_connect",
+        "event_sources": ["syscalls/sys_enter_connect", "syscalls/sys_exit_connect"],
+        "outcomes": ["succeeded", "failed", "denied", "pending"]
+    }]);
+    let partial_record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        partial,
+        lifecycle(
+            "run-partial-capability",
+            1001,
+            "started",
+            "healthy",
+            Value::Null,
+        ),
+        network_observation("run-partial-capability", 1002),
+        lifecycle(
+            "run-partial-capability",
+            1003,
+            "stopped",
+            "healthy",
+            json!("agent_exited"),
+        ),
+    ])])
+    .expect("partial capability remains queryable");
+    let partial_value = serde_json::to_value(partial_record).expect("serialize projection");
+    assert_eq!(partial_value["summary"]["evidence_state"], "incomplete");
+    assert_eq!(
+        partial_value["issues"],
+        json!([{
+            "code": "unsupported_capability",
+            "source_ordinal": 1,
+            "count": 9
+        }])
+    );
+
+    let mut fictitious = capability("run-fictitious-capability", 1000);
+    fictitious["capabilities"][0]["event_sources"] =
+        json!(["syscalls/sys_enter_openat", "syscalls/sys_exit_openat"]);
+    let fictitious_record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        fictitious,
+        lifecycle(
+            "run-fictitious-capability",
+            1001,
+            "started",
+            "healthy",
+            Value::Null,
+        ),
+        network_observation("run-fictitious-capability", 1002),
+        lifecycle(
+            "run-fictitious-capability",
+            1003,
+            "stopped",
+            "healthy",
+            json!("agent_exited"),
+        ),
+    ])])
+    .expect("incompatible capability remains queryable");
+    let fictitious_value = serde_json::to_value(fictitious_record).expect("serialize projection");
+    assert_eq!(fictitious_value["summary"]["evidence_state"], "incomplete");
+    assert_eq!(
+        fictitious_value["issues"],
+        json!([{
+            "code": "unsupported_capability",
+            "source_ordinal": 1,
+            "count": 1
+        }])
+    );
+}
+
+#[test]
+fn unsupported_or_heuristic_relations_are_never_promoted_to_exact_identity() {
+    let mut manual = network_observation("run-manual-exact", 1002);
+    manual["event_source"] = json!("manual");
+    let manual_error = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability("run-manual-exact", 1000),
+        lifecycle("run-manual-exact", 1001, "started", "healthy", Value::Null),
+        manual,
+    ])])
+    .expect_err("manual evidence must not become an exact identity");
+    assert_eq!(
+        manual_error,
+        ProjectionError::ConflictingRuntimeIdentity { ordinal: 3 }
+    );
+
+    let mut heuristic = network_observation("run-heuristic-exact", 1002);
+    heuristic["relation_reason"] = json!("pid_only_runtime_identity");
+    let heuristic_error = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability("run-heuristic-exact", 1000),
+        lifecycle(
+            "run-heuristic-exact",
+            1001,
+            "started",
+            "healthy",
+            Value::Null,
+        ),
+        heuristic,
+    ])])
+    .expect_err("heuristic evidence must not become an exact identity");
+    assert_eq!(
+        heuristic_error,
+        ProjectionError::ConflictingRuntimeIdentity { ordinal: 3 }
+    );
+}
+
+#[test]
+fn dangling_finding_evidence_is_explicit_and_prevents_complete_evidence() {
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability("run-dangling-finding", 1000),
+        lifecycle(
+            "run-dangling-finding",
+            1001,
+            "started",
+            "healthy",
+            Value::Null,
+        ),
+        network_observation("run-dangling-finding", 1002),
+        lifecycle(
+            "run-dangling-finding",
+            1003,
+            "stopped",
+            "healthy",
+            json!("agent_exited"),
+        ),
+        json!({
+            "record_type": "accountability_finding",
+            "schema_version": 1,
+            "session_id": "run-dangling-finding",
+            "kind": "unknown_egress",
+            "decision": "review",
+            "reason": "network endpoint is outside the declared egress set",
+            "evidence_ref": "missing-event",
+            "runtime": {
+                "runtime": "native",
+                "container_id": null,
+                "pod_uid": null,
+                "cgroup_id": null
+            },
+            "evidence_boundary": "host_boundary"
+        }),
+    ])])
+    .expect("dangling finding remains reviewable");
+
+    let value = serde_json::to_value(record).expect("serialize projection");
+    assert_eq!(value["summary"]["evidence_state"], "incomplete");
+    assert_eq!(value["summary"]["review_state"], "requires_review");
+    assert_eq!(
+        value["issues"],
+        json!([{
+            "code": "unresolved_finding_evidence",
+            "source_ordinal": 5,
+            "count": 1
+        }])
+    );
+}
+
 fn zero_counters() -> Value {
     json!({
         "global_reserve_failures": 0,
@@ -992,11 +1141,58 @@ fn capability(agent_run_id: &str, timestamp_unix_ms: u64) -> Value {
         "kernel_record_size": 656,
         "observation_scope": "process_tree",
         "privacy_profile": "content_off",
-        "capabilities": [{
-            "operation": "network_connect",
-            "event_sources": ["syscalls/sys_enter_connect", "syscalls/sys_exit_connect"],
-            "outcomes": ["succeeded", "failed", "denied", "pending"]
-        }]
+        "capabilities": [
+            {
+                "operation": "network_connect",
+                "event_sources": ["syscalls/sys_enter_connect", "syscalls/sys_exit_connect"],
+                "outcomes": ["succeeded", "failed", "denied", "pending"]
+            },
+            {
+                "operation": "process_fork",
+                "event_sources": ["sched/sched_process_fork"],
+                "outcomes": ["succeeded"]
+            },
+            {
+                "operation": "process_exec",
+                "event_sources": ["sched/sched_process_exec", "syscalls/sys_enter_execve", "syscalls/sys_enter_execveat"],
+                "outcomes": ["succeeded"]
+            },
+            {
+                "operation": "process_exit",
+                "event_sources": ["sched/sched_process_exit"],
+                "outcomes": ["unknown"]
+            },
+            {
+                "operation": "file_open",
+                "event_sources": ["syscalls/sys_enter_openat", "syscalls/sys_exit_openat", "syscalls/sys_enter_openat2", "syscalls/sys_exit_openat2"],
+                "outcomes": ["succeeded", "failed", "denied"]
+            },
+            {
+                "operation": "file_create",
+                "event_sources": ["syscalls/sys_enter_openat", "syscalls/sys_exit_openat", "syscalls/sys_enter_openat2", "syscalls/sys_exit_openat2", "syscalls/sys_enter_creat", "syscalls/sys_exit_creat"],
+                "outcomes": ["succeeded", "failed", "denied"]
+            },
+            {
+                "operation": "file_truncate",
+                "event_sources": ["syscalls/sys_enter_openat", "syscalls/sys_exit_openat", "syscalls/sys_enter_openat2", "syscalls/sys_exit_openat2", "syscalls/sys_enter_truncate", "syscalls/sys_exit_truncate"],
+                "outcomes": ["succeeded", "failed", "denied"]
+            },
+            {
+                "operation": "file_unlink",
+                "event_sources": ["syscalls/sys_enter_unlinkat", "syscalls/sys_exit_unlinkat"],
+                "outcomes": ["succeeded", "failed", "denied"]
+            },
+            {
+                "operation": "file_rename",
+                "event_sources": ["syscalls/sys_enter_renameat2", "syscalls/sys_exit_renameat2"],
+                "outcomes": ["succeeded", "failed", "denied"]
+            },
+            {
+                "operation": "credential_path_access",
+                "event_sources": ["syscalls/sys_enter_openat", "syscalls/sys_exit_openat", "syscalls/sys_enter_openat2", "syscalls/sys_exit_openat2"],
+                "outcomes": ["succeeded", "failed", "denied"]
+            }
+        ]
     })
 }
 
@@ -1047,7 +1243,7 @@ fn network_observation(agent_run_id: &str, timestamp_unix_ms: u64) -> Value {
         "parent_process_generation": 3,
         "parent_exec_generation": 1,
         "relation_status": "exact",
-        "relation_reason": "kernel_runtime_identity",
+        "relation_reason": "host_boot_scope_process_start_exec_generation",
         "process_command": null,
         "process_executable": "executable_ref:agent",
         "process_started_at_unix_ms": null

@@ -3,6 +3,7 @@
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use apolysis_observer::{audit_observer_capability_manifest, AyaLoaderPlan, LiveScope};
 use apolysis_store::HashChainStore;
 use serde_json::{json, Value};
 
@@ -240,6 +241,41 @@ fn run_project_refuses_to_overwrite_any_input_source() {
     std::fs::remove_dir_all(root).expect("remove fixture root");
 }
 
+#[test]
+fn run_project_is_byte_deterministic_for_the_same_saved_run() {
+    let root = temp_root("deterministic");
+    std::fs::create_dir_all(&root).expect("create fixture root");
+    let timeline = root.join("timeline.jsonl");
+    let first = root.join("first.json");
+    let second = root.join("second.json");
+    write_jsonl(&timeline, &complete_run("run-deterministic"));
+
+    for output in [&first, &second] {
+        let result = apolysis_command()
+            .args([
+                "run",
+                "project",
+                "--input",
+                timeline.to_str().expect("utf-8 timeline path"),
+                "--output",
+                output.to_str().expect("utf-8 output path"),
+            ])
+            .output()
+            .expect("run projection command");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    assert_eq!(
+        std::fs::read(&first).expect("read first projection"),
+        std::fs::read(&second).expect("read second projection")
+    );
+    std::fs::remove_dir_all(root).expect("remove fixture root");
+}
+
 fn complete_run(agent_run_id: &str) -> Vec<Value> {
     vec![
         capability(agent_run_id, 1000),
@@ -256,23 +292,13 @@ fn complete_run(agent_run_id: &str) -> Vec<Value> {
 }
 
 fn capability(agent_run_id: &str, timestamp_unix_ms: u64) -> Value {
-    json!({
-        "record_type": "collector_capability_manifest",
-        "schema_version": 1,
-        "timestamp_unix_ms": timestamp_unix_ms,
-        "agent_run_id": agent_run_id,
-        "collector": "apolysis_observer",
-        "collector_version": "0.1.0",
-        "kernel_abi_version": 3,
-        "kernel_record_size": 656,
-        "observation_scope": "process_tree",
-        "privacy_profile": "content_off",
-        "capabilities": [{
-            "operation": "network_connect",
-            "event_sources": ["syscalls/sys_enter_connect", "syscalls/sys_exit_connect"],
-            "outcomes": ["succeeded", "failed", "denied", "pending"]
-        }]
-    })
+    let loader_plan = AyaLoaderPlan::audit_observer_default("target/ebpf/apolysis_observer.bpf.o");
+    let manifest =
+        audit_observer_capability_manifest(agent_run_id, &LiveScope::ProcessTree(42), &loader_plan);
+    let mut value: Value =
+        serde_json::from_str(&manifest.to_json_line()).expect("parse production manifest");
+    value["timestamp_unix_ms"] = json!(timestamp_unix_ms);
+    value
 }
 
 fn lifecycle(
@@ -331,7 +357,7 @@ fn network_observation(agent_run_id: &str, timestamp_unix_ms: u64) -> Value {
         "parent_process_generation": 3,
         "parent_exec_generation": 1,
         "relation_status": "exact",
-        "relation_reason": "kernel_runtime_identity",
+        "relation_reason": "host_boot_scope_process_start_exec_generation",
         "process_command": null,
         "process_executable": "executable_ref:agent",
         "process_started_at_unix_ms": null

@@ -268,7 +268,8 @@ enforces byte/line/record limits before projection, and verifies a complete
 hash chain before exposing payloads. Source order is authoritative; wall-clock
 timestamps never repair or reorder a malformed lifecycle. Plain and verified
 inputs may be composed explicitly, but mixed integrity is visible and cannot
-produce complete evidence.
+produce complete evidence. Batch, byte, and record budgets apply to the whole
+composed command, not independently to each `--input`.
 
 `apolysis-accountability` folds those typed source records into exactly one
 Agent Observation Record. Its Agent Observation Summary keeps evidence state,
@@ -278,6 +279,11 @@ findings remain queryable limitations; mixed Agent Runs, corrupt storage,
 invalid lifecycle order, duplicate canonical observations, incompatible
 schemas, and content-policy violations fail closed. Free-form finding and gap
 diagnostics are canonicalized rather than copied into the derived artifact.
+Complete evidence requires the full current v1 operation/source/outcome
+capability contract. A partial or fictitious manifest and an unresolved Finding
+reference remain visible as typed issues and cannot be complete. Exact Runtime
+Identity is admitted only for post-activation kernel observations carrying the
+canonical generation-based relation reason and complete stable tuple.
 
 `apolysis run project --input <path> [--input <path> ...] --output <path>` is
 the non-privileged adapter for this projection. It writes deterministic JSON

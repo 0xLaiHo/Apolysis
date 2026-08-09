@@ -27,6 +27,7 @@ pub enum LocalRecordFormat {
 pub struct LocalRecordBatch {
     pub format: LocalRecordFormat,
     pub source_files: usize,
+    pub source_bytes: u64,
     pub records: Vec<Value>,
     #[serde(skip)]
     source_paths: Vec<PathBuf>,
@@ -227,6 +228,7 @@ pub fn read_agent_run_records(
     Ok(LocalRecordBatch {
         format: format.unwrap_or(LocalRecordFormat::PlainJsonl),
         source_files: segment_paths.len(),
+        source_bytes: total_bytes,
         records,
         source_paths: segment_paths,
     })

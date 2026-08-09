@@ -262,8 +262,9 @@ Deferred work 不会只因为未来可能有用就继续在活跃 workspace 中�
   `late_attach` gap，或把该 gap 的 `count:1` 呈现为 missing-syscall count；
 - 空 timeline 被解释为 Agent 没有活动；
 - saved-run projection 接纳 mixed Agent Run、在完整验证前暴露 hash-chain payload、把 mixed
-  integrity 或 unknown record 标为 complete、能够覆盖 input source，或在错误中包含 raw
-  payload；
+  integrity 或 unknown record 标为 complete、把 per-input limit 误当作 combined-input bound、
+  接受 partial 或伪造 capability 为 complete、保留无法解析的 Finding evidence link、能够覆盖
+  input source，或在错误中包含 raw payload；
 - raw prompt、response、argv、tool payload、credential 或 private path 默认落盘；
 - viewer 需要 root、BPF access、host PID namespace、runtime socket 或 node credential；
 - 受支持 kernel、runtime、operation 与 performance envelope 没有文档和测试；

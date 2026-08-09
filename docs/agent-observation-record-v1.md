@@ -66,6 +66,11 @@ An active or failed lifecycle remains visible even when other issues exist.
 Complete evidence requires one compatible content-off capability manifest, a
 legal lifecycle with a normal terminal, at least one supported Runtime
 Observation, and no loss, gap, diagnostic, integrity, or capability issue.
+For v1, compatible means the complete current `apolysis_observer`
+operation/source/outcome contract; a missing operation or mismatched source or
+outcome set produces `unsupported_capability`. A Finding whose `evidence_ref`
+does not resolve to a projected canonical observation produces
+`unresolved_finding_evidence`.
 Missing lifecycle, unsupported or missing outcomes, collector loss, gaps,
 integrity findings, and non-zero failure diagnostics cannot be complete. Mixed
 integrity and unknown additive records make an otherwise complete-shaped run
@@ -78,6 +83,10 @@ scope generation, PID, process generation, kernel process-start time, and exec
 generation. Identical exact tuples are folded into the stable first-seen IDs
 `identity-1`, `identity-2`, and so on. Inferred, ambiguous, and unattributed
 observations are never upgraded or merged into an exact identity.
+Exact projection additionally requires `event_source:kernel_tracepoint`, a
+non-empty canonical `raw_event_id`, and relation reason
+`host_boot_scope_process_start_exec_generation`. Unsupported or heuristic
+relations cannot create an exact identity.
 
 The projection accepts only a `content_off` capability manifest and rejects a
 non-null legacy `process_command`. Finding kinds, decisions, and evidence
@@ -101,7 +110,7 @@ conflicting run IDs.
 
 ## Limits and publication
 
-- 128 MiB total saved-run input;
+- 128 MiB total saved-run input across all `--input` values;
 - 1 MiB per JSONL line;
 - 1,000,000 source records;
 - at most 1,024 numeric rotation archives;

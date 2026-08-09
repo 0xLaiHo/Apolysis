@@ -305,6 +305,8 @@ The beta cannot be released for a profile when any applicable condition holds:
 - an empty timeline is interpreted as absence of Agent activity;
 - saved-run projection accepts mixed Agent Runs, exposes hash-chain payloads
   before full verification, marks mixed integrity or unknown records complete,
+  treats per-input limits as a combined-input bound, accepts a partial or
+  fictitious capability as complete, leaves Finding evidence links unresolved,
   can overwrite an input source, or includes raw payload content in an error;
 - raw prompt, response, argv, tool payload, credential, or private path content
   persists by default;
