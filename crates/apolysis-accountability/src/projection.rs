@@ -2,6 +2,14 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use apolysis_core::{
+    audit_observer_capability_contract_v1, AuditObserverCapabilityContract, OperationOutcome,
+    AUDIT_OBSERVER_COLLECTOR, CGROUP_OBSERVATION_SCOPE, CONTENT_OFF_PRIVACY_PROFILE,
+    PROCESS_TREE_OBSERVATION_SCOPE,
+};
+pub use apolysis_core::{
+    CollectorHealthState as CollectorLifecycleHealth, CollectorLifecycleState, CollectorStopReason,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -63,42 +71,6 @@ pub enum CollectorHealthProjection {
     Degraded,
     Failed,
     Unknown,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CollectorLifecycleState {
-    Started,
-    Checkpoint,
-    Stopped,
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CollectorLifecycleHealth {
-    Healthy,
-    Degraded,
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CollectorStopReason {
-    AgentRunClosed,
-    DaemonShutdown,
-    DurationElapsed,
-    AgentExited,
-    ShutdownSignal,
-    AttachFailure,
-    VerifierFailure,
-    AbiMismatch,
-    DecodeFailure,
-    CounterReadFailure,
-    StorageFailure,
-    ObserverFailure,
-    CollectorRestart,
-    IncompleteTerminalFlush,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -199,10 +171,88 @@ pub struct ProjectedCollectorLifecycle {
     pub timestamp_unix_ms: u128,
     pub collector: String,
     pub collector_instance_id: String,
+    #[serde(
+        serialize_with = "serialize_lifecycle_state",
+        deserialize_with = "deserialize_lifecycle_state"
+    )]
     pub state: CollectorLifecycleState,
+    #[serde(
+        serialize_with = "serialize_lifecycle_health",
+        deserialize_with = "deserialize_lifecycle_health"
+    )]
     pub health: CollectorLifecycleHealth,
+    #[serde(
+        serialize_with = "serialize_stop_reason",
+        deserialize_with = "deserialize_stop_reason"
+    )]
     pub stop_reason: Option<CollectorStopReason>,
     pub counters: ProjectedLifecycleCounters,
+}
+
+fn serialize_lifecycle_state<S>(
+    value: &CollectorLifecycleState,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(value.as_str())
+}
+
+fn deserialize_lifecycle_state<'de, D>(deserializer: D) -> Result<CollectorLifecycleState, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    CollectorLifecycleState::parse_v1(&value)
+        .ok_or_else(|| serde::de::Error::custom("invalid collector lifecycle state"))
+}
+
+fn serialize_lifecycle_health<S>(
+    value: &CollectorLifecycleHealth,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(value.as_str())
+}
+
+fn deserialize_lifecycle_health<'de, D>(
+    deserializer: D,
+) -> Result<CollectorLifecycleHealth, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    CollectorLifecycleHealth::parse_v1(&value)
+        .ok_or_else(|| serde::de::Error::custom("invalid collector lifecycle health"))
+}
+
+fn serialize_stop_reason<S>(
+    value: &Option<CollectorStopReason>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(reason) => serializer.serialize_some(reason.as_str()),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_stop_reason<'de, D>(deserializer: D) -> Result<Option<CollectorStopReason>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            CollectorStopReason::parse_v1(&value)
+                .ok_or_else(|| serde::de::Error::custom("invalid collector stop reason"))
+        })
+        .transpose()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -445,96 +495,6 @@ struct ValidatedLifecycle {
     health: CollectorLifecycleHealth,
     stop_reason: Option<CollectorStopReason>,
 }
-
-struct CapabilityContract {
-    operation: &'static str,
-    event_sources: &'static [&'static str],
-    outcomes: &'static [&'static str],
-}
-
-const CAPABILITY_CONTRACTS: &[CapabilityContract] = &[
-    CapabilityContract {
-        operation: "process_fork",
-        event_sources: &["sched/sched_process_fork"],
-        outcomes: &["succeeded"],
-    },
-    CapabilityContract {
-        operation: "process_exec",
-        event_sources: &[
-            "sched/sched_process_exec",
-            "syscalls/sys_enter_execve",
-            "syscalls/sys_enter_execveat",
-        ],
-        outcomes: &["succeeded"],
-    },
-    CapabilityContract {
-        operation: "process_exit",
-        event_sources: &["sched/sched_process_exit"],
-        outcomes: &["unknown"],
-    },
-    CapabilityContract {
-        operation: "file_open",
-        event_sources: &[
-            "syscalls/sys_enter_openat",
-            "syscalls/sys_exit_openat",
-            "syscalls/sys_enter_openat2",
-            "syscalls/sys_exit_openat2",
-        ],
-        outcomes: &["succeeded", "failed", "denied"],
-    },
-    CapabilityContract {
-        operation: "file_create",
-        event_sources: &[
-            "syscalls/sys_enter_openat",
-            "syscalls/sys_exit_openat",
-            "syscalls/sys_enter_openat2",
-            "syscalls/sys_exit_openat2",
-            "syscalls/sys_enter_creat",
-            "syscalls/sys_exit_creat",
-        ],
-        outcomes: &["succeeded", "failed", "denied"],
-    },
-    CapabilityContract {
-        operation: "file_truncate",
-        event_sources: &[
-            "syscalls/sys_enter_openat",
-            "syscalls/sys_exit_openat",
-            "syscalls/sys_enter_openat2",
-            "syscalls/sys_exit_openat2",
-            "syscalls/sys_enter_truncate",
-            "syscalls/sys_exit_truncate",
-        ],
-        outcomes: &["succeeded", "failed", "denied"],
-    },
-    CapabilityContract {
-        operation: "file_unlink",
-        event_sources: &["syscalls/sys_enter_unlinkat", "syscalls/sys_exit_unlinkat"],
-        outcomes: &["succeeded", "failed", "denied"],
-    },
-    CapabilityContract {
-        operation: "file_rename",
-        event_sources: &[
-            "syscalls/sys_enter_renameat2",
-            "syscalls/sys_exit_renameat2",
-        ],
-        outcomes: &["succeeded", "failed", "denied"],
-    },
-    CapabilityContract {
-        operation: "network_connect",
-        event_sources: &["syscalls/sys_enter_connect", "syscalls/sys_exit_connect"],
-        outcomes: &["succeeded", "failed", "denied", "pending"],
-    },
-    CapabilityContract {
-        operation: "credential_path_access",
-        event_sources: &[
-            "syscalls/sys_enter_openat",
-            "syscalls/sys_exit_openat",
-            "syscalls/sys_enter_openat2",
-            "syscalls/sys_exit_openat2",
-        ],
-        outcomes: &["succeeded", "failed", "denied"],
-    },
-];
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ExactIdentityKey {
@@ -1118,14 +1078,17 @@ fn validate_capability_manifest(
             field: "schema_version",
         });
     }
-    if wire.privacy_profile != "content_off" {
+    if wire.privacy_profile != CONTENT_OFF_PRIVACY_PROFILE {
         return Err(ProjectionError::ContentPolicyViolation { ordinal });
     }
-    if wire.collector != "apolysis_observer"
+    if wire.collector != AUDIT_OBSERVER_COLLECTOR
         || wire.collector_version.is_empty()
         || wire.kernel_abi_version != 3
         || wire.kernel_record_size != 656
-        || !matches!(wire.observation_scope.as_str(), "process_tree" | "cgroup")
+        || !matches!(
+            wire.observation_scope.as_str(),
+            PROCESS_TREE_OBSERVATION_SCOPE | CGROUP_OBSERVATION_SCOPE
+        )
         || wire.capabilities.is_empty()
     {
         return Err(ProjectionError::MalformedRecord {
@@ -1156,10 +1119,7 @@ fn validate_capability_manifest(
         }
         let mut outcomes = BTreeSet::new();
         if capability.outcomes.iter().any(|outcome| {
-            !matches!(
-                outcome.as_str(),
-                "attempted" | "succeeded" | "failed" | "denied" | "pending" | "unknown"
-            ) || !outcomes.insert(outcome.as_str())
+            OperationOutcome::parse_v1(outcome).is_none() || !outcomes.insert(outcome.as_str())
         }) {
             return Err(ProjectionError::MalformedRecord {
                 ordinal,
@@ -1167,7 +1127,7 @@ fn validate_capability_manifest(
             });
         }
     }
-    let unsupported = CAPABILITY_CONTRACTS
+    let unsupported = audit_observer_capability_contract_v1()
         .iter()
         .filter(|contract| {
             let Some(capability) = wire
@@ -1178,14 +1138,14 @@ fn validate_capability_manifest(
                 return true;
             };
             !same_vocabulary(&capability.event_sources, contract.event_sources)
-                || !same_vocabulary(&capability.outcomes, contract.outcomes)
+                || !same_outcome_vocabulary(&capability.outcomes, contract.outcomes)
         })
         .count();
     to_u64(unsupported)
 }
 
-fn capability_contract(operation: &str) -> Option<&'static CapabilityContract> {
-    CAPABILITY_CONTRACTS
+fn capability_contract(operation: &str) -> Option<&'static AuditObserverCapabilityContract> {
+    audit_observer_capability_contract_v1()
         .iter()
         .find(|contract| contract.operation == operation)
 }
@@ -1197,6 +1157,13 @@ fn same_vocabulary(actual: &[String], expected: &[&str]) -> bool {
             .all(|expected| actual.iter().any(|actual| actual == expected))
 }
 
+fn same_outcome_vocabulary(actual: &[String], expected: &[OperationOutcome]) -> bool {
+    actual.len() == expected.len()
+        && expected
+            .iter()
+            .all(|expected| actual.iter().any(|actual| actual == expected.as_str()))
+}
+
 fn invalid_lifecycle_record(ordinal: u64) -> ProjectionError {
     ProjectionError::MalformedRecord {
         ordinal,
@@ -1204,50 +1171,11 @@ fn invalid_lifecycle_record(ordinal: u64) -> ProjectionError {
     }
 }
 
-fn parse_lifecycle_state(value: &str) -> Option<CollectorLifecycleState> {
-    match value {
-        "started" => Some(CollectorLifecycleState::Started),
-        "checkpoint" => Some(CollectorLifecycleState::Checkpoint),
-        "stopped" => Some(CollectorLifecycleState::Stopped),
-        "failed" => Some(CollectorLifecycleState::Failed),
-        _ => None,
-    }
-}
-
-fn parse_lifecycle_health(value: &str) -> Option<CollectorLifecycleHealth> {
-    match value {
-        "healthy" => Some(CollectorLifecycleHealth::Healthy),
-        "degraded" => Some(CollectorLifecycleHealth::Degraded),
-        "failed" => Some(CollectorLifecycleHealth::Failed),
-        _ => None,
-    }
-}
-
-fn parse_stop_reason(value: &str) -> Option<CollectorStopReason> {
-    match value {
-        "agent_run_closed" => Some(CollectorStopReason::AgentRunClosed),
-        "daemon_shutdown" => Some(CollectorStopReason::DaemonShutdown),
-        "duration_elapsed" => Some(CollectorStopReason::DurationElapsed),
-        "agent_exited" => Some(CollectorStopReason::AgentExited),
-        "shutdown_signal" => Some(CollectorStopReason::ShutdownSignal),
-        "attach_failure" => Some(CollectorStopReason::AttachFailure),
-        "verifier_failure" => Some(CollectorStopReason::VerifierFailure),
-        "abi_mismatch" => Some(CollectorStopReason::AbiMismatch),
-        "decode_failure" => Some(CollectorStopReason::DecodeFailure),
-        "counter_read_failure" => Some(CollectorStopReason::CounterReadFailure),
-        "storage_failure" => Some(CollectorStopReason::StorageFailure),
-        "observer_failure" => Some(CollectorStopReason::ObserverFailure),
-        "collector_restart" => Some(CollectorStopReason::CollectorRestart),
-        "incomplete_terminal_flush" => Some(CollectorStopReason::IncompleteTerminalFlush),
-        _ => None,
-    }
-}
-
 fn validate_lifecycle(
     wire: &CollectorLifecycleWire,
     ordinal: u64,
 ) -> Result<ValidatedLifecycle, ProjectionError> {
-    if wire.collector != "apolysis_observer"
+    if wire.collector != AUDIT_OBSERVER_COLLECTOR
         || wire.collector_instance_id.is_empty()
         || !is_bounded_vocabulary(&wire.collector_instance_id, 128)
     {
@@ -1256,16 +1184,17 @@ fn validate_lifecycle(
             field: "collector_lifecycle",
         });
     }
-    let Some(state) = parse_lifecycle_state(&wire.state) else {
+    let Some(state) = CollectorLifecycleState::parse_v1(&wire.state) else {
         return Err(invalid_lifecycle_record(ordinal));
     };
-    let Some(health) = parse_lifecycle_health(&wire.health) else {
+    let Some(health) = CollectorLifecycleHealth::parse_v1(&wire.health) else {
         return Err(invalid_lifecycle_record(ordinal));
     };
     let stop_reason = match wire.stop_reason.as_deref() {
-        Some(reason) => {
-            Some(parse_stop_reason(reason).ok_or_else(|| invalid_lifecycle_record(ordinal))?)
-        }
+        Some(reason) => Some(
+            CollectorStopReason::parse_v1(reason)
+                .ok_or_else(|| invalid_lifecycle_record(ordinal))?,
+        ),
         None => None,
     };
     let valid = match state {
@@ -1284,38 +1213,17 @@ fn validate_lifecycle(
                     }
         }
         CollectorLifecycleState::Stopped => {
-            matches!(
-                stop_reason,
-                Some(
-                    CollectorStopReason::AgentRunClosed
-                        | CollectorStopReason::DaemonShutdown
-                        | CollectorStopReason::DurationElapsed
-                        | CollectorStopReason::AgentExited
-                        | CollectorStopReason::ShutdownSignal
-                )
-            ) && health
-                == if wire.counters.has_terminal_loss() {
-                    CollectorLifecycleHealth::Degraded
-                } else {
-                    CollectorLifecycleHealth::Healthy
-                }
+            stop_reason.is_some_and(CollectorStopReason::is_normal)
+                && health
+                    == if wire.counters.has_terminal_loss() {
+                        CollectorLifecycleHealth::Degraded
+                    } else {
+                        CollectorLifecycleHealth::Healthy
+                    }
         }
         CollectorLifecycleState::Failed => {
             health == CollectorLifecycleHealth::Failed
-                && matches!(
-                    stop_reason,
-                    Some(
-                        CollectorStopReason::AttachFailure
-                            | CollectorStopReason::VerifierFailure
-                            | CollectorStopReason::AbiMismatch
-                            | CollectorStopReason::DecodeFailure
-                            | CollectorStopReason::CounterReadFailure
-                            | CollectorStopReason::StorageFailure
-                            | CollectorStopReason::ObserverFailure
-                            | CollectorStopReason::CollectorRestart
-                            | CollectorStopReason::IncompleteTerminalFlush
-                    )
-                )
+                && stop_reason.is_some_and(CollectorStopReason::is_failure)
         }
     };
     if valid {
@@ -1364,24 +1272,19 @@ fn validate_runtime_observation(
         return Err(ProjectionError::ConflictingRuntimeIdentity { ordinal });
     }
     if let Some(outcome) = wire.outcome.as_deref() {
-        if !matches!(
-            outcome,
-            "attempted" | "succeeded" | "failed" | "denied" | "pending" | "unknown"
-        ) {
-            return Err(ProjectionError::MalformedRecord {
+        let outcome =
+            OperationOutcome::parse_v1(outcome).ok_or(ProjectionError::MalformedRecord {
                 ordinal,
                 field: "outcome",
-            });
-        }
+            })?;
         let result_is_valid = match outcome {
-            "succeeded" => {
+            OperationOutcome::Succeeded => {
                 wire.return_value.is_some_and(|value| value >= 0) && wire.errno.is_none()
             }
-            "failed" | "denied" | "pending" => {
+            OperationOutcome::Failed | OperationOutcome::Denied | OperationOutcome::Pending => {
                 matches!((wire.return_value, wire.errno), (Some(value), Some(errno)) if value < 0 && errno > 0 && value.checked_neg() == Some(i64::from(errno)))
             }
-            "attempted" | "unknown" => true,
-            _ => false,
+            OperationOutcome::Attempted | OperationOutcome::Unknown => true,
         };
         if !result_is_valid {
             return Err(ProjectionError::MalformedRecord {

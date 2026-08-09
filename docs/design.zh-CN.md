@@ -401,7 +401,8 @@ Implemented today：
   完成的 protected existing-process attach、非特权 saved-run projection、可选 Codex intent
   correlation、visibility 与 verification command；
 - `apolysis-core`：当前 JSONL vocabulary、record type、版本化 Collector Capability
-  manifest 与 collector lifecycle schema；
+  manifest 与 collector lifecycle schema，包括由 producer 与 projection 共同消费的唯一
+  lifecycle vocabulary 和完整 AuditObserver v1 operation/source/outcome contract；
 - `apolysis-store`：rotation、可选本地 hash-chain envelope，以及读取 plain/rotated 或 verified
   saved run 的有界 stable-snapshot reader；
 - `apolysis-accountability`：纯 Agent Observation Record projection、相互独立的 summary

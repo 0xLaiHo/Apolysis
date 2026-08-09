@@ -64,6 +64,10 @@ fn complete_agent_run_projects_one_queryable_aggregate_and_summary() {
     ])])
     .expect("complete Agent Run projection");
 
+    let rendered = serde_json::to_string(&record).expect("serialize projection");
+    let round_trip: apolysis_accountability::AgentObservationRecord =
+        serde_json::from_str(&rendered).expect("deserialize projection");
+    assert_eq!(round_trip, record);
     let value = serde_json::to_value(record).expect("serialize projection");
     assert_eq!(
         json!({

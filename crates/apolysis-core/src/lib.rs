@@ -28,6 +28,10 @@ pub trait JsonLine {
 pub const COLLECTOR_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 pub const COLLECTOR_LIFECYCLE_SCHEMA_VERSION: u32 = 1;
 pub const OBSERVATION_GAP_SCHEMA_VERSION: u32 = 1;
+pub const AUDIT_OBSERVER_COLLECTOR: &str = "apolysis_observer";
+pub const CONTENT_OFF_PRIVACY_PROFILE: &str = "content_off";
+pub const PROCESS_TREE_OBSERVATION_SCOPE: &str = "process_tree";
+pub const CGROUP_OBSERVATION_SCOPE: &str = "cgroup";
 
 pub fn new_collector_instance_id() -> Result<String, String> {
     let value = std::fs::read_to_string("/proc/sys/kernel/random/uuid")
@@ -61,6 +65,17 @@ impl CollectorLifecycleState {
             Self::Failed => "failed",
         }
     }
+
+    /// Decode one lifecycle state from the stable JSONL v1 vocabulary.
+    pub fn parse_v1(value: &str) -> Option<Self> {
+        match value {
+            "started" => Some(Self::Started),
+            "checkpoint" => Some(Self::Checkpoint),
+            "stopped" => Some(Self::Stopped),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +91,16 @@ impl CollectorHealthState {
             Self::Healthy => "healthy",
             Self::Degraded => "degraded",
             Self::Failed => "failed",
+        }
+    }
+
+    /// Decode one collector health state from the stable JSONL v1 vocabulary.
+    pub fn parse_v1(value: &str) -> Option<Self> {
+        match value {
+            "healthy" => Some(Self::Healthy),
+            "degraded" => Some(Self::Degraded),
+            "failed" => Some(Self::Failed),
+            _ => None,
         }
     }
 }
@@ -97,6 +122,18 @@ impl CollectorNormalStopReason {
             Self::DurationElapsed => "duration_elapsed",
             Self::AgentExited => "agent_exited",
             Self::ShutdownSignal => "shutdown_signal",
+        }
+    }
+
+    /// Decode one normal terminal reason from the stable JSONL v1 vocabulary.
+    pub fn parse_v1(value: &str) -> Option<Self> {
+        match value {
+            "agent_run_closed" => Some(Self::AgentRunClosed),
+            "daemon_shutdown" => Some(Self::DaemonShutdown),
+            "duration_elapsed" => Some(Self::DurationElapsed),
+            "agent_exited" => Some(Self::AgentExited),
+            "shutdown_signal" => Some(Self::ShutdownSignal),
+            _ => None,
         }
     }
 }
@@ -126,6 +163,126 @@ impl CollectorFailureReason {
             Self::ObserverFailure => "observer_failure",
             Self::CollectorRestart => "collector_restart",
             Self::IncompleteTerminalFlush => "incomplete_terminal_flush",
+        }
+    }
+
+    /// Decode one failed terminal reason from the stable JSONL v1 vocabulary.
+    pub fn parse_v1(value: &str) -> Option<Self> {
+        match value {
+            "attach_failure" => Some(Self::AttachFailure),
+            "verifier_failure" => Some(Self::VerifierFailure),
+            "abi_mismatch" => Some(Self::AbiMismatch),
+            "decode_failure" => Some(Self::DecodeFailure),
+            "counter_read_failure" => Some(Self::CounterReadFailure),
+            "storage_failure" => Some(Self::StorageFailure),
+            "observer_failure" => Some(Self::ObserverFailure),
+            "collector_restart" => Some(Self::CollectorRestart),
+            "incomplete_terminal_flush" => Some(Self::IncompleteTerminalFlush),
+            _ => None,
+        }
+    }
+}
+
+/// Typed union of every normal and failure stop reason in lifecycle schema v1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectorStopReason {
+    AgentRunClosed,
+    DaemonShutdown,
+    DurationElapsed,
+    AgentExited,
+    ShutdownSignal,
+    AttachFailure,
+    VerifierFailure,
+    AbiMismatch,
+    DecodeFailure,
+    CounterReadFailure,
+    StorageFailure,
+    ObserverFailure,
+    CollectorRestart,
+    IncompleteTerminalFlush,
+}
+
+impl CollectorStopReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentRunClosed => "agent_run_closed",
+            Self::DaemonShutdown => "daemon_shutdown",
+            Self::DurationElapsed => "duration_elapsed",
+            Self::AgentExited => "agent_exited",
+            Self::ShutdownSignal => "shutdown_signal",
+            Self::AttachFailure => "attach_failure",
+            Self::VerifierFailure => "verifier_failure",
+            Self::AbiMismatch => "abi_mismatch",
+            Self::DecodeFailure => "decode_failure",
+            Self::CounterReadFailure => "counter_read_failure",
+            Self::StorageFailure => "storage_failure",
+            Self::ObserverFailure => "observer_failure",
+            Self::CollectorRestart => "collector_restart",
+            Self::IncompleteTerminalFlush => "incomplete_terminal_flush",
+        }
+    }
+
+    /// Decode any terminal reason from the stable JSONL v1 vocabulary.
+    pub fn parse_v1(value: &str) -> Option<Self> {
+        match value {
+            "agent_run_closed" => Some(Self::AgentRunClosed),
+            "daemon_shutdown" => Some(Self::DaemonShutdown),
+            "duration_elapsed" => Some(Self::DurationElapsed),
+            "agent_exited" => Some(Self::AgentExited),
+            "shutdown_signal" => Some(Self::ShutdownSignal),
+            "attach_failure" => Some(Self::AttachFailure),
+            "verifier_failure" => Some(Self::VerifierFailure),
+            "abi_mismatch" => Some(Self::AbiMismatch),
+            "decode_failure" => Some(Self::DecodeFailure),
+            "counter_read_failure" => Some(Self::CounterReadFailure),
+            "storage_failure" => Some(Self::StorageFailure),
+            "observer_failure" => Some(Self::ObserverFailure),
+            "collector_restart" => Some(Self::CollectorRestart),
+            "incomplete_terminal_flush" => Some(Self::IncompleteTerminalFlush),
+            _ => None,
+        }
+    }
+
+    pub fn is_normal(self) -> bool {
+        matches!(
+            self,
+            Self::AgentRunClosed
+                | Self::DaemonShutdown
+                | Self::DurationElapsed
+                | Self::AgentExited
+                | Self::ShutdownSignal
+        )
+    }
+
+    pub fn is_failure(self) -> bool {
+        !self.is_normal()
+    }
+}
+
+impl From<CollectorNormalStopReason> for CollectorStopReason {
+    fn from(reason: CollectorNormalStopReason) -> Self {
+        match reason {
+            CollectorNormalStopReason::AgentRunClosed => Self::AgentRunClosed,
+            CollectorNormalStopReason::DaemonShutdown => Self::DaemonShutdown,
+            CollectorNormalStopReason::DurationElapsed => Self::DurationElapsed,
+            CollectorNormalStopReason::AgentExited => Self::AgentExited,
+            CollectorNormalStopReason::ShutdownSignal => Self::ShutdownSignal,
+        }
+    }
+}
+
+impl From<CollectorFailureReason> for CollectorStopReason {
+    fn from(reason: CollectorFailureReason) -> Self {
+        match reason {
+            CollectorFailureReason::AttachFailure => Self::AttachFailure,
+            CollectorFailureReason::VerifierFailure => Self::VerifierFailure,
+            CollectorFailureReason::AbiMismatch => Self::AbiMismatch,
+            CollectorFailureReason::DecodeFailure => Self::DecodeFailure,
+            CollectorFailureReason::CounterReadFailure => Self::CounterReadFailure,
+            CollectorFailureReason::StorageFailure => Self::StorageFailure,
+            CollectorFailureReason::ObserverFailure => Self::ObserverFailure,
+            CollectorFailureReason::CollectorRestart => Self::CollectorRestart,
+            CollectorFailureReason::IncompleteTerminalFlush => Self::IncompleteTerminalFlush,
         }
     }
 }
@@ -178,7 +335,7 @@ pub struct CollectorLifecycleRecord {
     collector_instance_id: String,
     state: CollectorLifecycleState,
     health: CollectorHealthState,
-    stop_reason: Option<&'static str>,
+    stop_reason: Option<CollectorStopReason>,
     counters: CollectorLifecycleCounters,
 }
 
@@ -223,7 +380,7 @@ impl CollectorLifecycleRecord {
             collector_instance_id,
             CollectorLifecycleState::Stopped,
             counters.terminal_health(),
-            Some(reason.as_str()),
+            Some(reason.into()),
             counters,
         )
     }
@@ -239,7 +396,7 @@ impl CollectorLifecycleRecord {
             collector_instance_id,
             CollectorLifecycleState::Failed,
             CollectorHealthState::Failed,
-            Some(reason.as_str()),
+            Some(reason.into()),
             counters,
         )
     }
@@ -249,7 +406,7 @@ impl CollectorLifecycleRecord {
         collector_instance_id: impl Into<String>,
         state: CollectorLifecycleState,
         health: CollectorHealthState,
-        stop_reason: Option<&'static str>,
+        stop_reason: Option<CollectorStopReason>,
         counters: CollectorLifecycleCounters,
     ) -> Self {
         Self {
@@ -286,11 +443,11 @@ impl JsonLine for CollectorLifecycleRecord {
             self.schema_version,
             self.timestamp_unix_ms,
             json_string(&self.agent_run_id),
-            json_string("apolysis_observer"),
+            json_string(AUDIT_OBSERVER_COLLECTOR),
             json_string(&self.collector_instance_id),
             json_string(self.state.as_str()),
             json_string(self.health.as_str()),
-            optional_json_string(self.stop_reason),
+            optional_json_string(self.stop_reason.map(CollectorStopReason::as_str)),
             self.counters.global_reserve_failures,
             self.counters.global_map_pressure,
             self.counters.global_abi_mismatches,
@@ -418,6 +575,140 @@ impl OperationOutcome {
             Self::Unknown => "unknown",
         }
     }
+
+    /// Decode one operation outcome from the stable JSONL v1 vocabulary.
+    pub fn parse_v1(value: &str) -> Option<Self> {
+        match value {
+            "attempted" => Some(Self::Attempted),
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "denied" => Some(Self::Denied),
+            "pending" => Some(Self::Pending),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+/// One operation in the complete AuditObserver capability contract for JSONL v1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuditObserverCapabilityContract {
+    pub operation: &'static str,
+    pub event_sources: &'static [&'static str],
+    pub required_event_sources: &'static [&'static str],
+    pub outcomes: &'static [OperationOutcome],
+}
+
+const FILE_OPERATION_OUTCOMES_V1: &[OperationOutcome] = &[
+    OperationOutcome::Succeeded,
+    OperationOutcome::Failed,
+    OperationOutcome::Denied,
+];
+const FILE_OPEN_SOURCES_V1: &[&str] = &[
+    "syscalls/sys_enter_openat",
+    "syscalls/sys_exit_openat",
+    "syscalls/sys_enter_openat2",
+    "syscalls/sys_exit_openat2",
+];
+const FILE_CREATE_SOURCES_V1: &[&str] = &[
+    "syscalls/sys_enter_openat",
+    "syscalls/sys_exit_openat",
+    "syscalls/sys_enter_openat2",
+    "syscalls/sys_exit_openat2",
+    "syscalls/sys_enter_creat",
+    "syscalls/sys_exit_creat",
+];
+const FILE_TRUNCATE_SOURCES_V1: &[&str] = &[
+    "syscalls/sys_enter_openat",
+    "syscalls/sys_exit_openat",
+    "syscalls/sys_enter_openat2",
+    "syscalls/sys_exit_openat2",
+    "syscalls/sys_enter_truncate",
+    "syscalls/sys_exit_truncate",
+];
+const FILE_UNLINK_SOURCES_V1: &[&str] =
+    &["syscalls/sys_enter_unlinkat", "syscalls/sys_exit_unlinkat"];
+const FILE_RENAME_SOURCES_V1: &[&str] = &[
+    "syscalls/sys_enter_renameat2",
+    "syscalls/sys_exit_renameat2",
+];
+
+/// Complete v1 observation contract emitted by the configured AuditObserver.
+pub const AUDIT_OBSERVER_CAPABILITY_CONTRACT_V1: &[AuditObserverCapabilityContract] = &[
+    AuditObserverCapabilityContract {
+        operation: "process_fork",
+        event_sources: &["sched/sched_process_fork"],
+        required_event_sources: &[],
+        outcomes: &[OperationOutcome::Succeeded],
+    },
+    AuditObserverCapabilityContract {
+        operation: "process_exec",
+        event_sources: &[
+            "sched/sched_process_exec",
+            "syscalls/sys_enter_execve",
+            "syscalls/sys_enter_execveat",
+        ],
+        required_event_sources: &["sched/sched_process_exec"],
+        outcomes: &[OperationOutcome::Succeeded],
+    },
+    AuditObserverCapabilityContract {
+        operation: "process_exit",
+        event_sources: &["sched/sched_process_exit"],
+        required_event_sources: &[],
+        outcomes: &[OperationOutcome::Unknown],
+    },
+    AuditObserverCapabilityContract {
+        operation: "file_open",
+        event_sources: FILE_OPEN_SOURCES_V1,
+        required_event_sources: FILE_OPEN_SOURCES_V1,
+        outcomes: FILE_OPERATION_OUTCOMES_V1,
+    },
+    AuditObserverCapabilityContract {
+        operation: "file_create",
+        event_sources: FILE_CREATE_SOURCES_V1,
+        required_event_sources: FILE_CREATE_SOURCES_V1,
+        outcomes: FILE_OPERATION_OUTCOMES_V1,
+    },
+    AuditObserverCapabilityContract {
+        operation: "file_truncate",
+        event_sources: FILE_TRUNCATE_SOURCES_V1,
+        required_event_sources: FILE_TRUNCATE_SOURCES_V1,
+        outcomes: FILE_OPERATION_OUTCOMES_V1,
+    },
+    AuditObserverCapabilityContract {
+        operation: "file_unlink",
+        event_sources: FILE_UNLINK_SOURCES_V1,
+        required_event_sources: FILE_UNLINK_SOURCES_V1,
+        outcomes: FILE_OPERATION_OUTCOMES_V1,
+    },
+    AuditObserverCapabilityContract {
+        operation: "file_rename",
+        event_sources: FILE_RENAME_SOURCES_V1,
+        required_event_sources: FILE_RENAME_SOURCES_V1,
+        outcomes: FILE_OPERATION_OUTCOMES_V1,
+    },
+    AuditObserverCapabilityContract {
+        operation: "network_connect",
+        event_sources: &["syscalls/sys_enter_connect", "syscalls/sys_exit_connect"],
+        required_event_sources: &["syscalls/sys_enter_connect", "syscalls/sys_exit_connect"],
+        outcomes: &[
+            OperationOutcome::Succeeded,
+            OperationOutcome::Failed,
+            OperationOutcome::Denied,
+            OperationOutcome::Pending,
+        ],
+    },
+    AuditObserverCapabilityContract {
+        operation: "credential_path_access",
+        event_sources: FILE_OPEN_SOURCES_V1,
+        required_event_sources: FILE_OPEN_SOURCES_V1,
+        outcomes: FILE_OPERATION_OUTCOMES_V1,
+    },
+];
+
+/// Return the authoritative, immutable AuditObserver capability contract for v1.
+pub fn audit_observer_capability_contract_v1() -> &'static [AuditObserverCapabilityContract] {
+    AUDIT_OBSERVER_CAPABILITY_CONTRACT_V1
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -502,12 +793,12 @@ impl CollectorCapabilityManifest {
             schema_version: COLLECTOR_CAPABILITY_SCHEMA_VERSION,
             timestamp_unix_ms: now_unix_ms(),
             agent_run_id: agent_run_id.into(),
-            collector: "apolysis_observer".to_string(),
+            collector: AUDIT_OBSERVER_COLLECTOR.to_string(),
             collector_version: collector_version.into(),
             kernel_abi_version,
             kernel_record_size,
             observation_scope: observation_scope.into(),
-            privacy_profile: "content_off".to_string(),
+            privacy_profile: CONTENT_OFF_PRIVACY_PROFILE.to_string(),
             capabilities,
         }
     }

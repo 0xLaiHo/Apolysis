@@ -475,7 +475,9 @@ Implemented today:
   saved-run projection, optional Codex intent correlation, visibility, and
   verification commands;
 - `apolysis-core`: current JSONL vocabulary, record types, versioned Collector
-  Capability manifest, and collector lifecycle schema;
+  Capability manifest, and collector lifecycle schema, including the single
+  authoritative lifecycle vocabulary and complete AuditObserver v1
+  operation/source/outcome contract consumed by both producer and projection;
 - `apolysis-store`: rotation, optional local hash-chain envelopes, and bounded
   stable-snapshot readers for plain/rotated or verified saved runs;
 - `apolysis-accountability`: the pure Agent Observation Record projection,
