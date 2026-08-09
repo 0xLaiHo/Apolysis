@@ -152,6 +152,23 @@ fn observation_gap_records_missing_network_exit_without_claiming_absence() {
 }
 
 #[test]
+fn late_attach_gap_records_one_unknown_history_boundary_without_counting_missing_operations() {
+    let gap = ObservationGap::new(
+        "agent-run-late-attach",
+        "collector_lifecycle",
+        ObservationGapKind::LateAttach,
+        1,
+        "collection began after the existing process started; earlier activity is unknown",
+    )
+    .with_timestamp(1_780_328_100_007);
+
+    assert_eq!(
+        gap.to_json_line(),
+        r#"{"record_type":"observation_gap","schema_version":1,"timestamp_unix_ms":1780328100007,"agent_run_id":"agent-run-late-attach","operation":"collector_lifecycle","kind":"late_attach","count":1,"detail":"collection began after the existing process started; earlier activity is unknown"}"#
+    );
+}
+
+#[test]
 fn collector_capability_manifest_declares_the_versioned_observation_boundary() {
     let manifest = CollectorCapabilityManifest::new(
         "agent-run-capability",

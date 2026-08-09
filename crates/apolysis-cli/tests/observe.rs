@@ -3,6 +3,8 @@
 use std::process::Command;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
 #[test]
 fn observe_rejects_removed_control_plane_options() {
     for option in ["--policy", "--feedback-dir"] {
@@ -337,7 +339,7 @@ fn observe_live_requires_exactly_one_session_scope() {
     let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
     assert!(
         stderr.contains(
-            "live observer requires exactly one of --scope-cgroup, --scope-pid, --agent-run, --agent-registration, or --agent-discover"
+            "live observer requires exactly one of --scope-cgroup, --agent-run, --agent-registration, or --agent-discover"
         ),
         "unexpected stderr: {stderr}"
     );
@@ -403,6 +405,38 @@ fn observe_live_validates_the_bpf_object_before_loading() {
         stderr.contains("BPF object does not exist"),
         "unexpected stderr: {stderr}"
     );
+}
+
+#[test]
+fn observe_live_rejects_unprotected_scope_pid() {
+    let output = temp_jsonl("apolysis-observe-unprotected-scope-pid");
+    let ordinary_file = workspace_root().join("Cargo.toml");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "session-unprotected-scope-pid",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            ordinary_file.to_str().expect("utf-8 ordinary file path"),
+            "--scope-pid",
+            &std::process::id().to_string(),
+            "--duration-seconds",
+            "1",
+        ])
+        .output()
+        .expect("run apolysis observe with an unprotected PID scope");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("--scope-pid is not a protected existing-process attach"),
+        "unexpected stderr: {stderr}"
+    );
+    let _ = std::fs::remove_file(output);
 }
 
 #[test]
@@ -481,6 +515,89 @@ fn observe_live_accepts_agent_registration_without_operator_pid() {
     );
 
     let _ = std::fs::remove_file(&registration);
+}
+
+#[test]
+fn observe_live_rejects_a_reused_registration_identity_without_starting_collection() {
+    let output = temp_jsonl("apolysis-observe-agent-registration-pid-reuse");
+    let registration_path = temp_jsonl("apolysis-agent-registration-pid-reuse");
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(&registration_path);
+
+    let mut registration = current_process_registration();
+    registration.start_time_ticks = registration
+        .start_time_ticks
+        .checked_add(1)
+        .expect("current process start time can advance by one tick");
+    write_agent_registration(&registration_path, &registration);
+
+    let existing_non_bpf_file = workspace_root().join("Cargo.toml");
+    let result = apolysis_command()
+        .args([
+            "observe",
+            "--backend",
+            "live",
+            "--session",
+            "agent-run-registration-pid-reuse",
+            "--output",
+            output.to_str().expect("utf-8 output path"),
+            "--bpf-object",
+            existing_non_bpf_file
+                .to_str()
+                .expect("utf-8 ordinary object path"),
+            "--workspace-root",
+            workspace_root().to_str().expect("utf-8 workspace root"),
+            "--agent-registration",
+            registration_path.to_str().expect("utf-8 registration path"),
+        ])
+        .output()
+        .expect("run protected attach with a reused registration identity");
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8(result.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("rejected possible PID reuse"),
+        "unexpected stderr: {stderr}"
+    );
+
+    let timeline = std::fs::read_to_string(&output).expect("read failed attach timeline");
+    let attach_failure = timeline
+        .lines()
+        .find(|line| {
+            line.contains(r#""record_type":"observer_diagnostic""#)
+                && line.contains(r#""kind":"attach_failure""#)
+        })
+        .expect("typed attach failure diagnostic");
+    assert!(attach_failure.contains(r#""count":1"#));
+    assert!(timeline.lines().any(|line| {
+        line.contains(r#""record_type":"collector_lifecycle""#)
+            && line.contains(r#""state":"failed""#)
+            && line.contains(r#""health":"failed""#)
+            && line.contains(r#""stop_reason":"attach_failure""#)
+    }));
+    assert!(!timeline.contains(r#""state":"started""#));
+    assert!(!timeline.contains(r#""record_type":"collector_capability_manifest""#));
+    assert!(!timeline.contains(r#""record_type":"raw_kernel_event""#));
+    assert!(!timeline.lines().any(|line| {
+        line.contains(r#""record_type":"event""#)
+            && line.contains(r#""event_source":"kernel_tracepoint""#)
+    }));
+
+    let private_command = &registration.command;
+    for sensitive in [
+        registration_path.to_string_lossy().as_ref(),
+        private_command,
+        &registration.command_fingerprint,
+    ] {
+        assert!(!stderr.contains(sensitive), "stderr leaked {sensitive:?}");
+        assert!(
+            !timeline.contains(sensitive),
+            "timeline leaked {sensitive:?}:\n{timeline}"
+        );
+    }
+
+    let _ = std::fs::remove_file(output);
+    let _ = std::fs::remove_file(registration_path);
 }
 
 #[test]
@@ -762,12 +879,146 @@ fn live_managed_agent_starts_after_the_capability_manifest_is_durable() {
     let _ = std::fs::remove_file(output);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires root plus Linux BTF, tracepoints, cgroup v2, CAP_BPF, and CAP_PERFMON"]
+fn live_registered_process_records_the_late_boundary_before_observation_starts() {
+    use std::io::Write as _;
+
+    assert_eq!(
+        // SAFETY: geteuid only reads the calling process credentials.
+        unsafe { libc::geteuid() },
+        0,
+        "the protected existing-process E2E must run as root"
+    );
+
+    let workspace = TempDirGuard::create("apolysis-live-registered-process");
+    let output = workspace.path().join("timeline.jsonl");
+    let registration_path = workspace.path().join("registration.json");
+    let trigger_path = workspace.path().join("read-credential.trigger");
+    let credential_path = workspace.path().join(".env");
+    let secret = "APOLYSIS_L1_SECRET=late-attach-content-must-not-persist\n";
+    std::fs::File::create(&credential_path)
+        .and_then(|mut file| file.write_all(secret.as_bytes()))
+        .expect("write protected-attach credential fixture");
+
+    let process_tree_script = r#"import os
+import sys
+import time
+
+child = os.fork()
+if child == 0:
+    while not os.path.exists(sys.argv[1]):
+        time.sleep(0.05)
+    with open(sys.argv[2], encoding="utf-8") as credential:
+        credential.read()
+    while True:
+        time.sleep(1)
+else:
+    os.waitpid(child, 0)
+"#;
+    let mut target_command = Command::new("python3");
+    target_command.current_dir(workspace.path());
+    target_command.args([
+        "-c",
+        process_tree_script,
+        trigger_path.to_str().expect("utf-8 trigger path"),
+        credential_path.to_str().expect("utf-8 credential path"),
+    ]);
+    let target = ChildGuard::spawn_process_group(target_command, "spawn registered process tree");
+    wait_for_process_child(target.id(), Duration::from_secs(5));
+
+    let registration = process_registration(target.id(), workspace.path().to_path_buf());
+    write_agent_registration(&registration_path, &registration);
+
+    let mut observer_command = apolysis_command();
+    observer_command.args([
+        "observe",
+        "--backend",
+        "live",
+        "--session",
+        "agent-run-registered-process-e2e",
+        "--output",
+        output.to_str().expect("utf-8 output path"),
+        "--bpf-object",
+        "target/ebpf/apolysis_observer.bpf.o",
+        "--workspace-root",
+        workspace.path().to_str().expect("utf-8 workspace path"),
+        "--agent-registration",
+        registration_path.to_str().expect("utf-8 registration path"),
+        "--duration-seconds",
+        "4",
+    ]);
+    let mut observer = ChildGuard::spawn(observer_command, "spawn protected attach observer");
+
+    wait_for_timeline_fragment(
+        &output,
+        r#""record_type":"collector_lifecycle","schema_version":1"#,
+        Duration::from_secs(10),
+    );
+    wait_for_timeline_fragment(&output, r#""state":"started""#, Duration::from_secs(2));
+    std::fs::File::create(&trigger_path).expect("release credential-read child");
+
+    let status = observer.wait();
+    assert!(
+        status.success(),
+        "protected attach observer failed: {status}"
+    );
+
+    let timeline = std::fs::read_to_string(&output).expect("read protected attach timeline");
+    let lines = timeline.lines().collect::<Vec<_>>();
+    let late_attach = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.contains(r#""record_type":"observation_gap""#)
+                && line.contains(r#""kind":"late_attach""#)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        late_attach.len(),
+        1,
+        "protected attach requires exactly one late boundary:\n{timeline}"
+    );
+    let (late_attach_index, late_attach_record) = late_attach[0];
+    assert!(late_attach_record.contains(r#""operation":"collector_lifecycle""#));
+    assert!(late_attach_record.contains(r#""count":1"#));
+    assert!(late_attach_record.contains(
+        r#""detail":"collection_boundary:protected_existing_process_attach,history:unknown,provenance:external_registration,root_selection:registration_qualified""#
+    ));
+
+    let capability_index = lines
+        .iter()
+        .position(|line| line.contains(r#""record_type":"collector_capability_manifest""#))
+        .expect("collector capability manifest");
+    let started_index = lines
+        .iter()
+        .position(|line| {
+            line.contains(r#""record_type":"collector_lifecycle""#)
+                && line.contains(r#""state":"started""#)
+        })
+        .expect("collector lifecycle start");
+    assert!(late_attach_index < capability_index);
+    assert!(late_attach_index < started_index);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(r#""event_type":"credential_read""#)),
+        "registered descendant credential read was not observed:\n{timeline}"
+    );
+    assert!(!timeline.contains("late-attach-content-must-not-persist"));
+    assert!(!timeline.contains(&registration.command));
+    assert!(!timeline.contains(&registration.command_fingerprint));
+    assert!(!timeline.contains(registration_path.to_str().expect("utf-8 registration path")));
+}
+
 #[test]
 #[ignore = "requires Linux BTF, tracepoints, cgroup v2, CAP_BPF, and CAP_PERFMON"]
 fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     use std::io::Write as _;
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::MetadataExt as _;
+    use std::process::Stdio;
 
     let output = temp_jsonl("apolysis-observe-live-smoke");
     let fixture_dir = temp_dir("apolysis-live-fixture");
@@ -810,6 +1061,7 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
 
     let status = Command::new("cat")
         .arg(&credential_path)
+        .stdout(Stdio::null())
         .status()
         .expect("read credential fixture");
     assert!(status.success());
@@ -817,13 +1069,9 @@ fn live_observer_records_scoped_events_and_redacts_sensitive_values() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
     let port = listener.local_addr().expect("listener address").port();
     let accept = std::thread::spawn(move || listener.accept().expect("accept local connection"));
-    let status = Command::new("python3")
-        .args(["tests/fixtures/connect.py", "127.0.0.1", &port.to_string()])
-        .current_dir(workspace_root())
-        .status()
-        .expect("run network fixture");
-    assert!(status.success());
+    let connection = TcpStream::connect(("127.0.0.1", port)).expect("run blocking network fixture");
     drop(accept.join().expect("join listener").0);
+    drop(connection);
 
     let status = observer.wait().expect("wait for live observer");
     assert!(status.success());
@@ -923,30 +1171,212 @@ fn temp_dir(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()))
 }
 
-fn write_current_process_registration(path: &std::path::Path) {
-    let start_time_ticks = current_start_time_ticks();
-    let executable = std::env::current_exe().expect("current executable");
-    let workspace_root = workspace_root();
-    let payload = format!(
-        r#"{{
-  "agent_kind": "codex",
-  "pid": {},
-  "start_time_ticks": {},
-  "workspace_root": "{}",
-  "executable": "{}",
-  "command_fingerprint": "sha256:test-fixture"
-}}"#,
-        std::process::id(),
-        start_time_ticks,
-        workspace_root.display(),
-        executable.display()
-    );
-    std::fs::write(path, payload).expect("write agent registration");
+struct TempDirGuard {
+    path: std::path::PathBuf,
 }
 
-fn current_start_time_ticks() -> u64 {
-    let stat = std::fs::read_to_string(format!("/proc/{}/stat", std::process::id()))
-        .expect("read current proc stat");
+impl TempDirGuard {
+    fn create(prefix: &str) -> Self {
+        let path = temp_dir(prefix);
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create guarded temporary directory");
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+struct ChildGuard {
+    child: Option<std::process::Child>,
+    process_group: Option<i32>,
+}
+
+impl ChildGuard {
+    fn spawn(mut command: Command, context: &str) -> Self {
+        let child = command
+            .spawn()
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+        Self {
+            child: Some(child),
+            process_group: None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_process_group(mut command: Command, context: &str) -> Self {
+        use std::os::unix::process::CommandExt as _;
+
+        command.process_group(0);
+        let child = command
+            .spawn()
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+        let process_group = i32::try_from(child.id()).expect("child PID fits process group id");
+        Self {
+            child: Some(child),
+            process_group: Some(process_group),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.as_ref().expect("live child").id()
+    }
+
+    fn wait(&mut self) -> std::process::ExitStatus {
+        self.child
+            .take()
+            .expect("live child")
+            .wait()
+            .expect("wait for child")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if let Some(process_group) = self.process_group {
+            // SAFETY: the negative PID targets only the dedicated process group
+            // created by spawn_process_group for this test fixture.
+            unsafe {
+                libc::kill(-process_group, libc::SIGKILL);
+            }
+        } else {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_process_child(parent_pid: u32, timeout: Duration) {
+    let children = format!("/proc/{parent_pid}/task/{parent_pid}/children");
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::fs::read_to_string(&children)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "registered process did not create its controlled child"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_timeline_fragment(path: &std::path::Path, fragment: &str, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let timeline = std::fs::read_to_string(path).unwrap_or_default();
+        if timeline.contains(fragment) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timeline did not persist {fragment:?}:\n{timeline}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct TestAgentRegistration {
+    #[serde(rename = "agent_kind")]
+    kind: String,
+    pid: u32,
+    start_time_ticks: u64,
+    host_boot_id: String,
+    workspace_root: std::path::PathBuf,
+    executable: String,
+    command_fingerprint: String,
+    command: String,
+}
+
+fn write_current_process_registration(path: &std::path::Path) -> TestAgentRegistration {
+    let registration = current_process_registration();
+    write_agent_registration(path, &registration);
+    registration
+}
+
+fn current_process_registration() -> TestAgentRegistration {
+    process_registration(std::process::id(), workspace_root())
+}
+
+fn process_registration(
+    pid: u32,
+    registration_workspace_root: std::path::PathBuf,
+) -> TestAgentRegistration {
+    let command_args = process_command_args(pid);
+    let fingerprint_input = if command_args.is_empty() {
+        process_comm(pid).into_bytes()
+    } else {
+        command_args.join("\0").into_bytes()
+    };
+
+    TestAgentRegistration {
+        kind: "codex".to_string(),
+        pid,
+        start_time_ticks: process_start_time_ticks(pid),
+        host_boot_id: std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .expect("read host boot identity")
+            .trim()
+            .to_string(),
+        workspace_root: registration_workspace_root,
+        executable: std::fs::read_link(format!("/proc/{pid}/exe"))
+            .expect("read process executable")
+            .display()
+            .to_string(),
+        command_fingerprint: sha256_fingerprint(&fingerprint_input),
+        command: command_args.join(" "),
+    }
+}
+
+fn write_agent_registration(path: &std::path::Path, registration: &TestAgentRegistration) {
+    let file = std::fs::File::create(path).expect("create agent registration");
+    serde_json::to_writer(file, registration).expect("serialize agent registration");
+}
+
+fn process_command_args(pid: u32) -> Vec<String> {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .expect("read process command line")
+        .split(|byte| *byte == 0)
+        .filter(|value| !value.is_empty())
+        .map(|value| String::from_utf8(value.to_vec()).expect("utf-8 process argument"))
+        .collect()
+}
+
+fn process_comm(pid: u32) -> String {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .expect("read process stat for command name");
+    let start = stat.find(" (").expect("proc stat command start") + 2;
+    let end = stat.rfind(") ").expect("proc stat command end");
+    stat[start..end].to_string()
+}
+
+fn sha256_fingerprint(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::from("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").expect("write command digest");
+    }
+    output
+}
+
+fn process_start_time_ticks(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("read process stat");
     let after_comm = stat.rsplit_once(") ").expect("proc stat comm").1;
     after_comm
         .split_whitespace()

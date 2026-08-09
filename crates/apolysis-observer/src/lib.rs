@@ -15,13 +15,14 @@ mod redaction;
 mod scope;
 
 pub use live::{
-    discover_agent_registration, discover_process_tree_scope_pids, enable_multi_cgroup_scope,
-    file_operation_observation_gaps, network_connect_observation_gaps, observe_live,
-    raw_event_from_record, scope_observation_gaps, AgentDiscoveryRequest, AgentRegistration,
-    AgentRunRequest, DaemonKernelEvent, DaemonObserver, DaemonObserverBatch, DaemonObserverConfig,
-    DaemonObserverCounters, FileOperationCounters, LiveObserveRequest, LiveScope,
-    NetworkConnectCounters, ObserverBatchDecoder, OperationPairCounters,
-    QualificationTelemetryConfig, ScopeGeneration, ScopeObservationGapCounters,
+    discover_agent_registration, discover_process_tree_scope_identities,
+    discover_process_tree_scope_pids, enable_multi_cgroup_scope, file_operation_observation_gaps,
+    network_connect_observation_gaps, observe_live, raw_event_from_record, scope_observation_gaps,
+    AgentDiscoveryRequest, AgentRegistration, AgentRunRequest, DaemonKernelEvent, DaemonObserver,
+    DaemonObserverBatch, DaemonObserverConfig, DaemonObserverCounters, FileOperationCounters,
+    LiveObserveRequest, LiveScope, NetworkConnectCounters, ObserverBatchDecoder,
+    OperationPairCounters, ProcStartClock, ProcessRuntimeIdentity, QualificationTelemetryConfig,
+    ScopeGeneration, ScopeObservationGapCounters, StartBoottimeWindow,
 };
 pub use redaction::{
     redact_command_text_for_persistence, RedactedValue, Redactor, RuntimeEvidencePersistence,
@@ -188,7 +189,7 @@ impl AyaLoaderPlan {
     pub fn audit_observer_default(object_path: impl Into<PathBuf>) -> Self {
         let mut plan = Self::host_observer_default(object_path);
         plan.tracepoints
-            .insert(1, TracepointAttach::new("sched", "sched_process_fork"));
+            .insert(0, TracepointAttach::new("sched", "sched_process_fork"));
         plan
     }
 }

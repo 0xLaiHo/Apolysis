@@ -14,7 +14,7 @@
           "kernel_release": "6.12.8-fixture",
           "btf_vmlinux_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "bpf_object_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "tracepoint_format_set_sha256": "13865f530b74943cc47dcba0596994ffedb21c9ca07a17a52e83514d4916dd8f",
+          "tracepoint_format_set_sha256": "5aaa5640db2b5ced0686eafbaebf5d32daacf4064b12fd665cda49964537e16f",
           "source_commit": "0000000000000000000000000000000000000000",
           "cargo_lock_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
         }

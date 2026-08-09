@@ -43,7 +43,7 @@
 | C3 稳定 Runtime Identity | 抵御 PID reuse 与 exec generation，且不把 heuristic match 提升为 Exact Relation | 无 |
 | C4 Collector lifecycle | 持久化 start、health/loss checkpoint、terminal state 与显式 stop reason；incomplete lifecycle 必须 fail loud | 无 |
 | Q1 验证边界 | 冻结候选 kernel/runtime contract 与测量协议；只有保留的 live 证据冻结 CPU、memory、latency 与 event-loss budget 后才授予支持 | 无 |
-| L1 受保护的 existing-process attach | 通过 Runtime Identity 验证 attach，并发出显式 late-attach Observation Gap | C3、C4 |
+| L1 受保护的 existing-process attach | 仅通过 registration-qualified current root 或唯一 inferred discovery 准入现有 process tree，拒绝原始 PID scope，从 seeded identity 激活，并持久化一条有序的 late-attach boundary gap | C3、C4 |
 | L2 Agent Observation Record projection | 为 observation、capability、identity、health、finding 与 gap record 生成单次 run 的可查询 aggregate 和 summary | C1、C2、C3、C4 |
 | L3 非特权 saved-run viewer | 无需原始 JSONL 或 privileged access 即可完成代表性调查 | L2 |
 | L4 本地 daemon 运维 | 验证 install、health、stop、cleanup、permission、retention 与 failure recovery | C4、L2 |
@@ -66,12 +66,33 @@
   decode failure、restart 与 incomplete flush 不能产生 clean 或 complete Agent Observation
   Record。
 - Runtime Identity 在其声明边界内区分 PID reuse 与 exec generation。
+- Protected-attach identity 归一化 TGID，并在 seeding 阶段或之后的 kernel bookkeeping 匹配前
+  使用 USER_HZ 半开 start interval。只有 activation 后实际发出、且携带匹配 kernel start time
+  与 process/exec generation 的 event，才在本次 collector run 内获得 exact event identity；
+  root-selection confidence 与之分开。
 - Content-off persistence 阻止 raw argv、prompt、response、tool payload、credential、private
   path 与 private network content 穿过默认 persistence seam。
 
 ### 本地产品
 
 - Managed launch 与 protected attach 都声明其 collection boundary。
+- Protected attach 仅允许显式 registration 或唯一 inferred discovery；原始 `--scope-pid` 会被
+  拒绝。资格验证覆盖 boot ID、start tick、executable、command fingerprint、live-root cwd
+  containment、zombie exclusion、pidfd liveness，以及 per-candidate initial PID/time namespace
+  失败路径。Registration 匹配记录为
+  `registration_qualified`，只限定打开 pidfd 时可见的 root，不证明从 registration 创建以来的
+  continuity。
+- Live activation evidence 覆盖 inactive scope、tracepoint attach、root 与 descendant TGID
+  seeding、多轮 snapshot、per-seeded-candidate pidfd sandwich、exit-hook removal 与 root
+  requalification，然后才 activation。
+- 每次成功 protected attach 都在 capability 与 `started` 前恰好发出一条
+  `operation:"collector_lifecycle"`、`count:1` 的 `late_attach` gap；count 被呈现为一个
+  unknown-history boundary，不是 missing-event estimate。三条 record 的 durable batch 只做一次
+  rotation decision，并在注入的 write 或 sync failure 时回滚。
+- 资格验证必须建模并记录 residual pre-anchor ambiguity：registration root 可能在 registration
+  创建到 root `pidfd_open` 之间被相同 PID/tick/executable/command 替换；lineage candidate
+  可能在 snapshot 到 `pidfd_open` 之间被相同 PID/tick/lineage 替换。不得把 post-anchor
+  seeded-candidate race 写成残余，也不得过度声明 pre-anchor continuity。
 - CLI 或 viewer 无需读取原始 JSONL 或 kernel trace，即可回答 roadmap 中六个调查问题。
 - Viewer 为 non-privileged，且每个显示事实都能解析到 typed source record。
 - Install、shutdown、cleanup、retention、permission 与 corruption recovery 均有边界并通过

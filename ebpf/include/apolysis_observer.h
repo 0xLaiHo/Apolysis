@@ -31,9 +31,11 @@ enum apolysis_event_flags {
 };
 
 enum apolysis_scope_mode {
+    APOLYSIS_SCOPE_INACTIVE = 0,
     APOLYSIS_SCOPE_CGROUP = 1,
     APOLYSIS_SCOPE_PID_TREE = 2,
     APOLYSIS_SCOPE_MULTI_CGROUP = 3,
+    APOLYSIS_SCOPE_PID_TREE_SEEDING = 4,
 };
 
 enum apolysis_cgroup_scope_state {
@@ -55,6 +57,22 @@ struct apolysis_scope_config {
     unsigned int root_pid;
     unsigned int mode;
 };
+
+enum apolysis_tracked_process_state {
+    APOLYSIS_TRACKED_PROCESS_EXPECTED = 1,
+    APOLYSIS_TRACKED_PROCESS_EXACT = 2,
+    APOLYSIS_TRACKED_PROCESS_FORK_PENDING = 3,
+};
+
+struct apolysis_tracked_process_identity {
+    unsigned long long start_boottime_ns;
+    unsigned long long start_boottime_upper_ns;
+    unsigned int state;
+    unsigned int reserved;
+};
+
+_Static_assert(sizeof(struct apolysis_tracked_process_identity) == 24,
+               "apolysis tracked process identity ABI size mismatch");
 
 struct apolysis_operation_pair_counters {
     unsigned long long missing_entries;

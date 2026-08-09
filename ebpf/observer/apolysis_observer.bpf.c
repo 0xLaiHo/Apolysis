@@ -74,7 +74,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
     __type(key, unsigned int);
-    __type(value, unsigned char);
+    __type(value, struct apolysis_tracked_process_identity);
 } APOLYSIS_TRACKED_PIDS SEC(".maps");
 
 struct {
@@ -484,21 +484,56 @@ static __always_inline bool multi_cgroup_scope(void)
     return config && config->mode == APOLYSIS_SCOPE_MULTI_CGROUP;
 }
 
-static __always_inline bool pid_is_tracked(unsigned int pid)
+static __always_inline bool pid_tree_bookkeeping_scope(
+    const struct apolysis_scope_config *config)
 {
-    return bpf_map_lookup_elem(&APOLYSIS_TRACKED_PIDS, &pid) != 0;
+    return config &&
+           (config->mode == APOLYSIS_SCOPE_PID_TREE ||
+            config->mode == APOLYSIS_SCOPE_PID_TREE_SEEDING);
+}
+
+static __always_inline bool current_process_start_boottime_ns(
+    unsigned long long *start_boottime_ns);
+
+static __always_inline bool tracked_process_matches_current(unsigned int pid)
+{
+    struct apolysis_tracked_process_identity *tracked;
+    struct apolysis_tracked_process_identity exact = {};
+    unsigned long long start_boottime_ns;
+
+    tracked = bpf_map_lookup_elem(&APOLYSIS_TRACKED_PIDS, &pid);
+    if (!tracked)
+        return false;
+    if (!current_process_start_boottime_ns(&start_boottime_ns))
+        return false;
+
+    if (tracked->state == APOLYSIS_TRACKED_PROCESS_EXACT)
+        return tracked->start_boottime_ns == start_boottime_ns;
+    if (tracked->state == APOLYSIS_TRACKED_PROCESS_EXPECTED) {
+        if (start_boottime_ns < tracked->start_boottime_ns ||
+            start_boottime_ns >= tracked->start_boottime_upper_ns)
+            return false;
+    } else if (tracked->state != APOLYSIS_TRACKED_PROCESS_FORK_PENDING) {
+        return false;
+    }
+
+    exact.start_boottime_ns = start_boottime_ns;
+    exact.state = APOLYSIS_TRACKED_PROCESS_EXACT;
+    if (bpf_map_update_elem(&APOLYSIS_TRACKED_PIDS, &pid, &exact, BPF_EXIST)) {
+        count_map_pressure();
+        return false;
+    }
+    return true;
 }
 
 static __always_inline bool current_pid_tree_is_tracked(void)
 {
     unsigned long long pid_tgid;
     unsigned int tgid;
-    unsigned int tid;
 
     pid_tgid = bpf_get_current_pid_tgid();
     tgid = pid_tgid >> 32;
-    tid = pid_tgid;
-    return pid_is_tracked(tgid) || pid_is_tracked(tid);
+    return tracked_process_matches_current(tgid);
 }
 
 static __always_inline bool current_is_in_scope(void)
@@ -560,6 +595,20 @@ static __always_inline unsigned long long current_process_start_time_ns(void)
     if (bpf_core_field_exists(leader->start_boottime))
         return BPF_CORE_READ(leader, start_boottime);
     return BPF_CORE_READ(leader, start_time);
+}
+
+static __always_inline bool current_process_start_boottime_ns(
+    unsigned long long *start_boottime_ns)
+{
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
+    struct task_struct *leader = BPF_CORE_READ(task, group_leader);
+
+    if (!leader)
+        leader = task;
+    if (!bpf_core_field_exists(leader->start_boottime))
+        return false;
+    *start_boottime_ns = BPF_CORE_READ(leader, start_boottime);
+    return true;
 }
 
 static __always_inline bool ensure_current_process_identity(
@@ -1111,17 +1160,21 @@ int apolysis_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
     unsigned long long event_cgroup_id;
     bool update_scoped;
     unsigned int child_pid;
-    unsigned char tracked = 1;
+    struct apolysis_tracked_process_identity tracked = {
+        .state = APOLYSIS_TRACKED_PROCESS_FORK_PENDING,
+    };
 
     if (!config)
         return 0;
 
-    if (config->mode == APOLYSIS_SCOPE_PID_TREE) {
-        if (!pid_is_tracked(ctx->parent_pid) && !current_pid_tree_is_tracked())
+    if (pid_tree_bookkeeping_scope(config)) {
+        if (!current_pid_tree_is_tracked())
             return 0;
         child_pid = ctx->child_pid;
-        if (bpf_map_update_elem(&APOLYSIS_TRACKED_PIDS, &child_pid, &tracked, BPF_NOEXIST))
+        if (bpf_map_update_elem(&APOLYSIS_TRACKED_PIDS, &child_pid, &tracked, BPF_ANY))
             count_map_pressure();
+        if (config->mode == APOLYSIS_SCOPE_PID_TREE_SEEDING)
+            return 0;
     } else if (!current_is_in_scope()) {
         return 0;
     }
@@ -1266,9 +1319,15 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     }
     end_scope_counter_update(event_cgroup_id, event_update_scoped);
 
-    if (config && config->mode == APOLYSIS_SCOPE_PID_TREE) {
-        pid = ctx->pid;
-        bpf_map_delete_elem(&APOLYSIS_TRACKED_PIDS, &pid);
+    if (pid_tree_bookkeeping_scope(config)) {
+        if (tid != tgid) {
+            pid = tid;
+            bpf_map_delete_elem(&APOLYSIS_TRACKED_PIDS, &pid);
+        }
+        if (group_dead) {
+            pid = tgid;
+            bpf_map_delete_elem(&APOLYSIS_TRACKED_PIDS, &pid);
+        }
     }
     if (tid != tgid)
         bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &tid);

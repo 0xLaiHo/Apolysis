@@ -8,7 +8,7 @@ occur.
 ## Runs and scope
 
 **Agent Run**:
-A bounded period in which an Agent and the processes it starts pursue one
+A bounded period in which an Agent and its attributed process tree pursue one
 declared task inside an Observation Scope.
 _Avoid_: Session, job, trace
 
@@ -19,6 +19,17 @@ _Avoid_: Model, bot, workload process
 **Observation Scope**:
 The runtime boundary whose activity belongs to one Agent Run.
 _Avoid_: Tenant, authority scope, global host
+
+**Protected Attach**:
+Admission of an already-running Agent into an Observation Scope after its
+currently visible root and process tree are qualified. It does not establish
+selection continuity before candidates are anchored or claim earlier history.
+_Avoid_: Manual attach, PID attach, complete history
+
+**Collection Boundary**:
+The point from which a Collector Capability applies to an Agent Run; activity
+before it is unknown history represented by an Observation Gap.
+_Avoid_: Run start, complete history, backfill
 
 **Runtime Identity**:
 The stable identity of a process or workload boundary used to distinguish it

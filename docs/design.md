@@ -2,7 +2,7 @@
 
 > English | [Simplified Chinese](design.zh-CN.md)
 > Companion document: [roadmap.md](roadmap.md)
-> Last reviewed: 2026-08-04
+> Last reviewed: 2026-08-10
 
 This document is the authority for what Apolysis is, how its target system
 works, what exists today, and where its claims stop. Delivery order, deferrals,
@@ -125,13 +125,42 @@ Agent command / self-hosted CI job / container / Pod
 Every observation belongs to an explicit run scope. Supported scope modes are:
 
 - a managed Agent command whose process tree is observed from launch;
-- an existing process tree with PID-reuse protection;
+- a protected existing process tree admitted through explicit Agent
+  registration or automatic discovery;
 - one cgroup for a container or workload;
 - a bounded set of cgroups managed by the node daemon.
 
 Managed launch is the preferred local workflow because the collector can be
-attached before the Agent starts. Attaching to an existing process may miss
-earlier activity and must record that gap.
+attached before the Agent starts. Protected existing-process attach is a closed
+admission surface: raw `--scope-pid` is rejected, and the root must come from
+`--agent-registration` or `--agent-discover`. An explicit registration is
+qualified against the current host boot ID, root start tick, executable,
+command fingerprint, and canonical workspace boundary as the collector opens
+the root pidfd; the root's live cwd must resolve to that boundary or one of its
+descendants. A match records `root_selection:registration_qualified`: it
+qualifies the root visible at that anchor, not its continuity since the
+registration was created. Discovery derives identity material from live process
+state, requires one unique best candidate, and keeps root selection `inferred`.
+
+Every root or lineage candidate admitted to seeding must be a live, non-zombie
+thread-group leader. After the snapshot, a pidfd is opened for each candidate
+and its liveness, lineage, and initial PID/time namespace membership are checked
+on both sides of map insertion: a per-seeded-candidate pidfd sandwich. The exit hook removes a candidate that
+exits after insertion. The selected root remains anchored by a pidfd through
+activation. The observer and target must share the initial PID namespace and
+the same initial, unshifted time namespace. The scope begins inactive,
+tracepoints attach, and it then enters process-tree seeding: the
+registration-qualified or inferred root is seeded before descendants, repeated
+process-tree snapshots add missing TGIDs, and root identity is requalified
+around activation. Only then does the scope become active. This closes
+post-anchor exit and replacement races for seeded candidates but is not proof
+of pre-anchor selection continuity.
+
+Activity before activation is unknown. Every successful protected attach
+therefore persists exactly one `late_attach` Observation Gap with
+`operation:"collector_lifecycle"` and `count:1` before the capability manifest
+and `started` lifecycle record. The count represents one unknown-history
+Collection Boundary, not an estimate of missing syscalls or events.
 
 A host-wide default scope is not permitted. The collector may expose an
 explicit diagnostic mode for development, but it is not a supported Agent Run
@@ -212,6 +241,19 @@ instance and its restart gap, but does not claim identity continuity across the
 boundary. PID namespace, container, Pod, and node identity remain additive
 attribution where available.
 
+Protected attach normalizes initial process and thread identifiers to TGIDs and
+requires the root to be a live thread-group leader. A `/proc` start tick is
+converted to the half-open boot-time interval
+`[start_tick * tick_ns, (start_tick + 1) * tick_ns)`. Matching kernel
+bookkeeping may promote the internal tracked membership to the exact
+group-leader start time during seeding or later; subsequent matches must use
+that nanosecond value. Only events emitted after activation receive exact event
+identity within the collector run from the matched kernel start time plus
+process and exec generations. This is separate from pre-anchor root-selection
+confidence: explicit registration is
+`registration_qualified`, discovery remains `inferred`, and neither selection
+value is an event relation status or a continuity claim.
+
 ### 5.4 Local store and viewer
 
 The first product remains local-first. The store is bounded, rotates safely,
@@ -264,6 +306,18 @@ Observation Scope's entry/exit pairing state. For the daemon, that is the sum
 of only the cgroups owned by the Agent Run. A non-zero loss counter degrades a
 checkpoint. Pending alone remains healthy while collection is active, but
 degrades a terminal because it then represents unmatched work at stop.
+
+For protected existing-process attach, the durable start boundary is appended
+and synchronized in this order: the mandatory `late_attach` gap, the Collector
+Capability manifest, then `started`. The gap's `count:1` means one
+unknown-history Collection Boundary. Its `root_selection` detail describes
+`registration_qualified` registration or `inferred` discovery selection; it
+does not extend or override the canonical `exact`, `inferred`, `ambiguous`, and
+`unattributed` event relation statuses. `registration_qualified` describes only
+the root visible when its pidfd is opened, not pre-anchor continuity.
+The three records are serialized as one durable batch: rotation is evaluated
+once for the complete batch, and a write or synchronization failure truncates
+the active file back to its pre-batch length before attach fails.
 
 Daemon checkpoints and terminals first wait on a sequence fence covering every
 pipeline record admitted before that boundary. The lifecycle boundary is then
@@ -331,6 +385,10 @@ blocking prototypes are not part of the active product.
 - Prompt, response, raw tool payload, and full argv are content-off by default.
 - Persisted executable identity is allowlisted and bounded; secret values and
   private paths are redacted before storage.
+- Registration host/start/executable/command-fingerprint/workspace values are
+  qualification inputs. Full executable and workspace paths and the command
+  fingerprint do not cross the persistence seam; only bounded identity and
+  redacted supervisor metadata are retained.
 - Raw kernel payload exists only as a bounded implementation detail and may not
   cross the persistence seam without an explicit, reviewed profile.
 - Observation scopes prevent accidental host-wide collection.
@@ -361,10 +419,11 @@ Implemented today:
 - `ebpf/observer` and `apolysis-observer`: CO-RE tracepoints, ring buffer,
   process-tree/cgroup scopes, ABI v3, bounded process/exec and cgroup scope
   generations, outcome-aware selected file operations and network connect,
-  per-cgroup operation gap counters, redaction, lifecycle checkpoints and
-  terminals, and health/gap diagnostics;
-- `apolysis-cli`: fixture/live observation, managed Agent launch, optional
-  Codex intent correlation, visibility, and verification commands;
+  protected existing-process TGID seeding, per-cgroup operation gap counters,
+  redaction, lifecycle checkpoints and terminals, and health/gap diagnostics;
+- `apolysis-cli`: fixture/live observation, managed Agent launch, protected
+  existing-process attach through registration or discovery, optional Codex
+  intent correlation, visibility, and verification commands;
 - `apolysis-core`: current JSONL vocabulary, record types, versioned Collector
   Capability manifest, and collector lifecycle schema;
 - `apolysis-store`: rotation and optional local hash-chain envelopes;
@@ -378,12 +437,13 @@ Implemented today:
 
 The live collector synchronizes its capability manifest and lifecycle start to
 stable storage after successful attachment and before releasing a managed
-Agent gate. Selected file operations and network connect have bounded
-entry/exit outcome semantics, and the daemon persists their pairing gaps to the
-owning Agent Run at explicit scope removal and clean shutdown. Stable in-run
-scope/process generations, periodic cumulative lifecycle checkpoints, explicit
-terminal reasons, and restart-gap recovery are implemented. The saved-run
-viewer and bounded Kubernetes beta remain targets.
+Agent gate. For protected existing-process attach it first persists the single
+unknown-history `late_attach` boundary. Selected file operations and network
+connect have bounded entry/exit outcome semantics, and the daemon persists
+their pairing gaps to the owning Agent Run at explicit scope removal and clean
+shutdown. Stable in-run scope/process generations, periodic cumulative
+lifecycle checkpoints, explicit terminal reasons, and restart-gap recovery are
+implemented. The saved-run viewer and bounded Kubernetes beta remain targets.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification
@@ -399,6 +459,18 @@ them as historical implementation input; they do not define this architecture.
 - A successful connect does not prove that a remote operation committed.
 - Same-process logical Agents cannot be separated without an additional
   propagated identity; runtime-only attribution remains process-level.
+- Protected existing-process attach supports only the initial PID namespace
+  and a shared initial, unshifted time namespace.
+- Per-seeded-candidate pidfd sandwiches and the exit hook close exit and
+  replacement races after a candidate is anchored. They cannot establish
+  pre-anchor selection continuity: an external-registration root can be
+  substituted between registration creation and root `pidfd_open` by a process
+  with the same PID, USER_HZ tick, executable, and command; a lineage candidate
+  can likewise be substituted between its snapshot and `pidfd_open` by one with
+  the same PID, tick, and lineage. These bounded same-tick ambiguities limit the
+  selection claim even though kernel start time plus process and exec
+  generations provide exact event identity after activation within that
+  collector run.
 - Connect or file entries still pending when a cgroup scope drains remain in
   bounded pairing maps until syscall or thread exit. Their captured scope
   generation prevents them from crossing into a later Agent Run after numeric
