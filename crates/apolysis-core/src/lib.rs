@@ -224,23 +224,9 @@ impl CollectorStopReason {
 
     /// Decode any terminal reason from the stable JSONL v1 vocabulary.
     pub fn parse_v1(value: &str) -> Option<Self> {
-        match value {
-            "agent_run_closed" => Some(Self::AgentRunClosed),
-            "daemon_shutdown" => Some(Self::DaemonShutdown),
-            "duration_elapsed" => Some(Self::DurationElapsed),
-            "agent_exited" => Some(Self::AgentExited),
-            "shutdown_signal" => Some(Self::ShutdownSignal),
-            "attach_failure" => Some(Self::AttachFailure),
-            "verifier_failure" => Some(Self::VerifierFailure),
-            "abi_mismatch" => Some(Self::AbiMismatch),
-            "decode_failure" => Some(Self::DecodeFailure),
-            "counter_read_failure" => Some(Self::CounterReadFailure),
-            "storage_failure" => Some(Self::StorageFailure),
-            "observer_failure" => Some(Self::ObserverFailure),
-            "collector_restart" => Some(Self::CollectorRestart),
-            "incomplete_terminal_flush" => Some(Self::IncompleteTerminalFlush),
-            _ => None,
-        }
+        CollectorNormalStopReason::parse_v1(value)
+            .map(Into::into)
+            .or_else(|| CollectorFailureReason::parse_v1(value).map(Into::into))
     }
 
     pub fn is_normal(self) -> bool {
@@ -634,7 +620,7 @@ const FILE_RENAME_SOURCES_V1: &[&str] = &[
 ];
 
 /// Complete v1 observation contract emitted by the configured AuditObserver.
-pub const AUDIT_OBSERVER_CAPABILITY_CONTRACT_V1: &[AuditObserverCapabilityContract] = &[
+const AUDIT_OBSERVER_CAPABILITY_CONTRACT_V1: &[AuditObserverCapabilityContract] = &[
     AuditObserverCapabilityContract {
         operation: "process_fork",
         event_sources: &["sched/sched_process_fork"],
