@@ -1317,7 +1317,7 @@ impl ObserveRequest {
 }
 
 fn live_scope_requirement() -> String {
-    "live observer requires exactly one of --scope-cgroup, --scope-pid, --agent-run, --agent-registration, or --agent-discover".to_string()
+    "live observer requires exactly one of --scope-cgroup, --agent-run, --agent-registration, or --agent-discover".to_string()
 }
 
 fn parse_option<T>(args: &[String], index: usize, option: &str) -> Result<Option<T>, String>

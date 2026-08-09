@@ -49,7 +49,7 @@ semantics, remote outcome verification, and enforcement.
 | C3 Stable Runtime Identity | Survive PID reuse and exec generation without promoting heuristic matches to Exact Relations | none |
 | C4 Collector lifecycle | Persist start, health/loss checkpoints, terminal state, and explicit stop reason; fail loud on incomplete lifecycle | none |
 | Q1 Qualification envelope | Freeze the candidate kernel/runtime contract and measurement protocol, then grant support only after retained live evidence freezes CPU, memory, latency, and event-loss budgets | none |
-| L1 Protected existing-process attach | Attach with Runtime Identity validation and an explicit late-attach Observation Gap | C3, C4 |
+| L1 Protected existing-process attach | Admit an existing tree only through a registration-qualified current root or unique inferred discovery, reject raw PID scope, activate from seeded identities, and persist one ordered late-attach boundary gap | C3, C4 |
 | L2 Agent Observation Record projection | Produce one queryable run aggregate and summary over observation, capability, identity, health, finding, and gap records | C1, C2, C3, C4 |
 | L3 Non-privileged saved-run viewer | Complete the representative investigation without raw JSONL or privileged access | L2 |
 | L4 Local daemon operations | Qualify install, health, stop, cleanup, permissions, retention, and failure recovery | C4, L2 |
@@ -74,6 +74,11 @@ environment breadth.
   clean or complete Agent Observation Record.
 - Runtime Identity distinguishes PID reuse and exec generations within its
   declared boundary.
+- Protected-attach identity normalizes TGIDs and uses a half-open USER_HZ start
+  interval until kernel bookkeeping matches during seeding or later. Only
+  post-activation emitted events carrying the matched kernel start time plus
+  process/exec generations receive exact event identity within that collector
+  run; root-selection confidence remains separate.
 - Content-off persistence prevents raw argv, prompt, response, tool payload,
   credential, private path, and private network content from crossing the
   default persistence seam.
@@ -81,6 +86,27 @@ environment breadth.
 ### Local product
 
 - Managed launch and protected attach both declare their collection boundary.
+- Protected attach is available only through explicit registration or unique
+  inferred discovery; raw `--scope-pid` is rejected. Qualification covers boot
+  ID, start tick, executable, command fingerprint, workspace, zombie exclusion,
+  live-root cwd containment, pidfd liveness, and per-candidate initial PID/time
+  namespace failures. A registration match
+  is recorded as `registration_qualified` for the root visible when its pidfd is
+  opened, not as continuity since registration creation.
+- Live activation evidence covers inactive scope, tracepoint attachment, root
+  and descendant TGID seeding, repeated snapshots, a per-seeded-candidate pidfd
+  sandwich plus exit-hook removal, root requalification, then activation.
+- Every successful protected attach emits exactly one `late_attach` gap with
+  `operation:"collector_lifecycle"` and `count:1` before capability and
+  `started`; the count is rendered as one unknown-history boundary, not a
+  missing-event estimate. The three-record durable batch survives one rotation
+  decision and rolls back on injected write or sync failure.
+- Qualification must model and document the residual pre-anchor ambiguity: a
+  registration root can be substituted between registration creation and root
+  `pidfd_open` by the same PID/tick/executable/command, and a lineage candidate
+  can be substituted between snapshot and `pidfd_open` by the same
+  PID/tick/lineage. It must not present the post-anchor seeded-candidate race as
+  residual or overclaim pre-anchor continuity.
 - The CLI or viewer answers the six roadmap investigation questions without
   requiring raw JSONL or kernel traces.
 - The viewer is non-privileged, and every displayed fact resolves to a typed

@@ -147,6 +147,133 @@ fn rotating_jsonl_store_rotates_before_budget_boundary() {
 }
 
 #[test]
+fn durable_batch_rotates_once_and_keeps_its_records_together() {
+    let path = std::env::temp_dir().join(format!(
+        "apolysis-jsonl-durable-batch-{}.jsonl",
+        std::process::id()
+    ));
+    let archive = path.with_extension("jsonl.1");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&archive);
+
+    let preface = CanonicalEvent::new(
+        "session-batch",
+        EventSource::Manual,
+        EventType::Exec,
+        1,
+        0,
+        "observer",
+        "preface",
+        "write",
+    );
+    let first = CanonicalEvent::new(
+        "session-batch",
+        EventSource::Manual,
+        EventType::Exec,
+        2,
+        1,
+        "observer",
+        "boundary-first",
+        "write",
+    );
+    let second = CanonicalEvent::new(
+        "session-batch",
+        EventSource::Manual,
+        EventType::FileOpen,
+        2,
+        1,
+        "observer",
+        "boundary-second",
+        "write",
+    );
+    let third = CanonicalEvent::new(
+        "session-batch",
+        EventSource::Manual,
+        EventType::NetworkConnect,
+        2,
+        1,
+        "observer",
+        "boundary-third",
+        "write",
+    );
+    let mut store = JsonlStore::create_with_rotation(
+        &path,
+        JsonlRotationPolicy {
+            max_file_bytes: 1,
+            max_archived_files: 1,
+        },
+    )
+    .expect("create rotating store");
+    store.append(&preface).expect("append preface");
+    store
+        .append_batch_and_sync(&[&first, &second, &third])
+        .expect("append one durable batch");
+
+    let active = std::fs::read_to_string(&path).expect("read active batch");
+    let rotated = std::fs::read_to_string(&archive).expect("read rotated preface");
+    assert_eq!(active.lines().count(), 3);
+    assert!(active.contains("boundary-first"));
+    assert!(active.contains("boundary-second"));
+    assert!(active.contains("boundary-third"));
+    assert_eq!(rotated.lines().count(), 1);
+    assert!(rotated.contains("preface"));
+
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(archive);
+}
+
+#[test]
+fn durable_batch_rolls_back_when_parent_sync_fails() {
+    let root = std::env::temp_dir().join(format!(
+        "apolysis-jsonl-batch-rollback-{}",
+        std::process::id()
+    ));
+    let parent = root.join("active");
+    let moved_parent = root.join("moved");
+    let path = parent.join("timeline.jsonl");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&parent).expect("create batch parent");
+
+    let preface = CanonicalEvent::new(
+        "session-rollback",
+        EventSource::Manual,
+        EventType::Exec,
+        1,
+        0,
+        "observer",
+        "retained-preface",
+        "write",
+    );
+    let boundary = CanonicalEvent::new(
+        "session-rollback",
+        EventSource::Manual,
+        EventType::FileOpen,
+        2,
+        1,
+        "observer",
+        "rolled-back-boundary",
+        "write",
+    );
+    let mut store = JsonlStore::create(&path).expect("create rollback store");
+    store.append(&preface).expect("append retained preface");
+    store.flush_and_sync().expect("persist retained preface");
+    std::fs::rename(&parent, &moved_parent).expect("make configured parent unavailable");
+
+    store
+        .append_batch_and_sync(&[&boundary])
+        .expect_err("missing parent sync must fail the durable batch");
+    drop(store);
+
+    let contents = std::fs::read_to_string(moved_parent.join("timeline.jsonl"))
+        .expect("read rolled back file");
+    assert_eq!(contents.lines().count(), 1);
+    assert!(contents.contains("retained-preface"));
+    assert!(!contents.contains("rolled-back-boundary"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn rotating_jsonl_store_rejects_invalid_policy() {
     let path = std::env::temp_dir().join(format!(
         "apolysis-invalid-rotating-jsonl-store-{}.jsonl",

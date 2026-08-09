@@ -76,8 +76,12 @@ an exact one.
 - Stable in-run runtime identity across PID reuse, exec, and numeric cgroup-ID
   reuse, with exact versus inferred attribution recorded explicitly.
 - PID-tree, single-cgroup, and multi-cgroup observation scopes.
-- Managed local Agent launch and runtime metadata correlation for local,
-  Docker/containerd, and Kubernetes prototypes.
+- Managed local Agent launch plus protected existing-process attach with an
+  explicit late-attach Collection Boundary.
+- Existing-process admission qualifies the current root; exact in-run event
+  identity begins after activation.
+- Runtime metadata correlation for local, Docker/containerd, and Kubernetes
+  prototypes.
 - Content-off persistence for exec arguments and process commands, with
   credential and network redaction.
 - Ordered JSONL output, rotation, optional local hash-chain envelopes, and

@@ -327,6 +327,7 @@ pub enum ObservationGapKind {
     MissingEntry,
     MissingExit,
     CollectorRestart,
+    LateAttach,
 }
 
 impl ObservationGapKind {
@@ -335,6 +336,7 @@ impl ObservationGapKind {
             Self::MissingEntry => "missing_entry",
             Self::MissingExit => "missing_exit",
             Self::CollectorRestart => "collector_restart",
+            Self::LateAttach => "late_attach",
         }
     }
 }

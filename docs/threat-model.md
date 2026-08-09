@@ -68,6 +68,16 @@ was blocked, rolled back, or contained.
 - A malicious or buggy Agent creates descendants that escape the tracked
   process tree or cgroup.
 - PID or thread-ID reuse attaches another workload's events to the run.
+- A stale or forged registration, or an ambiguous automatic discovery result,
+  selects the wrong existing-process root.
+- Before pidfd anchoring, an external-registration root is replaced by a process
+  with the same PID, USER_HZ tick, executable, and command, or a lineage
+  candidate is replaced after its snapshot by one with the same PID, tick, and
+  lineage.
+- An admitted root or seeded candidate exits or is replaced after anchoring but
+  before protected-attach activation completes.
+- A nested PID namespace or shifted time namespace makes host process identity
+  and start-time conversion unsafe.
 - Container churn, Pod rescheduling, cgroup reuse, or runtime restart preserves
   a stale identity relation.
 - Name, command, path, PID, or timing correlation is presented as an exact
@@ -129,8 +139,31 @@ was blocked, rolled back, or contained.
   host-wide default.
 - Prefer managed Agent launch so the collector is attached before workload
   execution begins.
-- Protect process attachment against PID reuse with stable start and runtime
-  identity where available.
+- Limit protected existing-process attach to explicit registration or unique
+  automatic discovery. Validate a registration's host boot ID, root start
+  tick, executable, command fingerprint, and workspace boundary against the
+  root visible when its pidfd is opened, and require its live cwd to resolve
+  inside that canonical boundary. Persist that selection as
+  `registration_qualified`, not as proof of pre-anchor continuity; keep
+  discovery root selection `inferred` and reject ambiguity.
+- Require the initial PID namespace and a shared initial, unshifted time
+  namespace for protected process-tree attach.
+- Keep the scope inactive while attaching tracepoints, then seed the admitted
+  TGID root and lineage candidates from repeated snapshots. Require each seeded
+  candidate to be a live, non-zombie leader in the initial PID/time namespaces,
+  use a per-seeded-candidate pidfd sandwich around map insertion that rechecks
+  namespace membership, remove post-insertion exits in the exit hook,
+  and hold the root pidfd across activation.
+- Match initially seeded TGIDs through a half-open USER_HZ start-time window.
+  Allow matching kernel bookkeeping to promote internal membership during
+  seeding or later, but assign exact event identity only to emitted
+  post-activation events carrying the matched kernel start time and process/exec
+  generations; keep this distinct from root-selection confidence.
+- After successful protected attach, persist exactly one `late_attach` gap for
+  one unknown-history Collection Boundary, followed by the capability manifest
+  and `started` lifecycle record. Do not interpret its `count:1` as a missing
+  syscall count. Persist all three as one rotation-safe durable batch and roll
+  back the active file if writing or synchronization fails.
 - Filter at event origin where possible and keep kernel records fixed and
   bounded.
 - Embed the kernel/userspace ABI version and record size in every ring-buffer
@@ -155,8 +188,14 @@ was blocked, rolled back, or contained.
 
 ## Environment-specific limits
 
-- **Local Linux:** managed launch provides the strongest scope. Manual attach
-  may miss prior activity.
+- **Local Linux:** managed launch provides the strongest scope. Protected
+  existing-process attach cannot recover prior activity or prove pre-anchor
+  selection continuity. An external-registration root can be substituted
+  between registration creation and root `pidfd_open` by a process with the
+  same PID, USER_HZ tick, executable, and command; a lineage candidate can be
+  substituted between its snapshot and `pidfd_open` by one with the same PID,
+  tick, and lineage. Pidfd sandwiches and the exit hook close the corresponding
+  exit/replacement race after candidates are anchored.
 - **Self-hosted CI:** Apolysis observes the managed workload but does not isolate
   the runner control plane or same-UID state.
 - **Docker/containerd:** host observations require exact cgroup and container

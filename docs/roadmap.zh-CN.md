@@ -3,7 +3,7 @@
 > [English](roadmap.md) | 简体中文
 > 配套文档：[design.zh-CN.md](design.zh-CN.md)
 > 执行计划：[beta-qualification-plan.zh-CN.md](beta-qualification-plan.zh-CN.md)
-> 最后审查：2026-08-04
+> 最后审查：2026-08-10
 
 本路线图把 Apolysis 引向一个有界的 eBPF Agent 运行时观测 Beta。它记录交付顺序、后置项、
 no-go 条件和允许项目扩张的条件，不是逐 commit 的进度日志。
@@ -131,7 +131,10 @@ enforcement。
 交付物：
 
 - 在 Agent 执行前完成 attach 的 managed launch；
-- 对现有 process tree 的受保护 attach，并记录显式 late-attach gap；
+- 仅通过 registration-qualified current root 或唯一 inferred discovery 准入现有 process
+  tree 的 protected attach，并拒绝原始 PID scope；
+- 每次成功 protected attach 都必须在 capability 与 lifecycle start 前记录一条 late-attach
+  gap；
 - 每次 run 一份 Agent Observation Record；
 - process tree 与有序 process/file/network/credential timeline；
 - run summary、collector health、capability、attribution 与 gap view；
@@ -148,6 +151,15 @@ API 时，run 仍必须有用。
 - operator 无需读取 raw JSONL 或 kernel trace 即可完成代表性调查；
 - 每个 viewer fact 都能解析到 observation、capability、health 或 gap record；
 - 空或不完整 timeline 永远不渲染成 successful 或 complete；
+- Protected attach 对 zombie、ambiguous 或 namespace-incompatible candidate fail closed，
+  把显式 registration selection 标为 `registration_qualified`，且绝不把该标记呈现为
+  pre-anchor continuity；
+- 每次成功 protected attach 都展示恰好一个有序的 unknown-history boundary，其 `count:1` 不会
+  被呈现为 missing-event estimate，并与 capability 和 start 一起作为 rotation-safe、可回滚的
+  durable batch 持久化；同时记录 admitted root 或 lineage candidate 的有界 same-tick pre-anchor
+  ambiguity；
+- Exact event identity 仅在 activation 后，由本次 collector run 内的 kernel start time、process
+  generation 与 exec generation 建立；
 - privilege separation、本地文件权限、retention 与 redaction 通过有界测试；
 - 资格证据来自版本化 synthetic workload、同一 boot 上交替的 collector-off/on trial、
   monotonic 原始 latency 与隔离 collector-resource sample、配对 bootstrap summary，以及准确
@@ -182,10 +194,10 @@ API 时，run 仍必须有用。
 
 - 先 scope 再 capture：不提供受支持的默认 host-wide collection。
 - 先 capability 再 claim：每个 operation 和 outcome 都绑定版本化 capability。
-- 不静默表达 absence：loss、truncation、unsupported path、late attach 与 collector death
-  始终产生 gap。
+- 不静默表达 absence：loss、truncation、unsupported path、collector death，以及 protected
+  attach 之前的 unknown history 始终产生 gap。
 - Runtime identity 优先于 inference：cgroup/process generation 优先于 PID、time、path 或
-  command correlation。
+  command correlation；root-selection confidence 不是 event identity 或 pre-anchor continuity。
 - Privacy 先于 persistence：除非独立 review profile 授权，否则敏感内容关闭。
 - Observation 不是 enforcement：finding 只描述正在或已经观测到的条件，不宣称阻止。
 - Viewer 非特权：browser 或 local UI 不能接触 BPF map、host PID namespace、runtime
@@ -238,6 +250,12 @@ Deferred work 不会只因为未来可能有用就继续在活跃 workspace 中�
   stop；
 - syscall-entry event 在没有受支持 outcome source 时被渲染为成功操作；
 - PID-only、name-only 或 timing-only matching 被显示为 exact runtime attribution；
+- Existing-process attach 接受原始 PID、绕过 root identity 或 namespace 资格校验、接纳
+  ambiguous discovery，或把 inferred root selection 当作 exact event attribution；
+- 把 `registration_qualified` 呈现为从 registration 创建以来的 continuity，或在缺少 kernel
+  start time 与 process/exec generation 时宣称 post-activation exact event identity；
+- 成功的 protected attach 没有在 capability 与 `started` record 前恰好写入一条
+  `late_attach` gap，或把该 gap 的 `count:1` 呈现为 missing-syscall count；
 - 空 timeline 被解释为 Agent 没有活动；
 - raw prompt、response、argv、tool payload、credential 或 private path 默认落盘；
 - viewer 需要 root、BPF access、host PID namespace、runtime socket 或 node credential；

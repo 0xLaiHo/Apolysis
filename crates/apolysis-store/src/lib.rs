@@ -6,7 +6,7 @@
 //! shell-friendly, and easy to preserve as evidence during early eBPF work.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use apolysis_core::JsonLine;
@@ -88,6 +88,61 @@ impl JsonlStore {
         Ok(())
     }
 
+    /// Append heterogeneous records as one durable boundary.
+    ///
+    /// Rotation is decided once for the complete batch, so the boundary is
+    /// never split merely because its individual records exceed the active
+    /// file budget. If writing or synchronization fails, the active file is
+    /// truncated back to its pre-batch length before the error is returned.
+    pub fn append_batch_and_sync(&mut self, records: &[&dyn JsonLine]) -> io::Result<()> {
+        if records.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "JSONL durable batch must not be empty",
+            ));
+        }
+
+        let mut batch = Vec::new();
+        let mut batch_len = 0_u64;
+        for record in records {
+            let line = record.to_json_line();
+            let line_len = u64::try_from(line.len())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "JSONL record too large"))?
+                .checked_add(1)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "JSONL batch is too large")
+                })?;
+            batch_len = batch_len.checked_add(line_len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "JSONL batch is too large")
+            })?;
+            batch.extend_from_slice(line.as_bytes());
+            batch.push(b'\n');
+        }
+
+        if self.should_rotate_before(batch_len) {
+            self.rotate()?;
+        }
+        self.writer.flush()?;
+        let starting_bytes = self.current_bytes;
+        let result = (|| {
+            self.writer.get_mut().write_all(&batch)?;
+            self.writer.get_mut().sync_all()?;
+            self.sync_parent()
+        })();
+        if let Err(error) = result {
+            let rollback = self.rollback_active_write(starting_bytes);
+            let message = match rollback {
+                Ok(()) => format!("{error}; durable batch rolled back"),
+                Err(rollback_error) => {
+                    format!("{error}; durable batch rollback failed: {rollback_error}")
+                }
+            };
+            return Err(io::Error::new(error.kind(), message));
+        }
+        self.current_bytes = self.current_bytes.saturating_add(batch_len);
+        Ok(())
+    }
+
     pub fn flush(&mut self) -> io::Result<()> {
         self.writer.flush()
     }
@@ -96,12 +151,24 @@ impl JsonlStore {
     pub fn flush_and_sync(&mut self) -> io::Result<()> {
         self.writer.flush()?;
         self.writer.get_ref().sync_all()?;
+        self.sync_parent()
+    }
+
+    fn sync_parent(&self) -> io::Result<()> {
         let parent = self
             .path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         File::open(parent)?.sync_all()
+    }
+
+    fn rollback_active_write(&mut self, starting_bytes: u64) -> io::Result<()> {
+        let file = self.writer.get_mut();
+        file.set_len(starting_bytes)?;
+        file.seek(SeekFrom::Start(starting_bytes))?;
+        file.sync_all()?;
+        self.sync_parent()
     }
 
     fn should_rotate_before(&self, next_line_bytes: u64) -> bool {

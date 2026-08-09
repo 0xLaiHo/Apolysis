@@ -1,6 +1,6 @@
 # Must remain byte-for-byte ordered with AyaLoaderPlan::audit_observer_default.
-sched/sched_process_exec
 sched/sched_process_fork
+sched/sched_process_exec
 sched/sched_process_exit
 syscalls/sys_enter_execve
 syscalls/sys_enter_execveat

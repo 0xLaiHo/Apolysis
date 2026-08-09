@@ -141,6 +141,48 @@ impl TrackedCgroupScopeAbi {
 const _: [(); 16] = [(); std::mem::size_of::<TrackedCgroupScopeAbi>()];
 const _: [(); 8] = [(); std::mem::align_of::<TrackedCgroupScopeAbi>()];
 
+const TRACKED_PROCESS_EXPECTED_STATE: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct TrackedProcessIdentityAbi {
+    start_boottime_ns: u64,
+    start_boottime_upper_ns: u64,
+    state: u32,
+    reserved: u32,
+}
+
+unsafe impl Pod for TrackedProcessIdentityAbi {}
+
+impl TrackedProcessIdentityAbi {
+    pub fn expected(start_boottime_ns: u64, start_boottime_upper_ns: u64) -> Result<Self, String> {
+        if start_boottime_ns >= start_boottime_upper_ns {
+            return Err("tracked process start window must be non-empty".to_string());
+        }
+        Ok(Self {
+            start_boottime_ns,
+            start_boottime_upper_ns,
+            state: TRACKED_PROCESS_EXPECTED_STATE,
+            reserved: 0,
+        })
+    }
+
+    pub fn start_boottime_ns(self) -> u64 {
+        self.start_boottime_ns
+    }
+
+    pub fn start_boottime_upper_ns(self) -> u64 {
+        self.start_boottime_upper_ns
+    }
+
+    pub fn is_expected(self) -> bool {
+        self.state == TRACKED_PROCESS_EXPECTED_STATE
+    }
+}
+
+const _: [(); 24] = [(); std::mem::size_of::<TrackedProcessIdentityAbi>()];
+const _: [(); 8] = [(); std::mem::align_of::<TrackedProcessIdentityAbi>()];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KernelEventDecodeError {
     UnexpectedRecordLength { expected: usize, received: usize },

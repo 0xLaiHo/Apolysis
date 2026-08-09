@@ -44,9 +44,10 @@ The v1 compatibility contract is append-only:
 
 Collector capability manifests declare the observation boundary used for one
 Agent Run. The live collector writes and synchronizes this record to stable
-storage after successful attachment and before releasing a managed Agent.
-Consumers must use it to distinguish supported observation semantics from
-unsupported paths.
+storage after successful attachment and, for managed launch, before releasing
+the Agent. For protected existing-process attach, it follows the mandatory
+`late_attach` gap and precedes the `started` lifecycle record. Consumers must
+use it to distinguish supported observation semantics from unsupported paths.
 
 Fields:
 
@@ -130,6 +131,29 @@ still writable. Daemon recovery treats an instance with `started` or
 `collector_restart` gap and recovered failed terminal. A missing terminal in a
 standalone timeline remains an incompleteness signal for consumers.
 
+Protected existing-process attach is available only when the root is supplied
+by an explicit Agent registration or selected by automatic discovery. The
+scope starts inactive while tracepoints attach, then enters process-tree
+seeding: the registration-qualified or inferred TGID root is seeded first and
+descendants are added across multiple process-tree snapshots. Every root or
+lineage candidate admitted to seeding is required to be a live, non-zombie
+thread-group leader and receives a per-seeded-candidate pidfd liveness sandwich
+around map insertion; liveness, lineage, and initial PID/time namespace
+membership are rechecked on both sides. The exit hook removes it if it exits afterward. The root
+pidfd remains open across activation. These controls close post-anchor exit and
+replacement races, but do not establish pre-anchor selection continuity.
+
+This path requires the observer and target to share the initial PID namespace
+and the same initial, unshifted time namespace. An explicit registration checks
+the current host boot ID, root start time in `/proc` clock ticks, executable,
+command fingerprint, and canonical workspace boundary against the root visible
+after its pidfd is opened; the live root cwd must resolve to that boundary or a
+descendant. A match is `registration_qualified`, not proof that
+the same process existed continuously since registration creation. Automatic
+discovery selects a unique root heuristically, so its root selection remains
+`inferred`. Failure or ambiguity rejects the attach rather than silently
+widening scope.
+
 ### `event`
 
 Canonical event records describe normalized runtime, metadata, process, file,
@@ -187,12 +211,33 @@ matching is never exact. Scope generation prevents numeric cgroup-ID reuse from
 crossing Agent Runs within one observer lifetime, but does not claim continuity
 across collector restart.
 
+For processes seeded during protected attach, thread IDs are normalized to
+thread-group IDs (TGIDs). A `/proc` start tick initially represents one
+USER_HZ-sized half-open boot-time interval. Matching kernel bookkeeping may
+promote the internal tracked membership to its exact nanosecond start time
+during seeding or later; subsequent matches must use it. Only events emitted
+after activation receive exact event identity within the collector run from the
+matched kernel start time plus process and exec generations.
+
+That event identity does not retroactively prove pre-anchor selection
+continuity. An external-registration root may be substituted between
+registration creation and root `pidfd_open` by a process with the same PID,
+USER_HZ tick, executable, and command. A lineage candidate may likewise be
+substituted between its snapshot and `pidfd_open` by one with the same PID,
+tick, and lineage. These are selection ambiguities; the pidfd sandwich and exit
+hook close replacement races only after each admitted candidate is anchored.
+
 Runtime metadata records are canonical `event` records with
 `event_type:"runtime_metadata"`. Agent supervisor metadata uses resources such
 as `agent-supervisor-mode`, `agent-kind`, `agent-root-pid`, `agent-command`,
 `agent-executable`, `agent-workspace-root`, `agent-start-time`, and
 `agent-exit-status`. The current writer records `agent-command` as a fixed
 content-off marker and does not emit `agent-command-fingerprint`.
+
+Protected-attach registration is validation input, not a new JSONL record.
+Supervisor metadata may retain the start tick and a redacted executable
+reference, while the full workspace path, full executable path, and command
+fingerprint used for validation are not persisted.
 
 ### `raw_kernel_event`
 
@@ -364,11 +409,31 @@ Fields:
 - `operation`: affected operation: `network_connect`, `file_open`,
   `file_create`, `file_truncate`, `file_unlink`, `file_rename`, or
   `collector_lifecycle`
-- `kind`: `missing_entry`, `missing_exit`, or `collector_restart`
-- `count`: affected operation count
+- `kind`: `missing_entry`, `missing_exit`, `collector_restart`, or
+  `late_attach`
+- `count`: affected operation count, except that `late_attach` always uses `1`
+  for one unknown-history Collection Boundary; it is not an estimate of
+  missing syscall or event count
 - `detail`: bounded diagnostic context. Missing-exit details distinguish
   kernel-reported losses from entries still pending when the collector stops;
   collector-restart details identify only the opaque unfinished instance.
+  A protected-attach detail has the form
+  `collection_boundary:protected_existing_process_attach,history:unknown,provenance:<external_registration|proc_discovery>,root_selection:<registration_qualified|inferred>`.
+  `root_selection` describes how the attach root was selected; it is not an
+  event `relation_status` and does not add a fifth relation value.
+  `registration_qualified` means the registration fields matched the root
+  visible when its pidfd was opened; it does not claim pre-anchor continuity.
+
+Every successful protected existing-process attach emits exactly one
+`late_attach` record with `operation:"collector_lifecycle"` and `count:1`.
+It marks all history before activation as unknown but does not by itself prove
+pre-anchor selection continuity. The durable start boundary is appended and
+synchronized in this order: `late_attach`,
+`collector_capability_manifest`, then `collector_lifecycle` with
+`state:"started"`. They are one durable batch: rotation is decided once for all
+three records, and write or synchronization failure rolls the active file back
+to its pre-batch length. An attach that fails before activation does not emit
+this successful boundary record.
 
 The managed single-Agent-Run live observer persists these records directly.
 The multi-cgroup daemon snapshots connect and file gap counters per cgroup and

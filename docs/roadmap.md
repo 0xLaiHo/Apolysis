@@ -3,7 +3,7 @@
 > English | [Simplified Chinese](roadmap.zh-CN.md)
 > Companion document: [design.md](design.md)
 > Execution plan: [beta-qualification-plan.md](beta-qualification-plan.md)
-> Last reviewed: 2026-08-04
+> Last reviewed: 2026-08-10
 
 This roadmap directs Apolysis toward a bounded eBPF Agent runtime
 observability beta. It records sequencing, deferrals, no-go criteria, and the
@@ -148,8 +148,11 @@ Purpose: turn correct kernel observations into an operator workflow.
 Deliverables:
 
 - managed launch that attaches before Agent execution begins;
-- protected attach to an existing process tree with an explicit late-attach
-  gap;
+- protected attach to an existing process tree admitted only through a
+  registration-qualified current root or unique inferred discovery, with raw
+  PID scope rejected;
+- one mandatory late-attach gap before capability and lifecycle start for every
+  successful protected attach;
 - one Agent Observation Record per run;
 - process tree and ordered process/file/network/credential timeline;
 - run summary, collector health, capability, attribution, and gap views;
@@ -168,6 +171,17 @@ Exit conditions:
 - every viewer fact resolves to an observation, capability, health, or gap
   record;
 - an empty or partial timeline never renders as successful or complete;
+- protected attach fails closed for zombie, ambiguous, or
+  namespace-incompatible candidates, labels explicit registration selection
+  `registration_qualified`, and never presents that label as pre-anchor
+  continuity;
+- each successful protected attach exposes exactly one ordered unknown-history
+  boundary whose `count:1` is not presented as a missing-event estimate, and
+  persists it with capability and start as one rotation-safe, rollback-capable
+  durable batch; the bounded same-tick pre-anchor ambiguity is documented for
+  an admitted root or lineage candidate;
+- exact event identity begins only after activation from kernel start time plus
+  process and exec generations within that collector run;
 - privilege separation, local file permissions, retention, and redaction pass
   their bounded tests;
 - qualification evidence comes from versioned synthetic workloads, alternating
@@ -209,10 +223,11 @@ Exit conditions:
 - Scope before capture: no supported host-wide default collection.
 - Capability before claim: every operation and outcome is tied to a versioned
   capability.
-- No silent absence: loss, truncation, unsupported paths, late attach, and
-  collector death always create gaps.
+- No silent absence: loss, truncation, unsupported paths, collector death, and
+  the unknown history before protected attach always create gaps.
 - Runtime identity before inference: cgroup/process generation wins over PID,
-  time, path, or command correlation.
+  time, path, or command correlation; root-selection confidence is not event
+  identity or pre-anchor continuity.
 - Privacy before persistence: sensitive content is off unless a separate,
   reviewed profile authorizes it.
 - Observation is not enforcement: findings describe conditions after or while
@@ -273,6 +288,15 @@ The beta cannot be released for a profile when any applicable condition holds:
   supported outcome source;
 - PID-only, name-only, or timing-only matching is displayed as exact runtime
   attribution;
+- existing-process attach accepts a raw PID, bypasses root identity or
+  namespace qualification, admits ambiguous discovery, or treats inferred root
+  selection as exact event attribution;
+- `registration_qualified` is presented as continuity since registration
+  creation, or post-activation exact event identity is claimed without kernel
+  start time and process/exec generations;
+- a successful protected attach lacks exactly one `late_attach` gap before its
+  capability and `started` records, or presents that gap's `count:1` as a
+  missing-syscall count;
 - an empty timeline is interpreted as absence of Agent activity;
 - raw prompt, response, argv, tool payload, credential, or private path content
   persists by default;
