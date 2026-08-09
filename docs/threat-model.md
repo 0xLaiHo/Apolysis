@@ -44,6 +44,10 @@ was blocked, rolled back, or contained.
   effects.
 - **Local store:** trusted to protect retained Agent Observation Records with
   restrictive permissions and bounded retention.
+- **Saved-run read and projection path:** non-privileged and read-only with
+  respect to source evidence. Local files are untrusted structured input;
+  hash-chain payloads are unavailable to projection until the entire chain is
+  verified.
 - **Saved-run viewer:** non-privileged and trusted only to render stored facts.
   It cannot invent outcome, attribution, health, or completeness verdicts.
 
@@ -58,6 +62,10 @@ was blocked, rolled back, or contained.
 - Content-off persistence and redaction guarantees for argv, paths, socket
   values, labels, annotations, and payloads.
 - Local timeline integrity, file permissions, retention, and cleanup behavior.
+- Projection source order and integrity plus the independent evidence,
+  collector-health, and review-state semantics of the derived record.
+- Private atomic publication of the derived Agent Observation Record without
+  overwriting any input source.
 - Operator credentials and kubeconfigs, which must never be captured, printed,
   copied into the repository, or committed.
 
@@ -106,6 +114,9 @@ was blocked, rolled back, or contained.
 - gVisor, Kata, Firecracker, or another boundary is described as providing
   guest process visibility that the host collector cannot supply.
 - A quiet or partial timeline is rendered as clean or complete.
+- Mixed-run, mixed-integrity, unknown, malformed, diagnostic-bearing, lossy, or
+  unterminated input is projected with a stronger completeness conclusion than
+  its source supports.
 - A finding is described as prevention or enforcement.
 
 ### Privacy and data exposure
@@ -119,6 +130,12 @@ was blocked, rolled back, or contained.
   fails open.
 - Viewer content causes script execution, unsafe links, terminal escape
   injection, or misleading status presentation.
+- A malformed Finding reason, Gap detail, record identifier, or parser error
+  copies private payload or control characters into projection output or
+  stderr.
+- Projection output aliases an active or rotated source file, is published
+  with broad permissions, or replaces an existing valid output before the new
+  record is complete.
 - Local files, runtime sockets, or cleanup paths expose or modify data outside
   the selected Agent Run.
 
@@ -130,6 +147,9 @@ was blocked, rolled back, or contained.
   container runtime sockets, node credentials, or privileged output paths.
 - A substituted BPF object or binary reports capabilities that do not match the
   loaded implementation.
+- A symlink, non-regular file, rotation substitution, source churn, oversized
+  record set, or tampered hash chain changes what the non-privileged projection
+  reads.
 - Install, upgrade, rollback, uninstall, retention, or cleanup modifies
   unrelated host state.
 
@@ -181,6 +201,21 @@ was blocked, rolled back, or contained.
 - Redact credential, private path, and socket values before persistence.
 - Use restrictive local permissions, bounded retention, safe rotation, and
   target-specific cleanup.
+- Open every saved-run segment without following symlinks, require regular
+  files, bind the active file plus contiguous `.N` archives to device/inode and
+  timestamp snapshots, read oldest archive through active, and fail if the set
+  changes during the read.
+- Bound saved-run bytes, line width, record count, rotation files, projection
+  batches, value depth, collection size, and copied strings. Verify a complete
+  hash chain before exposing any payload to projection.
+- Fail closed for mixed Agent Runs, invalid lifecycle order, incompatible or
+  malformed records, duplicate canonical observations, and content-policy
+  violations. Mixed integrity and unknown additive records cannot be complete.
+- Canonicalize free-form Finding reasons and Gap details, and keep error text
+  free of record payloads and conflicting run identifiers.
+- Publish projection output through an exclusive mode-`0600` same-directory
+  temporary file, sync file and parent, atomically rename it, and reject path or
+  inode aliases to every active or rotated input.
 - Keep the saved-run viewer non-privileged and render all captured text as
   untrusted data.
 - Keep privileged live and Kubernetes gates opt-in and document their kernel,

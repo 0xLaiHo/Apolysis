@@ -217,23 +217,19 @@ fn verify_existing(bytes: &[u8]) -> ReadonlyValidation {
     let mut previous_hash = ZERO_HASH.to_string();
     let mut valid_len = 0_usize;
     let mut records = Vec::new();
-    let newline_positions: Vec<usize> = bytes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, byte)| (*byte == b'\n').then_some(index))
-        .collect();
-    let mut start = 0_usize;
 
-    for newline in newline_positions {
-        let line = &bytes[start..newline];
+    for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if !chunk.ends_with(b"\n") {
+            break;
+        }
+        let line = &chunk[..chunk.len() - 1];
         let expected_sequence = sequence.saturating_add(1);
         match validate_line(line, expected_sequence, &previous_hash) {
             Ok(record) => {
                 sequence = record.sequence;
                 previous_hash = record.record_hash.clone();
                 records.push(record);
-                valid_len = newline + 1;
-                start = newline + 1;
+                valid_len = valid_len.saturating_add(chunk.len());
             }
             Err(detail) => {
                 return ReadonlyValidation {
@@ -260,24 +256,35 @@ fn verify_existing(bytes: &[u8]) -> ReadonlyValidation {
     }
 }
 
+pub(crate) fn decode_verified_chain(bytes: &[u8]) -> Result<Vec<ChainRecord>, StoreError> {
+    let validation = verify_existing(bytes);
+    if let Some(detail) = validation.failure {
+        return Err(StoreError::Integrity {
+            sequence: validation.sequence.checked_add(1),
+            detail,
+        });
+    }
+    if validation.valid_len != bytes.len() {
+        return Err(StoreError::Integrity {
+            sequence: validation.sequence.checked_add(1),
+            detail: "invalid or truncated hash-chain tail".to_string(),
+        });
+    }
+    Ok(validation.records)
+}
+
 fn validate_existing(bytes: &[u8]) -> Result<Validation, StoreError> {
     let mut sequence = 0_u64;
     let mut previous_hash = ZERO_HASH.to_string();
     let mut valid_len = 0_usize;
     let mut records = Vec::new();
-    let newline_positions: Vec<usize> = bytes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, byte)| (*byte == b'\n').then_some(index))
-        .collect();
-    let trailing_bytes = newline_positions
-        .last()
-        .map(|position| position + 1 < bytes.len())
-        .unwrap_or(!bytes.is_empty());
-    let mut start = 0_usize;
+    let trailing_bytes = !bytes.is_empty() && !bytes.ends_with(b"\n");
 
-    for (line_index, newline) in newline_positions.iter().copied().enumerate() {
-        let line = &bytes[start..newline];
+    for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if !chunk.ends_with(b"\n") {
+            break;
+        }
+        let line = &chunk[..chunk.len() - 1];
         let expected_sequence = sequence.saturating_add(1);
         let result = validate_line(line, expected_sequence, &previous_hash);
         match result {
@@ -285,11 +292,11 @@ fn validate_existing(bytes: &[u8]) -> Result<Validation, StoreError> {
                 sequence = record.sequence;
                 previous_hash = record.record_hash.clone();
                 records.push(record);
-                valid_len = newline + 1;
-                start = newline + 1;
+                valid_len = valid_len.saturating_add(chunk.len());
             }
             Err(detail) => {
-                let has_later_complete_line = line_index + 1 < newline_positions.len();
+                let remainder = &bytes[valid_len.saturating_add(chunk.len())..];
+                let has_later_complete_line = remainder.contains(&b'\n');
                 if has_later_complete_line || trailing_bytes {
                     return Err(StoreError::Integrity {
                         sequence: Some(expected_sequence),
@@ -299,7 +306,7 @@ fn validate_existing(bytes: &[u8]) -> Result<Validation, StoreError> {
                 return Ok(Validation {
                     sequence,
                     previous_hash,
-                    valid_len: start,
+                    valid_len,
                     records,
                 });
             }

@@ -17,6 +17,10 @@ pub(crate) mod commands {
     pub(crate) const INTENT: &str = "intent";
     /// Verify persisted evidence artifacts without mutating them.
     pub(crate) const VERIFY: &str = "verify";
+    /// Read or transform one saved Agent Run.
+    pub(crate) const RUN: &str = "run";
+    /// Project saved evidence into one Agent Observation Record.
+    pub(crate) const PROJECT: &str = "project";
     /// Ingest intent records from a supported harness log.
     pub(crate) const INGEST: &str = "ingest";
     /// Correlate intent records with observed host-side timeline events.
@@ -86,10 +90,12 @@ pub(crate) mod options {
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
     format!(
-        "usage: apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
+        "usage: apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>]\n       apolysis {run} {project} {input} <path> [{input} <path> ...] {output} <path>\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
         observe = commands::OBSERVE,
         intent = commands::INTENT,
         verify = commands::VERIFY,
+        run = commands::RUN,
+        project = commands::PROJECT,
         ingest = commands::INGEST,
         correlate = commands::CORRELATE,
         hash_chain = commands::HASH_CHAIN,

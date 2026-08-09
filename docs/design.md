@@ -262,6 +262,30 @@ and gap records. The current format is append-only JSONL with optional local
 hash-chain envelopes. A query index may be added behind the same record model
 when the saved-run viewer requires it.
 
+The v1 saved-run read path opens the active file and contiguous numeric
+archives as one stable local snapshot, refuses symlinks and non-regular files,
+enforces byte/line/record limits before projection, and verifies a complete
+hash chain before exposing payloads. Source order is authoritative; wall-clock
+timestamps never repair or reorder a malformed lifecycle. Plain and verified
+inputs may be composed explicitly, but mixed integrity is visible and cannot
+produce complete evidence.
+
+`apolysis-accountability` folds those typed source records into exactly one
+Agent Observation Record. Its Agent Observation Summary keeps evidence state,
+Collector Health, and review state independent. Missing lifecycle, unsupported
+outcomes, diagnostics, Observation Gaps, unknown records, and source-integrity
+findings remain queryable limitations; mixed Agent Runs, corrupt storage,
+invalid lifecycle order, duplicate canonical observations, incompatible
+schemas, and content-policy violations fail closed. Free-form finding and gap
+diagnostics are canonicalized rather than copied into the derived artifact.
+
+`apolysis run project --input <path> [--input <path> ...] --output <path>` is
+the non-privileged adapter for this projection. It writes deterministic JSON
+through a same-directory private temporary file, synchronizes it, and publishes
+it atomically. It refuses an output that aliases any active or rotated input.
+The command is a saved-run projection, not a live tail, remote query API, or
+interactive viewer.
+
 The viewer provides:
 
 - run inventory and summary;
@@ -335,6 +359,25 @@ instance without `stopped` or `failed` receives one `collector_restart`
 Observation Gap and one recovered failed terminal. The repair is idempotent.
 A standalone timeline with a missing terminal is still incomplete, even when
 no process remains available to append the gap.
+
+The Agent Observation Summary exposes three independent conclusions:
+
+- `evidence_state` is `complete`, `active`, `incomplete`, `failed`, or
+  `indeterminate`;
+- `collector_health` is `healthy`, `degraded`, `failed`, or `unknown`;
+- `review_state` is `requires_review`, `no_findings_reported`, or
+  `indeterminate`.
+
+Complete evidence requires one compatible content-off capability manifest, a
+legal started-to-normal-terminal lifecycle, at least one supported Runtime
+Observation, and no loss, gap, diagnostic, integrity, or capability issue.
+Active or failed lifecycle state remains explicit. Mixed source integrity and
+unknown additive record types are indeterminate. A Finding changes review
+state but does not rewrite evidence completeness. A `late_attach` count of one
+increments the unknown-history-boundary count, never the known-missing-event
+count. Mixed Agent Runs, malformed or incompatible records, content-policy
+violations, invalid lifecycle order, duplicate canonical observations, and
+conflicting Exact Runtime Identity fail closed.
 
 Consumers ignore unknown additive fields. Incompatible ABI or schema changes
 require a new version and an explicit decoder failure rather than best-effort
@@ -422,12 +465,15 @@ Implemented today:
   protected existing-process TGID seeding, per-cgroup operation gap counters,
   redaction, lifecycle checkpoints and terminals, and health/gap diagnostics;
 - `apolysis-cli`: fixture/live observation, managed Agent launch, protected
-  existing-process attach through registration or discovery, optional Codex
-  intent correlation, visibility, and verification commands;
+  existing-process attach through registration or discovery, non-privileged
+  saved-run projection, optional Codex intent correlation, visibility, and
+  verification commands;
 - `apolysis-core`: current JSONL vocabulary, record types, versioned Collector
   Capability manifest, and collector lifecycle schema;
-- `apolysis-store`: rotation and optional local hash-chain envelopes;
-- `apolysis-accountability`: optional declared-intent comparison and
+- `apolysis-store`: rotation, optional local hash-chain envelopes, and bounded
+  stable-snapshot readers for plain/rotated or verified saved runs;
+- `apolysis-accountability`: the pure Agent Observation Record projection,
+  independent summary axes, optional declared-intent comparison, and
   review-oriented findings;
 - `apolysis-kubernetes` and `apolysis-visibility`: bounded runtime metadata and
   visibility-boundary assessment;
@@ -443,7 +489,8 @@ connect have bounded entry/exit outcome semantics, and the daemon persists
 their pairing gaps to the owning Agent Run at explicit scope removal and clean
 shutdown. Stable in-run scope/process generations, periodic cumulative
 lifecycle checkpoints, explicit terminal reasons, and restart-gap recovery are
-implemented. The saved-run viewer and bounded Kubernetes beta remain targets.
+implemented together with the queryable saved-run projection. The interactive
+saved-run viewer and bounded Kubernetes beta remain targets.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification
@@ -452,6 +499,8 @@ them as historical implementation input; they do not define this architecture.
 
 ## 13. Limitations
 
+- L2 is a bounded, local, single-Agent-Run JSON projection. It is not the L3
+  interactive viewer, a live tail, cross-run search, or a central query plane.
 - eBPF sees kernel/runtime operations, not logical reasoning or hidden remote
   provider state.
 - Relative paths, file-descriptor-relative operations, namespaces, overlays,

@@ -76,6 +76,13 @@
 ### 本地产品
 
 - Managed launch 与 protected attach 都声明其 collection boundary。
+- `apolysis run project` 从 plain 连续 rotation set 或完整验证的 hash chain 生成确定性的
+  single-run aggregate；chain payload 在验证完成前不会暴露。
+- Malformed 或 mixed-run input、content-policy violation、非法 lifecycle order 与重复
+  canonical observation 会 fail closed。Mixed source integrity 与未知增量 record 为
+  indeterminate；gap、loss 与缺失 terminal 不能成为 complete。
+- Projection output 通过私有 atomic file 发布，拒绝 symlink、非普通文件或 input-alias target；
+  发布前失败不会修改 source file 或既有 output，也不会回显 payload。
 - Protected attach 仅允许显式 registration 或唯一 inferred discovery；原始 `--scope-pid` 会被
   拒绝。资格验证覆盖 boot ID、start tick、executable、command fingerprint、live-root cwd
   containment、zombie exclusion、pidfd liveness，以及 per-candidate initial PID/time namespace
@@ -121,6 +128,7 @@
   workload、配对采集顺序、monotonic event window、准确 count reconciliation、隔离的
   collector resource sampling，以及包含按 phase 归因 burst loss 的 pair-level bootstrap
   summary；但准确数值 budget 与任何 Supported 晋级仍受足量、保留的 privileged live 证据阻塞；
-- L2 冻结可查询 Agent Observation Record 后，saved-run viewer 的 interaction 与展示形态；
+- L3 saved-run viewer 在已冻结的 L2 Agent Observation Record 上采用何种 interaction 与展示
+  形态，同时不得重新解释其 evidence、health 或 review state；
 - container identity 与 runtime recovery 验证后，Kubernetes least-privilege deployment
   形态。

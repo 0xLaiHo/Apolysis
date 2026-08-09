@@ -27,7 +27,9 @@ Apolysis 不再推进跨 provider 的 Agent Runtime Evidence & Policy Plane。�
 活跃 workspace 现在与有界产品一致：8 个 crate 覆盖 core record、observer、
 accountability finding、本地 storage、daemon、CLI、Kubernetes metadata 与 visibility
 assessment。中央服务、policy actuation、feedback control、sandbox execution 与广泛的
-production qualification 不再参与活跃 build 或默认 test。下一优先级是 collector 正确性。
+production qualification 不再参与活跃 build 或默认 test。本地产品的活跃方向是在扩大
+runtime breadth 前，先基于 single-run projection contract 交付
+非特权 saved-run viewer 与 daemon operations。
 
 ## Beta 结果
 
@@ -135,9 +137,10 @@ enforcement。
   tree 的 protected attach，并拒绝原始 PID scope；
 - 每次成功 protected attach 都必须在 capability 与 lifecycle start 前记录一条 late-attach
   gap；
-- 每次 run 一份 Agent Observation Record；
+- 每次 run 一份确定性的 single-run Agent Observation Record projection；
 - process tree 与有序 process/file/network/credential timeline；
-- run summary、collector health、capability、attribution 与 gap view；
+- 可查询的 capability、identity、observation、lifecycle/health、finding、gap、issue array，
+  以及相互独立的 evidence/health/review summary；
 - credential path、workspace mutation、unexpected executable class、unapproved network
   target 与 degraded observation 的有界 finding；
 - 基于有界本地数据的非特权 saved-run viewer；
@@ -150,7 +153,8 @@ API 时，run 仍必须有用。
 
 - operator 无需读取 raw JSONL 或 kernel trace 即可完成代表性调查；
 - 每个 viewer fact 都能解析到 observation、capability、health 或 gap record；
-- 空或不完整 timeline 永远不渲染成 successful 或 complete；
+- mixed-run、malformed、active、failed、missing-capability/terminal、包含 loss/gap、
+  mixed-integrity 或 unknown-record 的输入永远不渲染成 clean 或 complete；
 - Protected attach 对 zombie、ambiguous 或 namespace-incompatible candidate fail closed，
   把显式 registration selection 标为 `registration_qualified`，且绝不把该标记呈现为
   pre-anchor continuity；
@@ -257,6 +261,9 @@ Deferred work 不会只因为未来可能有用就继续在活跃 workspace 中�
 - 成功的 protected attach 没有在 capability 与 `started` record 前恰好写入一条
   `late_attach` gap，或把该 gap 的 `count:1` 呈现为 missing-syscall count；
 - 空 timeline 被解释为 Agent 没有活动；
+- saved-run projection 接纳 mixed Agent Run、在完整验证前暴露 hash-chain payload、把 mixed
+  integrity 或 unknown record 标为 complete、能够覆盖 input source，或在错误中包含 raw
+  payload；
 - raw prompt、response、argv、tool payload、credential 或 private path 默认落盘；
 - viewer 需要 root、BPF access、host PID namespace、runtime socket 或 node credential；
 - 受支持 kernel、runtime、operation 与 performance envelope 没有文档和测试；

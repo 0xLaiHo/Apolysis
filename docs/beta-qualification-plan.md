@@ -86,6 +86,16 @@ environment breadth.
 ### Local product
 
 - Managed launch and protected attach both declare their collection boundary.
+- `apolysis run project` produces a deterministic single-run aggregate from a
+  plain contiguous rotation set or a fully verified hash chain; chain payloads
+  are not exposed before verification.
+- Malformed or mixed-run input, content-policy violations, illegal lifecycle
+  order, and duplicate canonical observations fail closed. Mixed source
+  integrity and unknown additive records are indeterminate; gaps, loss, and a
+  missing terminal cannot be complete.
+- Projection output is published through a private atomic file, refuses
+  symlink, non-regular, or input-alias targets, and preserves source files and
+  any existing output on pre-publication failure without echoing payloads.
 - Protected attach is available only through explicit registration or unique
   inferred discovery; raw `--scope-pid` is rejected. Qualification covers boot
   ID, start tick, executable, command fingerprint, workspace, zombie exclusion,
@@ -143,7 +153,8 @@ start:
   bootstrap summary with phase-scoped burst loss are fixed, but exact numeric
   budgets and any Supported promotion remain blocked on enough retained
   privileged live evidence;
-- the saved-run viewer interaction and presentation shape after L2 freezes the
-  queryable Agent Observation Record; and
+- the L3 saved-run viewer interaction and presentation over the frozen L2 Agent
+  Observation Record, without reinterpreting its evidence, health, or review
+  states; and
 - the Kubernetes least-privilege deployment shape after container identity and
   runtime recovery are qualified.
