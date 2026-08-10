@@ -215,7 +215,8 @@ pre-anchor root-selection confidence 相互独立：显式 registration 为
 
 首个产品保持 local-first。Store 有界、安全轮转，并保留显式 run start、capability、health
 checkpoint、terminal state 与 gap record。当前格式是 append-only JSONL 和可选本地
-hash-chain envelope。Saved-run viewer 需要时，可以在同一 record model 后加入 query index。
+hash-chain envelope。L3 Saved Run Viewer 直接消费冻结的 single-run record。只有重复使用证明
+有界 single-record 视图不足时，才考虑后置的 query index。
 
 V1 saved-run 读取路径会把 active file 与连续数字 archive 作为同一个稳定本地 snapshot，按
 最旧 archive 到 active 的顺序读取；它拒绝 symlink、非普通文件、读取期间变化、截断、格式错误
@@ -240,16 +241,33 @@ observation 才能进入 Exact Runtime Identity。
 并拒绝 output alias 任何 active 或 rotated input。该命令是 saved-run projection，不是 live
 tail、remote query API 或交互式 viewer。
 
+`apolysis run view --input <agent-observation-record.json> --output
+<viewer.html>` 是非特权 Saved Run Viewer adapter。它只接受一份 Agent Observation Record
+v1，验证其类型、schema、summary、identity reference、source ordinal、Finding link 与状态
+一致性，然后渲染确定性的 self-contained HTML。格式错误或内部不一致的 record 会 fail
+closed，且不会替换现有 output。Reader 有界并拒绝 symlink 与非普通文件；publisher 在使用
+独占、mode 为 `0600` 的同目录 temporary file、同步文件与目录并原子 rename 前，会拒绝 output
+alias。
+
+该 HTML 是离线、只读 artifact，不依赖外部 asset 或网络。限制性 Content Security Policy
+禁用 connection 与外部 resource，每个存储值都按不可信文本渲染。Viewer 不需要 root，也不
+接触 BPF map、host PID namespace、runtime socket 或 node credential。
+
 Viewer 提供：
 
-- run inventory 与 summary；
-- process tree 与 runtime identity drill-down；
+- 保持 Evidence State、Collector Health 与 Review State 三个状态轴相互独立的单次 run
+  summary；
+- Exact Runtime Identity roster，以及 Runtime Observation 中保留的 reported PID/PPID field；
 - 有序 process、file、network 与 credential timeline；
 - 受支持的 outcome 与 attribution status；
 - collector health、loss、truncation 与 unsupported capability gap；
-- 链接到原始观测的 review-oriented finding。
+- 链接到 supporting observation 的 review-oriented Finding；
+- 使展示事实可追溯到冻结 record 的 source ordinal 与 record path。
 
-Viewer 不从空结果推导隐藏的 success verdict。
+Agent Observation Record v1 不携带权威 parent Runtime Identity link。因此 viewer 不会从可能
+复用的数字 PID/PPID 构造 canonical process tree；它只把 identity roster 与 reported PPID
+作为已存储事实展示，不推断 parent edge。它也不会从空结果推导隐藏的 success verdict，更
+不会把三个 summary axis 合并为 clean verdict。
 
 ### 5.5 后置的中央边界
 
@@ -372,6 +390,8 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 - 本地文件使用限制性权限与有界 retention。
 - Viewer 是非特权组件，无法接触 BPF map、host PID namespace、container socket 或 node
   credential。
+- Standalone viewer 会转义所有存储文本，并使用禁止网络连接与外部 asset 的限制性 Content
+  Security Policy。该 artifact 包含投影后的 run fact，因此保留 mode-`0600` 发布语义。
 
 ## 11. 失败语义
 
@@ -398,8 +418,8 @@ Implemented today：
   per-cgroup operation gap counter、脱敏、lifecycle checkpoint/terminal 以及 health/gap
   diagnostic；
 - `apolysis-cli`：fixture/live observation、托管 Agent launch、通过 registration 或 discovery
-  完成的 protected existing-process attach、非特权 saved-run projection、可选 Codex intent
-  correlation、visibility 与 verification command；
+  完成的 protected existing-process attach、非特权 saved-run projection 与 Saved Run Viewer
+  发布、可选 Codex intent correlation、visibility 与 verification command；
 - `apolysis-core`：当前 JSONL vocabulary、record type、版本化 Collector Capability
   manifest 与 collector lifecycle schema，包括由 producer 与 projection 共同消费的唯一
   lifecycle vocabulary 和完整 AuditObserver v1 operation/source/outcome contract；
@@ -407,6 +427,8 @@ Implemented today：
   saved run 的有界 stable-snapshot reader；
 - `apolysis-accountability`：纯 Agent Observation Record projection、相互独立的 summary
   axis、可选声明意图对比与面向复查的 finding；
+- `apolysis-viewer`：严格验证 Agent Observation Record v1，并提供带 source traceability 的
+  确定性 standalone 离线 HTML 展示；
 - `apolysis-kubernetes` 与 `apolysis-visibility`：有界 runtime metadata 与 visibility
   boundary assessment；
 - `apolysis-daemon`：long-lived observer、有界 queue、本地 socket、runtime registration
@@ -417,8 +439,8 @@ start 同步到稳定存储；对 protected existing-process attach，它会先�
 `late_attach` boundary。选定文件操作与 network connect 已具备有界 entry/exit outcome 语义，
 daemon 会在显式移除 scope 与正常关闭时把这些配对 gap 持久化到所属 Agent Run。单次运行内
 稳定的 scope/process generation、周期累计 lifecycle checkpoint、显式 terminal reason 与
-restart-gap recovery 与可查询 saved-run projection 已实现。交互式 saved-run viewer 和有界
-Kubernetes Beta 仍是 target。
+restart-gap recovery、可查询 saved-run projection 与非特权 Saved Run Viewer 已实现。本地
+daemon operations 和有界 Kubernetes Beta 仍是 target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃
@@ -426,8 +448,11 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 
 ## 13. 限制
 
-- L2 是有界、本地、single-Agent-Run JSON projection，不是 L3 交互式 viewer、live tail、
-  cross-run search 或中央 query plane。
+- L3 渲染一份有界、本地、冻结的 Agent Observation Record v1。它不是 live tail、跨 run
+  search、remote query surface 或中央 query plane。
+- Agent Observation Record v1 缺少权威 parent Runtime Identity link。Viewer 可以展示 Exact
+  Runtime Identity roster 与每条 observation 的 reported PID/PPID，但不能依赖不安全的
+  PID-based inference 构造 canonical process tree。
 - eBPF 看到 kernel/runtime operation，看不到逻辑推理或隐藏的 remote provider state。
 - Relative path、fd-relative operation、namespace、overlay 与 guest runtime 需要显式解析和
   capability limit。

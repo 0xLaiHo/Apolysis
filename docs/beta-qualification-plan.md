@@ -51,7 +51,7 @@ semantics, remote outcome verification, and enforcement.
 | Q1 Qualification envelope | Freeze the candidate kernel/runtime contract and measurement protocol, then grant support only after retained live evidence freezes CPU, memory, latency, and event-loss budgets | none |
 | L1 Protected existing-process attach | Admit an existing tree only through a registration-qualified current root or unique inferred discovery, reject raw PID scope, activate from seeded identities, and persist one ordered late-attach boundary gap | C3, C4 |
 | L2 Agent Observation Record projection | Produce one queryable run aggregate and summary over observation, capability, identity, health, finding, and gap records | C1, C2, C3, C4 |
-| L3 Non-privileged saved-run viewer | Complete the representative investigation without raw JSONL or privileged access | L2 |
+| L3 Non-privileged saved-run viewer | Investigate exactly one Agent Observation Record v1 through a private, standalone offline view without raw JSONL or privileged access | L2 |
 | L4 Local daemon operations | Qualify install, health, stop, cleanup, permissions, retention, and failure recovery | C4, L2 |
 | D1 Container identity | Stabilize Docker/containerd cgroup and container attribution across churn and PID reuse | C3, C4 |
 | D2 Runtime recovery | Qualify daemon restart and Docker/containerd runtime socket recovery | D1, C4 |
@@ -123,8 +123,20 @@ environment breadth.
   residual or overclaim pre-anchor continuity.
 - The CLI or viewer answers the six roadmap investigation questions without
   requiring raw JSONL or kernel traces.
-- The viewer is non-privileged, and every displayed fact resolves to a typed
-  source record.
+- `apolysis run view` accepts exactly one internally consistent Agent
+  Observation Record v1 and publishes deterministic, standalone offline HTML
+  through a private atomic mode-`0600` file. It rejects unsafe input/output
+  types and aliases without replacing a valid output on pre-publication
+  failure.
+- The viewer is non-privileged, treats stored text as untrusted data, keeps
+  Evidence State, Collector Health, and Review State independent, and makes
+  every displayed fact traceable through a record path or `source_ordinal`.
+  Findings resolve to supporting Runtime Observations.
+- Active, failed, incomplete, mixed-integrity, gap-bearing, or otherwise
+  limited records retain those states and never render as clean or complete.
+  Because v1 lacks an authoritative parent Runtime Identity link, the viewer
+  shows the Exact Runtime Identity roster and reported PID/PPID facts without
+  constructing a canonical process tree.
 - Install, shutdown, cleanup, retention, permissions, and corruption recovery
   are bounded and tested.
 
@@ -146,6 +158,17 @@ environment breadth.
 - Required CI and human review pass on the `pre-release` to `main` promotion.
 - Documentation names only supported or explicitly experimental profiles.
 
+## Adopted local-viewer contract
+
+L3 uses the frozen L2 Agent Observation Record as its only input contract. The
+viewer is a deterministic local presentation boundary, not a new evidence
+source: it does not reproject raw JSONL, rewrite summary states, infer parent
+identity, or contact a live observer. Live tailing, cross-run search, remote
+query, external assets, and a central evidence plane are not part of this
+contract. The Local product gates above remain the qualification authority for
+record consistency, traceability, untrusted-text handling, output privacy, and
+failure behavior.
+
 ## Decisions still to resolve
 
 The focused work items must settle these details before their dependent items
@@ -157,8 +180,5 @@ start:
   bootstrap summary with phase-scoped burst loss are fixed, but exact numeric
   budgets and any Supported promotion remain blocked on enough retained
   privileged live evidence;
-- the L3 saved-run viewer interaction and presentation over the frozen L2 Agent
-  Observation Record, without reinterpreting its evidence, health, or review
-  states; and
 - the Kubernetes least-privilege deployment shape after container identity and
   runtime recovery are qualified.

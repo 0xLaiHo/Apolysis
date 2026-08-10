@@ -60,6 +60,12 @@ state, Collector Health, review state, and typed counts independent. Missing or
 incomplete evidence is never summarized as a clean result.
 _Avoid_: Run verdict, clean status, success proof
 
+**Saved Run Viewer**:
+A local, read-only investigation view of one Agent Observation Record. It
+preserves the record's evidence boundaries and source traceability without
+adding facts or combining state axes.
+_Avoid_: Web Console, live monitor, evidence source
+
 **Evidence State**:
 The projection state of one Agent Observation Record: complete, active,
 incomplete, failed, or indeterminate. It reports evidence boundaries, not Agent

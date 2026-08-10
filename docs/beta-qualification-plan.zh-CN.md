@@ -45,7 +45,7 @@
 | Q1 验证边界 | 冻结候选 kernel/runtime contract 与测量协议；只有保留的 live 证据冻结 CPU、memory、latency 与 event-loss budget 后才授予支持 | 无 |
 | L1 受保护的 existing-process attach | 仅通过 registration-qualified current root 或唯一 inferred discovery 准入现有 process tree，拒绝原始 PID scope，从 seeded identity 激活，并持久化一条有序的 late-attach boundary gap | C3、C4 |
 | L2 Agent Observation Record projection | 为 observation、capability、identity、health、finding 与 gap record 生成单次 run 的可查询 aggregate 和 summary | C1、C2、C3、C4 |
-| L3 非特权 saved-run viewer | 无需原始 JSONL 或 privileged access 即可完成代表性调查 | L2 |
+| L3 非特权 saved-run viewer | 无需原始 JSONL 或 privileged access，通过私有 standalone 离线视图调查恰好一份 Agent Observation Record v1 | L2 |
 | L4 本地 daemon 运维 | 验证 install、health、stop、cleanup、permission、retention 与 failure recovery | C4、L2 |
 | D1 Container identity | 稳定 Docker/containerd cgroup 与 container attribution，并抵御 churn 与 PID reuse | C3、C4 |
 | D2 Runtime recovery | 验证 daemon restart 与 Docker/containerd runtime socket recovery | D1、C4 |
@@ -105,7 +105,15 @@
   可能在 snapshot 到 `pidfd_open` 之间被相同 PID/tick/lineage 替换。不得把 post-anchor
   seeded-candidate race 写成残余，也不得过度声明 pre-anchor continuity。
 - CLI 或 viewer 无需读取原始 JSONL 或 kernel trace，即可回答 roadmap 中六个调查问题。
-- Viewer 为 non-privileged，且每个显示事实都能解析到 typed source record。
+- `apolysis run view` 只接受一份内部一致的 Agent Observation Record v1，并通过私有、原子的
+  mode-`0600` 文件发布确定性 standalone 离线 HTML。它拒绝不安全的 input/output 类型与
+  alias，且发布前失败不会替换有效 output。
+- Viewer 为 non-privileged，把存储文本作为不可信数据处理，保持 Evidence State、Collector
+  Health 与 Review State 相互独立，并使每个显示事实都能通过 record path 或
+  `source_ordinal` 追溯。Finding 会解析到 supporting Runtime Observation。
+- Active、failed、incomplete、mixed-integrity、带 gap 或其他受限 record 会保留相应状态，
+  绝不渲染为 clean 或 complete。由于 v1 缺少权威 parent Runtime Identity link，viewer 只展示
+  Exact Runtime Identity roster 与 reported PID/PPID fact，不构造 canonical process tree。
 - Install、shutdown、cleanup、retention、permission 与 corruption recovery 均有边界并通过
   测试。
 
@@ -124,6 +132,14 @@
 - `pre-release` 到 `main` 的 promotion 通过 required CI 与人工 review。
 - 文档只命名 supported 或显式 experimental profile。
 
+## 已采用的本地 Viewer Contract
+
+L3 仅以冻结的 L2 Agent Observation Record 作为输入 contract。Viewer 是确定性的本地展示
+边界，不是新的 evidence source：它不会重新投影 raw JSONL、改写 summary state、推断 parent
+identity 或连接 live observer。Live tail、跨 run 搜索、remote query、外部 asset 与 central
+evidence plane 均不属于该 contract。上文“本地产品”门禁仍是 record 一致性、traceability、
+不可信文本处理、output privacy 与失败行为的资格权威。
+
 ## 尚待解决的决策
 
 以下细节必须由相应聚焦工作项解决，之后才能开始其依赖项：
@@ -132,7 +148,5 @@
   workload、配对采集顺序、monotonic event window、准确 count reconciliation、隔离的
   collector resource sampling，以及包含按 phase 归因 burst loss 的 pair-level bootstrap
   summary；但准确数值 budget 与任何 Supported 晋级仍受足量、保留的 privileged live 证据阻塞；
-- L3 saved-run viewer 在已冻结的 L2 Agent Observation Record 上采用何种 interaction 与展示
-  形态，同时不得重新解释其 evidence、health 或 review state；
 - container identity 与 runtime recovery 验证后，Kubernetes least-privilege deployment
   形态。

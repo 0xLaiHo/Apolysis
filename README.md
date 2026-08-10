@@ -92,6 +92,9 @@ an exact one.
   queryable Agent Observation Record with independent evidence, collector
   health, and review states. Plain/rotated JSONL and verified hash-chain input
   are bounded and fail closed on corruption or mixed runs.
+- Deterministic, non-privileged viewing of one Agent Observation Record as a
+  private, self-contained offline HTML investigation. It keeps the three state
+  axes independent and links Findings to source-ordered observations.
 - Agent-Run-scoped Observation Gaps for unmatched or still-pending selected
   file and network-connect entry/exit pairs, including isolated multi-cgroup
   daemon scopes.
@@ -135,16 +138,18 @@ deferred beyond the bounded beta.
 
 `v0.3.0` remains the latest public research release and demonstrates the live
 collector, managed Agent launch, JSONL timeline, privacy redaction, and release
-packaging. The active Cargo workspace is now limited to eight crates: core,
-observer, accountability findings, local storage, daemon, CLI, Kubernetes
-metadata, and visibility assessment. Superseded contracts, central services,
-policy actuation, Agent feedback control, sandbox execution, and broad
-production-qualification prototypes have left active builds and default gates.
+packaging. The active Cargo workspace is now limited to nine crates: core,
+observer, accountability findings, local storage, daemon, CLI, saved-run
+viewer, Kubernetes metadata, and visibility assessment. Superseded contracts,
+central services, policy actuation, Agent feedback control, sandbox execution,
+and broad production-qualification prototypes have left active builds and
+default gates.
 
 The local `apolysis run project` path now writes one private, atomic JSON Agent
-Observation Record for a saved run. The non-privileged interactive viewer
-remains the next local product layer; projection does not add a central query
-service or change the experimental support status.
+Observation Record for a saved run. `apolysis run view` validates exactly one
+such v1 record and writes a private, self-contained offline HTML investigation.
+The local projection and viewer do not add live tailing, cross-run search, a
+central query service, or a change to the experimental support status.
 
 The scope reset is a roadmap decision, not a retroactive production claim.
 Apolysis remains experimental until the supported collector, attribution,
@@ -187,6 +192,14 @@ Project a saved run without root access:
 ./target/debug/apolysis run project \
   --input .apolysis/codex-live/timeline.agent-run.jsonl \
   --output .apolysis/codex-live/agent-observation-record.json
+```
+
+Render that record as an offline Saved Run Viewer without root access:
+
+```bash
+./target/debug/apolysis run view \
+  --input .apolysis/codex-live/agent-observation-record.json \
+  --output .apolysis/codex-live/saved-run-view.html
 ```
 
 ## Live managed Agent example

@@ -29,14 +29,13 @@ The reset establishes these durable boundaries:
 - a central multi-tenant evidence plane requires new user evidence and a new
   architectural decision.
 
-The active workspace now matches the bounded product: eight crates cover core
-records, observer, accountability findings, local storage, daemon, CLI,
-Kubernetes metadata, and visibility assessment. Central services, policy
-actuation, feedback control, sandbox execution, and broad production
-qualification no longer participate in active builds or default tests. The
-active local-product direction is to build the non-privileged saved-run viewer
-and daemon operations on the single-run projection contract before expanding
-runtime breadth.
+The bounded product comprises core records, observer, accountability findings,
+local storage, daemon, CLI, the Saved Run Viewer, Kubernetes metadata, and
+visibility assessment. Central services, policy actuation, feedback control,
+sandbox execution, and broad production qualification do not participate in
+active builds or default tests. The local-product direction uses the single-run
+projection contract for non-privileged saved-run investigation and daemon
+operations before runtime breadth expands.
 
 ## Beta outcome
 
@@ -80,7 +79,7 @@ Keep as active product modules:
 - run scope and runtime identity;
 - bounded local store;
 - node daemon;
-- CLI and future saved-run viewer;
+- CLI and Saved Run Viewer;
 - narrowly required local/container metadata.
 
 Remove from the active workspace and default gates:
@@ -156,7 +155,9 @@ Deliverables:
 - one mandatory late-attach gap before capability and lifecycle start for every
   successful protected attach;
 - one deterministic, single-run Agent Observation Record projection;
-- process tree and ordered process/file/network/credential timeline;
+- Exact Runtime Identity roster, reported PID/PPID facts, and an ordered
+  process/file/network/credential timeline; schema v1 does not support a
+  canonical process tree and the viewer does not infer parent edges;
 - queryable capability, identity, observation, lifecycle/health, finding, gap,
   issue arrays, and an independent evidence/health/review summary;
 - bounded findings for credential paths, workspace mutations, unexpected
@@ -269,6 +270,7 @@ Unsupported:
 - provider Hook, SDK, OTLP, MCP, and A2A adapter families;
 - generic remote export and external custody;
 - semantic coverage and remote outcome verification;
+- live tailing or a streaming viewer;
 - cross-run search and organization-wide investigation graph;
 - central authenticated ingest, multi-user Query API, and Web Console;
 - PostgreSQL, S3-compatible evidence objects, KMS, replay authority, and
@@ -310,6 +312,9 @@ The beta cannot be released for a profile when any applicable condition holds:
   can overwrite an input source, or includes raw payload content in an error;
 - raw prompt, response, argv, tool payload, credential, or private path content
   persists by default;
+- the v1 viewer constructs canonical process-tree edges from numeric PID/PPID
+  values instead of limiting the display to the stored identity roster and
+  reported parent identifiers;
 - the viewer requires root, BPF access, host PID namespace, runtime socket, or
   node credential access;
 - the supported kernel, runtime, operation, and performance envelope is not
