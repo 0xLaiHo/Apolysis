@@ -343,6 +343,934 @@ pub struct ProjectionIssue {
     pub count: u64,
 }
 
+/// Structural inconsistencies in a frozen Agent Observation Record v1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum AgentObservationRecordValidationError {
+    UnsupportedRecordType,
+    UnsupportedSchemaVersion,
+    EmptyAgentRunId,
+    SummaryCountMismatch,
+    SummaryAggregationMismatch,
+    InvalidSourceOrdinal,
+    InvalidRuntimeIdentity,
+    InvalidFindingReference,
+    InvalidCollectorLifecycle,
+    InconsistentEvidenceState,
+    InconsistentCollectorHealth,
+    InconsistentReviewState,
+    InvalidProjectionIssue,
+    InvalidCapabilityManifest,
+    InvalidRuntimeObservation,
+    InvalidSourceOrder,
+    InvalidObservationGap,
+}
+
+impl std::fmt::Display for AgentObservationRecordValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Agent Observation Record is internally inconsistent")
+    }
+}
+
+impl std::error::Error for AgentObservationRecordValidationError {}
+
+/// Validate consistency properties retained by the frozen v1 projection.
+pub fn validate_agent_observation_record_v1(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    if record.record_type != "agent_observation_record" {
+        return Err(AgentObservationRecordValidationError::UnsupportedRecordType);
+    }
+    if record.schema_version != AGENT_OBSERVATION_RECORD_SCHEMA_V1 {
+        return Err(AgentObservationRecordValidationError::UnsupportedSchemaVersion);
+    }
+    if record.agent_run_id.is_empty() {
+        return Err(AgentObservationRecordValidationError::EmptyAgentRunId);
+    }
+    let summary = &record.summary;
+    let counts_match = usize_matches_u64(
+        record.runtime_observations.len(),
+        summary.runtime_observation_count,
+    ) && usize_matches_u64(
+        record.runtime_identities.len(),
+        summary.runtime_identity_count,
+    ) && usize_matches_u64(record.findings.len(), summary.finding_count)
+        && usize_matches_u64(
+            record.observation_gaps.len(),
+            summary.observation_gap_record_count,
+        );
+    if !counts_match {
+        return Err(AgentObservationRecordValidationError::SummaryCountMismatch);
+    }
+    let event_type_counts = count_values(
+        record
+            .runtime_observations
+            .iter()
+            .map(|observation| observation.event_type.as_str()),
+    )?;
+    let outcome_counts = count_values(
+        record
+            .runtime_observations
+            .iter()
+            .filter_map(|observation| observation.outcome.as_deref()),
+    )?;
+    let relation_counts = count_values(
+        record
+            .runtime_observations
+            .iter()
+            .map(|observation| observation.relation_status.as_str()),
+    )?;
+    let finding_kind_counts = count_values(
+        record
+            .findings
+            .iter()
+            .map(|finding| finding_kind_name(&finding.kind)),
+    )?;
+    let gap_kind_counts =
+        count_values(record.observation_gaps.iter().map(|gap| gap.kind.as_str()))?;
+    let known_missing_observation_count = record
+        .observation_gaps
+        .iter()
+        .filter(|gap| matches!(gap.kind.as_str(), "missing_entry" | "missing_exit"))
+        .try_fold(0_u64, |total, gap| total.checked_add(gap.count))
+        .ok_or(AgentObservationRecordValidationError::SummaryAggregationMismatch)?;
+    let unknown_history_boundary_count = u64::try_from(
+        record
+            .observation_gaps
+            .iter()
+            .filter(|gap| gap.kind == "late_attach")
+            .count(),
+    )
+    .map_err(|_| AgentObservationRecordValidationError::SummaryAggregationMismatch)?;
+    let aggregations_match = summary.event_type_counts == event_type_counts
+        && summary.outcome_counts == outcome_counts
+        && summary.relation_counts == relation_counts
+        && summary.finding_kind_counts == finding_kind_counts
+        && summary.gap_kind_counts == gap_kind_counts
+        && summary.known_missing_observation_count == known_missing_observation_count
+        && summary.unknown_history_boundary_count == unknown_history_boundary_count;
+    if !aggregations_match {
+        return Err(AgentObservationRecordValidationError::SummaryAggregationMismatch);
+    }
+    let mut source_ordinals = BTreeSet::new();
+    validate_source_ordinal_sequence(
+        record
+            .capability_manifests
+            .iter()
+            .map(|manifest| manifest.source_ordinal),
+        &mut source_ordinals,
+    )?;
+    validate_source_ordinal_sequence(
+        record
+            .runtime_observations
+            .iter()
+            .map(|observation| observation.source_ordinal),
+        &mut source_ordinals,
+    )?;
+    validate_source_ordinal_sequence(
+        record
+            .collector_lifecycle
+            .iter()
+            .map(|lifecycle| lifecycle.source_ordinal),
+        &mut source_ordinals,
+    )?;
+    validate_source_ordinal_sequence(
+        record.findings.iter().map(|finding| finding.source_ordinal),
+        &mut source_ordinals,
+    )?;
+    validate_source_ordinal_sequence(
+        record.observation_gaps.iter().map(|gap| gap.source_ordinal),
+        &mut source_ordinals,
+    )?;
+    validate_projected_source_order(record)?;
+    validate_runtime_identities(record)?;
+    validate_issue_structure(record, &source_ordinals)?;
+    validate_required_presence_issues(record)?;
+    validate_projected_capabilities(record)?;
+    validate_projected_observations(record)?;
+    validate_gaps_and_loss(record)?;
+    validate_finding_references(record)?;
+    validate_summary_states(record)?;
+    Ok(())
+}
+
+fn usize_matches_u64(actual: usize, expected: u64) -> bool {
+    u64::try_from(actual).ok() == Some(expected)
+}
+
+fn count_values<'a>(
+    values: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeMap<String, u64>, AgentObservationRecordValidationError> {
+    let mut counts = BTreeMap::new();
+    for value in values {
+        let count = counts.entry(value.to_string()).or_insert(0_u64);
+        *count = count
+            .checked_add(1)
+            .ok_or(AgentObservationRecordValidationError::SummaryAggregationMismatch)?;
+    }
+    Ok(counts)
+}
+
+fn validate_source_ordinal_sequence(
+    ordinals: impl IntoIterator<Item = u64>,
+    all_ordinals: &mut BTreeSet<u64>,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let mut previous = None;
+    for ordinal in ordinals {
+        if ordinal == 0
+            || ordinal > MAX_AGENT_RUN_PROJECTION_RECORDS
+            || previous.is_some_and(|previous| ordinal <= previous)
+            || !all_ordinals.insert(ordinal)
+        {
+            return Err(AgentObservationRecordValidationError::InvalidSourceOrdinal);
+        }
+        previous = Some(ordinal);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ProjectedSourceFact<'a> {
+    Capability,
+    Lifecycle(&'a ProjectedCollectorLifecycle),
+    Observation,
+    Gap(&'a ProjectedObservationGap),
+}
+
+fn validate_projected_source_order(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let mut facts = BTreeMap::new();
+    for manifest in &record.capability_manifests {
+        facts.insert(manifest.source_ordinal, ProjectedSourceFact::Capability);
+    }
+    for lifecycle in &record.collector_lifecycle {
+        facts.insert(
+            lifecycle.source_ordinal,
+            ProjectedSourceFact::Lifecycle(lifecycle),
+        );
+    }
+    for observation in &record.runtime_observations {
+        facts.insert(observation.source_ordinal, ProjectedSourceFact::Observation);
+    }
+    for gap in &record.observation_gaps {
+        facts.insert(gap.source_ordinal, ProjectedSourceFact::Gap(gap));
+    }
+
+    let mut manifest_seen = false;
+    let mut late_attach_seen = false;
+    let mut lifecycle_progress = BTreeMap::new();
+    for (ordinal, fact) in &facts {
+        match fact {
+            ProjectedSourceFact::Capability => {
+                if manifest_seen || !lifecycle_progress.is_empty() {
+                    return Err(AgentObservationRecordValidationError::InvalidSourceOrder);
+                }
+                manifest_seen = true;
+            }
+            ProjectedSourceFact::Lifecycle(lifecycle) => {
+                advance_lifecycle(
+                    &mut lifecycle_progress,
+                    &lifecycle.collector_instance_id,
+                    lifecycle.state,
+                    *ordinal,
+                )
+                .map_err(|_| AgentObservationRecordValidationError::InvalidSourceOrder)?;
+            }
+            ProjectedSourceFact::Observation => {
+                active_collector_instance(&lifecycle_progress, *ordinal)
+                    .map_err(|_| AgentObservationRecordValidationError::InvalidSourceOrder)?;
+            }
+            ProjectedSourceFact::Gap(gap) if gap.kind == "late_attach" => {
+                let capability_ordinal = ordinal
+                    .checked_add(1)
+                    .ok_or(AgentObservationRecordValidationError::InvalidSourceOrder)?;
+                let start_ordinal = ordinal
+                    .checked_add(2)
+                    .ok_or(AgentObservationRecordValidationError::InvalidSourceOrder)?;
+                let next_is_capability = matches!(
+                    facts.get(&capability_ordinal),
+                    Some(ProjectedSourceFact::Capability)
+                );
+                let next_is_start = matches!(
+                    facts.get(&start_ordinal),
+                    Some(ProjectedSourceFact::Lifecycle(lifecycle))
+                        if lifecycle.state == CollectorLifecycleState::Started
+                );
+                if late_attach_seen
+                    || manifest_seen
+                    || !lifecycle_progress.is_empty()
+                    || !next_is_capability
+                    || !next_is_start
+                {
+                    return Err(AgentObservationRecordValidationError::InvalidSourceOrder);
+                }
+                late_attach_seen = true;
+            }
+            ProjectedSourceFact::Gap(_) => {
+                active_collector_instance(&lifecycle_progress, *ordinal)
+                    .map_err(|_| AgentObservationRecordValidationError::InvalidSourceOrder)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RuntimeIdentityStats {
+    observation_count: u64,
+    first_source_ordinal: Option<u64>,
+    last_source_ordinal: Option<u64>,
+}
+
+fn validate_runtime_identities(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let mut identity_indices = BTreeMap::new();
+    for (index, identity) in record.runtime_identities.iter().enumerate() {
+        let expected_id = format!("identity-{}", index + 1);
+        if identity.identity_id != expected_id
+            || !is_uuid(&identity.host_boot_id)
+            || identity.scope_generation == 0
+            || identity.pid == 0
+            || identity.process_generation == 0
+            || identity.process_start_time_ns == 0
+            || identity.first_source_ordinal == 0
+            || identity.last_source_ordinal < identity.first_source_ordinal
+            || identity_indices
+                .insert(identity.identity_id.as_str(), index)
+                .is_some()
+        {
+            return Err(AgentObservationRecordValidationError::InvalidRuntimeIdentity);
+        }
+    }
+
+    let mut stats = vec![RuntimeIdentityStats::default(); record.runtime_identities.len()];
+    let mut raw_event_ids = BTreeSet::new();
+    for observation in &record.runtime_observations {
+        if let Some(raw_event_id) = observation.raw_event_id.as_deref() {
+            if raw_event_id.is_empty() || !raw_event_ids.insert(raw_event_id) {
+                return Err(AgentObservationRecordValidationError::InvalidRuntimeIdentity);
+            }
+        }
+        if !matches!(
+            observation.relation_status.as_str(),
+            "exact" | "inferred" | "ambiguous" | "unattributed"
+        ) {
+            return Err(AgentObservationRecordValidationError::InvalidRuntimeIdentity);
+        }
+        if observation.relation_status != "exact" {
+            if observation.runtime_identity_id.is_some() {
+                return Err(AgentObservationRecordValidationError::InvalidRuntimeIdentity);
+            }
+            continue;
+        }
+        if observation.event_source != "kernel_tracepoint"
+            || observation.relation_reason != EXACT_RUNTIME_RELATION_REASON
+            || observation.raw_event_id.is_none()
+        {
+            return Err(AgentObservationRecordValidationError::InvalidRuntimeIdentity);
+        }
+        let identity_id = observation
+            .runtime_identity_id
+            .as_deref()
+            .ok_or(AgentObservationRecordValidationError::InvalidRuntimeIdentity)?;
+        let index = identity_indices
+            .get(identity_id)
+            .copied()
+            .ok_or(AgentObservationRecordValidationError::InvalidRuntimeIdentity)?;
+        if record.runtime_identities[index].pid != observation.pid {
+            return Err(AgentObservationRecordValidationError::InvalidRuntimeIdentity);
+        }
+        let identity_stats = &mut stats[index];
+        identity_stats.observation_count = identity_stats
+            .observation_count
+            .checked_add(1)
+            .ok_or(AgentObservationRecordValidationError::InvalidRuntimeIdentity)?;
+        identity_stats.first_source_ordinal = Some(
+            identity_stats
+                .first_source_ordinal
+                .map_or(observation.source_ordinal, |first| {
+                    first.min(observation.source_ordinal)
+                }),
+        );
+        identity_stats.last_source_ordinal = Some(
+            identity_stats
+                .last_source_ordinal
+                .map_or(observation.source_ordinal, |last| {
+                    last.max(observation.source_ordinal)
+                }),
+        );
+    }
+    for (identity, stats) in record.runtime_identities.iter().zip(stats) {
+        if stats.observation_count != identity.observation_count
+            || stats.first_source_ordinal != Some(identity.first_source_ordinal)
+            || stats.last_source_ordinal != Some(identity.last_source_ordinal)
+        {
+            return Err(AgentObservationRecordValidationError::InvalidRuntimeIdentity);
+        }
+    }
+    Ok(())
+}
+
+fn validate_issue_structure(
+    record: &AgentObservationRecord,
+    source_fact_ordinals: &BTreeSet<u64>,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let mut opaque_source_ordinals = BTreeSet::new();
+    let mut mixed_integrity_issue_count = 0_usize;
+    for issue in &record.issues {
+        if issue.count == 0
+            || issue
+                .source_ordinal
+                .is_some_and(|ordinal| ordinal == 0 || ordinal > MAX_AGENT_RUN_PROJECTION_RECORDS)
+        {
+            return Err(AgentObservationRecordValidationError::InvalidProjectionIssue);
+        }
+        match issue.code {
+            ProjectionIssueCode::MissingCapability
+            | ProjectionIssueCode::MissingLifecycleStart
+            | ProjectionIssueCode::MissingLifecycleTerminal
+            | ProjectionIssueCode::NoRuntimeObservations => {
+                if issue.source_ordinal.is_some() {
+                    return Err(AgentObservationRecordValidationError::InvalidProjectionIssue);
+                }
+            }
+            ProjectionIssueCode::SourceIntegrityFinding if issue.source_ordinal.is_none() => {
+                if issue.count != 1 {
+                    return Err(AgentObservationRecordValidationError::InvalidProjectionIssue);
+                }
+                mixed_integrity_issue_count += 1;
+            }
+            ProjectionIssueCode::UnknownRecordType
+            | ProjectionIssueCode::CollectorDiagnostic
+            | ProjectionIssueCode::SourceIntegrityFinding => {
+                let ordinal = issue
+                    .source_ordinal
+                    .ok_or(AgentObservationRecordValidationError::InvalidProjectionIssue)?;
+                if matches!(
+                    issue.code,
+                    ProjectionIssueCode::UnknownRecordType
+                        | ProjectionIssueCode::SourceIntegrityFinding
+                ) && issue.count != 1
+                {
+                    return Err(AgentObservationRecordValidationError::InvalidProjectionIssue);
+                }
+                if source_fact_ordinals.contains(&ordinal)
+                    || !opaque_source_ordinals.insert(ordinal)
+                {
+                    return Err(AgentObservationRecordValidationError::InvalidProjectionIssue);
+                }
+            }
+            _ => {
+                if issue.source_ordinal.is_none() {
+                    return Err(AgentObservationRecordValidationError::InvalidProjectionIssue);
+                }
+            }
+        }
+    }
+    let expects_mixed_integrity_issue =
+        record.source_integrity == ObservationRecordSourceIntegrity::Mixed;
+    if mixed_integrity_issue_count != usize::from(expects_mixed_integrity_issue) {
+        return Err(AgentObservationRecordValidationError::InvalidProjectionIssue);
+    }
+    Ok(())
+}
+
+fn validate_required_presence_issues(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    if record.capability_manifests.len() > 1 {
+        return Err(AgentObservationRecordValidationError::InvalidProjectionIssue);
+    }
+    validate_singleton_issue(
+        record,
+        ProjectionIssueCode::MissingCapability,
+        record.capability_manifests.is_empty().then_some((None, 1)),
+    )?;
+    validate_singleton_issue(
+        record,
+        ProjectionIssueCode::NoRuntimeObservations,
+        record.runtime_observations.is_empty().then_some((None, 1)),
+    )?;
+
+    let mut lifecycle_progress = BTreeMap::new();
+    for lifecycle in &record.collector_lifecycle {
+        advance_lifecycle(
+            &mut lifecycle_progress,
+            &lifecycle.collector_instance_id,
+            lifecycle.state,
+            lifecycle.source_ordinal,
+        )
+        .map_err(|_| AgentObservationRecordValidationError::InvalidCollectorLifecycle)?;
+    }
+    validate_singleton_issue(
+        record,
+        ProjectionIssueCode::MissingLifecycleStart,
+        record.collector_lifecycle.is_empty().then_some((None, 1)),
+    )?;
+    let active_count = lifecycle_progress
+        .values()
+        .filter(|progress| **progress == LifecycleProgress::Started)
+        .count();
+    let expected_missing_terminal = if active_count == 0 {
+        None
+    } else {
+        Some((
+            None,
+            u64::try_from(active_count)
+                .map_err(|_| AgentObservationRecordValidationError::InvalidProjectionIssue)?,
+        ))
+    };
+    validate_singleton_issue(
+        record,
+        ProjectionIssueCode::MissingLifecycleTerminal,
+        expected_missing_terminal,
+    )?;
+    Ok(())
+}
+
+fn validate_projected_capabilities(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let expected_issue = match record.capability_manifests.as_slice() {
+        [] => None,
+        [manifest] => {
+            let unsupported_count = projected_unsupported_capability_count(manifest)?;
+            (unsupported_count > 0).then_some((Some(manifest.source_ordinal), unsupported_count))
+        }
+        _ => return Err(AgentObservationRecordValidationError::InvalidCapabilityManifest),
+    };
+    validate_singleton_issue(
+        record,
+        ProjectionIssueCode::UnsupportedCapability,
+        expected_issue,
+    )
+}
+
+fn projected_unsupported_capability_count(
+    manifest: &ProjectedCapabilityManifest,
+) -> Result<u64, AgentObservationRecordValidationError> {
+    if manifest.schema_version != AGENT_OBSERVATION_RECORD_SCHEMA_V1
+        || manifest.privacy_profile != CONTENT_OFF_PRIVACY_PROFILE
+        || manifest.collector != AUDIT_OBSERVER_COLLECTOR
+        || manifest.collector_version.is_empty()
+        || manifest.kernel_abi_version != 3
+        || manifest.kernel_record_size != 656
+        || !matches!(
+            manifest.observation_scope.as_str(),
+            PROCESS_TREE_OBSERVATION_SCOPE | CGROUP_OBSERVATION_SCOPE
+        )
+        || manifest.capabilities.is_empty()
+    {
+        return Err(AgentObservationRecordValidationError::InvalidCapabilityManifest);
+    }
+    let mut operations = BTreeSet::new();
+    for capability in &manifest.capabilities {
+        if capability_contract(&capability.operation).is_none()
+            || !operations.insert(capability.operation.as_str())
+            || capability.event_sources.is_empty()
+            || capability.outcomes.is_empty()
+        {
+            return Err(AgentObservationRecordValidationError::InvalidCapabilityManifest);
+        }
+        let mut event_sources = BTreeSet::new();
+        if capability.event_sources.iter().any(|source| {
+            !is_bounded_vocabulary(source, 128) || !event_sources.insert(source.as_str())
+        }) {
+            return Err(AgentObservationRecordValidationError::InvalidCapabilityManifest);
+        }
+        let mut outcomes = BTreeSet::new();
+        if capability.outcomes.iter().any(|outcome| {
+            OperationOutcome::parse_v1(outcome).is_none() || !outcomes.insert(outcome.as_str())
+        }) {
+            return Err(AgentObservationRecordValidationError::InvalidCapabilityManifest);
+        }
+    }
+    let unsupported = audit_observer_capability_contract_v1()
+        .iter()
+        .filter(|contract| {
+            let Some(capability) = manifest
+                .capabilities
+                .iter()
+                .find(|capability| capability.operation == contract.operation)
+            else {
+                return true;
+            };
+            !same_vocabulary(&capability.event_sources, contract.event_sources)
+                || !same_outcome_vocabulary(&capability.outcomes, contract.outcomes)
+        })
+        .count();
+    u64::try_from(unsupported)
+        .map_err(|_| AgentObservationRecordValidationError::InvalidCapabilityManifest)
+}
+
+fn validate_projected_observations(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let mut expected_unsupported_observations = Vec::new();
+    let mut expected_unsupported_outcomes = Vec::new();
+    for observation in &record.runtime_observations {
+        if !matches!(
+            observation.event_source.as_str(),
+            "manual" | "process_tree" | "kernel_tracepoint" | "uprobe" | "runtime_metadata"
+        ) || !is_bounded_vocabulary(&observation.actor, 128)
+            || !is_bounded_vocabulary(&observation.action, 128)
+            || !is_bounded_text(&observation.resource, MAX_PROJECTION_STRING_BYTES)
+            || !is_bounded_vocabulary(&observation.relation_reason, 256)
+            || observation
+                .process_executable
+                .as_deref()
+                .is_some_and(|value| !is_executable_reference(value))
+        {
+            return Err(AgentObservationRecordValidationError::InvalidRuntimeObservation);
+        }
+        let outcome = observation
+            .outcome
+            .as_deref()
+            .map(|outcome| {
+                OperationOutcome::parse_v1(outcome)
+                    .ok_or(AgentObservationRecordValidationError::InvalidRuntimeObservation)
+            })
+            .transpose()?;
+        if !operation_result_is_valid(outcome, observation.return_value, observation.errno) {
+            return Err(AgentObservationRecordValidationError::InvalidRuntimeObservation);
+        }
+
+        let Some(manifest) = record.capability_manifests.first() else {
+            continue;
+        };
+        let issue = if observation.event_source != "kernel_tracepoint" {
+            Some(ProjectionIssueCode::UnsupportedObservation)
+        } else if let Some(operation) = operation_for_event(&observation.event_type) {
+            match manifest
+                .capabilities
+                .iter()
+                .find(|capability| capability.operation == operation)
+            {
+                None => Some(ProjectionIssueCode::UnsupportedObservation),
+                Some(capability) => match observation.outcome.as_deref() {
+                    Some(outcome) if capability.outcomes.iter().any(|value| value == outcome) => {
+                        None
+                    }
+                    _ => Some(ProjectionIssueCode::UnsupportedOutcome),
+                },
+            }
+        } else {
+            Some(ProjectionIssueCode::UnsupportedObservation)
+        };
+        match issue {
+            Some(ProjectionIssueCode::UnsupportedObservation) => {
+                expected_unsupported_observations.push((Some(observation.source_ordinal), 1));
+            }
+            Some(ProjectionIssueCode::UnsupportedOutcome) => {
+                expected_unsupported_outcomes.push((Some(observation.source_ordinal), 1));
+            }
+            _ => {}
+        }
+    }
+    validate_issue_sequence(
+        record,
+        ProjectionIssueCode::UnsupportedObservation,
+        &expected_unsupported_observations,
+    )?;
+    validate_issue_sequence(
+        record,
+        ProjectionIssueCode::UnsupportedOutcome,
+        &expected_unsupported_outcomes,
+    )
+}
+
+fn validate_gaps_and_loss(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let mut expected_gap_issues = Vec::new();
+    for gap in &record.observation_gaps {
+        let valid = gap.schema_version == AGENT_OBSERVATION_RECORD_SCHEMA_V1
+            && gap.count > 0
+            && match gap.kind.as_str() {
+                "late_attach" => {
+                    gap.operation == "collector_lifecycle"
+                        && gap.count == 1
+                        && valid_late_attach_detail(&gap.detail)
+                }
+                "missing_entry" | "missing_exit" => gap.detail == "bounded_loss_counter",
+                "collector_restart" => {
+                    valid_collector_restart_gap_shape(&gap.operation, gap.count)
+                        && gap.detail == "unfinished_collector_instance"
+                }
+                _ => false,
+            };
+        if !valid {
+            return Err(AgentObservationRecordValidationError::InvalidObservationGap);
+        }
+        expected_gap_issues.push((Some(gap.source_ordinal), gap.count));
+    }
+    validate_issue_sequence(
+        record,
+        ProjectionIssueCode::ObservationGap,
+        &expected_gap_issues,
+    )?;
+    let expected_loss_issue = record
+        .collector_lifecycle
+        .iter()
+        .rev()
+        .find(|lifecycle| lifecycle_record_has_loss(lifecycle))
+        .map(|lifecycle| (Some(lifecycle.source_ordinal), 1));
+    validate_singleton_issue(
+        record,
+        ProjectionIssueCode::CollectorLoss,
+        expected_loss_issue,
+    )
+}
+
+fn valid_late_attach_detail(detail: &str) -> bool {
+    let parts = detail.split(',').collect::<Vec<_>>();
+    parts.len() == 4
+        && parts[0] == "collection_boundary:protected_existing_process_attach"
+        && parts[1] == "history:unknown"
+        && matches!(
+            parts[2],
+            "provenance:external_registration" | "provenance:proc_discovery"
+        )
+        && matches!(
+            parts[3],
+            "root_selection:registration_qualified" | "root_selection:inferred"
+        )
+}
+
+fn validate_singleton_issue(
+    record: &AgentObservationRecord,
+    code: ProjectionIssueCode,
+    expected: Option<(Option<u64>, u64)>,
+) -> Result<(), AgentObservationRecordValidationError> {
+    validate_issue_sequence(record, code, &expected.into_iter().collect::<Vec<_>>())
+}
+
+fn validate_issue_sequence(
+    record: &AgentObservationRecord,
+    code: ProjectionIssueCode,
+    expected: &[(Option<u64>, u64)],
+) -> Result<(), AgentObservationRecordValidationError> {
+    let actual = record
+        .issues
+        .iter()
+        .filter(|issue| issue.code == code)
+        .map(|issue| (issue.source_ordinal, issue.count))
+        .collect::<Vec<_>>();
+    if actual != expected {
+        return Err(AgentObservationRecordValidationError::InvalidProjectionIssue);
+    }
+    Ok(())
+}
+
+fn validate_finding_references(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let raw_event_ids = record
+        .runtime_observations
+        .iter()
+        .filter_map(|observation| observation.raw_event_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    let mut expected_unresolved = Vec::new();
+    for finding in &record.findings {
+        if finding.schema_version != AGENT_OBSERVATION_RECORD_SCHEMA_V1
+            || finding.reason != canonical_finding_reason(&finding.kind)
+            || !is_bounded_vocabulary(&finding.evidence_ref, 256)
+            || !is_bounded_vocabulary(&finding.runtime.runtime, 64)
+            || finding
+                .runtime
+                .container_id
+                .as_deref()
+                .is_some_and(|value| !is_bounded_vocabulary(value, 256))
+            || finding
+                .runtime
+                .pod_uid
+                .as_deref()
+                .is_some_and(|value| !is_bounded_vocabulary(value, 256))
+        {
+            return Err(AgentObservationRecordValidationError::InvalidFindingReference);
+        }
+        if !raw_event_ids.contains(finding.evidence_ref.as_str()) {
+            expected_unresolved.push((Some(finding.source_ordinal), 1_u64));
+        }
+    }
+    let actual_unresolved = record
+        .issues
+        .iter()
+        .filter(|issue| issue.code == ProjectionIssueCode::UnresolvedFindingEvidence)
+        .map(|issue| (issue.source_ordinal, issue.count))
+        .collect::<Vec<_>>();
+    if actual_unresolved != expected_unresolved {
+        return Err(AgentObservationRecordValidationError::InvalidFindingReference);
+    }
+    Ok(())
+}
+
+fn validate_summary_states(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let mut lifecycle_progress = BTreeMap::new();
+    for lifecycle in &record.collector_lifecycle {
+        if !valid_projected_lifecycle(lifecycle)
+            || advance_lifecycle(
+                &mut lifecycle_progress,
+                &lifecycle.collector_instance_id,
+                lifecycle.state,
+                lifecycle.source_ordinal,
+            )
+            .is_err()
+        {
+            return Err(AgentObservationRecordValidationError::InvalidCollectorLifecycle);
+        }
+    }
+    let collector_restart_gap_count = record
+        .observation_gaps
+        .iter()
+        .filter(|gap| gap.kind == "collector_restart")
+        .count();
+    if !collector_restart_gaps_cover_instance_transitions(
+        lifecycle_progress.len(),
+        collector_restart_gap_count,
+    ) {
+        return Err(AgentObservationRecordValidationError::InvalidCollectorLifecycle);
+    }
+
+    if record.summary.collector_health != aggregate_collector_health(&record.collector_lifecycle) {
+        return Err(AgentObservationRecordValidationError::InconsistentCollectorHealth);
+    }
+
+    let expected_review_state = if !record.findings.is_empty() {
+        ReviewState::RequiresReview
+    } else if record.summary.evidence_state == EvidenceState::Complete
+        && !record.runtime_observations.is_empty()
+    {
+        ReviewState::NoFindingsReported
+    } else {
+        ReviewState::Indeterminate
+    };
+    if record.summary.review_state != expected_review_state {
+        return Err(AgentObservationRecordValidationError::InconsistentReviewState);
+    }
+
+    let any_failed_lifecycle = record
+        .collector_lifecycle
+        .iter()
+        .any(|lifecycle| lifecycle.state == CollectorLifecycleState::Failed);
+    let lifecycle_active = lifecycle_progress
+        .values()
+        .any(|progress| *progress == LifecycleProgress::Started);
+    let lifecycle_complete = has_single_terminal_collector_lifecycle(&lifecycle_progress);
+    let has_diagnostic = record
+        .issues
+        .iter()
+        .any(|issue| issue.code == ProjectionIssueCode::CollectorDiagnostic);
+    let has_capability_issue = record.capability_manifests.len() != 1
+        || record.issues.iter().any(|issue| {
+            matches!(
+                issue.code,
+                ProjectionIssueCode::MissingCapability
+                    | ProjectionIssueCode::UnsupportedCapability
+                    | ProjectionIssueCode::UnsupportedObservation
+                    | ProjectionIssueCode::UnsupportedOutcome
+            )
+        });
+    let has_source_integrity_finding = record.issues.iter().any(|issue| {
+        issue.code == ProjectionIssueCode::SourceIntegrityFinding && issue.source_ordinal.is_some()
+    });
+    let has_unresolved_finding = record
+        .issues
+        .iter()
+        .any(|issue| issue.code == ProjectionIssueCode::UnresolvedFindingEvidence);
+    let has_unknown_record = record
+        .issues
+        .iter()
+        .any(|issue| issue.code == ProjectionIssueCode::UnknownRecordType);
+    let has_loss = record
+        .collector_lifecycle
+        .iter()
+        .any(lifecycle_record_has_loss);
+    let hard_incomplete = !lifecycle_complete
+        || has_loss
+        || record.runtime_observations.is_empty()
+        || !record.observation_gaps.is_empty()
+        || has_capability_issue
+        || has_source_integrity_finding
+        || has_diagnostic
+        || has_unresolved_finding;
+    let evidence_state_is_valid = if any_failed_lifecycle {
+        record.summary.evidence_state == EvidenceState::Failed
+    } else if lifecycle_active {
+        record.summary.evidence_state == EvidenceState::Active
+            || has_diagnostic && record.summary.evidence_state == EvidenceState::Failed
+    } else if hard_incomplete {
+        record.summary.evidence_state == EvidenceState::Incomplete
+            || has_diagnostic && record.summary.evidence_state == EvidenceState::Failed
+    } else if record.source_integrity == ObservationRecordSourceIntegrity::Mixed
+        || has_unknown_record
+    {
+        record.summary.evidence_state == EvidenceState::Indeterminate
+    } else {
+        record.summary.evidence_state == EvidenceState::Complete
+    };
+    if !evidence_state_is_valid {
+        return Err(AgentObservationRecordValidationError::InconsistentEvidenceState);
+    }
+    Ok(())
+}
+
+fn valid_projected_lifecycle(record: &ProjectedCollectorLifecycle) -> bool {
+    if record.schema_version != AGENT_OBSERVATION_RECORD_SCHEMA_V1
+        || record.collector != AUDIT_OBSERVER_COLLECTOR
+        || !is_bounded_vocabulary(&record.collector_instance_id, 128)
+    {
+        return false;
+    }
+    lifecycle_fields_are_consistent(
+        record.state,
+        record.health,
+        record.stop_reason,
+        record.counters,
+    )
+}
+
+fn lifecycle_fields_are_consistent(
+    state: CollectorLifecycleState,
+    health: CollectorLifecycleHealth,
+    stop_reason: Option<CollectorStopReason>,
+    counters: ProjectedLifecycleCounters,
+) -> bool {
+    match state {
+        CollectorLifecycleState::Started => {
+            health == CollectorLifecycleHealth::Healthy
+                && stop_reason.is_none()
+                && counters == ProjectedLifecycleCounters::default()
+        }
+        CollectorLifecycleState::Checkpoint => {
+            stop_reason.is_none()
+                && health
+                    == if counters.has_persistent_loss() {
+                        CollectorLifecycleHealth::Degraded
+                    } else {
+                        CollectorLifecycleHealth::Healthy
+                    }
+        }
+        CollectorLifecycleState::Stopped => {
+            stop_reason.is_some_and(CollectorStopReason::is_normal)
+                && health
+                    == if counters.has_terminal_loss() {
+                        CollectorLifecycleHealth::Degraded
+                    } else {
+                        CollectorLifecycleHealth::Healthy
+                    }
+        }
+        CollectorLifecycleState::Failed => {
+            health == CollectorLifecycleHealth::Failed
+                && stop_reason.is_some_and(CollectorStopReason::is_failure)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProjectionError {
     EmptyRun,
@@ -751,6 +1679,14 @@ pub fn project_agent_run(
                             field: "observation_gap",
                         });
                     }
+                    if wire.kind == "collector_restart"
+                        && !valid_collector_restart_gap_shape(&wire.operation, wire.count)
+                    {
+                        return Err(ProjectionError::MalformedRecord {
+                            ordinal,
+                            field: "collector_restart",
+                        });
+                    }
                     if wire.kind == "late_attach" {
                         if wire.operation != "collector_lifecycle" || wire.count != 1 {
                             return Err(ProjectionError::MalformedRecord {
@@ -878,6 +1814,16 @@ pub fn project_agent_run(
     if late_attach_progress.is_some() {
         return Err(ProjectionError::InvalidLifecycle { ordinal });
     }
+    let collector_restart_gap_count = observation_gaps
+        .iter()
+        .filter(|gap| gap.kind == "collector_restart")
+        .count();
+    if !collector_restart_gaps_cover_instance_transitions(
+        lifecycle_progress.len(),
+        collector_restart_gap_count,
+    ) {
+        return Err(ProjectionError::InvalidLifecycle { ordinal });
+    }
     let mut has_unresolved_finding_evidence = false;
     for finding in &findings {
         if !raw_event_ids.contains(finding.evidence_ref.as_str()) {
@@ -908,10 +1854,7 @@ pub fn project_agent_run(
             count: 1,
         });
     }
-    let lifecycle_complete = !lifecycle_progress.is_empty()
-        && lifecycle_progress
-            .values()
-            .all(|progress| *progress == LifecycleProgress::Terminal);
+    let lifecycle_complete = has_single_terminal_collector_lifecycle(&lifecycle_progress);
     let missing_terminal_count = lifecycle_progress
         .values()
         .filter(|progress| **progress == LifecycleProgress::Started)
@@ -1197,36 +2140,7 @@ fn validate_lifecycle(
         ),
         None => None,
     };
-    let valid = match state {
-        CollectorLifecycleState::Started => {
-            health == CollectorLifecycleHealth::Healthy
-                && stop_reason.is_none()
-                && wire.counters == ProjectedLifecycleCounters::default()
-        }
-        CollectorLifecycleState::Checkpoint => {
-            stop_reason.is_none()
-                && health
-                    == if wire.counters.has_persistent_loss() {
-                        CollectorLifecycleHealth::Degraded
-                    } else {
-                        CollectorLifecycleHealth::Healthy
-                    }
-        }
-        CollectorLifecycleState::Stopped => {
-            stop_reason.is_some_and(CollectorStopReason::is_normal)
-                && health
-                    == if wire.counters.has_terminal_loss() {
-                        CollectorLifecycleHealth::Degraded
-                    } else {
-                        CollectorLifecycleHealth::Healthy
-                    }
-        }
-        CollectorLifecycleState::Failed => {
-            health == CollectorLifecycleHealth::Failed
-                && stop_reason.is_some_and(CollectorStopReason::is_failure)
-        }
-    };
-    if valid {
+    if lifecycle_fields_are_consistent(state, health, stop_reason, wire.counters) {
         Ok(ValidatedLifecycle {
             state,
             health,
@@ -1271,34 +2185,46 @@ fn validate_runtime_observation(
     {
         return Err(ProjectionError::ConflictingRuntimeIdentity { ordinal });
     }
-    if let Some(outcome) = wire.outcome.as_deref() {
-        let outcome =
+    let outcome = wire
+        .outcome
+        .as_deref()
+        .map(|outcome| {
             OperationOutcome::parse_v1(outcome).ok_or(ProjectionError::MalformedRecord {
                 ordinal,
                 field: "outcome",
-            })?;
-        let result_is_valid = match outcome {
-            OperationOutcome::Succeeded => {
-                wire.return_value.is_some_and(|value| value >= 0) && wire.errno.is_none()
-            }
-            OperationOutcome::Failed | OperationOutcome::Denied | OperationOutcome::Pending => {
-                matches!((wire.return_value, wire.errno), (Some(value), Some(errno)) if value < 0 && errno > 0 && value.checked_neg() == Some(i64::from(errno)))
-            }
-            OperationOutcome::Attempted | OperationOutcome::Unknown => true,
-        };
-        if !result_is_valid {
-            return Err(ProjectionError::MalformedRecord {
-                ordinal,
-                field: "operation_result",
-            });
-        }
-    } else if wire.return_value.is_some() || wire.errno.is_some() {
+            })
+        })
+        .transpose()?;
+    if !operation_result_is_valid(outcome, wire.return_value, wire.errno) {
         return Err(ProjectionError::MalformedRecord {
             ordinal,
             field: "operation_result",
         });
     }
     Ok(())
+}
+
+fn operation_result_is_valid(
+    outcome: Option<OperationOutcome>,
+    return_value: Option<i64>,
+    errno: Option<i32>,
+) -> bool {
+    match outcome {
+        Some(OperationOutcome::Succeeded) => {
+            return_value.is_some_and(|value| value >= 0) && errno.is_none()
+        }
+        Some(OperationOutcome::Failed | OperationOutcome::Denied | OperationOutcome::Pending) => {
+            matches!(
+                (return_value, errno),
+                (Some(value), Some(errno))
+                    if value < 0
+                        && errno > 0
+                        && value.checked_neg() == Some(i64::from(errno))
+            )
+        }
+        Some(OperationOutcome::Attempted | OperationOutcome::Unknown) => true,
+        None => return_value.is_none() && errno.is_none(),
+    }
 }
 
 fn active_collector_instance(
@@ -1315,6 +2241,24 @@ fn active_collector_instance(
         return Err(ProjectionError::InvalidLifecycle { ordinal });
     }
     Ok(instance)
+}
+
+fn has_single_terminal_collector_lifecycle(progress: &BTreeMap<String, LifecycleProgress>) -> bool {
+    progress.len() == 1
+        && progress
+            .values()
+            .all(|state| *state == LifecycleProgress::Terminal)
+}
+
+fn collector_restart_gaps_cover_instance_transitions(
+    lifecycle_instance_count: usize,
+    collector_restart_gap_count: usize,
+) -> bool {
+    collector_restart_gap_count >= lifecycle_instance_count.saturating_sub(1)
+}
+
+fn valid_collector_restart_gap_shape(operation: &str, count: u64) -> bool {
+    operation == "collector_lifecycle" && count == 1
 }
 
 fn normalized_gap_detail(

@@ -119,5 +119,21 @@ jq '.observation_gaps[], .issues[]' agent-observation-record.json
 jq '.findings[] | {kind,decision,evidence_ref}' agent-observation-record.json
 ```
 
-L3 saved-run viewer 将消费这份 record。Live tailing、跨 run 搜索、remote query 和 central
-evidence plane 均不属于该 schema。
+## Saved Run Viewer consumer
+
+已完成的 L3 Saved Run Viewer 通过以下命令消费恰好一份 record：
+
+```bash
+apolysis run view \
+  --input <agent-observation-record.json> \
+  --output <saved-run-view.html>
+```
+
+它验证 v1 一致性，保持 Evidence State、Collector Health 与 Review State 三个状态轴相互
+独立，以 `source_ordinal` 作为权威顺序，并把 Finding link 解析到 supporting Runtime
+Observation。它不会把 incomplete、active、failed、mixed-integrity 或带 gap 的 record
+重新解释为 clean 或 complete。
+
+V1 保留 Exact Runtime Identity roster 与 reported PID/PPID field，但没有权威 parent Runtime
+Identity link。因此 viewer 只展示这些事实，不构造或暗示 canonical process tree。Live
+tailing、跨 run 搜索、remote query 与 central evidence plane 仍不属于该 schema。

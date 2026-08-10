@@ -26,6 +26,7 @@ dependencies = [
  "apolysis-kubernetes",
  "apolysis-observer",
  "apolysis-store",
+ "apolysis-viewer",
  "apolysis-visibility",
  "libc",
  "serde",
@@ -84,6 +85,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+]
+
+[[package]]
+name = "apolysis-viewer"
+version = "0.1.0"
+dependencies = [
+ "apolysis-accountability",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
