@@ -79,6 +79,7 @@ name = "apolysis-store"
 version = "0.1.0"
 dependencies = [
  "apolysis-core",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

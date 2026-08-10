@@ -9,6 +9,8 @@ operators, tests, and downstream log pipelines.
 
 Release manifests and hash-chain package metadata are separate artifacts. They
 may contain JSON, but they are not timeline JSONL records covered by this schema.
+The derived [Agent Observation Record v1](agent-observation-record-v1.md) is
+also a separate single-object schema and must never be appended to a timeline.
 
 ## Format
 

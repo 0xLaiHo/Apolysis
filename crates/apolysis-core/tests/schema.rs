@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_core::{
-    actors, records, resources, CanonicalEvent, CollectorCapability, CollectorCapabilityManifest,
-    CollectorLifecycleCounters, CollectorLifecycleRecord, EventSource, EventType, ObservationGap,
-    ObservationGapKind, ObserverDiagnostic, ObserverDiagnosticKind, OperationOutcome,
-    OperationResult, RawKernelEvent, RuntimeRelation, SessionIntentRecord,
+    actors, audit_observer_capability_contract_v1, records, resources,
+    AuditObserverCapabilityContract, CanonicalEvent, CollectorCapability,
+    CollectorCapabilityManifest, CollectorHealthState, CollectorLifecycleCounters,
+    CollectorLifecycleRecord, CollectorLifecycleState, CollectorStopReason, EventSource, EventType,
+    ObservationGap, ObservationGapKind, ObserverDiagnostic, ObserverDiagnosticKind,
+    OperationOutcome, OperationResult, RawKernelEvent, RuntimeRelation, SessionIntentRecord,
+    AUDIT_OBSERVER_COLLECTOR, CGROUP_OBSERVATION_SCOPE, CONTENT_OFF_PRIVACY_PROFILE,
+    PROCESS_TREE_OBSERVATION_SCOPE,
 };
 
 #[test]
@@ -21,10 +25,96 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
     );
     assert_eq!(actors::OBSERVER, "observer");
     assert_eq!(resources::PROCESS, "process");
+    assert_eq!(AUDIT_OBSERVER_COLLECTOR, "apolysis_observer");
+    assert_eq!(CONTENT_OFF_PRIVACY_PROFILE, "content_off");
+    assert_eq!(PROCESS_TREE_OBSERVATION_SCOPE, "process_tree");
+    assert_eq!(CGROUP_OBSERVATION_SCOPE, "cgroup");
     assert_eq!(
         resources::AGENT_COMMAND_FINGERPRINT,
         "agent-command-fingerprint"
     );
+}
+
+#[test]
+fn shared_lifecycle_vocabulary_round_trips_wire_values() {
+    assert_eq!(
+        CollectorLifecycleState::parse_v1("checkpoint"),
+        Some(CollectorLifecycleState::Checkpoint)
+    );
+    assert_eq!(
+        CollectorHealthState::parse_v1("degraded"),
+        Some(CollectorHealthState::Degraded)
+    );
+    assert_eq!(
+        CollectorStopReason::parse_v1("duration_elapsed"),
+        Some(CollectorStopReason::DurationElapsed)
+    );
+    assert_eq!(
+        CollectorStopReason::parse_v1("decode_failure"),
+        Some(CollectorStopReason::DecodeFailure)
+    );
+    assert_eq!(
+        OperationOutcome::parse_v1("denied"),
+        Some(OperationOutcome::Denied)
+    );
+    assert_eq!(CollectorLifecycleState::parse_v1("running"), None);
+    assert_eq!(CollectorStopReason::parse_v1("operator_override"), None);
+    assert_eq!(OperationOutcome::parse_v1("successful"), None);
+}
+
+#[test]
+fn audit_observer_capability_contract_v1_is_shared_and_complete() {
+    let contracts = audit_observer_capability_contract_v1();
+
+    assert_eq!(contracts.len(), 10);
+    assert_eq!(
+        contracts
+            .iter()
+            .map(|contract| contract.operation)
+            .collect::<Vec<_>>(),
+        vec![
+            "process_fork",
+            "process_exec",
+            "process_exit",
+            "file_open",
+            "file_create",
+            "file_truncate",
+            "file_unlink",
+            "file_rename",
+            "network_connect",
+            "credential_path_access",
+        ]
+    );
+    let process_exec = contracts
+        .iter()
+        .find(|contract| contract.operation == "process_exec")
+        .expect("process exec contract");
+    assert_eq!(
+        process_exec,
+        &AuditObserverCapabilityContract {
+            operation: "process_exec",
+            event_sources: &[
+                "sched/sched_process_exec",
+                "syscalls/sys_enter_execve",
+                "syscalls/sys_enter_execveat",
+            ],
+            required_event_sources: &["sched/sched_process_exec"],
+            outcomes: &[OperationOutcome::Succeeded],
+        }
+    );
+    assert!(contracts.iter().all(|contract| {
+        !contract.operation.is_empty()
+            && !contract.event_sources.is_empty()
+            && !contract.outcomes.is_empty()
+            && contract
+                .event_sources
+                .iter()
+                .all(|source| source.split_once('/').is_some())
+            && contract
+                .required_event_sources
+                .iter()
+                .all(|required| contract.event_sources.contains(required))
+    }));
 }
 
 #[test]

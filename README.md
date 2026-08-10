@@ -44,6 +44,7 @@ For a supported Agent Run, Apolysis should let an operator answer:
 3. Which container, cgroup, Pod, or process identity owns each observation?
 4. Did the operation succeed, fail, or remain unknown?
 5. Was the collector healthy, and where are the observation gaps?
+6. Which bounded findings require operator review?
 
 The product does not claim that an unobserved operation did not occur. It only
 describes activity inside its declared scope and capability boundary.
@@ -87,6 +88,10 @@ an exact one.
 - Ordered JSONL output, rotation, optional local hash-chain envelopes, and
   typed diagnostics for drops, map pressure, ABI mismatches, decode failures,
   and truncation.
+- Deterministic, non-privileged projection of one saved Agent Run into a
+  queryable Agent Observation Record with independent evidence, collector
+  health, and review states. Plain/rotated JSONL and verified hash-chain input
+  are bounded and fail closed on corruption or mixed runs.
 - Agent-Run-scoped Observation Gaps for unmatched or still-pending selected
   file and network-connect entry/exit pairs, including isolated multi-cgroup
   daemon scopes.
@@ -136,6 +141,11 @@ metadata, and visibility assessment. Superseded contracts, central services,
 policy actuation, Agent feedback control, sandbox execution, and broad
 production-qualification prototypes have left active builds and default gates.
 
+The local `apolysis run project` path now writes one private, atomic JSON Agent
+Observation Record for a saved run. The non-privileged interactive viewer
+remains the next local product layer; projection does not add a central query
+service or change the experimental support status.
+
 The scope reset is a roadmap decision, not a retroactive production claim.
 Apolysis remains experimental until the supported collector, attribution,
 failure, performance, and privacy paths pass their new bounded beta gates.
@@ -170,6 +180,14 @@ make test-live
 
 Privileged tests skip cleanly when Linux BTF, cgroup v2, tracepoints, or the
 required BPF capabilities are unavailable.
+
+Project a saved run without root access:
+
+```bash
+./target/debug/apolysis run project \
+  --input .apolysis/codex-live/timeline.agent-run.jsonl \
+  --output .apolysis/codex-live/agent-observation-record.json
+```
 
 ## Live managed Agent example
 
@@ -206,6 +224,7 @@ third-party workload behavior still require a documented threat model.
 - [Bounded Beta qualification plan](docs/beta-qualification-plan.md)
 - [Quickstart](docs/quickstart.md)
 - [JSONL schema](docs/jsonl-schema-v1.md)
+- [Agent Observation Record v1](docs/agent-observation-record-v1.md)
 - [Threat model](docs/threat-model.md)
 - [Visibility validation](docs/visibility-validation.md)
 - [Live demo runbook](docs/codex-live-demo-runbook.md)

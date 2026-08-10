@@ -14,9 +14,14 @@ use tokio::fs as async_fs;
 use tokio::io::{AsyncWriteExt, BufWriter as AsyncBufWriter};
 
 mod hash_chain;
+mod saved_run;
 
 pub use hash_chain::{
     ChainRecord, HashChainStore, HashChainVerificationReport, Recovery, StoreError, ZERO_HASH,
+};
+pub use saved_run::{
+    read_agent_run_records, LocalRecordBatch, LocalRecordFormat, LocalRecordReadError,
+    MAX_SAVED_RUN_BYTES, MAX_SAVED_RUN_LINE_BYTES, MAX_SAVED_RUN_RECORDS,
 };
 
 pub struct JsonlStore {
