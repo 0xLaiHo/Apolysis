@@ -24,12 +24,11 @@ Apolysis 不再推进跨 provider 的 Agent Runtime Evidence & Policy Plane。�
 - finding 是 post-observation review aid，不宣称 enforcement；
 - 中央多租户证据平面需要新的用户证据和新的架构决策。
 
-活跃 workspace 现在与有界产品一致：8 个 crate 覆盖 core record、observer、
-accountability finding、本地 storage、daemon、CLI、Kubernetes metadata 与 visibility
-assessment。中央服务、policy actuation、feedback control、sandbox execution 与广泛的
-production qualification 不再参与活跃 build 或默认 test。本地产品的活跃方向是在扩大
-runtime breadth 前，先基于 single-run projection contract 交付
-非特权 saved-run viewer 与 daemon operations。
+有界产品由 core record、observer、accountability finding、本地 storage、daemon、CLI、
+Saved Run Viewer、Kubernetes metadata 与 visibility assessment 组成。中央服务、policy
+actuation、feedback control、sandbox execution 与广泛的 production qualification 不参与
+活跃 build 或默认 test。本地产品方向是在扩大 runtime breadth 前，基于 single-run
+projection contract 支持非特权 saved-run investigation 与 daemon operations。
 
 ## Beta 结果
 
@@ -71,7 +70,7 @@ enforcement。
 - run scope 与 runtime identity；
 - 有界本地 store；
 - node daemon；
-- CLI 与未来 saved-run viewer；
+- CLI 与 Saved Run Viewer；
 - 严格必要的 local/container metadata。
 
 移出活跃 workspace 与默认门禁：
@@ -138,7 +137,9 @@ enforcement。
 - 每次成功 protected attach 都必须在 capability 与 lifecycle start 前记录一条 late-attach
   gap；
 - 每次 run 一份确定性的 single-run Agent Observation Record projection；
-- process tree 与有序 process/file/network/credential timeline；
+- Exact Runtime Identity roster、reported PID/PPID fact 与有序
+  process/file/network/credential timeline；schema v1 不支持 canonical process tree，viewer
+  不会推断 parent edge；
 - 可查询的 capability、identity、observation、lifecycle/health、finding、gap、issue array，
   以及相互独立的 evidence/health/review summary；
 - credential path、workspace mutation、unexpected executable class、unapproved network
@@ -234,6 +235,7 @@ API 时，run 仍必须有用。
 - Provider Hook、SDK、OTLP、MCP 与 A2A adapter family；
 - 通用 remote export 与 external custody；
 - semantic coverage 与 remote outcome verification；
+- live tail 或 streaming viewer；
 - 跨 run search 与 organization-wide investigation graph；
 - 中央 authenticated ingest、多用户 Query API 与 Web Console；
 - PostgreSQL、S3-compatible evidence object、KMS、replay authority 与多租户
@@ -266,6 +268,8 @@ Deferred work 不会只因为未来可能有用就继续在活跃 workspace 中�
   接受 partial 或伪造 capability 为 complete、保留无法解析的 Finding evidence link、能够覆盖
   input source，或在错误中包含 raw payload；
 - raw prompt、response、argv、tool payload、credential 或 private path 默认落盘；
+- v1 viewer 从数字 PID/PPID 构造 canonical process-tree edge，而不是只展示已存储的 identity
+  roster 与 reported parent identifier；
 - viewer 需要 root、BPF access、host PID namespace、runtime socket 或 node credential；
 - 受支持 kernel、runtime、operation 与 performance envelope 没有文档和测试；
 - finding 被描述为 blocking 或 enforcement；

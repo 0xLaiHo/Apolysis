@@ -78,6 +78,8 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
 - 可在非特权环境中把一次 saved Agent Run 确定性投影为可查询的 Agent Observation Record，
   并保持 evidence、collector health 与 review state 相互独立。Plain/rotated JSONL 和经过验证的
   hash-chain 输入都有界，遇到损坏或混合 run 时 fail closed。
+- 可在非特权环境中把一份 Agent Observation Record 确定性呈现为私有、self-contained 的离线
+  HTML 调查视图；三个状态轴保持独立，Finding 可链接到按 source order 排列的 observation。
 - 对无法匹配或 collector 停止时仍 pending 的选定文件与 network connect entry/exit pair
   发出归属于 Agent Run 的 Observation Gap，并隔离 multi-cgroup daemon 中的不同 scope。
 - 可选摄取 Codex 声明意图并通过启发式关联生成 mismatch finding。
@@ -117,14 +119,16 @@ Agent command / container / Pod
 ## 当前仓库状态
 
 `v0.3.0` 仍是最新公开研究版本，展示 live collector、托管 Agent 启动、JSONL timeline、
-隐私脱敏和发布打包。活跃 Cargo workspace 现仅包含 8 个 crate：core、observer、
-accountability finding、本地 storage、daemon、CLI、Kubernetes metadata 与 visibility
-assessment。被取代的 contracts、中央服务、policy actuation、Agent feedback control、
-sandbox execution 与广泛的 production-qualification 原型已移出活跃 build 和默认门禁。
+隐私脱敏和发布打包。活跃 Cargo workspace 现仅包含 9 个 crate：core、observer、
+accountability finding、本地 storage、daemon、CLI、saved-run viewer、Kubernetes metadata
+与 visibility assessment。被取代的 contracts、中央服务、policy actuation、Agent feedback
+control、sandbox execution 与广泛的 production-qualification 原型已移出活跃 build 和默认
+门禁。
 
 本地 `apolysis run project` 路径现可为 saved run 原子写入一份私有 JSON Agent Observation
-Record。非特权交互式 viewer 仍是下一层本地产品能力；projection 不会引入中央 query service，
-也不会改变当前 experimental support 状态。
+Record。`apolysis run view` 会验证恰好一份这类 v1 record，并写入私有、self-contained 的离线
+HTML 调查视图。本地 projection 与 viewer 不会引入 live tail、跨 run 搜索、中央 query
+service，也不会改变当前 experimental support 状态。
 
 范围重置是一项路线图决策，不是追溯性的生产声明。在受支持 collector、归属、失败、性能和
 隐私路径通过新的有界 Beta 门禁前，Apolysis 仍是实验性项目。
@@ -163,6 +167,14 @@ make test-live
 ./target/debug/apolysis run project \
   --input .apolysis/codex-live/timeline.agent-run.jsonl \
   --output .apolysis/codex-live/agent-observation-record.json
+```
+
+无需 root 即可把这份 record 渲染为离线 Saved Run Viewer：
+
+```bash
+./target/debug/apolysis run view \
+  --input .apolysis/codex-live/agent-observation-record.json \
+  --output .apolysis/codex-live/saved-run-view.html
 ```
 
 ## 托管 Agent 实时观测示例

@@ -13,6 +13,7 @@ apolysis-observer = { path = "../apolysis-observer" }
 apolysis-kubernetes = { path = "../apolysis-kubernetes" }
 apolysis-store = { path = "../apolysis-store" }
 apolysis-visibility = { path = "../apolysis-visibility" }
+apolysis-viewer = { path = "../apolysis-viewer" }
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

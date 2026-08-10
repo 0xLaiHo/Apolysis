@@ -133,5 +133,24 @@ jq '.observation_gaps[], .issues[]' agent-observation-record.json
 jq '.findings[] | {kind,decision,evidence_ref}' agent-observation-record.json
 ```
 
-The L3 saved-run viewer will consume this record. Live tailing, cross-run
-search, remote query, and a central evidence plane are outside this schema.
+## Saved Run Viewer consumer
+
+The completed L3 Saved Run Viewer consumes exactly one record through:
+
+```bash
+apolysis run view \
+  --input <agent-observation-record.json> \
+  --output <saved-run-view.html>
+```
+
+It validates v1 consistency, preserves Evidence State, Collector Health, and
+Review State as independent axes, follows `source_ordinal` as authoritative
+order, and resolves Finding links to supporting Runtime Observations. It does
+not reinterpret incomplete, active, failed, mixed-integrity, or gap-bearing
+records as clean or complete.
+
+Version 1 retains an Exact Runtime Identity roster and reported PID/PPID fields
+but no authoritative parent Runtime Identity link. The viewer therefore shows
+those facts without constructing or implying a canonical process tree. Live
+tailing, cross-run search, remote query, and a central evidence plane remain
+outside this schema.

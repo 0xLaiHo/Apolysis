@@ -3,7 +3,7 @@
 mod cli;
 
 use std::fs::{File, OpenOptions};
-use std::io::Write as IoWrite;
+use std::io::{Read as IoRead, Write as IoWrite};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,7 +26,7 @@ use apolysis_store::{
 use apolysis_visibility::{assess_visibility, RuntimeVisibilityProfile, VisibilityInput};
 use cli::{commands, options, values};
 
-static NEXT_PROJECTION_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_PRIVATE_OUTPUT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[tokio::main]
 async fn main() {
@@ -54,8 +54,21 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
 fn run_command(args: Vec<String>) -> Result<i32, String> {
     match args.get(1).map(String::as_str) {
         Some(commands::PROJECT) => run_project_command(args),
+        Some(commands::VIEW) => run_view_command(args),
         _ => Err(usage()),
     }
+}
+
+fn run_view_command(args: Vec<String>) -> Result<i32, String> {
+    let request = ViewRunRequest::parse(args)?;
+    let input = read_stable_bounded_regular_file(&request.input_path, MAX_SAVED_RUN_BYTES)
+        .map_err(|error| format!("failed to read Agent Observation Record for viewing: {error}"))?;
+    ensure_distinct_view_output(&input, &request.output_path)?;
+    let html = apolysis_viewer::render_agent_observation_record_v1(&input.bytes)
+        .map_err(|error| format!("failed to render saved Agent Run: {error}"))?;
+    write_private_atomic(&request.output_path, html.as_ref())
+        .map_err(|error| format!("failed to write saved Agent Run view: {error}"))?;
+    Ok(0)
 }
 
 fn run_project_command(args: Vec<String>) -> Result<i32, String> {
@@ -89,7 +102,8 @@ fn run_project_command(args: Vec<String>) -> Result<i32, String> {
     let mut output = serde_json::to_vec_pretty(&record)
         .map_err(|_| "failed to serialize Agent Observation Record".to_string())?;
     output.push(b'\n');
-    write_private_atomic(&request.output_path, &output)?;
+    write_private_atomic(&request.output_path, &output)
+        .map_err(|error| format!("failed to write Agent Observation Record: {error}"))?;
     Ok(0)
 }
 
@@ -242,6 +256,141 @@ async fn verify_hash_chain_command(args: Vec<String>) -> Result<i32, String> {
     Ok(if report.passed { 0 } else { 1 })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalFileIdentity {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+struct StableLocalFile {
+    bytes: Vec<u8>,
+    identity: LocalFileIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StableLocalFileReadError {
+    Metadata,
+    Symlink,
+    NonRegular,
+    Open,
+    ByteLimit,
+    Read,
+    Changed,
+}
+
+impl std::fmt::Display for StableLocalFileReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Metadata => write!(formatter, "input metadata inspection failed"),
+            Self::Symlink => write!(formatter, "input is a symlink"),
+            Self::NonRegular => write!(formatter, "input is not a regular file"),
+            Self::Open => write!(formatter, "input open failed"),
+            Self::ByteLimit => write!(formatter, "input exceeded the byte limit"),
+            Self::Read => write!(formatter, "input read failed"),
+            Self::Changed => write!(formatter, "input changed while reading"),
+        }
+    }
+}
+
+fn read_stable_bounded_regular_file(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<StableLocalFile, StableLocalFileReadError> {
+    let path_metadata =
+        std::fs::symlink_metadata(path).map_err(|_| StableLocalFileReadError::Metadata)?;
+    if path_metadata.file_type().is_symlink() {
+        return Err(StableLocalFileReadError::Symlink);
+    }
+    if !path_metadata.is_file() {
+        return Err(StableLocalFileReadError::NonRegular);
+    }
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                StableLocalFileReadError::Symlink
+            } else {
+                StableLocalFileReadError::Open
+            }
+        })?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|_| StableLocalFileReadError::Metadata)?;
+    if !opened_metadata.is_file() {
+        return Err(StableLocalFileReadError::NonRegular);
+    }
+    let identity = local_file_identity(&opened_metadata);
+    if identity.device != path_metadata.dev() || identity.inode != path_metadata.ino() {
+        return Err(StableLocalFileReadError::Changed);
+    }
+    if identity.len > max_bytes {
+        return Err(StableLocalFileReadError::ByteLimit);
+    }
+
+    let mut bytes = Vec::new();
+    IoRead::by_ref(&mut file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| StableLocalFileReadError::Read)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(StableLocalFileReadError::ByteLimit);
+    }
+    let after_metadata = file
+        .metadata()
+        .map_err(|_| StableLocalFileReadError::Metadata)?;
+    if identity != local_file_identity(&after_metadata)
+        || after_metadata.len() != bytes.len() as u64
+    {
+        return Err(StableLocalFileReadError::Changed);
+    }
+    let path_after =
+        std::fs::symlink_metadata(path).map_err(|_| StableLocalFileReadError::Changed)?;
+    if path_after.file_type().is_symlink()
+        || !path_after.is_file()
+        || local_file_identity(&path_after) != identity
+    {
+        return Err(StableLocalFileReadError::Changed);
+    }
+
+    Ok(StableLocalFile { bytes, identity })
+}
+
+fn local_file_identity(metadata: &std::fs::Metadata) -> LocalFileIdentity {
+    LocalFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        len: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+    }
+}
+
+fn ensure_distinct_view_output(input: &StableLocalFile, output_path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(output_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("saved Agent Run view output must be a regular file".to_string());
+            }
+            if metadata.dev() == input.identity.device && metadata.ino() == input.identity.inode {
+                return Err("saved Agent Run view output aliases its input".to_string());
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("failed to inspect saved Agent Run view output".to_string()),
+    }
+}
+
 fn ensure_distinct_projection_output(
     source_paths: &[PathBuf],
     output_path: &Path,
@@ -291,22 +440,48 @@ fn ensure_distinct_projection_output(
     Ok(())
 }
 
-fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrivateOutputWriteError {
+    ParentCreate,
+    InvalidPath,
+    Create,
+    Write,
+    Sync,
+    Publish,
+    ParentSync,
+    Allocate,
+}
+
+impl std::fmt::Display for PrivateOutputWriteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ParentCreate => write!(formatter, "private output parent creation failed"),
+            Self::InvalidPath => write!(formatter, "private output path is invalid"),
+            Self::Create => write!(formatter, "private output creation failed"),
+            Self::Write => write!(formatter, "private output write failed"),
+            Self::Sync => write!(formatter, "private output sync failed"),
+            Self::Publish => write!(formatter, "private output publication failed"),
+            Self::ParentSync => write!(formatter, "private output parent sync failed"),
+            Self::Allocate => write!(formatter, "private output allocation failed"),
+        }
+    }
+}
+
+fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), PrivateOutputWriteError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)
-        .map_err(|_| "failed to create Agent Observation Record parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|_| PrivateOutputWriteError::ParentCreate)?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| "Agent Observation Record output path is invalid".to_string())?;
+        .ok_or(PrivateOutputWriteError::InvalidPath)?;
 
     for _ in 0..128 {
-        let id = NEXT_PROJECTION_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let id = NEXT_PRIVATE_OUTPUT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
         let temporary_path = parent.join(format!(
-            ".{file_name}.apolysis-project-{}-{id}.tmp",
+            ".{file_name}.apolysis-private-{}-{id}.tmp",
             std::process::id()
         ));
         let mut file = match OpenOptions::new()
@@ -318,28 +493,24 @@ fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => {
-                return Err("failed to create private Agent Observation Record output".to_string())
-            }
+            Err(_) => return Err(PrivateOutputWriteError::Create),
         };
         let result = (|| {
             file.write_all(bytes)
-                .map_err(|_| "failed to write Agent Observation Record".to_string())?;
-            file.sync_all()
-                .map_err(|_| "failed to sync Agent Observation Record".to_string())?;
+                .map_err(|_| PrivateOutputWriteError::Write)?;
+            file.sync_all().map_err(|_| PrivateOutputWriteError::Sync)?;
             drop(file);
-            std::fs::rename(&temporary_path, path)
-                .map_err(|_| "failed to publish Agent Observation Record".to_string())?;
+            std::fs::rename(&temporary_path, path).map_err(|_| PrivateOutputWriteError::Publish)?;
             File::open(parent)
                 .and_then(|directory| directory.sync_all())
-                .map_err(|_| "failed to sync Agent Observation Record parent".to_string())
+                .map_err(|_| PrivateOutputWriteError::ParentSync)
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary_path);
         }
         return result;
     }
-    Err("failed to allocate private Agent Observation Record output".to_string())
+    Err(PrivateOutputWriteError::Allocate)
 }
 
 async fn observe_command(args: Vec<String>) -> Result<i32, String> {
@@ -416,6 +587,12 @@ struct ProjectRunRequest {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+struct ViewRunRequest {
+    input_path: PathBuf,
+    output_path: PathBuf,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 enum IntentAdapterSelection {
     CodexJsonl,
 }
@@ -462,6 +639,50 @@ impl ProjectRunRequest {
         }
         Ok(Self {
             input_paths,
+            output_path: output_path
+                .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
+        })
+    }
+}
+
+impl ViewRunRequest {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        if args.first().map(String::as_str) != Some(commands::RUN)
+            || args.get(1).map(String::as_str) != Some(commands::VIEW)
+        {
+            return Err(usage());
+        }
+
+        let mut input_path = None;
+        let mut output_path = None;
+        let mut i = 2;
+        while i < args.len() {
+            match args[i].as_str() {
+                options::INPUT => {
+                    i += 1;
+                    if input_path.is_some() {
+                        return Err(format!("duplicate {}\n{}", options::INPUT, usage()));
+                    }
+                    input_path = Some(PathBuf::from(args.get(i).cloned().ok_or_else(|| {
+                        format!("missing {} value\n{}", options::INPUT, usage())
+                    })?));
+                }
+                options::OUTPUT => {
+                    i += 1;
+                    if output_path.is_some() {
+                        return Err(format!("duplicate {}\n{}", options::OUTPUT, usage()));
+                    }
+                    output_path = Some(PathBuf::from(args.get(i).cloned().ok_or_else(|| {
+                        format!("missing {} value\n{}", options::OUTPUT, usage())
+                    })?));
+                }
+                unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
+            }
+            i += 1;
+        }
+        Ok(Self {
+            input_path: input_path
+                .ok_or_else(|| format!("missing {}\n{}", options::INPUT, usage()))?,
             output_path: output_path
                 .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
         })

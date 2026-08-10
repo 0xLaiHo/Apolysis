@@ -259,8 +259,9 @@ value is an event relation status or a continuity claim.
 The first product remains local-first. The store is bounded, rotates safely,
 and retains explicit run start, capability, health checkpoints, terminal state,
 and gap records. The current format is append-only JSONL with optional local
-hash-chain envelopes. A query index may be added behind the same record model
-when the saved-run viewer requires it.
+hash-chain envelopes. The L3 Saved Run Viewer consumes the frozen single-run
+record directly. A query index remains deferred until repeated use demonstrates
+that a bounded single-record view is insufficient.
 
 The v1 saved-run read path opens the active file and contiguous numeric
 archives as one stable local snapshot, refuses symlinks and non-regular files,
@@ -292,16 +293,41 @@ it atomically. It refuses an output that aliases any active or rotated input.
 The command is a saved-run projection, not a live tail, remote query API, or
 interactive viewer.
 
+`apolysis run view --input <agent-observation-record.json> --output
+<viewer.html>` is the non-privileged Saved Run Viewer adapter. It accepts
+exactly one Agent Observation Record v1, validates its type, schema, summary,
+identity references, source ordinals, Finding links, and state consistency,
+then renders deterministic, self-contained HTML. A malformed or inconsistent
+record fails closed without replacing an existing output. The reader is
+bounded, refuses symlinks and non-regular files, and the publisher refuses an
+output alias before using an exclusive mode-`0600` same-directory temporary
+file, file and directory synchronization, and atomic rename.
+
+The HTML is an offline, read-only artifact with no external assets or network
+dependency. A restrictive Content Security Policy disables connections and
+external resources, and every stored value is rendered as untrusted text. The
+viewer requires neither root nor access to BPF maps, the host PID namespace,
+runtime sockets, or node credentials.
+
 The viewer provides:
 
-- run inventory and summary;
-- process tree and runtime identity drill-down;
+- one-run summary with Evidence State, Collector Health, and Review State kept
+  as three independent axes;
+- an Exact Runtime Identity roster and the reported PID/PPID fields retained
+  on Runtime Observations;
 - ordered process, file, network, and credential timeline;
 - supported outcome and attribution status;
 - collector health, loss, truncation, and unsupported capability gaps;
-- review-oriented findings linked to their observations.
+- review-oriented Findings linked to their supporting observations;
+- source ordinals and record paths that keep displayed facts traceable to the
+  frozen record.
 
-The viewer derives no hidden success verdict from an empty result.
+Agent Observation Record v1 does not carry an authoritative parent Runtime
+Identity link. The viewer therefore does not construct a canonical process
+tree from numeric PID/PPID values, which may be reused; it presents the identity
+roster and reported PPID as stored facts without inferring parent edges. It
+also derives no hidden success verdict from an empty result and never combines
+the three summary axes into a clean verdict.
 
 ### 5.5 Deferred central boundary
 
@@ -444,6 +470,10 @@ blocking prototypes are not part of the active product.
 - Local files use restrictive permissions and bounded retention.
 - The viewer is non-privileged and has no path to BPF maps, host PID namespace,
   container sockets, or node credentials.
+- The standalone viewer escapes all stored text and uses a restrictive Content
+  Security Policy that permits no network connection or external asset. The
+  artifact contains projected run facts and therefore retains mode-`0600`
+  publication semantics.
 
 ## 11. Failure semantics
 
@@ -472,8 +502,8 @@ Implemented today:
   redaction, lifecycle checkpoints and terminals, and health/gap diagnostics;
 - `apolysis-cli`: fixture/live observation, managed Agent launch, protected
   existing-process attach through registration or discovery, non-privileged
-  saved-run projection, optional Codex intent correlation, visibility, and
-  verification commands;
+  saved-run projection and Saved Run Viewer publication, optional Codex intent
+  correlation, visibility, and verification commands;
 - `apolysis-core`: current JSONL vocabulary, record types, versioned Collector
   Capability manifest, and collector lifecycle schema, including the single
   authoritative lifecycle vocabulary and complete AuditObserver v1
@@ -483,6 +513,8 @@ Implemented today:
 - `apolysis-accountability`: the pure Agent Observation Record projection,
   independent summary axes, optional declared-intent comparison, and
   review-oriented findings;
+- `apolysis-viewer`: strict Agent Observation Record v1 validation and
+  deterministic standalone offline HTML presentation with source traceability;
 - `apolysis-kubernetes` and `apolysis-visibility`: bounded runtime metadata and
   visibility-boundary assessment;
 - `apolysis-daemon`: long-lived observer, bounded queue, local socket, runtime
@@ -497,8 +529,9 @@ connect have bounded entry/exit outcome semantics, and the daemon persists
 their pairing gaps to the owning Agent Run at explicit scope removal and clean
 shutdown. Stable in-run scope/process generations, periodic cumulative
 lifecycle checkpoints, explicit terminal reasons, and restart-gap recovery are
-implemented together with the queryable saved-run projection. The interactive
-saved-run viewer and bounded Kubernetes beta remain targets.
+implemented together with the queryable saved-run projection and the
+non-privileged Saved Run Viewer. Local daemon operations and the bounded
+Kubernetes beta remain targets.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification
@@ -507,8 +540,12 @@ them as historical implementation input; they do not define this architecture.
 
 ## 13. Limitations
 
-- L2 is a bounded, local, single-Agent-Run JSON projection. It is not the L3
-  interactive viewer, a live tail, cross-run search, or a central query plane.
+- L3 renders one bounded, local, frozen Agent Observation Record v1. It is not
+  a live tail, cross-run search, remote query surface, or central query plane.
+- Agent Observation Record v1 lacks an authoritative parent Runtime Identity
+  link. The viewer can show the Exact Runtime Identity roster and each
+  observation's reported PID/PPID, but cannot construct a canonical process
+  tree without unsafe PID-based inference.
 - eBPF sees kernel/runtime operations, not logical reasoning or hidden remote
   provider state.
 - Relative paths, file-descriptor-relative operations, namespaces, overlays,
