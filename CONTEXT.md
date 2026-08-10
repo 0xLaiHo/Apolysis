@@ -54,6 +54,24 @@ identities, Runtime Observations, Collector Health, findings, and Observation
 Gaps.
 _Avoid_: Agent Execution Record, evidence plane, flat event stream
 
+**Agent Observation Summary**:
+A bounded derived view of one Agent Observation Record that keeps evidence
+state, Collector Health, review state, and typed counts independent. Missing or
+incomplete evidence is never summarized as a clean result.
+_Avoid_: Run verdict, clean status, success proof
+
+**Evidence State**:
+The projection state of one Agent Observation Record: complete, active,
+incomplete, failed, or indeterminate. It reports evidence boundaries, not Agent
+task success.
+_Avoid_: Agent success, clean verdict
+
+**Review State**:
+Whether bounded findings require review, no findings were reported over
+complete evidence, or the result is indeterminate. No findings reported is not
+proof that no relevant action occurred.
+_Avoid_: Clean result, policy verdict, absence proof
+
 **Collector Capability**:
 A versioned declaration of the runtime operations and outcomes a collector can
 observe within a stated environment boundary.

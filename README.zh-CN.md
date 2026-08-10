@@ -38,6 +38,7 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
 3. 每条观测属于哪个 container、cgroup、Pod 或进程身份？
 4. 操作是成功、失败，还是结果未知？
 5. Collector 是否健康，观测缺口在哪里？
+6. 哪些有界 Finding 需要操作者复查？
 
 产品不把“没有观测到”解释为“没有发生”。它只描述声明 scope 与 capability 边界内的活动。
 
@@ -74,6 +75,9 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
 - Exec 参数与 process command 默认 content-off 持久化，并对凭证和网络内容脱敏。
 - 提供有序 JSONL、输出轮转、可选本地 hash-chain envelope，以及 drop、map pressure、ABI
   mismatch、decode failure 和 truncation 的类型化诊断。
+- 可在非特权环境中把一次 saved Agent Run 确定性投影为可查询的 Agent Observation Record，
+  并保持 evidence、collector health 与 review state 相互独立。Plain/rotated JSONL 和经过验证的
+  hash-chain 输入都有界，遇到损坏或混合 run 时 fail closed。
 - 对无法匹配或 collector 停止时仍 pending 的选定文件与 network connect entry/exit pair
   发出归属于 Agent Run 的 Observation Gap，并隔离 multi-cgroup daemon 中的不同 scope。
 - 可选摄取 Codex 声明意图并通过启发式关联生成 mismatch finding。
@@ -118,6 +122,10 @@ accountability finding、本地 storage、daemon、CLI、Kubernetes metadata 与
 assessment。被取代的 contracts、中央服务、policy actuation、Agent feedback control、
 sandbox execution 与广泛的 production-qualification 原型已移出活跃 build 和默认门禁。
 
+本地 `apolysis run project` 路径现可为 saved run 原子写入一份私有 JSON Agent Observation
+Record。非特权交互式 viewer 仍是下一层本地产品能力；projection 不会引入中央 query service，
+也不会改变当前 experimental support 状态。
+
 范围重置是一项路线图决策，不是追溯性的生产声明。在受支持 collector、归属、失败、性能和
 隐私路径通过新的有界 Beta 门禁前，Apolysis 仍是实验性项目。
 首个资格 contract 现仅把 Linux 6.12/x86_64 原生 host 命名为 Candidate；当前尚无
@@ -148,6 +156,14 @@ make test-live
 ```
 
 当 Linux BTF、cgroup v2、tracepoint 或所需 BPF capability 不可用时，特权测试会明确跳过。
+
+无需 root 即可投影 saved run：
+
+```bash
+./target/debug/apolysis run project \
+  --input .apolysis/codex-live/timeline.agent-run.jsonl \
+  --output .apolysis/codex-live/agent-observation-record.json
+```
 
 ## 托管 Agent 实时观测示例
 
@@ -181,6 +197,7 @@ sudo -E ./target/debug/apolysis observe \
 - [有界 Beta 验证计划](docs/beta-qualification-plan.zh-CN.md)
 - [Quickstart](docs/quickstart.md)
 - [JSONL 模式](docs/jsonl-schema-v1.md)
+- [Agent Observation Record v1](docs/agent-observation-record-v1.zh-CN.md)
 - [威胁模型](docs/threat-model.md)
 - [可见性验证](docs/visibility-validation.md)
 - [实时演示运行手册](docs/codex-live-demo-runbook.md)

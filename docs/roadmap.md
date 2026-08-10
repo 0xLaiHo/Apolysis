@@ -34,7 +34,9 @@ records, observer, accountability findings, local storage, daemon, CLI,
 Kubernetes metadata, and visibility assessment. Central services, policy
 actuation, feedback control, sandbox execution, and broad production
 qualification no longer participate in active builds or default tests. The
-next priority is collector correctness.
+active local-product direction is to build the non-privileged saved-run viewer
+and daemon operations on the single-run projection contract before expanding
+runtime breadth.
 
 ## Beta outcome
 
@@ -153,9 +155,10 @@ Deliverables:
   PID scope rejected;
 - one mandatory late-attach gap before capability and lifecycle start for every
   successful protected attach;
-- one Agent Observation Record per run;
+- one deterministic, single-run Agent Observation Record projection;
 - process tree and ordered process/file/network/credential timeline;
-- run summary, collector health, capability, attribution, and gap views;
+- queryable capability, identity, observation, lifecycle/health, finding, gap,
+  issue arrays, and an independent evidence/health/review summary;
 - bounded findings for credential paths, workspace mutations, unexpected
   executable classes, unapproved network targets, and degraded observation;
 - a non-privileged saved-run viewer over bounded local data;
@@ -170,7 +173,9 @@ Exit conditions:
   raw JSONL or kernel traces;
 - every viewer fact resolves to an observation, capability, health, or gap
   record;
-- an empty or partial timeline never renders as successful or complete;
+- mixed-run, malformed, active, failed, missing-capability/terminal,
+  loss/gap-bearing, mixed-integrity, or unknown-record input never renders as a
+  clean or complete result;
 - protected attach fails closed for zombie, ambiguous, or
   namespace-incompatible candidates, labels explicit registration selection
   `registration_qualified`, and never presents that label as pre-anchor
@@ -298,6 +303,11 @@ The beta cannot be released for a profile when any applicable condition holds:
   capability and `started` records, or presents that gap's `count:1` as a
   missing-syscall count;
 - an empty timeline is interpreted as absence of Agent activity;
+- saved-run projection accepts mixed Agent Runs, exposes hash-chain payloads
+  before full verification, marks mixed integrity or unknown records complete,
+  treats per-input limits as a combined-input bound, accepts a partial or
+  fictitious capability as complete, leaves Finding evidence links unresolved,
+  can overwrite an input source, or includes raw payload content in an error;
 - raw prompt, response, argv, tool payload, credential, or private path content
   persists by default;
 - the viewer requires root, BPF access, host PID namespace, runtime socket, or

@@ -33,8 +33,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use apolysis_core::{
-    actors, fields::PipeFields, resources, CanonicalEvent, CollectorCapability,
-    CollectorCapabilityManifest, EventSource, EventType, OperationOutcome, RawKernelEvent,
+    actors, audit_observer_capability_contract_v1, fields::PipeFields, resources, CanonicalEvent,
+    CollectorCapability, CollectorCapabilityManifest, EventSource, EventType, RawKernelEvent,
+    CGROUP_OBSERVATION_SCOPE, PROCESS_TREE_OBSERVATION_SCOPE,
 };
 use apolysis_kubernetes::KubernetesMetadata;
 use apolysis_store::{JsonlRotationPolicy, JsonlStore};
@@ -194,156 +195,35 @@ impl AyaLoaderPlan {
     }
 }
 
-type TracepointId = (&'static str, &'static str);
-
-struct CapabilityDeclaration {
-    operation: &'static str,
-    sources: &'static [TracepointId],
-    required_sources: &'static [TracepointId],
-    outcomes: &'static [OperationOutcome],
-}
-
-const FILE_OPERATION_OUTCOMES: &[OperationOutcome] = &[
-    OperationOutcome::Succeeded,
-    OperationOutcome::Failed,
-    OperationOutcome::Denied,
-];
-const FILE_OPEN_SOURCES: &[TracepointId] = &[
-    ("syscalls", "sys_enter_openat"),
-    ("syscalls", "sys_exit_openat"),
-    ("syscalls", "sys_enter_openat2"),
-    ("syscalls", "sys_exit_openat2"),
-];
-const FILE_CREATE_SOURCES: &[TracepointId] = &[
-    ("syscalls", "sys_enter_openat"),
-    ("syscalls", "sys_exit_openat"),
-    ("syscalls", "sys_enter_openat2"),
-    ("syscalls", "sys_exit_openat2"),
-    ("syscalls", "sys_enter_creat"),
-    ("syscalls", "sys_exit_creat"),
-];
-const FILE_TRUNCATE_SOURCES: &[TracepointId] = &[
-    ("syscalls", "sys_enter_openat"),
-    ("syscalls", "sys_exit_openat"),
-    ("syscalls", "sys_enter_openat2"),
-    ("syscalls", "sys_exit_openat2"),
-    ("syscalls", "sys_enter_truncate"),
-    ("syscalls", "sys_exit_truncate"),
-];
-const FILE_UNLINK_SOURCES: &[TracepointId] = &[
-    ("syscalls", "sys_enter_unlinkat"),
-    ("syscalls", "sys_exit_unlinkat"),
-];
-const FILE_RENAME_SOURCES: &[TracepointId] = &[
-    ("syscalls", "sys_enter_renameat2"),
-    ("syscalls", "sys_exit_renameat2"),
-];
-
-const AUDIT_OBSERVER_CAPABILITIES: &[CapabilityDeclaration] = &[
-    CapabilityDeclaration {
-        operation: "process_fork",
-        sources: &[("sched", "sched_process_fork")],
-        required_sources: &[],
-        outcomes: &[OperationOutcome::Succeeded],
-    },
-    CapabilityDeclaration {
-        operation: "process_exec",
-        sources: &[
-            ("sched", "sched_process_exec"),
-            ("syscalls", "sys_enter_execve"),
-            ("syscalls", "sys_enter_execveat"),
-        ],
-        required_sources: &[("sched", "sched_process_exec")],
-        outcomes: &[OperationOutcome::Succeeded],
-    },
-    CapabilityDeclaration {
-        operation: "process_exit",
-        sources: &[("sched", "sched_process_exit")],
-        required_sources: &[],
-        outcomes: &[OperationOutcome::Unknown],
-    },
-    CapabilityDeclaration {
-        operation: "file_open",
-        sources: FILE_OPEN_SOURCES,
-        required_sources: FILE_OPEN_SOURCES,
-        outcomes: FILE_OPERATION_OUTCOMES,
-    },
-    CapabilityDeclaration {
-        operation: "file_create",
-        sources: FILE_CREATE_SOURCES,
-        required_sources: FILE_CREATE_SOURCES,
-        outcomes: FILE_OPERATION_OUTCOMES,
-    },
-    CapabilityDeclaration {
-        operation: "file_truncate",
-        sources: FILE_TRUNCATE_SOURCES,
-        required_sources: FILE_TRUNCATE_SOURCES,
-        outcomes: FILE_OPERATION_OUTCOMES,
-    },
-    CapabilityDeclaration {
-        operation: "file_unlink",
-        sources: FILE_UNLINK_SOURCES,
-        required_sources: FILE_UNLINK_SOURCES,
-        outcomes: FILE_OPERATION_OUTCOMES,
-    },
-    CapabilityDeclaration {
-        operation: "file_rename",
-        sources: FILE_RENAME_SOURCES,
-        required_sources: FILE_RENAME_SOURCES,
-        outcomes: FILE_OPERATION_OUTCOMES,
-    },
-    CapabilityDeclaration {
-        operation: "network_connect",
-        sources: &[
-            ("syscalls", "sys_enter_connect"),
-            ("syscalls", "sys_exit_connect"),
-        ],
-        required_sources: &[
-            ("syscalls", "sys_enter_connect"),
-            ("syscalls", "sys_exit_connect"),
-        ],
-        outcomes: &[
-            OperationOutcome::Succeeded,
-            OperationOutcome::Failed,
-            OperationOutcome::Denied,
-            OperationOutcome::Pending,
-        ],
-    },
-    CapabilityDeclaration {
-        operation: "credential_path_access",
-        sources: FILE_OPEN_SOURCES,
-        required_sources: FILE_OPEN_SOURCES,
-        outcomes: FILE_OPERATION_OUTCOMES,
-    },
-];
-
 /// Describe exactly what the configured AuditObserver can report for one Agent Run.
 pub fn audit_observer_capability_manifest(
     agent_run_id: &str,
     scope: &LiveScope,
     loader_plan: &AyaLoaderPlan,
 ) -> CollectorCapabilityManifest {
-    let capabilities = AUDIT_OBSERVER_CAPABILITIES
+    let capabilities = audit_observer_capability_contract_v1()
         .iter()
         .filter_map(|declaration| {
-            let is_attached = |category: &str, name: &str| {
-                loader_plan
-                    .tracepoints
-                    .iter()
-                    .any(|attach| attach.category == category && attach.name == name)
+            let is_attached = |source: &str| {
+                source.split_once('/').is_some_and(|(category, name)| {
+                    loader_plan
+                        .tracepoints
+                        .iter()
+                        .any(|attach| attach.category == category && attach.name == name)
+                })
             };
             if declaration
-                .required_sources
+                .required_event_sources
                 .iter()
-                .any(|(category, name)| !is_attached(category, name))
+                .any(|source| !is_attached(source))
             {
                 return None;
             }
             let event_sources = declaration
-                .sources
+                .event_sources
                 .iter()
-                .filter(|(category, name)| is_attached(category, name))
-                .map(|(category, name)| format!("{category}/{name}"))
+                .filter(|source| is_attached(source))
+                .map(|source| (*source).to_string())
                 .collect::<Vec<_>>();
             if event_sources.is_empty() {
                 None
@@ -357,8 +237,8 @@ pub fn audit_observer_capability_manifest(
         })
         .collect();
     let observation_scope = match scope {
-        LiveScope::Cgroup(_) => "cgroup",
-        LiveScope::ProcessTree(_) => "process_tree",
+        LiveScope::Cgroup(_) => CGROUP_OBSERVATION_SCOPE,
+        LiveScope::ProcessTree(_) => PROCESS_TREE_OBSERVATION_SCOPE,
     };
     CollectorCapabilityManifest::new(
         agent_run_id,

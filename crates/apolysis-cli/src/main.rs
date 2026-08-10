@@ -2,21 +2,31 @@
 
 mod cli;
 
+use std::fs::{File, OpenOptions};
+use std::io::Write as IoWrite;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use apolysis_accountability::{
-    AccountabilityFinding, EvidenceBoundary, FindingDecision, FindingKind, RuntimeIdentity,
-    FINDING_SCHEMA_V1,
+    project_agent_run, AccountabilityFinding, AgentRunRecordBatch, EvidenceBoundary,
+    FindingDecision, FindingKind, RuntimeIdentity, FINDING_SCHEMA_V1,
+    MAX_AGENT_RUN_PROJECTION_BATCHES, MAX_AGENT_RUN_PROJECTION_RECORDS,
 };
 use apolysis_core::{now_unix_ms, JsonLine, SessionIntentRecord};
 use apolysis_observer::{
     observe_fixture, observe_live, redact_command_text_for_persistence, AgentDiscoveryRequest,
     AgentRunRequest, FixtureObserveRequest, LiveObserveRequest, LiveScope,
 };
-use apolysis_store::{HashChainStore, JsonlRotationPolicy};
+use apolysis_store::{
+    read_agent_run_records, HashChainStore, JsonlRotationPolicy, LocalRecordFormat,
+    MAX_SAVED_RUN_BYTES,
+};
 use apolysis_visibility::{assess_visibility, RuntimeVisibilityProfile, VisibilityInput};
 use cli::{commands, options, values};
+
+static NEXT_PROJECTION_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[tokio::main]
 async fn main() {
@@ -33,11 +43,77 @@ async fn main() {
 async fn run(args: Vec<String>) -> Result<i32, String> {
     match args.first().map(String::as_str) {
         Some(commands::OBSERVE) => observe_command(args).await,
+        Some(commands::RUN) => run_command(args),
         Some(commands::INTENT) => intent_command(args).await,
         Some(commands::VISIBILITY) => visibility_command(args).await,
         Some(commands::VERIFY) => verify_command(args).await,
         _ => Err(usage()),
     }
+}
+
+fn run_command(args: Vec<String>) -> Result<i32, String> {
+    match args.get(1).map(String::as_str) {
+        Some(commands::PROJECT) => run_project_command(args),
+        _ => Err(usage()),
+    }
+}
+
+fn run_project_command(args: Vec<String>) -> Result<i32, String> {
+    let request = ProjectRunRequest::parse(args)?;
+    let mut batches = Vec::with_capacity(request.input_paths.len());
+    let mut source_paths = Vec::new();
+    let mut total_input_bytes = 0_u64;
+    let mut total_input_records = 0_u64;
+    for input_path in &request.input_paths {
+        let batch = read_agent_run_records(input_path)
+            .map_err(|error| format!("failed to read Agent Run input: {error}"))?;
+        let batch_records = u64::try_from(batch.records.len())
+            .map_err(|_| "Agent Run input exceeded the total record limit".to_string())?;
+        accumulate_projection_input_budget(
+            &mut total_input_bytes,
+            &mut total_input_records,
+            batch.source_bytes,
+            batch_records,
+        )?;
+        source_paths.extend(batch.source_paths().iter().cloned());
+        batches.push(match batch.format {
+            LocalRecordFormat::PlainJsonl => AgentRunRecordBatch::plain(batch.records),
+            LocalRecordFormat::VerifiedHashChain => {
+                AgentRunRecordBatch::verified_hash_chain(batch.records)
+            }
+        });
+    }
+    ensure_distinct_projection_output(&source_paths, &request.output_path)?;
+    let record = project_agent_run(batches)
+        .map_err(|error| format!("failed to project Agent Run: {error}"))?;
+    let mut output = serde_json::to_vec_pretty(&record)
+        .map_err(|_| "failed to serialize Agent Observation Record".to_string())?;
+    output.push(b'\n');
+    write_private_atomic(&request.output_path, &output)?;
+    Ok(0)
+}
+
+fn accumulate_projection_input_budget(
+    total_bytes: &mut u64,
+    total_records: &mut u64,
+    batch_bytes: u64,
+    batch_records: u64,
+) -> Result<(), String> {
+    let next_bytes = total_bytes
+        .checked_add(batch_bytes)
+        .ok_or_else(|| "Agent Run input exceeded the total byte limit".to_string())?;
+    if next_bytes > MAX_SAVED_RUN_BYTES {
+        return Err("Agent Run input exceeded the total byte limit".to_string());
+    }
+    let next_records = total_records
+        .checked_add(batch_records)
+        .ok_or_else(|| "Agent Run input exceeded the total record limit".to_string())?;
+    if next_records > MAX_AGENT_RUN_PROJECTION_RECORDS {
+        return Err("Agent Run input exceeded the total record limit".to_string());
+    }
+    *total_bytes = next_bytes;
+    *total_records = next_records;
+    Ok(())
 }
 
 async fn intent_command(args: Vec<String>) -> Result<i32, String> {
@@ -166,6 +242,106 @@ async fn verify_hash_chain_command(args: Vec<String>) -> Result<i32, String> {
     Ok(if report.passed { 0 } else { 1 })
 }
 
+fn ensure_distinct_projection_output(
+    source_paths: &[PathBuf],
+    output_path: &Path,
+) -> Result<(), String> {
+    let output_metadata = match std::fs::symlink_metadata(output_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("Agent Observation Record output must be a regular file".to_string());
+            }
+            Some(metadata)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err("failed to inspect Agent Observation Record output".to_string()),
+    };
+    let output_canonical = if output_metadata.is_some() {
+        Some(
+            std::fs::canonicalize(output_path)
+                .map_err(|_| "failed to resolve Agent Observation Record output".to_string())?,
+        )
+    } else {
+        let parent = output_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        match std::fs::canonicalize(parent) {
+            Ok(parent) => output_path.file_name().map(|name| parent.join(name)),
+            Err(_) => None,
+        }
+    };
+
+    for source_path in source_paths {
+        let source_metadata = std::fs::metadata(source_path)
+            .map_err(|_| "failed to inspect Agent Run source identity".to_string())?;
+        if output_metadata.as_ref().is_some_and(|output| {
+            output.dev() == source_metadata.dev() && output.ino() == source_metadata.ino()
+        }) {
+            return Err("Agent Observation Record output aliases an input source".to_string());
+        }
+        if let Some(output) = output_canonical.as_ref() {
+            let source = std::fs::canonicalize(source_path)
+                .map_err(|_| "failed to resolve Agent Run source identity".to_string())?;
+            if &source == output {
+                return Err("Agent Observation Record output aliases an input source".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|_| "failed to create Agent Observation Record parent".to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Agent Observation Record output path is invalid".to_string())?;
+
+    for _ in 0..128 {
+        let id = NEXT_PROJECTION_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let temporary_path = parent.join(format!(
+            ".{file_name}.apolysis-project-{}-{id}.tmp",
+            std::process::id()
+        ));
+        let mut file = match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&temporary_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => {
+                return Err("failed to create private Agent Observation Record output".to_string())
+            }
+        };
+        let result = (|| {
+            file.write_all(bytes)
+                .map_err(|_| "failed to write Agent Observation Record".to_string())?;
+            file.sync_all()
+                .map_err(|_| "failed to sync Agent Observation Record".to_string())?;
+            drop(file);
+            std::fs::rename(&temporary_path, path)
+                .map_err(|_| "failed to publish Agent Observation Record".to_string())?;
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| "failed to sync Agent Observation Record parent".to_string())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary_path);
+        }
+        return result;
+    }
+    Err("failed to allocate private Agent Observation Record output".to_string())
+}
+
 async fn observe_command(args: Vec<String>) -> Result<i32, String> {
     let request = ObserveRequest::parse(args)?;
     match request.backend {
@@ -234,8 +410,62 @@ struct VerifyHashChainRequest {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+struct ProjectRunRequest {
+    input_paths: Vec<PathBuf>,
+    output_path: PathBuf,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 enum IntentAdapterSelection {
     CodexJsonl,
+}
+
+impl ProjectRunRequest {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        if args.first().map(String::as_str) != Some(commands::RUN)
+            || args.get(1).map(String::as_str) != Some(commands::PROJECT)
+        {
+            return Err(usage());
+        }
+
+        let mut input_paths = Vec::new();
+        let mut output_path = None;
+        let mut i = 2;
+        while i < args.len() {
+            match args[i].as_str() {
+                options::INPUT => {
+                    i += 1;
+                    if input_paths.len() >= MAX_AGENT_RUN_PROJECTION_BATCHES {
+                        return Err(
+                            "Agent Run projection exceeded the input batch count limit".to_string()
+                        );
+                    }
+                    input_paths.push(PathBuf::from(args.get(i).cloned().ok_or_else(|| {
+                        format!("missing {} value\n{}", options::INPUT, usage())
+                    })?));
+                }
+                options::OUTPUT => {
+                    i += 1;
+                    if output_path.is_some() {
+                        return Err(format!("duplicate {}\n{}", options::OUTPUT, usage()));
+                    }
+                    output_path = Some(PathBuf::from(args.get(i).cloned().ok_or_else(|| {
+                        format!("missing {} value\n{}", options::OUTPUT, usage())
+                    })?));
+                }
+                unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
+            }
+            i += 1;
+        }
+        if input_paths.is_empty() {
+            return Err(format!("missing {}\n{}", options::INPUT, usage()));
+        }
+        Ok(Self {
+            input_paths,
+            output_path: output_path
+                .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
+        })
+    }
 }
 
 impl IntentIngestRequest {
@@ -1403,7 +1633,14 @@ fn usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{evidence_loss_warning, executable_matches, observer_evidence_loss};
+    use super::{
+        accumulate_projection_input_budget, evidence_loss_warning, executable_matches,
+        observer_evidence_loss, ProjectRunRequest,
+    };
+    use apolysis_accountability::{
+        MAX_AGENT_RUN_PROJECTION_BATCHES, MAX_AGENT_RUN_PROJECTION_RECORDS,
+    };
+    use apolysis_store::MAX_SAVED_RUN_BYTES;
 
     #[test]
     fn evidence_loss_is_summed_and_warned() {
@@ -1441,5 +1678,36 @@ mod tests {
         // Different executables must not match, and a missing path never matches.
         assert!(!executable_matches("cargo", Some("/usr/bin/rustc")));
         assert!(!executable_matches("cargo", None));
+    }
+
+    #[test]
+    fn project_request_rejects_too_many_inputs_before_reading_them() {
+        let mut args = vec!["run".to_string(), "project".to_string()];
+        for _ in 0..=MAX_AGENT_RUN_PROJECTION_BATCHES {
+            args.push("--input".to_string());
+            args.push("timeline.jsonl".to_string());
+        }
+        args.push("--output".to_string());
+        args.push("record.json".to_string());
+
+        let error = ProjectRunRequest::parse(args).expect_err("batch limit must be preflighted");
+        assert!(error.contains("batch count"), "{error}");
+    }
+
+    #[test]
+    fn projection_input_budget_is_global_across_batches() {
+        let mut total_bytes = MAX_SAVED_RUN_BYTES - 1;
+        let mut total_records = MAX_AGENT_RUN_PROJECTION_RECORDS - 1;
+        let error = accumulate_projection_input_budget(&mut total_bytes, &mut total_records, 2, 1)
+            .expect_err("combined byte limit must fail");
+        assert!(error.contains("byte limit"), "{error}");
+        assert_eq!(total_bytes, MAX_SAVED_RUN_BYTES - 1);
+        assert_eq!(total_records, MAX_AGENT_RUN_PROJECTION_RECORDS - 1);
+
+        total_bytes = 0;
+        total_records = MAX_AGENT_RUN_PROJECTION_RECORDS;
+        let error = accumulate_projection_input_budget(&mut total_bytes, &mut total_records, 0, 1)
+            .expect_err("combined record limit must fail");
+        assert!(error.contains("record limit"), "{error}");
     }
 }

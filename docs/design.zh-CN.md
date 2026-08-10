@@ -217,6 +217,29 @@ pre-anchor root-selection confidence 相互独立：显式 registration 为
 checkpoint、terminal state 与 gap record。当前格式是 append-only JSONL 和可选本地
 hash-chain envelope。Saved-run viewer 需要时，可以在同一 record model 后加入 query index。
 
+V1 saved-run 读取路径会把 active file 与连续数字 archive 作为同一个稳定本地 snapshot，按
+最旧 archive 到 active 的顺序读取；它拒绝 symlink、非普通文件、读取期间变化、截断、格式错误
+和混合 envelope，并在暴露 payload 前验证完整 hash chain。Byte、line 与 record 都有明确上限。
+Source order 是权威顺序；wall-clock timestamp 不会修复或重排非法 lifecycle。Plain 与 verified
+输入可以显式组合，但 mixed integrity 始终可见，不能产生 complete evidence。Batch、byte 与
+record budget 作用于整个组合命令，而不是分别作用于每个 `--input`。
+
+`apolysis-accountability` 会把这些 typed source record 纯函数式折叠为恰好一份 Agent
+Observation Record。Agent Observation Summary 保持 Evidence State、Collector Health 与
+Review State 相互独立。缺失 lifecycle、不支持的 outcome、diagnostic、Observation Gap、未知
+record 与 source-integrity finding 会保留为可查询限制；mixed Agent Run、损坏 storage、非法
+lifecycle 顺序、重复 canonical observation、不兼容 schema 与 content-policy violation 会
+fail closed。自由文本 Finding reason 与 Gap detail 会 canonicalize，而不是复制到派生 artifact。
+Complete evidence 要求完整的当前 v1 operation/source/outcome capability contract。Partial 或
+伪造 manifest 与无法解析的 Finding reference 会作为 typed issue 保留，不能成为 complete。
+只有携带 canonical generation-based relation reason 与完整稳定 tuple 的 post-activation kernel
+observation 才能进入 Exact Runtime Identity。
+
+`apolysis run project --input <path> [--input <path> ...] --output <path>` 是该 projection
+的非特权 adapter。它通过同目录私有 temporary file 写入确定性 JSON，完成 sync 后原子发布，
+并拒绝 output alias 任何 active 或 rotated input。该命令是 saved-run projection，不是 live
+tail、remote query API 或交互式 viewer。
+
 Viewer 提供：
 
 - run inventory 与 summary；
@@ -279,6 +302,20 @@ timeline 仍可写时记录 `failed`。Daemon 恢复时，缺少 `stopped` 或 `
 `checkpoint` 实例会得到一次 `collector_restart` Observation Gap 和一个恢复生成的 failed
 terminal；重复恢复不会重复写入。Standalone timeline 缺少 terminal 时仍是不完整证据，即使
 原进程已无法补写 gap。
+
+Agent Observation Summary 暴露三条相互独立的结论：
+
+- `evidence_state` 为 `complete`、`active`、`incomplete`、`failed` 或 `indeterminate`；
+- `collector_health` 为 `healthy`、`degraded`、`failed` 或 `unknown`；
+- `review_state` 为 `requires_review`、`no_findings_reported` 或 `indeterminate`。
+
+Complete evidence 要求存在一份兼容的 content-off capability manifest、合法的 started 到正常
+terminal lifecycle、至少一条受支持 Runtime Observation，并且没有 loss、gap、diagnostic、
+integrity 或 capability issue。Active 或 failed lifecycle state 必须显式保留。Mixed source
+integrity 与未知增量 record type 为 indeterminate。Finding 只改变 review state，不改写
+evidence completeness。`late_attach` 的 count 1 只增加 unknown-history-boundary count，不增加
+known-missing-event count。Mixed Agent Run、格式错误或不兼容 record、content-policy violation、
+非法 lifecycle 顺序、重复 canonical observation 与冲突的 Exact Runtime Identity 都 fail closed。
 
 Consumer 忽略未知的增量 field。不兼容的 ABI 或 schema change 必须使用新版本并显式 decode
 failure，不能 best-effort 误解。
@@ -361,12 +398,15 @@ Implemented today：
   per-cgroup operation gap counter、脱敏、lifecycle checkpoint/terminal 以及 health/gap
   diagnostic；
 - `apolysis-cli`：fixture/live observation、托管 Agent launch、通过 registration 或 discovery
-  完成的 protected existing-process attach、可选 Codex intent correlation、visibility 与
-  verification command；
+  完成的 protected existing-process attach、非特权 saved-run projection、可选 Codex intent
+  correlation、visibility 与 verification command；
 - `apolysis-core`：当前 JSONL vocabulary、record type、版本化 Collector Capability
-  manifest 与 collector lifecycle schema；
-- `apolysis-store`：rotation 与可选本地 hash-chain envelope；
-- `apolysis-accountability`：可选声明意图对比与面向复查的 finding；
+  manifest 与 collector lifecycle schema，包括由 producer 与 projection 共同消费的唯一
+  lifecycle vocabulary 和完整 AuditObserver v1 operation/source/outcome contract；
+- `apolysis-store`：rotation、可选本地 hash-chain envelope，以及读取 plain/rotated 或 verified
+  saved run 的有界 stable-snapshot reader；
+- `apolysis-accountability`：纯 Agent Observation Record projection、相互独立的 summary
+  axis、可选声明意图对比与面向复查的 finding；
 - `apolysis-kubernetes` 与 `apolysis-visibility`：有界 runtime metadata 与 visibility
   boundary assessment；
 - `apolysis-daemon`：long-lived observer、有界 queue、本地 socket、runtime registration
@@ -377,7 +417,8 @@ start 同步到稳定存储；对 protected existing-process attach，它会先�
 `late_attach` boundary。选定文件操作与 network connect 已具备有界 entry/exit outcome 语义，
 daemon 会在显式移除 scope 与正常关闭时把这些配对 gap 持久化到所属 Agent Run。单次运行内
 稳定的 scope/process generation、周期累计 lifecycle checkpoint、显式 terminal reason 与
-restart-gap recovery 已实现。Saved-run viewer 和有界 Kubernetes Beta 仍是 target。
+restart-gap recovery 与可查询 saved-run projection 已实现。交互式 saved-run viewer 和有界
+Kubernetes Beta 仍是 target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃
@@ -385,6 +426,8 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 
 ## 13. 限制
 
+- L2 是有界、本地、single-Agent-Run JSON projection，不是 L3 交互式 viewer、live tail、
+  cross-run search 或中央 query plane。
 - eBPF 看到 kernel/runtime operation，看不到逻辑推理或隐藏的 remote provider state。
 - Relative path、fd-relative operation、namespace、overlay 与 guest runtime 需要显式解析和
   capability limit。
