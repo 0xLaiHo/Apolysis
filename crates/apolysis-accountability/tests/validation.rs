@@ -121,6 +121,293 @@ fn validator_accepts_explicit_unresolved_findings_and_rejects_hidden_dangling_re
 }
 
 #[test]
+fn validator_rebuilds_runtime_binding_support_and_accepts_old_records_without_the_additive_field() {
+    let resolved = record_with_runtime_binding_finding();
+    assert!(validate_agent_observation_record_v1(&resolved).is_ok());
+
+    let mut mismatched_runtime = resolved.clone();
+    mismatched_runtime.findings[0].runtime.cgroup_id = Some(910);
+    assert_eq!(
+        validate_agent_observation_record_v1(&mismatched_runtime),
+        Err(AgentObservationRecordValidationError::InvalidFindingReference)
+    );
+
+    let mut late_support = resolved.clone();
+    late_support.runtime_bindings[0].source_ordinal = 99;
+    assert_eq!(
+        validate_agent_observation_record_v1(&late_support),
+        Err(AgentObservationRecordValidationError::InvalidFindingReference)
+    );
+
+    let mut terminal_only = serde_json::to_value(resolved).expect("serialize projected record");
+    terminal_only["runtime_bindings"][0]["record_type"] = json!("runtime_binding_retired");
+    let terminal_only: AgentObservationRecord =
+        serde_json::from_value(terminal_only).expect("deserialize terminal-only record");
+    assert_eq!(
+        validate_agent_observation_record_v1(&terminal_only),
+        Err(AgentObservationRecordValidationError::InvalidRuntimeBinding)
+    );
+
+    let mut old_value = serde_json::to_value(complete_record()).expect("serialize old record");
+    old_value
+        .as_object_mut()
+        .expect("record object")
+        .remove("runtime_bindings");
+    let old_record: AgentObservationRecord =
+        serde_json::from_value(old_value).expect("deserialize pre-field AOR v1");
+    assert!(old_record.runtime_bindings.is_empty());
+    assert!(validate_agent_observation_record_v1(&old_record).is_ok());
+}
+
+#[test]
+fn validator_rejects_runtime_binding_suspension_without_a_source_gap() {
+    let mut record = runtime_suspension_record("docker");
+    record.observation_gaps.clear();
+    record
+        .issues
+        .retain(|issue| issue.code != ProjectionIssueCode::ObservationGap);
+    record.summary.observation_gap_record_count = 0;
+    record.summary.gap_kind_counts.clear();
+
+    assert_eq!(
+        validate_agent_observation_record_v1(&record),
+        Err(AgentObservationRecordValidationError::InvalidRuntimeBinding)
+    );
+}
+
+#[test]
+fn validator_rejects_runtime_binding_suspension_with_a_different_source_gap() {
+    let record = runtime_suspension_record("docker");
+    let mut value = serde_json::to_value(record).expect("serialize runtime suspension AOR");
+    value["observation_gaps"][0]["runtime_source"] = json!("containerd");
+    let wrong_source =
+        serde_json::from_value(value).expect("deserialize source-qualified runtime gap");
+
+    assert_eq!(
+        validate_agent_observation_record_v1(&wrong_source),
+        Err(AgentObservationRecordValidationError::InvalidRuntimeBinding)
+    );
+}
+
+#[test]
+fn validator_rejects_reusing_one_runtime_source_gap_for_two_suspensions() {
+    let record = runtime_suspension_record("docker");
+    let mut value = serde_json::to_value(record).expect("serialize runtime suspension AOR");
+    let mut observed = value["runtime_bindings"][0].clone();
+    observed["source_ordinal"] = json!(5);
+    observed["workload_id"] =
+        json!("1111111111111111111111111111111111111111111111111111111111111111");
+    observed["start_marker"] = json!("2026-08-11T01:02:04.000000000Z");
+    observed["init_process_start_time_ticks"] = json!(124);
+    observed["cgroup_id"] = json!(910);
+    let mut suspended = observed.clone();
+    suspended["source_ordinal"] = json!(6);
+    suspended["record_type"] = json!("runtime_binding_suspended");
+    value["runtime_bindings"]
+        .as_array_mut()
+        .expect("runtime binding array")
+        .extend([observed, suspended]);
+    let reused_credit = serde_json::from_value(value).expect("deserialize repeated suspension AOR");
+
+    assert_eq!(
+        validate_agent_observation_record_v1(&reused_credit),
+        Err(AgentObservationRecordValidationError::InvalidRuntimeBinding)
+    );
+}
+
+#[test]
+fn validator_does_not_treat_daemon_restart_as_a_suspension_credit() {
+    let agent_run_id = "run-runtime-restart-validation";
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1_000),
+        runtime_binding(agent_run_id, "docker", "runtime_binding_observed"),
+        runtime_metadata_gap(agent_run_id, "docker", "daemon_restart", 1),
+        runtime_binding(agent_run_id, "docker", "runtime_binding_retired"),
+    ])])
+    .expect("project legal daemon-restart retirement fixture");
+    let mut value = serde_json::to_value(record).expect("serialize daemon-restart AOR");
+    value["runtime_bindings"][1]["record_type"] = json!("runtime_binding_suspended");
+    let invalid_suspension =
+        serde_json::from_value(value).expect("deserialize daemon-restart suspension AOR");
+
+    assert_eq!(
+        validate_agent_observation_record_v1(&invalid_suspension),
+        Err(AgentObservationRecordValidationError::InvalidRuntimeBinding)
+    );
+}
+
+#[test]
+fn validator_accepts_one_prior_same_source_gap_for_one_suspension() {
+    let record = runtime_suspension_record("docker");
+
+    assert_eq!(
+        record.observation_gaps[0].runtime_source.as_deref(),
+        Some("docker")
+    );
+    assert_eq!(
+        record.observation_gaps[0].runtime_reason.as_deref(),
+        Some("socket_unavailable")
+    );
+    assert!(validate_agent_observation_record_v1(&record).is_ok());
+}
+
+#[test]
+fn validator_rejects_a_runtime_source_gap_after_the_suspension() {
+    let mut record = runtime_suspension_record("docker");
+    record.observation_gaps[0].source_ordinal = 5;
+    record
+        .issues
+        .iter_mut()
+        .find(|issue| issue.code == ProjectionIssueCode::ObservationGap)
+        .expect("runtime-gap issue")
+        .source_ordinal = Some(5);
+
+    assert_eq!(
+        validate_agent_observation_record_v1(&record),
+        Err(AgentObservationRecordValidationError::InvalidRuntimeBinding)
+    );
+}
+
+#[test]
+fn validator_rejects_a_runtime_source_gap_with_a_non_unit_count() {
+    let mut record = runtime_suspension_record("docker");
+    record.observation_gaps[0].count = 2;
+    record
+        .issues
+        .iter_mut()
+        .find(|issue| issue.code == ProjectionIssueCode::ObservationGap)
+        .expect("runtime-gap issue")
+        .count = 2;
+
+    assert!(validate_agent_observation_record_v1(&record).is_err());
+}
+
+#[test]
+fn validator_reads_legacy_runtime_gaps_but_never_uses_missing_metadata_as_credit() {
+    let suspension = runtime_suspension_record("docker");
+    let mut suspension_value =
+        serde_json::to_value(suspension).expect("serialize runtime suspension AOR");
+    let suspension_gap = suspension_value["observation_gaps"][0]
+        .as_object_mut()
+        .expect("runtime gap object");
+    suspension_gap.remove("runtime_source");
+    suspension_gap.remove("runtime_reason");
+    let legacy_suspension =
+        serde_json::from_value(suspension_value).expect("read legacy runtime suspension AOR");
+    assert_eq!(
+        validate_agent_observation_record_v1(&legacy_suspension),
+        Err(AgentObservationRecordValidationError::InvalidRuntimeBinding)
+    );
+
+    let retirement = runtime_retirement_record("daemon_restart");
+    let mut retirement_value =
+        serde_json::to_value(retirement).expect("serialize runtime retirement AOR");
+    let retirement_gap = retirement_value["observation_gaps"][0]
+        .as_object_mut()
+        .expect("runtime gap object");
+    retirement_gap.remove("runtime_source");
+    retirement_gap.remove("runtime_reason");
+    let legacy_retirement =
+        serde_json::from_value(retirement_value).expect("read legacy runtime retirement AOR");
+    assert!(validate_agent_observation_record_v1(&legacy_retirement).is_ok());
+}
+
+#[test]
+fn validator_rejects_partial_unknown_or_private_runtime_gap_metadata() {
+    let valid = runtime_retirement_record("daemon_restart");
+    for mutate in [
+        |value: &mut Value| {
+            value["observation_gaps"][0]
+                .as_object_mut()
+                .expect("runtime gap object")
+                .remove("runtime_source");
+        },
+        |value: &mut Value| {
+            value["observation_gaps"][0]
+                .as_object_mut()
+                .expect("runtime gap object")
+                .remove("runtime_reason");
+        },
+        |value: &mut Value| {
+            value["observation_gaps"][0]["runtime_source"] = json!("unknown_runtime");
+        },
+        |value: &mut Value| {
+            value["observation_gaps"][0]["runtime_reason"] = json!("backend_timeout");
+        },
+        |value: &mut Value| {
+            value["observation_gaps"][0]["runtime_source"] = json!("/run/private.sock");
+        },
+        |value: &mut Value| {
+            value["observation_gaps"][0]["runtime_reason"] =
+                json!("socket_unavailable:/run/private.sock");
+        },
+    ] {
+        let mut value = serde_json::to_value(valid.clone()).expect("serialize runtime gap AOR");
+        mutate(&mut value);
+        let record: AgentObservationRecord =
+            serde_json::from_value(value).expect("deserialize malformed runtime gap metadata");
+        assert_eq!(
+            validate_agent_observation_record_v1(&record),
+            Err(AgentObservationRecordValidationError::InvalidObservationGap)
+        );
+    }
+}
+
+#[test]
+fn validator_rejects_runtime_gap_metadata_on_an_unrelated_gap() {
+    let mut value = serde_json::to_value(gap_record()).expect("serialize observation-gap AOR");
+    value["observation_gaps"][0]["runtime_source"] = json!("docker");
+    value["observation_gaps"][0]["runtime_reason"] = json!("socket_unavailable");
+    let record = serde_json::from_value(value).expect("deserialize unrelated gap metadata");
+
+    assert_eq!(
+        validate_agent_observation_record_v1(&record),
+        Err(AgentObservationRecordValidationError::InvalidObservationGap)
+    );
+}
+
+#[test]
+fn validator_preserves_legal_restart_transition_and_inventory_sequences() {
+    let agent_run_id = "run-runtime-sequence-validation";
+    let observed = runtime_binding(agent_run_id, "docker", "runtime_binding_observed");
+    let retired = runtime_binding(agent_run_id, "docker", "runtime_binding_retired");
+
+    let daemon_restart = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1_000),
+        observed.clone(),
+        runtime_metadata_gap(agent_run_id, "docker", "daemon_restart", 1),
+        retired.clone(),
+        observed.clone(),
+    ])])
+    .expect("project legal daemon-restart sequence");
+
+    let mut replacement = observed.clone();
+    replacement["start_marker"] = json!("2026-08-11T01:02:04.000000000Z");
+    replacement["init_process_start_time_ticks"] = json!(124);
+    replacement["cgroup_id"] = json!(910);
+    let identity_transition = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1_000),
+        observed.clone(),
+        runtime_metadata_gap(agent_run_id, "docker", "identity_transition", 1),
+        retired.clone(),
+        replacement,
+    ])])
+    .expect("project legal identity-transition sequence");
+
+    let complete_inventory = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1_000),
+        observed.clone(),
+        retired,
+        observed,
+    ])])
+    .expect("project legal complete-inventory retire and reobserve sequence");
+
+    for record in [daemon_restart, identity_transition, complete_inventory] {
+        assert!(validate_agent_observation_record_v1(&record).is_ok());
+    }
+}
+
+#[test]
 fn validator_accepts_legitimate_three_axis_states_and_diagnostic_ambiguity() {
     for record in [
         complete_record(),
@@ -534,6 +821,104 @@ fn record_with_finding(evidence_ref: &str) -> AgentObservationRecord {
         }),
     ])])
     .expect("Agent Observation Record with Finding fixture")
+}
+
+fn record_with_runtime_binding_finding() -> AgentObservationRecord {
+    let agent_run_id = "run-runtime-binding-validation";
+    let workload_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1_000),
+        lifecycle(agent_run_id, 1_001, "started", "healthy", Value::Null),
+        network_observation(agent_run_id, 1_002),
+        json!({
+            "record_type": "runtime_binding_observed",
+            "schema_version": 1,
+            "agent_run_id": agent_run_id,
+            "adapter": "docker",
+            "workload_id": workload_id,
+            "start_marker": "2026-08-11T01:02:03.000000000Z",
+            "host_boot_id": "82b46386-b87a-4d86-93f6-232bb04c37fb",
+            "init_process_start_time_ticks": 123,
+            "cgroup_device": 7,
+            "cgroup_id": 909,
+            "runtime_handler": "runc",
+        }),
+        json!({
+            "record_type": "accountability_finding",
+            "schema_version": 1,
+            "session_id": agent_run_id,
+            "kind": "missing_intent",
+            "decision": "review",
+            "reason": "observed side effect has no matching declared intent",
+            "evidence_ref": format!("runtime_binding:{workload_id}"),
+            "runtime": {
+                "runtime": "docker",
+                "container_id": workload_id,
+                "pod_uid": null,
+                "cgroup_id": 909,
+            },
+            "evidence_boundary": "host_boundary",
+        }),
+        lifecycle(
+            agent_run_id,
+            1_003,
+            "stopped",
+            "healthy",
+            json!("agent_exited"),
+        ),
+    ])])
+    .expect("project runtime binding Finding support")
+}
+
+fn runtime_suspension_record(gap_source: &str) -> AgentObservationRecord {
+    let agent_run_id = "run-runtime-suspension-validation";
+    project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1_000),
+        runtime_binding(agent_run_id, "docker", "runtime_binding_observed"),
+        runtime_metadata_gap(agent_run_id, gap_source, "socket_unavailable", 1),
+        runtime_binding(agent_run_id, "docker", "runtime_binding_suspended"),
+    ])])
+    .expect("project source-qualified runtime suspension fixture")
+}
+
+fn runtime_retirement_record(reason: &str) -> AgentObservationRecord {
+    let agent_run_id = "run-runtime-retirement-validation";
+    project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1_000),
+        runtime_binding(agent_run_id, "docker", "runtime_binding_observed"),
+        runtime_metadata_gap(agent_run_id, "docker", reason, 1),
+        runtime_binding(agent_run_id, "docker", "runtime_binding_retired"),
+    ])])
+    .expect("project source-qualified runtime retirement fixture")
+}
+
+fn runtime_binding(agent_run_id: &str, adapter: &str, record_type: &str) -> Value {
+    json!({
+        "record_type": record_type,
+        "schema_version": 1,
+        "agent_run_id": agent_run_id,
+        "adapter": adapter,
+        "workload_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "start_marker": "2026-08-11T01:02:03.000000000Z",
+        "host_boot_id": "82b46386-b87a-4d86-93f6-232bb04c37fb",
+        "init_process_start_time_ticks": 123,
+        "cgroup_device": 7,
+        "cgroup_id": 909,
+        "runtime_handler": "runc",
+    })
+}
+
+fn runtime_metadata_gap(agent_run_id: &str, source: &str, reason: &str, count: u64) -> Value {
+    json!({
+        "record_type": "observation_gap",
+        "schema_version": 1,
+        "timestamp_unix_ms": 1_001,
+        "agent_run_id": agent_run_id,
+        "operation": "runtime_metadata",
+        "kind": "runtime_metadata_unavailable",
+        "count": count,
+        "detail": format!("source={source},reason={reason}"),
+    })
 }
 
 fn active_record() -> AgentObservationRecord {

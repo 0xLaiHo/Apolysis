@@ -3,8 +3,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use apolysis_accountability::AdapterKind;
 use apolysis_accountability::{ActionClass, SessionIntent};
-use apolysis_daemon::{scope_channel, DaemonConfig, DaemonState, ScopeOperation, ScopeRequest};
+use apolysis_daemon::{
+    scope_channel, CgroupIdentity, DaemonConfig, DaemonState, RuntimeBinding, RuntimeInventory,
+    RuntimeWorkloadIdentity, ScopeOperation, ScopeRequest,
+};
 
 #[tokio::test]
 async fn observer_rejection_does_not_publish_cgroup_ownership() {
@@ -79,7 +83,11 @@ async fn closing_a_session_removes_its_observer_scope() {
     assert_eq!(state.session_for_cgroup(61).await, None);
     assert_eq!(
         *operations.lock().unwrap(),
-        vec![ScopeOperation::Track, ScopeOperation::Untrack]
+        vec![
+            ScopeOperation::Track,
+            ScopeOperation::Untrack,
+            ScopeOperation::CloseAgentRun,
+        ]
     );
 
     drop(state);
@@ -108,6 +116,61 @@ async fn restart_restores_persisted_cgroup_ownership() {
         Some("restart-session")
     );
     assert_eq!(restarted.tracked_cgroups().await, vec![71]);
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn runtime_binding_tracks_scope_with_verified_container_identity() {
+    let config = config("runtime-container-context");
+    let observed_container_ids = Arc::new(Mutex::new(Vec::new()));
+    let (scope, mut receiver) = scope_channel(4);
+    let observed = Arc::clone(&observed_container_ids);
+    let worker = tokio::spawn(async move {
+        while let Some(request) = receiver.recv().await {
+            observed
+                .lock()
+                .unwrap()
+                .push(request.runtime_container_id().map(str::to_string));
+            request.complete(Ok(()));
+        }
+    });
+    let state = DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state");
+    state
+        .register(intent("runtime-agent-run"), now_ms())
+        .await
+        .expect("register Agent Run");
+    state
+        .reconcile_runtime_inventory(RuntimeInventory::new(
+            AdapterKind::Docker,
+            vec![RuntimeBinding {
+                agent_run_id: "runtime-agent-run".to_string(),
+                identity: RuntimeWorkloadIdentity {
+                    adapter: AdapterKind::Docker,
+                    workload_id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                        .to_string(),
+                    start_marker: "2026-08-11T01:02:03Z".to_string(),
+                    host_boot_id: "82b46386-b87a-4d86-93f6-232bb04c37fb".to_string(),
+                    init_process_start_time_ticks: 42,
+                    cgroup: CgroupIdentity {
+                        device: 7,
+                        inode: 808,
+                    },
+                },
+                runtime_handler: Some("runc".to_string()),
+            }],
+        ))
+        .await
+        .expect("reconcile runtime inventory");
+
+    assert_eq!(
+        *observed_container_ids.lock().unwrap(),
+        vec![Some(
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string()
+        )]
+    );
+
+    drop(state);
+    worker.abort();
     cleanup(&config);
 }
 

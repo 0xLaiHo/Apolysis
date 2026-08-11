@@ -18,10 +18,11 @@ use tokio::sync::{oneshot, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::{
-    render_prometheus_metrics, run_observer_runtime, run_runtime_adapter, scope_channel,
-    ContainerdCriRuntimeAdapter, CriRuntimeClient, DaemonConfig, DaemonState, DockerEngineClient,
-    DockerEnginePollingRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
-    RetentionError, RuntimeAdapterSummary,
+    render_prometheus_metrics, run_observer_runtime, run_runtime_adapter,
+    run_runtime_inventory_adapter, scope_channel, ContainerdCriRuntimeAdapter, CriRuntimeClient,
+    DaemonConfig, DaemonState, DockerEngineClient, DockerEnginePollingRuntimeAdapter,
+    KubernetesCliClient, KubernetesCliRuntimeAdapter, RetentionError, RuntimeAdapterSummary,
+    RuntimeSourceGapReason,
 };
 
 pub const DAEMON_SCHEMA_V1: u32 = 1;
@@ -43,6 +44,8 @@ pub enum DaemonResponse {
     Session {
         schema_version: u32,
         session: Option<SessionState>,
+        #[serde(default)]
+        runtime_bindings: Vec<crate::RuntimeBinding>,
     },
     SessionList {
         schema_version: u32,
@@ -439,7 +442,7 @@ fn start_runtime_adapters(
                 scan_interval,
                 seen_capacity,
             );
-            run_runtime_adapter(adapter, state, receiver).await
+            run_runtime_inventory_adapter(adapter, state, receiver).await
         }));
     }
 
@@ -461,7 +464,7 @@ fn start_runtime_adapters(
                 scan_interval,
                 seen_capacity,
             ) {
-                Ok(adapter) => run_runtime_adapter(adapter, state, receiver).await,
+                Ok(adapter) => run_runtime_inventory_adapter(adapter, state, receiver).await,
                 Err(error) => degraded_summary(state, AdapterKind::Containerd, error).await,
             }
         }));
@@ -485,7 +488,7 @@ fn start_runtime_adapters(
                 scan_interval,
                 seen_capacity,
             ) {
-                Ok(adapter) => run_runtime_adapter(adapter, state, receiver).await,
+                Ok(adapter) => run_runtime_inventory_adapter(adapter, state, receiver).await,
                 Err(error) => degraded_summary(state, AdapterKind::K3sContainerd, error).await,
             }
         }));
@@ -525,10 +528,20 @@ fn start_runtime_adapters(
 async fn degraded_summary(
     state: Arc<DaemonState>,
     adapter: AdapterKind,
-    error: String,
+    _error: String,
 ) -> RuntimeAdapterSummary {
-    eprintln!("apolysisd: runtime adapter unavailable: {error}");
-    state.set_adapter(adapter, ComponentState::Degraded).await;
+    eprintln!(
+        "apolysisd: runtime inventory adapter={adapter:?} code=constructor_failed reason=inventory_invalid"
+    );
+    if let Err(_gap_error) = state
+        .runtime_source_unavailable(adapter, RuntimeSourceGapReason::InventoryInvalid)
+        .await
+    {
+        eprintln!(
+            "apolysisd: runtime inventory adapter={adapter:?} code=gap_persist_failed reason=inventory_invalid"
+        );
+        state.set_adapter(adapter, ComponentState::Degraded).await;
+    }
     RuntimeAdapterSummary {
         adapter,
         discovered: 0,
@@ -594,10 +607,16 @@ async fn dispatch(request: IntentRequest, state: &DaemonState, now_unix_ms: u64)
         IntentRequest::Query {
             tenant_id,
             session_id,
-        } => DaemonResponse::Session {
-            schema_version: DAEMON_SCHEMA_V1,
-            session: state.query_for_tenant(&session_id, &tenant_id).await,
-        },
+        } => {
+            let (session, runtime_bindings) = state
+                .query_with_runtime_bindings_for_tenant(&session_id, &tenant_id)
+                .await;
+            DaemonResponse::Session {
+                schema_version: DAEMON_SCHEMA_V1,
+                session,
+                runtime_bindings,
+            }
+        }
         IntentRequest::ListSessions {
             tenant_id,
             retention_tier,

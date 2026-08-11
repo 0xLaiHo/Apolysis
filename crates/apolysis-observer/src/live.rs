@@ -11,10 +11,11 @@ use std::process::ExitStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use apolysis_core::{
-    actors, new_collector_instance_id, resources, CanonicalEvent, CollectorFailureReason,
-    CollectorLifecycleCounters, CollectorLifecycleRecord, CollectorNormalStopReason, EventSource,
-    EventType, JsonLine, ObservationGap, ObservationGapKind, ObserverDiagnostic,
-    ObserverDiagnosticKind, OperationOutcome, OperationResult, RawKernelEvent,
+    actors, new_collector_instance_id, resources, CanonicalEvent, CollectorCapabilityManifest,
+    CollectorFailureReason, CollectorLifecycleCounters, CollectorLifecycleRecord,
+    CollectorNormalStopReason, EventSource, EventType, JsonLine, ObservationGap,
+    ObservationGapKind, ObserverDiagnostic, ObserverDiagnosticKind, OperationOutcome,
+    OperationResult, RawKernelEvent,
 };
 use apolysis_store::JsonlRotationPolicy;
 use apolysis_store::JsonlStore;
@@ -1069,6 +1070,7 @@ pub struct DaemonObserver {
     ebpf: Ebpf,
     ring: AsyncFd<RingBuf<MapData>>,
     decoder: ObserverBatchDecoder,
+    loader_plan: AyaLoaderPlan,
     scope_generations: ScopeGenerationSequence,
     active_scope_generations: BTreeMap<u64, ScopeGeneration>,
 }
@@ -1133,9 +1135,23 @@ impl DaemonObserver {
             ebpf,
             ring,
             decoder: ObserverBatchDecoder::capture()?,
+            loader_plan,
             scope_generations: ScopeGenerationSequence::default(),
             active_scope_generations: BTreeMap::new(),
         })
+    }
+
+    /// Describe the capabilities of the tracepoints attached by this daemon observer.
+    pub fn capability_manifest(
+        &self,
+        agent_run_id: &str,
+        cgroup_id: u64,
+    ) -> CollectorCapabilityManifest {
+        audit_observer_capability_manifest(
+            agent_run_id,
+            &LiveScope::Cgroup(cgroup_id),
+            &self.loader_plan,
+        )
     }
 
     pub fn track_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeGeneration, String> {

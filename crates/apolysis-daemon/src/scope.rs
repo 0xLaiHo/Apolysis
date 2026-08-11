@@ -7,7 +7,15 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScopeOperation {
     Track,
+    RefreshContext,
     Untrack,
+    CloseAgentRun,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScopeCompletion {
+    Applied,
+    AgentRunClosePersisted,
 }
 
 pub struct ScopeRequest {
@@ -15,8 +23,9 @@ pub struct ScopeRequest {
     cgroup_id: u64,
     agent_run_id: Option<String>,
     agent_intent: Option<SessionIntent>,
+    runtime_container_id: Option<String>,
     failure_reason: Option<CollectorFailureReason>,
-    response: oneshot::Sender<Result<(), String>>,
+    response: oneshot::Sender<Result<ScopeCompletion, String>>,
 }
 
 impl ScopeRequest {
@@ -36,12 +45,24 @@ impl ScopeRequest {
         self.agent_intent.as_ref()
     }
 
+    pub fn runtime_container_id(&self) -> Option<&str> {
+        self.runtime_container_id.as_deref()
+    }
+
     pub fn failure_reason(&self) -> Option<CollectorFailureReason> {
         self.failure_reason
     }
 
     pub fn complete(self, result: Result<(), String>) {
-        let _ = self.response.send(result);
+        let _ = self
+            .response
+            .send(result.map(|()| ScopeCompletion::Applied));
+    }
+
+    pub(crate) fn complete_agent_run_close(self, result: Result<(), String>) {
+        let _ = self
+            .response
+            .send(result.map(|()| ScopeCompletion::AgentRunClosePersisted));
     }
 }
 
@@ -52,12 +73,12 @@ pub struct ScopeController {
 
 impl ScopeController {
     pub async fn track(&self, cgroup_id: u64) -> Result<(), String> {
-        self.apply(ScopeOperation::Track, cgroup_id, None, None, None)
+        self.apply(ScopeOperation::Track, cgroup_id, None, None, None, None)
             .await
     }
 
     pub async fn untrack(&self, cgroup_id: u64) -> Result<(), String> {
-        self.apply(ScopeOperation::Untrack, cgroup_id, None, None, None)
+        self.apply(ScopeOperation::Untrack, cgroup_id, None, None, None, None)
             .await
     }
 
@@ -72,6 +93,25 @@ impl ScopeController {
             cgroup_id,
             Some(agent_run_id),
             intent,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn track_runtime_agent_run(
+        &self,
+        agent_run_id: &str,
+        intent: Option<&SessionIntent>,
+        cgroup_id: u64,
+        container_id: &str,
+    ) -> Result<(), String> {
+        self.apply(
+            ScopeOperation::Track,
+            cgroup_id,
+            Some(agent_run_id),
+            intent,
+            Some(container_id),
             None,
         )
         .await
@@ -88,6 +128,43 @@ impl ScopeController {
             cgroup_id,
             Some(agent_run_id),
             intent,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn untrack_runtime_agent_run(
+        &self,
+        agent_run_id: &str,
+        intent: Option<&SessionIntent>,
+        cgroup_id: u64,
+        container_id: &str,
+    ) -> Result<(), String> {
+        self.apply(
+            ScopeOperation::Untrack,
+            cgroup_id,
+            Some(agent_run_id),
+            intent,
+            Some(container_id),
+            None,
+        )
+        .await
+    }
+
+    pub async fn refresh_runtime_agent_run(
+        &self,
+        agent_run_id: &str,
+        intent: Option<&SessionIntent>,
+        cgroup_id: u64,
+        container_id: &str,
+    ) -> Result<(), String> {
+        self.apply(
+            ScopeOperation::RefreshContext,
+            cgroup_id,
+            Some(agent_run_id),
+            intent,
+            Some(container_id),
             None,
         )
         .await
@@ -107,6 +184,7 @@ impl ScopeController {
                 cgroup_id,
                 agent_run_id: Some(agent_run_id.to_string()),
                 agent_intent: intent.cloned(),
+                runtime_container_id: None,
                 failure_reason: Some(reason),
                 response,
             })
@@ -115,6 +193,26 @@ impl ScopeController {
         receiver
             .await
             .map_err(|_| "observer scope worker stopped before responding".to_string())?
+            .map(|_| ())
+    }
+
+    pub(crate) async fn close_agent_run(&self, agent_run_id: &str) -> Result<bool, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .try_send(ScopeRequest {
+                operation: ScopeOperation::CloseAgentRun,
+                cgroup_id: 0,
+                agent_run_id: Some(agent_run_id.to_string()),
+                agent_intent: None,
+                runtime_container_id: None,
+                failure_reason: None,
+                response,
+            })
+            .map_err(|error| format!("observer scope command queue unavailable: {error}"))?;
+        receiver
+            .await
+            .map_err(|_| "observer scope worker stopped before responding".to_string())?
+            .map(|completion| completion == ScopeCompletion::AgentRunClosePersisted)
     }
 
     async fn apply(
@@ -123,6 +221,7 @@ impl ScopeController {
         cgroup_id: u64,
         agent_run_id: Option<&str>,
         agent_intent: Option<&SessionIntent>,
+        runtime_container_id: Option<&str>,
         failure_reason: Option<CollectorFailureReason>,
     ) -> Result<(), String> {
         let (response, receiver) = oneshot::channel();
@@ -132,6 +231,7 @@ impl ScopeController {
                 cgroup_id,
                 agent_run_id: agent_run_id.map(str::to_owned),
                 agent_intent: agent_intent.cloned(),
+                runtime_container_id: runtime_container_id.map(str::to_owned),
                 failure_reason,
                 response,
             })
@@ -139,6 +239,7 @@ impl ScopeController {
         receiver
             .await
             .map_err(|_| "observer scope worker stopped before responding".to_string())?
+            .map(|_| ())
     }
 }
 

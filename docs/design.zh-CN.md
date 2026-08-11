@@ -1,11 +1,10 @@
 # Apolysis 设计文档
 
 > [English](design.md) | 简体中文
-> 配套文档：[roadmap.zh-CN.md](roadmap.zh-CN.md)
-> 最后审查：2026-08-10
+> 最后审查：2026-08-11
 
-本文是 Apolysis 做什么、目标系统如何工作、当前已经实现什么以及产品声明止步于何处的
-唯一权威说明。交付顺序、后置项和发布门禁属于 roadmap。
+本文是唯一的详细产品文档，权威定义 Apolysis 是什么、目标系统如何工作、稳定 record 与资格
+contract、当前已经实现什么、未来方向，以及产品声明止步于何处。
 
 ## 1. 产品定义与成熟度
 
@@ -70,6 +69,29 @@ intent、多 Agent protocol 语义、远端 outcome 验证、approval 或 policy
 Exact relation 必须依赖文档化 boundary 内的稳定 runtime identity。仅使用时间、命令名、
 路径或 PID 的匹配属于 inferred。存在多个可能 owner 时关系为 ambiguous，绝不能静默升级为
 exact。
+
+共享词汇如下：
+
+| 术语 | Contract |
+| --- | --- |
+| Agent | 被观测运行时活动的自主参与者 |
+| Agent Run | Agent 及其归属 process tree 为一项声明任务工作的有界时间段 |
+| Observation Scope | 属于一次 Agent Run 的 runtime boundary |
+| Protected Attach | 对已运行 Agent 的资格化准入；不声明更早历史或 pre-anchor continuity |
+| Collection Boundary | Collector Capability 开始适用的位置；更早活动是以 gap 表示的未知历史 |
+| Runtime Identity | 区分复用与偶然匹配的稳定 process/workload identity |
+| Runtime Observation | 在 capability 与 scope 内报告的受支持 process/file/network/credential operation |
+| Operation Outcome | 在声明 source 语义内的 `attempted`、`succeeded`、`failed`、`denied`、`pending` 或 `unknown` |
+| Collector Capability | 某一环境 boundary 的版本化 operation/source/outcome 声明 |
+| Collector Health | 独立的 `healthy`、`degraded`、`failed` 或 `unknown` collector 状态 |
+| Observation Gap | 对 missing、lost、truncated、unsupported、ambiguous 或 scope 外证据边界的显式记录 |
+| Exact / Inferred / Ambiguous Relation | 稳定身份关系、相关证据支持的关系，或仍有多个合理目标的关系 |
+| Unattributed Observation | 位于 scope 内但无法负责任地进一步归属的 observation |
+| Finding | 从有界 observation 派生的可复查条件；永远不是 enforcement verdict |
+| Saved Run Viewer | 一份冻结 Agent Observation Record 的本地只读呈现；不是 evidence source |
+
+新接口与文档使用这些术语。“Session”“job”“tenant”、process name 或裸 PID 不得在公开声明中
+替代 Agent Run、Observation Scope 或 Runtime Identity。
 
 ## 4. 责任与信任边界
 
@@ -201,6 +223,88 @@ ownership。Collector restart 仍是可见 identity boundary。Lifecycle recover
 实例及其 restart gap，但不会跨越该边界声明 identity continuity。PID namespace、container、
 Pod 与 node identity 在可用时仍作为增量 attribution。
 
+#### Container runtime binding 与 recovery
+
+Docker 与 containerd attribution 消费成功、完整的 adapter inventory，而不会把 sighting stream
+直接当作权威。一个稳定 workload identity 包含 adapter、完整 workload/container ID、runtime
+start marker、host boot ID、init-process clock tick start time，以及 cgroup filesystem
+`(device,inode)` identity。PID、process/container name、timing、runtime path 与数字 cgroup ID
+都不能独立成为 Exact。
+
+相同 complete inventory 是 no-op。只有成功的 complete inventory 才能 retire 缺失 binding。
+相同 adapter/workload key 若出现不同 stable identity，就是显式 identity transition：旧 binding
+会先得到一条带 `reason=identity_transition` 的 `runtime_metadata_unavailable` gap，然后被
+retire；replacement 只有通过资格化后才能 attach。Duplicate workload key、
+冲突 cgroup identity、adapter mismatch、缺失或超限 identity field、过大 inventory 都会 fail
+closed。Socket 或 decode failure 不是 empty inventory，因此不能静默 retire，也不能保留陈旧
+Exact attribution。
+
+Runtime source 丢失会 suspend 受影响的 active binding，并在恢复前持久化 Observation Gap。
+Daemon restart 只把持久化 binding 恢复为 dormant，而不是 Exact；必须由新的 complete inventory
+重新资格化。Socket disconnect、runtime service restart 与 daemon restart 使用有界 backoff，
+不可用期间 adapter health 为 degraded，只有取得合法 inventory 后才恢复 ready。Docker、
+containerd 与 k3s-containerd 使用相同 recovery 语义；Kubernetes metadata 仍是增量信息，不能
+升级未资格化的 container binding。
+
+D1/D2 implementation 与 deterministic contract 已完成。保留的非破坏性 Docker qualification
+证明以下全部边界：
+
+- complete inventory 建立 active binding；同一完整 container ID 重启后会改变 stable identity，
+  不会继承陈旧的 PID、名称、时间或数字 cgroup attribution；
+- 受控 adapter-socket outage 会先持久化 source gap，再 suspend binding 并清除 active
+  ownership；之后只有 fresh complete inventory 才能重新 observe 该 stable binding；
+- 在同一 private state root 上创建新的私有 daemon/server lifecycle 时，replay binding 保持
+  dormant；active query attribution 恢复前必须按 `daemon_restart` gap -> retired -> observed
+  顺序完成 recovery；
+- 真实 content-off eBPF file event 携带 Exact container 与 cgroup identity，同时完成 Agent Run
+  capability manifest 与 hash chain 验证。
+
+特权 Docker/eBPF boundary 可通过 `make qualify-runtime-binding-live` 复现。Runner 以普通用户
+身份构建 BPF 与测试，把唯一测试可执行文件和 CO-RE BPF object 发布为经过校验、root-owned 的
+私有副本，并且只针对固定的本地 Docker Engine socket 调用该 exact opt-in gate。测试本身会在
+任何 Docker mutation 前检查 kernel、Docker、image、service state 与 ownership prerequisite，
+并执行 identity-bound cleanup。Skip 不等于 pass；直接对测试 binary 使用裸 `--ignored` 不属于
+该 contract。
+
+这些 gate 只资格化已保留的 Docker 行为。独立的私有 standalone-containerd boundary 可通过
+`make qualify-private-containerd-live` 复现；该目标由具备预授权 `sudo` 的非特权 checkout owner
+显式调用 `scripts/run-private-containerd-live.sh`。Runner 固定 official `crictl` v1.36.0 archive
+与 binary hash，只接受该 verified binary（或下载并校验 official archive），并要求本地 Docker
+store 已存在 pinned Alpine image。它使用 host 本地的 containerd 与 runc binary，再通过保存并
+导入该 cached image，以离线方式构建私有 workload store；资格验证期间不会拉取 workload image。
+
+Runner 进入 create-only 的 delegated user systemd scope，把 scope root process 移入私有 `init`
+child，并只启用实际存在的必需 controller，从而准备合法的 cgroup-v2 nesting。之后特权 gate
+使用 runc，并以私有 root、state、socket、plugin、CNI、CDI、NRI、image-verifier 与 `opt` path
+启动私有 containerd instance。Mount、network、UTS、IPC 与 cgroup namespace 相互隔离。Outer PID
+namespace 有意与 host 共享，使 `/proc` 能证明每个 owned process 与 cgroup generation；每个 CRI
+Pod sandbox 和 workload 的 PID namespace 仍由 runc 创建并隔离。Gate 不重启 shared service，
+不修改 shared CNI configuration 或 iptables，也不使用 shared runtime socket 或 store。
+
+保留的 private-containerd 结果证明 complete initial inventory、相同的 stable inventory，以及
+replacement workload 的 fresh full container identity 与 stable-proof generation；未变化 workload
+仍保持原 identity。受控 proxy-socket outage 会持久化 source gap、suspend active ownership，且
+reconnect 后只有 fresh complete inventory 才能再次 observe。`crictl` 可能把 CRI `startedAt`
+渲染为带 numeric UTC offset 的 local-time RFC3339Nano；adapter 会在边界严格归一化为既有
+canonical positive-decimal Unix-nanosecond marker，不持久化 offset text。
+
+Cleanup 由 proof 约束并 fail closed。Runner 只删除经过证明的私有 CRI object 及其 process/cgroup
+generation，停止私有 runtime，移除其 namespace、mount、delegated scope 与 create-new root，并
+要求这些对象全部不存在后才报告成功。执行前后都会绑定 shared Docker/containerd service state、
+PID、socket identity、cached Alpine identity 与 Docker container inventory。无法确定的私有
+cleanup 或 residue 会使 gate 失败并保留 private root；shared baseline drift 同样使 gate 失败，
+但若私有 cleanup 已被独立证明，该 root 仍可删除，因为它不是 shared-host state 的证据权威。
+
+Shared-host CRI discovery gate 若报告 `RuntimeReady=true` 但 `NetworkReady=false`，仍会在 mutation
+前 clean skip；该 skip 不算 pass。已保留的 private standalone 结果关闭了有界 D1/D2 containerd
+qualification，但不资格化 Kubernetes 或 shared containerd installation。Docker 证据不能外推到
+containerd，private-containerd 证据也不能外推到 Kubernetes。因此 containerd 与 Kubernetes
+profile 继续保持 Experimental，任何 profile 都不会因此成为 Supported。
+
+通过 systemd 实际重启 Docker/containerd service 仍属于非破坏性 D1/D2 闭环之外的额外、破坏性
+opt-in qualification。这些 gate 与 K1/VKE Kubernetes qualification 仍保持 open；它们不会使
+已保留的 Docker 或 private-containerd 证据失效。
+
 Protected attach 会把初始 process 与 thread identifier 归一化为 TGID，并要求 root 是活着的
 thread-group leader。一个 `/proc` start tick 会转换成 boot-time 半开区间
 `[start_tick * tick_ns, (start_tick + 1) * tick_ns)`。匹配的 kernel bookkeeping 可以在 seeding
@@ -231,6 +335,9 @@ Review State 相互独立。缺失 lifecycle、不支持的 outcome、diagnostic
 record 与 source-integrity finding 会保留为可查询限制；mixed Agent Run、损坏 storage、非法
 lifecycle 顺序、重复 canonical observation、不兼容 schema 与 content-policy violation 会
 fail closed。自由文本 Finding reason 与 Gap detail 会 canonicalize，而不是复制到派生 artifact。
+经过验证的 runtime-binding lifecycle fact 会按 source order 保留在 projection 中；验证会重建
+其 lifecycle，而不是把它们归约为当前 active set。
+
 Complete evidence 要求完整的当前 v1 operation/source/outcome capability contract。Partial 或
 伪造 manifest 与无法解析的 Finding reference 会作为 typed issue 保留，不能成为 complete。
 只有携带 canonical generation-based relation reason 与完整稳定 tuple 的 post-activation kernel
@@ -243,11 +350,11 @@ tail、remote query API 或交互式 viewer。
 
 `apolysis run view --input <agent-observation-record.json> --output
 <viewer.html>` 是非特权 Saved Run Viewer adapter。它只接受一份 Agent Observation Record
-v1，验证其类型、schema、summary、identity reference、source ordinal、Finding link 与状态
-一致性，然后渲染确定性的 self-contained HTML。格式错误或内部不一致的 record 会 fail
-closed，且不会替换现有 output。Reader 有界并拒绝 symlink 与非普通文件；publisher 在使用
-独占、mode 为 `0600` 的同目录 temporary file、同步文件与目录并原子 rename 前，会拒绝 output
-alias。
+v1，验证其类型、schema、summary、identity reference、source ordinal、Finding link、
+runtime-binding lifecycle 与状态一致性，然后渲染确定性的 self-contained HTML。格式错误或
+内部不一致的 record 会 fail closed，且不会替换现有 output。Reader 有界并拒绝 symlink 与非
+普通文件；publisher 在使用独占、mode 为 `0600` 的同目录 temporary file、同步文件与目录并
+原子 rename 前，会拒绝 output alias。
 
 该 HTML 是离线、只读 artifact，不依赖外部 asset 或网络。限制性 Content Security Policy
 禁用 connection 与外部 resource，每个存储值都按不可信文本渲染。Viewer 不需要 root，也不
@@ -258,16 +365,40 @@ Viewer 提供：
 - 保持 Evidence State、Collector Health 与 Review State 三个状态轴相互独立的单次 run
   summary；
 - Exact Runtime Identity roster，以及 Runtime Observation 中保留的 reported PID/PPID field；
+- 有序的 observed、retired 与 suspended runtime-binding lifecycle；
 - 有序 process、file、network 与 credential timeline；
 - 受支持的 outcome 与 attribution status；
 - collector health、loss、truncation 与 unsupported capability gap；
-- 链接到 supporting observation 的 review-oriented Finding；
+- 链接到 supporting Runtime Observation 或更早、精确匹配的 observed runtime binding 的
+  review-oriented Finding；
 - 使展示事实可追溯到冻结 record 的 source ordinal 与 record path。
 
 Agent Observation Record v1 不携带权威 parent Runtime Identity link。因此 viewer 不会从可能
 复用的数字 PID/PPID 构造 canonical process tree；它只把 identity roster 与 reported PPID
 作为已存储事实展示，不推断 parent edge。它也不会从空结果推导隐藏的 success verdict，更
 不会把三个 summary axis 合并为 clean verdict。
+
+派生的 v1 对象是一份 JSON object，永远不会追加回 timeline JSONL。Top level 是
+`record_type`、`schema_version`、`agent_run_id`、`source_integrity`、`summary`、
+`capability_manifests`、`runtime_identities`、`runtime_observations`、
+`runtime_bindings`、`collector_lifecycle`、`findings`、`observation_gaps` 与 `issues`。每个投影后
+的 source fact 携带来自权威输入顺序、从 1 开始的 `source_ordinal`。Summary 保留 typed count
+与 grouping map，不合并 Evidence State、Collector Health 与 Review State。
+
+Projection limit 为：全部 input 合计 128 MiB、每行 JSONL 1 MiB、1,000,000 条 source record、
+1,024 个数字 archive、1,024 个 input batch、每个 string 4,096 bytes、每个 array 1,024 items、
+每个 object 256 fields、value 最深 16 层。发布使用独占 mode-`0600` temporary file、file/parent
+sync 与 atomic rename；替换前拒绝 source alias 与不安全 file type。
+
+`apolysis verify hash-chain` 是只读操作。退出码 `0` 表示所有 record 与 tail 验证通过，`1`
+表示已经写出失败报告，`2` 表示命令无法运行。报告保留 verified record count、last sequence/
+hash、valid/total bytes 与有界 failure category。Middle corruption、truncated 或 corrupt tail
+都会 fail closed，不会 truncate、repair 或 quarantine 源文件。
+
+外部 log shipping 保留每条原始 JSONL line 与 record body。Vector、Fluent Bit 或其他 operator
+transport 可以在 body 外 route、buffer、compress 或 encrypt，但不会成为 schema 或 query
+authority。复制出的 daemon hash chain 在 replay 前必须验证；确认 downstream retention 前，
+本地 evidence 仍是权威。OTLP 与项目自有 exporter 保持 deferred。
 
 ### 5.5 本地 daemon 运维
 
@@ -336,6 +467,470 @@ Remote export、custody、organization authorization、object storage、跨 run 
 
 ## 6. Observation contract
 
+Timeline schema v1 是 newline-delimited JSON：每行一个完整 object，每个 object 一个
+`record_type` string；除非 field name 另行声明，timestamp 使用 Unix milliseconds；数字 ID
+使用十进制；optional field 显式输出 `null`。兼容规则是 append-only。Consumer 忽略未知 field
+与新增 record type，不依赖 object field 顺序，并使用稳定 ID 而不是 timestamp 做 join。下文
+runtime-binding lifecycle 等显式 closed sub-schema 会拒绝未知 field。删除、rename、type 或
+semantic change 需要新 schema version。Producer 在持久化前脱敏；默认
+`content_off` profile 永不写入 raw secret、argv、prompt、response、socket、path、label、
+annotation 或 tool payload。
+
+稳定 record family 是：
+
+| `record_type` | 必需 contract |
+| --- | --- |
+| `collector_capability_manifest` | Agent Run、collector/ABI identity、Observation Scope、privacy profile、有序 operation/source/outcome 声明 |
+| `collector_lifecycle` | Agent Run、不透明 collector instance、start/checkpoint/terminal state、health、stop reason、累计 loss/pending counter |
+| `event` | Agent Run、source/type/raw ID、actor/resource/action、outcome/return/errno、runtime identity field、relation status/reason |
+| `raw_kernel_event` | 带 ABI identity、有界 redacted resource/payload、outcome 与 raw event ID 的 normalization 前 kernel fact |
+| `intent` / `intent_correlation` | 可选 content-off declared intent 及其 stable-ID 或有界 executable correlation；不是 observation 必需输入 |
+| `accountability_finding` | Typed review decision、有界 canonical reason、evidence reference、runtime identity 与 evidence boundary |
+| `observation_gap` | 可能缺失或不可用证据的 typed operation、kind、count 与 bounded detail |
+| `runtime_binding_observed` / `runtime_binding_retired` / `runtime_binding_suspended` | 围绕单一 stable workload identity 的持久 Docker/containerd binding lifecycle |
+| `observer_diagnostic` | Typed bounded attach、verifier、ABI、decode、truncation、pressure、loss 或 summary diagnostic |
+| `visibility_assessment` | Runtime profile、host visibility scope、metadata/guest-collector requirement 与 bounded subject |
+
+### 6.1 Timeline JSONL wire schema v1
+
+下列表格中的每个 field 都是 wire 必需 field。`T|null` 表示 field 必须出现，但 value 可以是
+JSON `null`；其他 field 都不可为空。`u32`、`u64` 与 `u128` 是处于对应 Rust range 内的非负
+JSON integer，`i32` 与 `i64` 是有符号 JSON integer，`map<string,u64>` 是 value 为非负
+count 的 JSON object。
+
+`collector_capability_manifest` 的 shape 是：
+
+| Field | Type | Value 或含义 |
+| --- | --- | --- |
+| `record_type` | string | 常量 `collector_capability_manifest` |
+| `schema_version` | u32 | 常量 `1` |
+| `timestamp_unix_ms` | u128 | 持久化时间 |
+| `agent_run_id` | string | 所属 Agent Run |
+| `collector` | string | 常量 `apolysis_observer` |
+| `collector_version` | string | Userspace package version |
+| `kernel_abi_version` | u32 | 当前 live ABI 为 `3` |
+| `kernel_record_size` | u32 | 当前 ABI-v3 size 为 `656` |
+| `observation_scope` | enum | `process_tree` 或 `cgroup` |
+| `privacy_profile` | enum | 常量 `content_off` |
+| `capabilities` | array<object> | 有序 capability object |
+
+每个 capability object 包含必需的 `operation:string`、
+`event_sources:array<string>` 和 `outcomes:array<enum>`。Outcome value 是
+`attempted`、`succeeded`、`failed`、`denied`、`pending` 与 `unknown`。兼容的
+AuditObserver v1 manifest 必须声明下列完整 operation contract；file capability 只有包含完整
+entry/exit source set 时才有效。
+
+| Operation | Event source | Outcome |
+| --- | --- | --- |
+| `process_fork` | `sched/sched_process_fork` | `succeeded` |
+| `process_exec` | `sched/sched_process_exec`、`syscalls/sys_enter_execve`、`syscalls/sys_enter_execveat` | `succeeded`；sched source 必需 |
+| `process_exit` | `sched/sched_process_exit` | `unknown` |
+| `file_open` | `syscalls/sys_enter_openat`、`syscalls/sys_exit_openat`、`syscalls/sys_enter_openat2`、`syscalls/sys_exit_openat2` | `succeeded`、`failed`、`denied` |
+| `file_create` | file-open source 加 `syscalls/sys_enter_creat`、`syscalls/sys_exit_creat` | `succeeded`、`failed`、`denied` |
+| `file_truncate` | file-open source 加 `syscalls/sys_enter_truncate`、`syscalls/sys_exit_truncate` | `succeeded`、`failed`、`denied` |
+| `file_unlink` | `syscalls/sys_enter_unlinkat`、`syscalls/sys_exit_unlinkat` | `succeeded`、`failed`、`denied` |
+| `file_rename` | `syscalls/sys_enter_renameat2`、`syscalls/sys_exit_renameat2` | `succeeded`、`failed`、`denied` |
+| `network_connect` | `syscalls/sys_enter_connect`、`syscalls/sys_exit_connect` | `succeeded`、`failed`、`denied`、`pending` |
+| `credential_path_access` | `syscalls/sys_enter_openat`、`syscalls/sys_exit_openat`、`syscalls/sys_enter_openat2`、`syscalls/sys_exit_openat2` | `succeeded`、`failed`、`denied` |
+
+`collector_lifecycle` 的 shape 是：
+
+| Field | Type | Value 或含义 |
+| --- | --- | --- |
+| `record_type` | string | 常量 `collector_lifecycle` |
+| `schema_version` | u32 | 常量 `1` |
+| `timestamp_unix_ms` | u128 | Lifecycle 时间 |
+| `agent_run_id` | string | 所属 Agent Run |
+| `collector` | string | 常量 `apolysis_observer` |
+| `collector_instance_id` | string | 同一 process 各 run stream 共用的不透明 UUID |
+| `state` | enum | `started`、`checkpoint`、`stopped` 或 `failed` |
+| `health` | enum | `healthy`、`degraded` 或 `failed` |
+| `stop_reason` | enum|null | Start/checkpoint 为 `null`；terminal value 见下文 |
+| `counters` | object | 下列必需的累计 counter object |
+
+正常 stop reason 是 `agent_run_closed`、`daemon_shutdown`、
+`duration_elapsed`、`agent_exited` 与 `shutdown_signal`。失败 reason 是
+`attach_failure`、`verifier_failure`、`abi_mismatch`、`decode_failure`、
+`counter_read_failure`、`storage_failure`、`observer_failure`、
+`collector_restart` 与 `incomplete_terminal_flush`。Counters object 有八个必需 `u64`
+field：`global_reserve_failures`、`global_map_pressure`、
+`global_abi_mismatches`、`global_decode_failures`、`global_truncations`、
+`scope_missing_entries`、`scope_missing_exits` 与 `scope_pending`。
+`started` 必须为 `healthy`，reason 为 null，counter 为零。`checkpoint` 的 reason 为 null，且
+恰好在 persistent-loss counter 非零时为 `degraded`。`stopped` 使用正常 reason，并在存在
+persistent loss 或非零 pending 时 degraded。`failed` 的 health 为 `failed`，并使用 failure
+reason。
+
+`event` 是 canonical Runtime Observation source record：
+
+| Field | Type | Value 或含义 |
+| --- | --- | --- |
+| `record_type` | string | 常量 `event` |
+| `timestamp_unix_ms` | u128 | 观测时间 |
+| `session_id` | string | Agent Run ID；这是 legacy wire name |
+| `event_source` | enum | `manual`、`process_tree`、`kernel_tracepoint`、`uprobe` 或 `runtime_metadata` |
+| `event_type` | enum | `session_started`、`runtime_metadata`、`exec`、`file_open`、`file_create`、`file_truncate`、`file_unlink`、`file_rename`、`network_connect`、`credential_read` 或 `process_exit` |
+| `raw_event_id` | string|null | 指向 raw event 的 canonical join |
+| `pid` | u32 | 报告的 process ID |
+| `ppid` | u32 | 报告的 parent process ID |
+| `actor` | string | 有界 process、observer、runtime 或 integration actor |
+| `resource` | string | 脱敏的 target/resource identity |
+| `action` | string | Normalized action 或 metadata value |
+| `outcome` | enum|null | Capability outcome enum；不支持时为 `null` |
+| `return_value` | i64|null | Linux syscall result |
+| `errno` | i32|null | 从负 result 推导的正 errno |
+| `container_id` | string|null | Runtime container identity |
+| `cgroup_id` | string|null | Runtime cgroup identity |
+| `host_boot_id` | string|null | Collector 捕获的 boot UUID |
+| `scope_generation` | u64|null | Observer-lifetime scope generation |
+| `process_generation` | u64|null | Collector 分配的 process generation |
+| `process_start_time_ns` | u64|null | Boot-relative kernel process start time |
+| `exec_generation` | u32|null | Process-local exec generation |
+| `parent_process_generation` | u64|null | 已知 parent process generation |
+| `parent_exec_generation` | u32|null | 已知 parent exec generation |
+| `relation_status` | enum | `exact`、`inferred`、`ambiguous` 或 `unattributed` |
+| `relation_reason` | string | 稳定、有界 attribution reason |
+| `process_command` | string|null | Legacy redacted context；当前 content-off producer 输出 `null` |
+| `process_executable` | string|null | 仅允许 `executable_ref:<basename>` |
+| `process_started_at_unix_ms` | u128|null | Legacy wall-clock context，不是 `process_start_time_ns` |
+
+`raw_kernel_event` 保留 canonicalization 前的有界输入：
+
+| Field | Type | Value 或含义 |
+| --- | --- | --- |
+| `record_type` | string | 常量 `raw_kernel_event` |
+| `timestamp_unix_ms` | u128 | 观测时间 |
+| `session_id` | string | Agent Run ID |
+| `event_source` | enum | 上述 event-source enum；通常是 `kernel_tracepoint` |
+| `event_name` | string | Tracepoint 或 normalized kernel event name |
+| `event_id` | string|null | 稳定 raw-event join ID |
+| `pid` | u32 | Process ID |
+| `ppid` | u32 | Parent process ID |
+| `uid` | u32 | User ID |
+| `gid` | u32 | Group ID |
+| `comm` | string | 有界 kernel command name |
+| `resource` | string | 持久化前脱敏的 resource |
+| `action` | string | Raw action label |
+| `outcome` | enum|null | Capability outcome enum |
+| `return_value` | i64|null | Linux syscall result |
+| `errno` | i32|null | 正 errno 或 `null` |
+| `container_id` | string|null | Container identity |
+| `cgroup_id` | string|null | Cgroup identity |
+| `host_boot_id` | string|null | Boot UUID |
+| `scope_generation` | u64|null | Scope generation |
+| `process_generation` | u64|null | Process generation |
+| `process_start_time_ns` | u64|null | Boot-relative process start |
+| `exec_generation` | u32|null | Exec generation |
+| `parent_process_generation` | u64|null | Parent process generation |
+| `parent_exec_generation` | u32|null | Parent exec generation |
+| `relation_status` | enum | 上述 relation enum |
+| `relation_reason` | string | 稳定、有界 reason |
+| `raw_payload` | string | 有界、持久化前脱敏的 payload |
+
+对于 `network_connect`，非负 return 是 `succeeded`；`EACCES`/`EPERM` 是 `denied`；
+`EINPROGRESS`/`EALREADY` 是 `pending`；其他负 return 是 `failed`。对于五种 file
+operation，非负 return 是 `succeeded`，`EACCES`/`EPERM` 是 `denied`，其他所有负 result
+都是 `failed`。
+在 wire 上，`succeeded` 要求非负 `return_value` 与 null `errno`；`failed`、`denied` 和
+`pending` 要求负 value，且 `errno` 是该 value 取反后的正数；null outcome 要求两个数值 field
+都为 null。
+
+可选 intent record 具有下列必需 shape：
+
+| Record | Field | Type | Value 或含义 |
+| --- | --- | --- | --- |
+| `intent` | `record_type` | string | 常量 `intent` |
+| `intent` | `timestamp_unix_ms` | u128 | 摄取时间 |
+| `intent` | `session_id` | string | Agent Run ID |
+| `intent` | `intent_source` | string | Adapter，目前为 `codex` |
+| `intent` | `intent_id` | string | Adapter-stable ID |
+| `intent` | `source_event_id` | string|null | Source harness event ID |
+| `intent` | `intent_type` | string | Normalized type，例如 `tool_call` |
+| `intent` | `tool_name` | string | Source tool/function name |
+| `intent` | `declared_action` | string|null | Normalized action class |
+| `intent` | `target` | string|null | 声明的 target scope/resource |
+| `intent` | `command` | string|null | Content-off executable reference 与 redaction marker |
+| `intent` | `raw_event_id` | string|null | Correlated raw-event ID |
+| `intent_correlation` | `record_type` | string | 常量 `intent_correlation` |
+| `intent_correlation` | `timestamp_unix_ms` | u128 | Correlation 时间 |
+| `intent_correlation` | `session_id` | string | Agent Run ID |
+| `intent_correlation` | `intent_source` | string | Adapter |
+| `intent_correlation` | `intent_id` | string | Declared intent ID |
+| `intent_correlation` | `match_basis` | enum | `raw_event_id`、`process_command_exact` 或 `process_executable` |
+| `intent_correlation` | `raw_event_id` | string | Observed raw-event ID |
+| `intent_correlation` | `event_type` | string | Canonical observed type |
+| `intent_correlation` | `pid` | u32 | Observed PID；不可用时为 `0` |
+| `intent_correlation` | `resource` | string | Observed redacted resource |
+| `intent_correlation` | `process_command` | string|null | Redacted observed context |
+| `intent_correlation` | `process_executable` | string|null | Observed executable reference |
+| `intent_correlation` | `command` | string|null | Redacted declared summary |
+
+`accountability_finding` 有必需 field `record_type:string`（常量
+`accountability_finding`）、
+`schema_version:u32`（`1`）、`session_id:string`、`kind:enum`、`decision:enum`、
+`reason:string`、`evidence_ref:string`、`runtime:object` 与
+`evidence_boundary:enum`。Kind 是 `missing_intent`、`unobserved_intent`、
+`undeclared_action`、`credential_read`、`workspace_boundary`、`unknown_egress`、
+`dangerous_command` 或 `service_account_token_read`；decision 是 `notify` 或 `review`；
+evidence boundary 是 `host_boundary` 或 `guest_semantic`。Runtime 有必需 field
+`runtime:string`、`container_id:string|null`、`pod_uid:string|null` 与
+`cgroup_id:u64|null`。AOR 丢弃 source `reason`，并替换为与 kind 对应的 canonical bounded
+reason。
+
+| Finding kind | Canonical AOR `reason` |
+| --- | --- |
+| `missing_intent` | `observed side effect has no matching declared intent` |
+| `unobserved_intent` | `declared intent has no matching observed side effect` |
+| `undeclared_action` | `observed action class was not declared by intent` |
+| `credential_read` | `workload read a credential-classified resource` |
+| `workspace_boundary` | `file access crossed the declared workspace boundary` |
+| `unknown_egress` | `network endpoint is outside the declared egress set` |
+| `dangerous_command` | `command matches the dangerous-command baseline` |
+| `service_account_token_read` | `workload read a Kubernetes service account token` |
+
+`observation_gap` 有必需 field `record_type:string`（常量 `observation_gap`）、
+`schema_version:u32`（`1`）、`timestamp_unix_ms:u128`、`agent_run_id:string`、
+`operation:string`、`kind:enum`、`count:u64` 与 `detail:string`。合法 shape 是：
+
+| Kind | Operation/count | Source detail | AOR detail |
+| --- | --- | --- | --- |
+| `missing_entry`、`missing_exit` | `network_connect`、`file_open`、`file_create`、`file_truncate`、`file_unlink` 或 `file_rename`；正 count | 有界 producer diagnostic | `bounded_loss_counter` |
+| `collector_restart` | `collector_lifecycle`、`1` | 只含不透明 unfinished instance | `unfinished_collector_instance` |
+| `late_attach` | `collector_lifecycle`、`1` | `collection_boundary:protected_existing_process_attach,history:unknown,provenance:<external_registration\|proc_discovery>,root_selection:<registration_qualified\|inferred>` | 相同 bounded detail |
+| `runtime_metadata_unavailable` | `runtime_metadata`、`1` | `source=<docker\|containerd\|k3s_containerd>,reason=<socket_unavailable\|daemon_restart\|inventory_invalid>` | `runtime_source_unavailable` |
+| `runtime_metadata_unavailable` | `runtime_metadata`、`1` | 相同 source set 加 `reason=identity_transition` | `runtime_identity_transition` |
+
+Runtime-metadata detail 不得包含 path、payload、socket name 或 backend text。每条 gap 都增加
+一条 AOR `observation_gap` issue，并阻止 evidence 成为 complete。Runtime adapter 可以独立
+配置，因此 runtime-metadata gap 不要求 collector `started` record。
+
+Runtime-binding lifecycle record 共用同一个精确 shape：
+
+| Field | Type | Value 或含义 |
+| --- | --- | --- |
+| `record_type` | enum | `runtime_binding_observed`、`runtime_binding_retired` 或 `runtime_binding_suspended` |
+| `schema_version` | u32 | 常量 `1` |
+| `agent_run_id` | string | 所属 canonical Agent Run ID |
+| `adapter` | enum | `docker`、`containerd` 或 `k3s_containerd` |
+| `workload_id` | string | 非零、64-byte lowercase-hex Docker container ID、`containerd/<same-id>` 或 `k3s_containerd/<same-id>` |
+| `start_marker` | string | Docker UTC `YYYY-MM-DDTHH:MM:SS[.1..9 digits]Z`（有效日期且 year >= 1970），或 canonical positive-decimal u64 CRI `startedAt`；strict RFC3339Nano `Z`/numeric-offset CRI text 会在 adapter boundary 归一化为 decimal Unix nanoseconds |
+| `host_boot_id` | string | Canonical lowercase、非零 host boot UUID |
+| `init_process_start_time_ticks` | u64 | 正数 `/proc/<init>/stat` start tick |
+| `cgroup_device` | u64 | 正数 cgroup-filesystem device identity |
+| `cgroup_id` | u64 | 正数 cgroup-filesystem inode identity；不是 PID，也不是可独立作为 Exact 的数字 cgroup claim |
+| `runtime_handler` | string|null | 有界、不含 path 的 opaque runtime-handler name，或 `null` |
+
+上表所有 field 都是必需 field，只有 `runtime_handler` 可为空。这些 record 没有 payload
+timestamp；权威顺序来自 JSONL source order 或外层 hash-chain sequence。它们绝不包含 PID、
+container name、raw label/annotation、runtime/cgroup/socket path、endpoint、backend error、payload
+或 private namespace。`agent_run_id`、`workload_id`、`start_marker` 与非空
+`runtime_handler` 都是有界 identifier，不是自由文本 capture。
+
+合法 lifecycle order 会 fail closed。成功的 complete inventory 可以产生
+`runtime_binding_observed`；相同 inventory 不产生 record，且只有成功的 complete inventory 才能
+因缺席产生 `runtime_binding_retired`。Stable-identity replacement 的顺序是先写
+`reason=identity_transition` gap，再退役旧 identity，最后观测 replacement。Runtime source 丢失
+先写 `reason=socket_unavailable` 或 `reason=inventory_invalid` gap，再 suspension；只有后续 fresh
+complete inventory 才能再次观测该 binding。Daemon recovery 将持久 binding 保持 dormant；首次
+fresh complete inventory 先写 `reason=daemon_restart` gap，再退役 dormant identity，并在当前
+identity 存在时写 observed。Failure 永远不是 empty inventory。不存在独立 transition record；
+canonical identity-transition representation 就是有序的 gap -> retired -> observed sequence。
+
+AOR projector 会 strict-decode 这三种 record type，把每条 record 绑定到投影中的 Agent Run，并
+跟踪 active `(adapter,workload_id)` key。重复 observation，或 full identity 与 active binding
+不匹配的 retirement/suspension 都会 fail closed。Suspension 还必须消费同一 adapter 之前一条
+尚未匹配的 source-outage gap credit；credit 只能消费一次，但允许跨越无关的交错 record。由于
+v1 没有 inventory transaction ID，projector 不会猜测 identity 或 daemon-restart gap 属于任意
+retirement。其更强的 effect order 仍由 producer/coordinator 保证，而每条此类 gap 仍会使投影
+evidence 成为 incomplete。
+
+`observer_diagnostic` 有必需 field `record_type:string`（常量 `observer_diagnostic`）、
+`timestamp_unix_ms:u128`、`session_id:string`、`kind:enum`、`count:u64` 与
+`detail:string`。Kind 是 `ring_buffer_reserve_failure`、`map_pressure`、
+`abi_mismatch`、`decode_failure`、`truncation`、`attach_failure`、
+`verifier_failure` 或 `summary`。`visibility_assessment` 有必需 field
+`record_type:string`（常量 `visibility_assessment`）、`session_id:string`、`runtime_profile:enum`、
+`host_visibility_scope:enum`、`host_semantics_collapsed:boolean`、
+`guest_collector_required:boolean`、`runtime_metadata_required:boolean`、
+`host_event_subjects:array<string>`、`pod_name:string|null`、
+`namespace:string|null`、`runtime_class_name:string|null`、
+`sandbox_name:string|null` 与 `notes:string`。Runtime profile 是
+`docker-default`、`docker-gvisor`、`kubernetes-gvisor`、`kubernetes-kata` 或
+`firecracker-prototype`；host scope 是 `guest_process`、`runtime_boundary` 或
+`boundary_only`。
+
+### 6.2 本地 Session query schema v1
+
+本地 daemon query 不是 timeline record。合法的
+`{"type":"query","tenant_id":"<tenant>","session_id":"<agent-run>"}` request 返回下列
+`DAEMON_SCHEMA_V1` response：
+
+| Field | Type | Value 或含义 |
+| --- | --- | --- |
+| `type` | string | 常量 `session` |
+| `schema_version` | u32 | 常量 `1` |
+| `session` | object|null | 匹配的 `SessionState`；不存在或对该 tenant 不可见时为 `null` |
+| `runtime_bindings` | array<object> | 该可见 Agent Run 的 active binding；始终存在，`session` 为 `null` 时为空数组 |
+
+每个 `runtime_bindings` element 恰好包含下列必需 nested field：
+
+| Field path | Type | Value 或含义 |
+| --- | --- | --- |
+| `agent_run_id` | string | 与 request 及返回 `session` 相同的 Agent Run |
+| `identity.adapter` | enum | `docker`、`containerd` 或 `k3s_containerd` |
+| `identity.workload_id` | string | 上述完整 stable workload/container ID |
+| `identity.start_marker` | string | Runtime-native start marker |
+| `identity.host_boot_id` | string | Canonical host boot UUID |
+| `identity.init_process_start_time_ticks` | u64 | 正数 init-process start tick |
+| `identity.cgroup.device` | u64 | 正数 cgroup-filesystem device identity |
+| `identity.cgroup.inode` | u64 | 正数 cgroup-filesystem inode identity |
+| `runtime_handler` | string|null | 有界 opaque handler name，或 `null` |
+
+该数组只包含 active、经过 fresh qualification 的 binding；dormant、suspended 与 retired binding
+不会返回，entry 按 adapter/workload key 排序。省略 `tenant_id` 时默认为 `default`。Daemon 会先
+要求 request tenant 等于目标 Agent Run 的 registered tenant，之后才读取 binding。`session` 与
+`runtime_bindings` 来自同一个 tenant-gated atomic snapshot，因此并发 tenant replacement 不能
+把授权判断与 binding disclosure 分离。不存在或 cross-tenant 的 Agent Run 因而返回
+`session:null` 与 `runtime_bindings:[]`，避免 binding identity
+成为跨 tenant existence oracle。Query 保持与 persistence 相同的 privacy boundary：它不暴露 raw
+label、namespace、PID、container name、cgroup/runtime/socket path、endpoint、backend error 或
+payload。
+
+### 6.3 Agent Observation Record v1
+
+Projection 是一份 deterministic JSON object，绝不是 timeline line。Input 保持 command-line
+与 segment 顺序；每条投影 source fact 使用从一开始的 `source_ordinal`，timestamp 不会重排
+record。
+
+| Top-level field | Type | Contract |
+| --- | --- | --- |
+| `record_type` | string | 常量 `agent_observation_record` |
+| `schema_version` | u32 | 常量 `1` |
+| `agent_run_id` | string | 所有 source record 共用的非空 run |
+| `source_integrity` | enum | `unverified_plain_jsonl`、`verified_hash_chain` 或 `mixed` |
+| `summary` | object | 下列 state 与 deterministic aggregate |
+| `capability_manifests` | array<object> | 投影后的兼容 manifest |
+| `runtime_identities` | array<object> | Exact identity aggregate |
+| `runtime_observations` | array<object> | Canonical supported observation |
+| `runtime_bindings` | array<object> | 有序、经过验证的 runtime-binding lifecycle fact；新的 v1 output 始终包含该 field |
+| `collector_lifecycle` | array<object> | 有序 lifecycle fact |
+| `findings` | array<object> | Typed review finding |
+| `observation_gaps` | array<object> | Normalized bounded gap |
+| `issues` | array<object> | Projection limitation |
+
+必需 `summary` field 包含三个 enum（`evidence_state`：
+`complete|active|incomplete|failed|indeterminate`，`collector_health`：
+`healthy|degraded|failed|unknown`，`review_state`：
+`requires_review|no_findings_reported|indeterminate`）、六个 `u64` count
+（`runtime_observation_count`、`runtime_identity_count`、`finding_count`、
+`observation_gap_record_count`、`known_missing_observation_count`、
+`unknown_history_boundary_count`）以及五个 `map<string,u64>` aggregate
+（`event_type_counts`、`outcome_counts`、`relation_counts`、
+`finding_kind_counts`、`gap_kind_counts`）。
+
+Nested array object schema 是：
+
+| Array/object | 必需 field 与 type |
+| --- | --- |
+| capability manifest | `source_ordinal:u64`、`schema_version:u32`、`timestamp_unix_ms:u128`、`collector:string`、`collector_version:string`、`kernel_abi_version:u32`、`kernel_record_size:u32`、`observation_scope:string`、`privacy_profile:string`、`capabilities:array<object>` |
+| capability | `operation:string`、`event_sources:array<string>`、`outcomes:array<string>` |
+| runtime identity | `identity_id:string`、`host_boot_id:string`、`scope_generation:u64`、`pid:u32`、`process_generation:u64`、`process_start_time_ns:u64`、`exec_generation:u32`、`first_source_ordinal:u64`、`last_source_ordinal:u64`、`observation_count:u64` |
+| runtime observation | `source_ordinal:u64`、`timestamp_unix_ms:u128`、`event_source:string`、`event_type:string`、`raw_event_id:string|null`、`pid:u32`、`ppid:u32`、`actor:string`、`resource:string`、`action:string`、`outcome:string|null`、`return_value:i64|null`、`errno:i32|null`、`container_id:string|null`、`cgroup_id:string|null`、`relation_status:string`、`relation_reason:string`、`process_executable:string|null`、`process_started_at_unix_ms:u128|null`、`runtime_identity_id:string|null`、`parent_process_generation:u64|null`、`parent_exec_generation:u32|null` |
+| runtime binding | `source_ordinal:u64`、`record_type:enum`、`schema_version:u32`、`agent_run_id:string`、`adapter:string`、`workload_id:string`、`start_marker:string`、`host_boot_id:string`、`init_process_start_time_ticks:u64`、`cgroup_device:u64`、`cgroup_id:u64`、`runtime_handler:string|null`；后十一个 field 是精确的 runtime-binding v1 lifecycle wire shape |
+| collector lifecycle | `source_ordinal:u64`、`schema_version:u32`、`timestamp_unix_ms:u128`、`collector:string`、`collector_instance_id:string`、`state:enum`、`health:enum`、`stop_reason:enum|null`、`counters:object`；counter 与 timeline lifecycle 使用相同八个 `u64` field |
+| finding | `source_ordinal:u64`、`schema_version:u32`、`kind:enum`、`decision:enum`、`reason:string`、`evidence_ref:string`、`runtime:object`、`evidence_boundary:enum`；runtime 使用 `runtime:string`、`container_id:string|null`、`pod_uid:string|null`、`cgroup_id:u64|null` |
+| observation gap | `source_ordinal:u64`、`schema_version:u32`、`timestamp_unix_ms:u128`、`operation:string`、`kind:string`、`count:u64`、`detail:string`；使用上表 normalized value，并包含下文定义的可选 `runtime_source:string` 与 `runtime_reason:string` |
+| issue | `code:enum`、`source_ordinal:u64|null`、`count:u64` |
+
+Version 1 最多接受一份 capability manifest；重复 manifest 是 structural error，不会创建第二个
+capability epoch。Nested lifecycle、observation、Finding 与 Gap object 的 enum value 使用
+上文对应 timeline enum 与 canonical projection。
+
+`runtime_bindings` 是 default-compatible 的 v1 extension。新的 projection output 始终包含该
+array；缺少该 field 的旧 v1 AOR 会按空数组读取。该数组保留每条经过验证的
+`runtime_binding_observed`、`runtime_binding_retired` 与 `runtime_binding_suspended` fact，而不只
+保留 run 结束时 active 的 binding。每个 element 都属于投影中的 Agent Run，并保持权威
+`source_ordinal` 顺序。Projector 与 frozen-record validator 都会重建 active binding state，并
+执行 6.1 节的 lifecycle identity 与 sequence rule。
+
+当 Finding 的 `evidence_ref` 为 `runtime_binding:<workload_id>` 时，只有同一 run 中先于该
+Finding 出现，且 `adapter`、`workload_id`、`cgroup_id` 与 Finding 的 runtime、container ID、
+cgroup ID 精确匹配的 `runtime_binding_observed` fact 才能解析该引用。Retired 或 suspended fact
+即使字段匹配也绝不授予 support。Saved Run Viewer 会在每个 binding fact 的 source ordinal
+提供目标，并允许受支持的 Finding 跳转到那条更早、精确匹配的 observed fact；无法解析的引用
+继续作为 limitation 保留。
+
+新投影的 `runtime_metadata_unavailable` gap 会同时包含 `runtime_source` 与
+`runtime_reason`。Source 只能是 `docker`、`containerd` 或 `k3s_containerd`；reason 只能是
+`socket_unavailable`、`inventory_invalid`、`daemon_restart` 或 `identity_transition`。其他 gap
+kind 会省略这两个 field。该字段对是 default-compatible 的 v1 extension：旧 AOR 可以省略，
+但缺失或只出现一项时，绝不能授权后续 `runtime_binding_suspended`。Frozen-record validator
+会按 `source_ordinal` 顺序共同重放 gap 与 binding fact。只有同 adapter、更早且尚未消费、
+reason 为 `socket_unavailable` 或 `inventory_invalid` 的 gap 才授予一次 suspension credit；
+`daemon_restart` 与 `identity_transition` 不授予 suspension credit，每个 credit 只能消费一次。
+
+Issue code 恰好是 `missing_capability`、`unsupported_capability`、
+`missing_lifecycle_start`、`missing_lifecycle_terminal`、`collector_loss`、
+`collector_diagnostic`、`observation_gap`、`unsupported_observation`、
+`unsupported_outcome`、`unknown_record_type`、`source_integrity_finding`、
+`no_runtime_observations` 或 `unresolved_finding_evidence`。Null issue ordinal 表示 run-wide
+issue，不是复制的 source fact。
+`unsupported_capability` count 等于其 manifest 中缺失或不匹配的 contract operation 数。
+Source-bound unsupported-observation/outcome、unknown-record、integrity 与 unresolved-Finding
+issue 各 count 1。`observation_gap` 与 `collector_diagnostic` 保留 source count。Run-wide
+missing-capability、missing-start、no-observation 与 mixed-integrity issue count 1；
+missing-terminal issue count 等于未完成 collector instance 数。`collector_loss` 指向最新
+lossy lifecycle record 且 count 1。
+
+Exact identity 由 active `collector_instance_id` 限定，并要求
+`event_source=kernel_tracepoint`、非 null canonical `raw_event_id`、
+relation `exact` 且 reason 为 `host_boot_scope_process_start_exec_generation`，并具有完整 tuple
+`(host_boot_id,scope_generation,pid,process_generation,process_start_time_ns,exec_generation)`。
+首次出现依次分配 `identity-1`、`identity-2`。Non-exact fact 保持不合并。Complete evidence
+要求兼容 content-off manifest、合法正常 lifecycle terminal、至少一条 supported observation，
+且不存在 loss、gap、diagnostic、integrity、capability 或 unresolved-evidence issue。Finding 只
+改变 review state；`no_findings_reported` 不是 clean-run verdict。
+
+执行 capability check 时，projected event type 按如下方式映射：`exec` 到 `process_exec`，
+`process_exit` 到 `process_exit`，各 `file_*` event 到同名 operation，`network_connect` 到
+`network_connect`，`credential_read` 到 `credential_path_access`。其他 event type 以及任何
+非 `kernel_tracepoint` source 都增加 `unsupported_observation`；缺失或未声明的 outcome 增加
+`unsupported_outcome`。
+
+### 6.4 本地 hash-chain envelope
+
+Hash-chain timeline 是 JSONL，每行都有必需的 `schema_version:u32`、`sequence:u64`、
+`previous_hash:string`、`record_hash:string` 与 `payload:object`。Sequence 从 `1` 开始；首条
+previous hash 是 64 个小写零字符，之后每条 `previous_hash` 等于前一条 `record_hash`。Payload
+通过 parse JSON 后递归序列化为 compact UTF-8 JSON 完成 canonicalization：object key 按
+lexicographic order 排序，array order 保留，不添加无意义 whitespace 或 slash escape；string
+escape JSON control character、quote 与 backslash；number 使用最短 serde-json representation
+（timeline contract 只使用 integer）。小写十六进制 record digest 是：
+
+```text
+SHA-256(
+  schema_version 的 4-byte unsigned big-endian
+  || sequence 的 8-byte unsigned big-endian
+  || previous_hash 的 UTF-8 byte
+  || compact canonical payload JSON 的 UTF-8 byte
+)
+```
+
+这四段 byte string 之间没有 separator 或 length prefix。验证会检查 expected sequence、link、
+canonicalized payload digest 与完整 final line。Report 包含 `path:string`、`passed:boolean`、
+`record_count:integer`、`last_sequence:u64`、`last_record_hash:string`、
+`valid_bytes:u64`、`total_bytes:u64` 与 `failure:string|null`。验证只读；middle corruption、
+truncated 或 corrupt tail 都会 fail closed。
+
+Canonical join 使用 raw kernel `event_id`、canonical `raw_event_id`、可选 intent
+`raw_event_id`、correlation `raw_event_id` 与 Finding `evidence_ref`。
+对于 runtime-binding evidence，有界 Finding reference 只会按 6.3 节的精确规则连接到更早的
+observed lifecycle source ordinal；retired 与 suspended lifecycle fact 不属于该 support
+relation。Timestamp-only matching 永远不会创建 Exact relation。Raw exec argv 会替换为
+redaction/truncation marker；credential path 与 socket address 在输出前 tokenized。Rotation 是
+storage budget，不是 schema change，
+并且永远不会拆分一条 JSONL record。
+
 每条 Runtime Observation 在受支持时携带：
 
 - schema 与 collector ABI version；
@@ -380,6 +975,22 @@ timeline 仍可写时记录 `failed`。Daemon 恢复时，缺少 `stopped` 或 `
 terminal；重复恢复不会重复写入。Standalone timeline 缺少 terminal 时仍是不完整证据，即使
 原进程已无法补写 gap。
 
+Runtime metadata 丢失使用一种有界 v1 shape：
+
+```json
+{"record_type":"observation_gap","schema_version":1,"agent_run_id":"<agent-run>","operation":"runtime_metadata","kind":"runtime_metadata_unavailable","count":1,"detail":"source=docker,reason=socket_unavailable"}
+```
+
+`source` 只能是 `docker`、`containerd` 或 `k3s_containerd`。Source-outage `reason` 只能是
+`socket_unavailable`、`daemon_restart` 或 `inventory_invalid`；相同 workload key 的 stable
+identity 变化使用 `reason=identity_transition`。禁止 path、payload、socket name 与自由文本
+backend error。Agent Observation Record 会把 outage detail canonicalize 为
+`runtime_source_unavailable`，把 identity change canonicalize 为
+`runtime_identity_transition`，同时将有界 source 与 reason 保留在 `runtime_source` 与
+`runtime_reason`。它会增加一条 `observation_gap` issue，并且不能成为 complete。由于 runtime
+adapter 可以独立配置，这种 gap 不要求 eBPF collector 已有 `started` lifecycle record。
+Identity transition 的 durable effect order 是 gap、retire、attach。
+
 Agent Observation Summary 暴露三条相互独立的结论：
 
 - `evidence_state` 为 `complete`、`active`、`incomplete`、`failed` 或 `indeterminate`；
@@ -389,7 +1000,8 @@ Agent Observation Summary 暴露三条相互独立的结论：
 Complete evidence 要求存在一份兼容的 content-off capability manifest、合法的 started 到正常
 terminal lifecycle、至少一条受支持 Runtime Observation，并且没有 loss、gap、diagnostic、
 integrity 或 capability issue。Active 或 failed lifecycle state 必须显式保留。Mixed source
-integrity 与未知增量 record type 为 indeterminate。Finding 只改变 review state，不改写
+integrity 与未知增量 record type 会让其他方面呈 complete shape 的 run 成为 indeterminate。
+Finding 只改变 review state，不改写
 evidence completeness。`late_attach` 的 count 1 只增加 unknown-history-boundary count，不增加
 known-missing-event count。Mixed Agent Run、格式错误或不兼容 record、content-policy violation、
 非法 lifecycle 顺序、重复 canonical observation 与冲突的 Exact Runtime Identity 都 fail closed。
@@ -422,6 +1034,33 @@ filesystem、network、guest 或 runtime path 成为显式 capability gap。
 | Kata 或 Firecracker | Host/VMM/shim visibility；guest semantics 需要 guest collector |
 | macOS 或 Windows | 不支持 eBPF runtime observation |
 | 厂商托管 Agent runtime | 没有用户可控 Linux kernel 时不属于范围 |
+
+Machine-readable 资格权威位于源码树的
+[qualification envelope](https://github.com/0xLaiHo/Apolysis/blob/main/qualification/envelope-v1.json)，
+其版本化 workload definition 位于相邻的 `qualification/workloads/` directory。Release 文档
+archive 只是 human-readable snapshot，不内嵌这些 machine file；执行 profile 资格验证或晋级的
+consumer 必须使用匹配 source revision 中的 envelope。Linux 6.12/x86_64 原生 host 只是
+Candidate，不是 Supported：它要求 cgroup v2、可读 target BTF/tracefs、19 个声明
+tracepoint 及其经过检查的 format、production verifier/load/full attach 路径，以及有效
+`CAP_BPF` + `CAP_PERFMON`。其他 feature-probed Linux 5.11+ x86_64 kernel、aarch64、Docker、
+containerd、Kubernetes 与 legacy `CAP_SYS_ADMIN` fallback 保持 Experimental。缺少必需 hook、
+cgroup v1/hybrid scope、rootless host collection、非 Linux，或低于 feature floor 且无 backport
+的 kernel 为 Unsupported。
+
+资格验证使用版本化 content-free `idle`、`representative` 与 `burst` workload。同一 boot 上
+配对的 collector-off/on trial 分别保留 workload/collector CPU、process/cgroup/BPF memory、
+monotonic kernel-to-decode/append latency、完整 expected/observed/lost event map，以及按 phase
+归属的 burst loss。Representative profile 要求 known 与 unexplained loss 都为 0。CPU、memory、
+latency、repetition 与 rated-event 数值 budget 在足量 privileged live evidence 支持 reviewed
+保守边界前保持 unset。Fixture 只测试 checker，不能晋级 profile。晋级 Supported 需要保留 raw
+live evidence、在 machine envelope 冻结 budget 与 exact tuple、通过 privacy/overload review，
+并关闭全部适用 release gate。
+
+Visibility 声明保持 profile-specific。具备 exact container/cgroup identity 时，Docker default
+通常保留 guest-process host semantic。gVisor 可能把 observation 收缩到 runtime boundary，
+因此关联需要 runtime metadata。Kata 与 Firecracker 只暴露 VMM/shim/host boundary；完整 guest
+process、file、network 或 credential semantic 需要 guest collector。Kubernetes metadata 无法
+恢复 host source 没有观测到的 guest semantic。
 
 ## 9. Finding 与控制
 
@@ -463,6 +1102,8 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 - kernel/userspace ABI mismatch；
 - decode、attach、verifier 或 permission failure；
 - collector restart 或 death；
+- runtime socket 丢失、daemon restart、非法 runtime inventory 或陈旧 container identity
+  transition；
 - late attach、PID reuse ambiguity 或 missing process lineage；
 - unsupported syscall、io_uring、guest 或 remote operation path；
 - local storage failure 或 incomplete terminal flush。
@@ -493,18 +1134,25 @@ Implemented today：
   确定性 standalone 离线 HTML 展示；
 - `apolysis-kubernetes` 与 `apolysis-visibility`：有界 runtime metadata 与 visibility
   boundary assessment；
-- `apolysis-daemon`：long-lived observer、有界 queue、本地 socket、runtime registration
-  prototype、scoped lifecycle persistence、幂等的未完成实例恢复、receipt-owned local
-  operation 与 identity-bound journaled retention。
+- `apolysis-daemon`：long-lived observer、有界 queue、本地 socket、runtime registration、
+  完整 Docker/containerd inventory qualification、稳定 container/cgroup binding、有界
+  runtime-source 与 daemon-restart recovery、scoped lifecycle persistence、幂等的未完成实例
+  恢复、receipt-owned local operation 与 identity-bound journaled retention。
 
 Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 与 lifecycle
 start 同步到稳定存储；对 protected existing-process attach，它会先持久化唯一的 unknown-history
 `late_attach` boundary。选定文件操作与 network connect 已具备有界 entry/exit outcome 语义，
 daemon 会在显式移除 scope 与正常关闭时把这些配对 gap 持久化到所属 Agent Run。单次运行内
 稳定的 scope/process generation、周期累计 lifecycle checkpoint、显式 terminal reason 与
-restart-gap recovery、可查询 saved-run projection 与非特权 Saved Run Viewer 已实现。本地
-有界本地 daemon filesystem operation 已实现；Supported live-host profile 与有界 Kubernetes
-Beta 仍是 target。
+restart-gap recovery、可查询 saved-run projection 与非特权 Saved Run Viewer 已实现。
+Docker/containerd stable identity 与 runtime recovery 已通过 typed runtime-metadata gap 实现。
+保留的非破坏性 Docker gate 覆盖 complete-inventory identity churn、socket-outage recovery、
+私有 daemon-lifecycle recovery，以及具备 capability 与 hash-chain 证据的 content-off eBPF
+exact container/cgroup 归属。独立、保留的 private-containerd gate 按 section 5.3 的隔离与
+cleanup contract，覆盖 stable/replacement complete inventory 以及 socket gap -> suspension ->
+fresh observation。破坏性 systemd runtime-service restart 与 K1/VKE qualification 仍保持
+open。本地有界 daemon filesystem operation 已实现；当前没有授予任何 Supported live-host
+profile，有界 Kubernetes Beta 仍是 target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃
@@ -561,3 +1209,47 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 - 多租户 Gateway、PostgreSQL/S3 custody、evidence-object lifecycle、billing、HA 或公共 SaaS。
 - SIEM、prompt evaluation、token-cost analytics 或长期 data lake。
 - macOS/Windows kernel sensor、TLS plaintext、默认 prompt/response 或无差别全 syscall 采集。
+
+## 15. 方向与 release gate
+
+本地 Agent Run workflow、非特权 projection/viewer、有界 daemon 运维，以及已完成的 D1/D2
+implementation 与分别保留的 Docker/private-containerd qualification 构成当前基础。下一项有界
+方向是 K1 least-privilege Kubernetes node/Pod 归属，随后进行 release 准备。指定的
+runtime-ready 且 network-ready VKE validation 必须覆盖代表性 reschedule、sensor loss、runtime
+boundary、cleanup 与 privacy。Docker 证据不能复用成 containerd 或 Kubernetes 证据，
+private-containerd 证据也不能复用成 Kubernetes 证据。破坏性 systemd runtime-service restart
+qualification 保持独立、可选声明。在相应 exact workload/kernel/runtime 与适用 release 证据
+通过前，任何 profile 都不会超越 Experimental 或 Candidate。
+
+跨领域规则长期有效：scope before capture、capability before claim、no silent absence、stable
+identity before inference、privacy before persistence、observation 而非 enforcement、viewer
+非特权，以及只有重复使用能改变真实调查决策时才扩展。
+
+以下能力明确 deferred：provider Hook/SDK/OTLP/MCP/A2A family；通用 remote export/custody；
+remote outcome verification；live tail 与跨 run search；中央 authenticated ingest、multi-user
+query、PostgreSQL/S3/KMS custody 与 multi-tenant retention；policy denial/containment；portable
+evidence receipt；public SaaS、HA 与 multi-region；通用 package-manager abstraction；卸载时自动
+purge 已保留 Agent Run。只有出现明确需求并做出新架构决策后，它们才能返回。
+
+存在任一适用条件时，profile 都属于 release no-go：
+
+- loss、failure、truncation、restart、runtime metadata unavailable、unsupported path 或 missing
+  terminal 可以产生未标记的 complete evidence；
+- entry-only、PID/name/time-only、陈旧 container 或 ambiguous correlation 被展示为成功 operation
+  或 Exact Runtime Identity；
+- protected attach 绕过资格校验、遗漏有序 unknown-history boundary 或夸大 pre-anchor continuity；
+- mixed、malformed、corrupt、unsupported、unresolved 或带 gap input 被呈现得比 source 更强，
+  或 viewer 构造 process-tree edge；
+- secret、argv、prompt、response、payload、credential、private path、socket、label、annotation、
+  kubeconfig 或 private workload data 跨越默认 persistence、log、error、test 或 repository boundary；
+- viewer 需要 privileged host access，或 Finding 被描述为 blocking/enforcement；
+- install、replacement、uninstall、retention、recovery、runtime cleanup 或 Kubernetes validation
+  可以修改无关状态，或缺少必需 live evidence；
+- claimed profile 的 kernel、runtime、operation、privacy、performance、packaging 与 cleanup
+  envelope 尚未文档化、测试或冻结 budget。
+
+只有 representative Agent Run 能自动限定 scope/attribution、operator 实际使用
+process/file/network investigation、gap 能阻止 false clean conclusion，并且 container/Kubernetes
+context 能改变真实 review 或 incident decision 时，项目才继续扩展。如果通用 telemetry 已足够、
+eBPF evidence 不改变决策、deployment privilege 成本高于 workflow 价值、大多数活动发生在远端，
+或 adapter maintenance 挤压 collector correctness，项目应进一步简化而不是扩张。
