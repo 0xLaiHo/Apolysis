@@ -76,7 +76,10 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
   从 activation 后开始。
 - 已完成基于稳定 complete inventory 的 Docker/containerd runtime binding 与有界 source
   recovery 资格验证；精确 identity、transition 与 gap 合同由设计文档定义。
-- Kubernetes metadata 关联仍是有界 Beta 目标。
+- 已为 containerd 与 K3s node 实现确定性的 K1 Kubernetes 归属 contract：类型化操作者 claim、
+  Pod/runtime identity 资格化、显式 attribution lifecycle 与 gap、tenant-gated query、saved-run
+  projection 和离线查看。指定的 VKE live qualification 通过前，Kubernetes profile 仍为
+  Experimental。
 - Exec 参数与 process command 默认 content-off 持久化，并对凭证和网络内容脱敏。
 - 提供有序 JSONL、输出轮转、可选本地 hash-chain envelope，以及 drop、map pressure、ABI
   mismatch、decode failure 和 truncation 的类型化诊断。
@@ -115,22 +118,37 @@ Agent command / container / Pod
 特权 collector 与非特权 operator viewer 保持独立 trust boundary。Remote export 和任何中央
 多租户证据平面都后置到有界 Beta 之后。
 
+在 Kubernetes 中，目标部署形态是每个 node 一个双容器 DaemonSet Pod。Root collector 负责
+eBPF、host runtime 访问与本地状态，但不持有 Kubernetes API token；non-root metadata source
+仅具有 namespace 范围的 Pod `list/watch` 权限，并通过 shared-group Unix socket 发送有界
+snapshot。操作者通过本地 `apolysisd-control` 边界注册精确、类型化 workload claim。Host
+state 目录必须预先创建为 root 所有、mode `0700`。
+
+随仓库交付的 canonical manifest 只覆盖自身专用 Agent namespace 与 VKE/containerd socket，
+不提供 cluster-wide 观测。K3s 已有实现支持，但需要 operator 提供匹配 K3s socket 且保持相同
+trust control 的 manifest 或 overlay。该 namespace 必须由 operator 控制；不受信 tenant 不得在
+其中 create 或修改 Pod。Typed claim 会阻止 metadata 扩大 authorization，但不能阻止具有
+namespace 写权限的主体用 malformed marked metadata 降低 K1 availability。Host CRI socket
+在协议上具有 mutation authority，因此 collector 仍是 node-trusted。Token 隔离、收敛
+capability 与 content-off pseudonym 只缩小
+暴露面，不能使 collector 变成真正 read-only，也不能使 metadata 匿名。
+
 ## 支持环境
 
 | 环境 | 方向 |
 | --- | --- |
 | 本地 Linux Agent CLI | 首个稳定 workflow |
 | 用户可控 Linux 上的 Docker/containerd | 本地 collector 正确性完成后的稳定目标 |
-| Kubernetes node 与 Pod 归属 | Container identity 稳定后的有界 Beta |
+| Kubernetes containerd/K3s node 与 Pod 归属 | 已有确定性 K1 实现；指定 VKE live qualification 前仍为 Experimental |
 | Linux self-hosted CI runner | 仅提供 CLI managed-run path；不维护 composite Action |
 | macOS、Windows 或厂商托管 Agent runtime | 不支持 eBPF runtime observation |
 
 ## 当前仓库状态
 
 `v0.3.0` 仍是最新公开研究版本，展示 live collector、托管 Agent 启动、JSONL timeline、
-隐私脱敏和发布打包。活跃 Cargo workspace 现仅包含 10 个 crate：core、observer、
-accountability finding、本地 storage、daemon、CLI、saved-run viewer、Kubernetes metadata、
-visibility assessment 与 release verification。被取代的 contracts、中央服务、policy
+隐私脱敏和发布打包。活跃 Cargo workspace 现仅包含 11 个 crate：core、observer、
+accountability finding、本地 storage、daemon、CLI、saved-run viewer、Kubernetes attribution、
+隔离的 Kubernetes metadata source、visibility assessment 与 release verification。被取代的 contracts、中央服务、policy
 actuation、Agent feedback control、sandbox execution 与广泛的 production-qualification
 原型已移出活跃 build 和默认门禁。
 
@@ -144,10 +162,11 @@ host lifecycle。具体的文件系统、恢复与资格 contract 统一记录�
 不会改变 experimental support 状态。
 
 D1/D2 runtime-binding implementation、deterministic contract 与保留的非破坏性资格验证已经完成，
-并分别覆盖 Docker 和独立隔离的私有 standalone containerd runtime。这些证据保持 profile-specific：
-不能把 Docker 声明外推到 containerd，也不能把任一 runtime 的声明外推到 Kubernetes。破坏性的
-runtime-service restart、K1/VKE 与 release qualification 仍保持 open。这些结果都不会晋级任何
-profile。
+并分别覆盖 Docker 和独立隔离的私有 standalone containerd runtime。K1 contract 与实现也已
+覆盖有界 containerd/K3s Kubernetes workflow，但不会因此晋级 profile。证据保持
+profile-specific：Docker 与 private-containerd 结果不能资格化 Kubernetes。本 workspace 因缺少
+指定 kubeconfig 与 `kubectl`，尚未运行指定 VKE live gate；其规范结果是 skip，不是 pass。
+破坏性 runtime-service restart 与 release qualification 也仍保持 open。
 
 范围重置是一项路线图决策，不是追溯性的生产声明。在受支持 collector、归属、失败、性能和
 隐私路径通过新的有界 Beta 门禁前，Apolysis 仍是实验性项目。资格 contract 将 Linux
@@ -221,10 +240,10 @@ sudo -E ./target/debug/apolysis observe \
 
 ## 高层路线图
 
-1. 保持活跃 workspace 只包含 eBPF collection、Observation Scope、attribution、本地 storage、
-   daemon、CLI 与操作者调查能力。
-2. 在指定的 runtime-ready 且 network-ready VKE 测试集群上验证 least-privilege K1 node/Pod
-   归属这一明确有界的 Beta。
+1. 将已实现的 K1 contract 限定在显式操作者 claim、containerd/K3s identity、node-local
+   collection 与 content-off metadata 内。
+2. 在显式前置条件可用后，于指定的 runtime-ready 且 network-ready VKE 集群运行
+   least-privilege K1 live gate。
 3. 将破坏性 runtime-service restart qualification 保持独立，并在不把 Docker 证据外推到
    containerd 或 Kubernetes 的前提下准备 release。
 4. 只有适用的 kernel、runtime、privacy、performance、packaging、cleanup 与 no-silent-gap

@@ -1,7 +1,7 @@
 # Apolysis Design
 
 > English | [Simplified Chinese](design.zh-CN.md)
-> Last reviewed: 2026-08-11
+> Last reviewed: 2026-08-12
 
 This is the sole detailed product document. It is the authority for what
 Apolysis is, how its target system works, its stable record and qualification
@@ -38,8 +38,9 @@ builds; none is an observer-side product dependency.
 
 The primary operator is a platform, runtime-security, AppSec, or engineering
 team running Agents on Linux infrastructure it controls. The first supported
-workflows are local Agent CLIs, Linux self-hosted CI, and containers; a bounded
-Kubernetes node workflow follows after container attribution is stable.
+workflows are local Agent CLIs, Linux self-hosted CI, and containers. The K1
+implementation adds a bounded Kubernetes containerd/K3s node workflow without
+promoting that still-unqualified profile beyond Experimental.
 
 For one Agent Run, the operator needs to answer:
 
@@ -62,6 +63,8 @@ The aggregate is the **Agent Observation Record**:
 ```text
 Agent Run
   |- Observation Scope
+  |- Kubernetes Workload Claim
+  |- Kubernetes Attribution
   |- Runtime Identity
   |    `- Runtime Observation
   |         `- Operation Outcome
@@ -90,6 +93,8 @@ The shared vocabulary is:
 | Protected Attach | Qualified admission of an already-running Agent; it does not claim earlier history or pre-anchor continuity |
 | Collection Boundary | The point from which a Collector Capability applies; earlier activity is unknown history represented by a gap |
 | Runtime Identity | Stable process or workload identity that distinguishes reuse and coincidental matches |
+| Kubernetes Workload Claim | Operator-authorized exact cluster/namespace/Pod/container slot for one Agent Run and claim revision |
+| Kubernetes Attribution | Qualified lifecycle relation from one exact claim and stable Pod candidate to one active Exact D1 runtime binding |
 | Runtime Observation | A supported process, file, network, or credential-related operation reported inside capability and scope |
 | Operation Outcome | `attempted`, `succeeded`, `failed`, `denied`, `pending`, or `unknown` within the declared source semantics |
 | Collector Capability | Versioned operation/source/outcome declaration for one environment boundary |
@@ -371,8 +376,184 @@ profile becomes Supported.
 
 Actual Docker/containerd service restarts through systemd remain additional,
 destructive opt-in qualification beyond the non-destructive D1/D2 closure.
-Those gates and the K1/VKE Kubernetes qualification remain open; their status
-does not invalidate the retained Docker or private-containerd evidence.
+Those gates and the K1/VKE Kubernetes live qualification remain open; their
+status does not invalidate the retained Docker or private-containerd evidence.
+
+#### Kubernetes node and Pod attribution (K1)
+
+K1 is deployed as one two-container DaemonSet Pod per node. The root collector
+owns eBPF loading, the host `/proc`, cgroup, BPF, trace/BTF, exactly one CRI
+runtime socket, and the local state boundary. It has no service-account token.
+It is not a privileged container, cannot escalate privileges, uses a read-only
+root filesystem, drops all ambient capabilities, and adds exactly `BPF`,
+`PERFMON`, `SYS_RESOURCE`, and `DAC_READ_SEARCH`; it does not receive
+`SYS_ADMIN`. The Pod does not join the host PID or network namespace.
+The metadata-source container runs as UID/GID `65532`, drops all capabilities,
+uses a read-only root filesystem, and alone receives a projected, rotating
+service-account token. Production startup verifies the exact effective UID and
+GID and a zero effective capability set. Its Role permits only Pod `list` and `watch` in
+the DaemonSet's own dedicated Agent namespace; automatic token mounting is
+disabled. It has no cluster-wide or cross-namespace read path.
+The dedicated namespace is an operator-controlled trust domain: untrusted
+tenants must not receive Pod `create`, `update`, or `patch` authority there.
+
+The containers share only a bounded memory-backed IPC volume. The source owns a
+mode-`0700` directory and a UID/GID-`65532`, mode-`0660` Unix socket; the
+source binds under an unpredictable private name and publishes the fully
+qualified socket with one no-replace rename. The collector receives shared GID
+`65532` under a strict supplemental-group policy and retains `DAC_READ_SEARCH` alongside
+its BPF capabilities to traverse that private directory. Both ends validate the
+socket type, ownership, mode, pre/post-connect inode identity and peer
+credentials around bounded framed I/O. Stale-socket recovery uses a
+nonblocking liveness probe and removes only the exact proven inode. The
+collector's persistent host directory is a separate operator precondition and
+must already exist as root-owned mode `0700`; the DaemonSet never creates a
+broad host path. A K1 daemon owns exactly one `containerd` or
+`k3s_containerd` inventory domain, and configuration with both sockets is
+rejected. The shipped canonical manifest is pinned to the VKE/containerd path
+`/run/containerd/containerd.sock`. K3s support is implemented, but an operator
+must supply a matching K3s socket manifest or overlay that preserves this
+security and ownership contract; the repository does not ship one. A host CRI
+socket nevertheless exposes mutating protocol methods, so
+the collector remains node-trusted. Removing `SYS_ADMIN`, separating the token,
+and mounting host files narrowly are relative privilege reductions, not a
+read-only runtime boundary. True read-only CRI access requires a future
+allowlist broker rather than direct socket ownership.
+
+Operator authorization enters through `SessionIntent.kubernetes_claims`, not
+through discovered Pod metadata. Each claim has one non-zero revision and the
+exact tuple `(cluster_id,namespace_ref,pod_uid,container_kind,container_ref)`;
+all claims in one intent share the revision and duplicate slots are rejected.
+The operator must generate a cross-cluster unique, immutable `cluster_id` for
+the deployment. The source validates only canonical, non-zero UUID shape; it
+cannot detect accidental reuse or prove cluster identity.
+
+| Claim field | Contract |
+| --- | --- |
+| `schema_version` | u32 constant `1` |
+| `claim_revision` | Non-zero u64 shared by every claim in the intent |
+| `cluster_id` | Canonical lowercase non-zero UUID |
+| `namespace_ref` | 64-byte lowercase hexadecimal namespace pseudonym |
+| `pod_uid` | Canonical lowercase non-zero Pod UUID |
+| `container_kind` | `application`, `init`, or `ephemeral` |
+| `container_ref` | 64-byte lowercase hexadecimal container-name pseudonym |
+
+An intent carries at most 256 K1 claims. Unknown claim fields, mixed revisions,
+duplicate exact slots, malformed references, and an expired or invalid parent
+intent fail before daemon state changes.
+`apolysisd-control` reads one bounded typed control request from standard input,
+validates the local daemon socket and peer, applies one I/O deadline, and
+forwards the request without echoing rejected values. It is the intended
+operator ingress from `kubectl exec` into the collector container. Source
+labels and annotations remain discovery inputs and can never create or widen a
+claim.
+
+The Kubernetes node task explicitly enables CRI Pod-sandbox metadata joining.
+Standalone containerd keeps its existing direct-container-only behavior, while
+K3s retains its existing sandbox-label behavior. In K1 mode, only a READY Pod
+sandbox whose label is exactly `apolysis.dev/observe=true` participates;
+unmarked sandboxes are ignored before their private metadata is parsed. A
+marked sandbox must carry `metadata.namespace`; a different namespace is
+ignored even when its session value matches, while the configured namespace
+also requires standard label `io.kubernetes.pod.namespace` to match exactly.
+The sandbox Agent Run may come from label `apolysis.session_id` or annotation
+`apolysis.dev/session-id` and is normalized to inherited
+`apolysis.session_id`. A direct container session label remains a valid routing
+input for a candidate D1 identity, but it must equal inherited routing when both
+exist. Neither direct nor inherited session metadata authorizes D1/scope
+attachment. A present empty or
+invalid session value, conflicting label/annotation, missing or conflicting
+target namespace, duplicate READY target sandbox ID, or direct/inherited
+conflict during listing or inspect invalidates the complete CRI inventory.
+Diagnostics report only a fixed category and never the rejected metadata. The
+adapter's final candidate re-list uses the identical K1 mode and invalidates the
+inventory if the canonical set changed.
+
+This fail-closed metadata behavior is also an explicit availability boundary.
+A malformed marked sandbox in the operator namespace degrades that node's
+K1/runtime cycle. Exact typed claims prevent such metadata from widening
+authorization, but K1 does not claim denial-of-service resistance against a
+principal that already has Pod write authority in the dedicated namespace.
+
+Qualification is one closed transaction:
+
+```text
+complete paginated Pod LIST A
+  -> complete containerd/K3s CRI inventory (whole-scan request_timeout)
+  -> complete paginated Pod LIST B
+  -> exact typed-claim intersection
+  -> filter to claim-authorized full D1 identities
+  -> D1 reconcile/attach before durable Kubernetes attribution
+```
+
+Watch is only a dirty hint; it is never authority. LIST A and LIST B must have
+the same source epoch, cluster, namespace, and node identity, strictly
+increasing non-zero sequences, and byte-equivalent canonical Pod candidates.
+The candidate includes Pod UID, deletion/marker state, runtime-class reference,
+every application/init/ephemeral container slot and running container ID, plus
+an ephemeral `pod_revision_ref` derived from the Pod resource version. A later
+cycle in the same epoch must begin after the prior terminal sequence. Any
+pagination, decoding, bound, duplicate, revision, or A/B mismatch invalidates
+the whole snapshot; failure is never interpreted as an empty list.
+
+The intersection requires a marked, non-deleting Pod, an exact claim slot, a
+running container with a canonical full ID, and a candidate carrying the full
+Exact D1 identity for the same Agent Run. Only the resulting exact
+`claim -> A/B Pod UID+slot -> runtime container ID -> full D1 identity` key
+enters the admitted inventory. D1 reconciliation and scope attachment consume
+that filtered inventory; an unclaimed, mismatched, or metadata-only candidate
+cannot produce D1 state or scope ownership. Durable effect ordering observes D1
+before its K1 attribution. Kubernetes metadata is additive: it cannot
+manufacture a runtime identity or upgrade a stale/inferred binding. Raw
+namespace, node, container, and runtime-class names are domain-separated SHA-256
+references before IPC. `pod_revision_ref`, source epoch, and source sequences
+exist only to close qualification races and never cross the persistence seam.
+The persisted references are deterministic, unkeyed SHA-256 pseudonyms for the
+content-off profile, not anonymization or confidentiality: low-entropy names
+can be enumerated offline and identical values are linkable across runs. Pod UID
+and the nested D1 full container ID remain explicit.
+
+```text
+reference_v1(kind, raw) = lowerhex(SHA-256(
+  "apolysis:kubernetes-reference:v1" || 0x00 ||
+  kind || 0x00 || UTF-8(raw)
+))
+pod_revision_ref = lowerhex(SHA-256(
+  "apolysis:kubernetes-pod-revision:v1" || 0x00 || UTF-8(resourceVersion)
+))
+```
+
+`kind` is exactly `namespace`, `node`, `container`, or `runtime_class`.
+Namespace/container inputs are canonical lowercase DNS labels; node/runtime
+class inputs are bounded canonical lowercase DNS subdomains. The second formula
+is qualification-only and never a persisted identifier.
+
+An identical qualified cycle is a no-op. Pod/container absence in a successful
+cycle retires the K1 attribution. A same-Pod container restart changes its D1
+identity and produces the ordered K1 identity-transition gap, old K1
+retirement, fresh D1 qualification, and new K1 observation. A newly appearing
+K1 link to a runtime binding that predated the cycle records one
+`kubernetes_late_attach` relationship boundary; a D1 binding created in the
+same atomic cycle does not. Recovery from a declared outage, identity
+transition, or restart is not mislabeled as late attach.
+
+Kubernetes API loss emits an API gap and suspends K1 while leaving independently
+healthy D1 collection active. CRI loss first makes K1 runtime metadata
+unavailable and suspends K1, then applies the ordinary D1 runtime gap and
+suspension. A successful CRI scan that cannot prove the claimed runtime join
+(missing, conflicting, duplicate, or invalid runtime identity) follows the same
+K1-then-D1 `inventory_invalid` suspension path; source-only Pod A/B churn
+suspends K1 but retains an independently exact D1 binding. Both recovery paths
+require a fresh complete A/runtime/B cycle before attribution returns. A changed
+source epoch or recovered daemon state emits
+`kubernetes_daemon_restart`, retires prior active or dormant K1 state, and
+re-observes only freshly qualified links. Closing or replacing a claim revision
+atomically retires its K1 links and the K1-exclusive containerd/K3s D1 bindings,
+and untracks their scopes before acknowledging the replacement; this remains
+true while Kubernetes metadata is unavailable. Independent Docker bindings are
+not revoked by that K1 transaction. A cross-node reschedule is not continuity:
+the old Pod UID retires and a new Pod UID is independently observed after a
+bounded handoff; no gap-free ownership claim is made.
 
 Protected attach normalizes initial process and thread identifiers to TGIDs and
 requires the root to be a live thread-group leader. A `/proc` start tick is
@@ -413,9 +594,9 @@ findings remain queryable limitations; mixed Agent Runs, corrupt storage,
 invalid lifecycle order, duplicate canonical observations, incompatible
 schemas, and content-policy violations fail closed. Free-form finding and gap
 diagnostics are canonicalized rather than copied into the derived artifact.
-Validated runtime-binding lifecycle facts remain in source order in the
-projection; validation reconstructs their lifecycle rather than reducing them
-to the currently active set.
+Validated runtime-binding and Kubernetes-attribution lifecycle facts remain in
+source order in the projection; validation reconstructs both lifecycles rather
+than reducing them to the currently active set.
 
 Complete evidence requires the full current v1 operation/source/outcome
 capability contract. A partial or fictitious manifest and an unresolved Finding
@@ -433,8 +614,9 @@ interactive viewer.
 `apolysis run view --input <agent-observation-record.json> --output
 <viewer.html>` is the non-privileged Saved Run Viewer adapter. It accepts
 exactly one Agent Observation Record v1, validates its type, schema, summary,
-identity references, source ordinals, runtime-binding lifecycle, Finding
-links, and state consistency, then renders deterministic, self-contained HTML.
+identity references, source ordinals, runtime-binding and K1 lifecycles,
+Finding links, and state consistency, then renders deterministic,
+self-contained HTML.
 A malformed or inconsistent record fails closed without replacing an existing
 output. The reader is bounded, refuses symlinks and non-regular files, and the
 publisher refuses an output alias before using an exclusive mode-`0600`
@@ -454,6 +636,8 @@ The viewer provides:
 - an Exact Runtime Identity roster and the reported PID/PPID fields retained
   on Runtime Observations;
 - the ordered observed, retired, and suspended runtime-binding lifecycle;
+- the ordered observed, retired, and suspended K1 lifecycle with exact D1
+  source links;
 - ordered process, file, network, and credential timeline;
 - supported outcome and attribution status;
 - collector health, loss, truncation, and unsupported capability gaps;
@@ -472,8 +656,9 @@ the three summary axes into a clean verdict.
 The derived v1 object is one JSON object and is never appended to timeline
 JSONL. Its top level is `record_type`, `schema_version`, `agent_run_id`,
 `source_integrity`, `summary`, `capability_manifests`, `runtime_identities`,
-`runtime_observations`, `runtime_bindings`, `collector_lifecycle`, `findings`,
-`observation_gaps`, and `issues`. Every projected source fact carries a
+`runtime_observations`, `runtime_bindings`, `kubernetes_attributions`,
+`collector_lifecycle`, `findings`, `observation_gaps`, and `issues`. Every
+projected source fact carries a
 one-based `source_ordinal` from authoritative input order. The summary retains
 typed counts and grouping maps without merging Evidence State, Collector
 Health, and Review State.
@@ -608,6 +793,7 @@ The stable record families are:
 | `accountability_finding` | Typed review decision, bounded canonical reason, evidence reference, runtime identity and evidence boundary |
 | `observation_gap` | Typed operation, kind, count and bounded detail for evidence that may be absent or unusable |
 | `runtime_binding_observed` / `runtime_binding_retired` / `runtime_binding_suspended` | Durable Docker/containerd binding lifecycle over one stable workload identity |
+| `kubernetes_attribution_observed` / `kubernetes_attribution_retired` / `kubernetes_attribution_suspended` | Durable claimed Pod/container attribution lifecycle over one Exact observed containerd/K3s runtime binding |
 | `observer_diagnostic` | Typed bounded attach, verifier, ABI, decode, truncation, pressure, loss, or summary diagnostic |
 | `visibility_assessment` | Runtime profile, host visibility scope, metadata/guest-collector requirements and bounded subjects |
 
@@ -823,6 +1009,8 @@ are:
 | `late_attach` | `collector_lifecycle`, `1` | `collection_boundary:protected_existing_process_attach,history:unknown,provenance:<external_registration\|proc_discovery>,root_selection:<registration_qualified\|inferred>` | Same bounded detail |
 | `runtime_metadata_unavailable` | `runtime_metadata`, `1` | `source=<docker\|containerd\|k3s_containerd>,reason=<socket_unavailable\|daemon_restart\|inventory_invalid>` | `runtime_source_unavailable` |
 | `runtime_metadata_unavailable` | `runtime_metadata`, `1` | Same source set and `reason=identity_transition` | `runtime_identity_transition` |
+| `kubernetes_metadata_unavailable` | `kubernetes_metadata`, `1` | `cluster=<canonical-nonzero-UUID>,reason=<kubernetes_api_unavailable\|kubernetes_runtime_unavailable\|kubernetes_snapshot_invalid>` | Respectively `kubernetes_source_unavailable`, `kubernetes_runtime_unavailable`, or `kubernetes_snapshot_invalid` |
+| `kubernetes_metadata_unavailable` | `kubernetes_metadata`, `1` | Same cluster shape and `reason=<kubernetes_daemon_restart\|kubernetes_identity_transition\|kubernetes_late_attach>` | The same bounded reason |
 
 Runtime-metadata details cannot include paths, payloads, socket names, or
 backend text. Every gap adds one AOR `observation_gap` issue and prevents
@@ -866,6 +1054,32 @@ currently qualified identity when present. Failure is never an empty inventory.
 There is no separate transition record: the canonical identity-transition
 representation is the ordered gap -> retired -> observed sequence.
 
+The Kubernetes-attribution lifecycle records have this exact closed shape:
+
+| Field | Type | Value or meaning |
+| --- | --- | --- |
+| `record_type` | enum | `kubernetes_attribution_observed`, `kubernetes_attribution_retired`, or `kubernetes_attribution_suspended` |
+| `schema_version` | u32 | Constant `1` |
+| `agent_run_id` | string | Owning canonical Agent Run ID |
+| `cluster_id` | string | Canonical lowercase non-zero UUID configured by the operator |
+| `namespace_ref` | string | 64-byte lowercase hexadecimal domain-separated privacy reference |
+| `pod_uid` | string | Canonical lowercase non-zero Kubernetes Pod UUID |
+| `node_ref` | string | 64-byte lowercase hexadecimal domain-separated privacy reference |
+| `runtime_class_ref` | string\|null | Same 64-byte privacy reference, or explicit `null` |
+| `container_kind` | enum | `application`, `init`, or `ephemeral` |
+| `container_ref` | string | 64-byte lowercase hexadecimal domain-separated privacy reference |
+| `runtime_binding` | object | Complete valid v1 `runtime_binding_observed` object for the same Agent Run; adapter is exactly `containerd` or `k3s_containerd` |
+
+The lifecycle key is
+`(cluster_id,pod_uid,container_kind,container_ref)`. Observation requires the
+embedded D1 identity to be active first. Suspension or retirement must match the
+entire active K1 identity, and K1 must end before its D1 identity ends. A K1
+suspension consumes one earlier unmatched API/runtime/snapshot-unavailable gap
+credit for the same cluster and active key. Restart, identity-transition, and
+late-attach gaps are visible boundaries but do not authorize suspension.
+`claim_revision`, raw names, `pod_revision_ref`, source epoch/sequence, labels,
+annotations, paths, PID, endpoint, token, and backend text are not wire fields.
+
 The AOR projector strict-decodes these three record types, binds every record
 to the projected Agent Run, and tracks active `(adapter,workload_id)` keys. A
 duplicate observation or a retirement/suspension whose full identity does not
@@ -905,6 +1119,7 @@ request returns this `DAEMON_SCHEMA_V1` response:
 | `schema_version` | u32 | Constant `1` |
 | `session` | object|null | Matching `SessionState`, or `null` when absent or not visible to the tenant |
 | `runtime_bindings` | array<object> | Active bindings for that visible Agent Run; always present, and empty when `session` is `null` |
+| `kubernetes_attributions` | array<object> | Active freshly qualified K1 records for that visible Agent Run; always present, and empty when `session` is `null` |
 
 Each `runtime_bindings` element has exactly these required nested fields:
 
@@ -920,17 +1135,21 @@ Each `runtime_bindings` element has exactly these required nested fields:
 | `identity.cgroup.inode` | u64 | Positive cgroup-filesystem inode identity |
 | `runtime_handler` | string|null | Bounded opaque handler name, or `null` |
 
-The array contains active, freshly qualified bindings only; dormant, suspended,
-and retired bindings are excluded and entries are ordered by adapter/workload
-key. `tenant_id` defaults to `default` when omitted. The daemon first requires
+The two arrays contain active, freshly qualified state only; dormant,
+suspended, and retired entries are excluded. Runtime bindings are ordered by
+adapter/workload key and Kubernetes attributions by their exact lifecycle key.
+Every `kubernetes_attributions` element has the closed K1 wire shape above and
+references one returned active D1 binding. `tenant_id` defaults to `default`
+when omitted. The daemon first requires
 the requested Agent Run's registered tenant to equal the query tenant; only
 then does it read bindings. `session` and `runtime_bindings` come from one
 tenant-gated atomic snapshot, so concurrent tenant replacement cannot separate
 the authorization decision from binding disclosure. An absent or cross-tenant
-Agent Run therefore returns `session:null` and `runtime_bindings:[]`, preventing binding identity
-from becoming a cross-tenant existence oracle. The query preserves the same
-privacy boundary as persistence: it exposes no raw label, namespace, PID,
-container name, cgroup/runtime/socket path, endpoint, backend error, or payload.
+Agent Run therefore returns `session:null`, `runtime_bindings:[]`, and
+`kubernetes_attributions:[]`, preventing workload identity from becoming a
+cross-tenant existence oracle. The query preserves the same privacy boundary as
+persistence: it exposes no raw label, annotation, namespace, node, container
+name, PID, cgroup/runtime/socket path, endpoint, backend error, or payload.
 
 ### 6.3 Agent Observation Record v1
 
@@ -949,6 +1168,7 @@ uses a one-based `source_ordinal`, and timestamps never reorder records.
 | `runtime_identities` | array<object> | Exact identity aggregates |
 | `runtime_observations` | array<object> | Canonical supported observations |
 | `runtime_bindings` | array<object> | Ordered validated runtime-binding lifecycle facts; new v1 output always includes it |
+| `kubernetes_attributions` | array<object> | Ordered validated K1 lifecycle facts; new v1 output always includes it |
 | `collector_lifecycle` | array<object> | Ordered lifecycle facts |
 | `findings` | array<object> | Typed review findings |
 | `observation_gaps` | array<object> | Normalized bounded gaps |
@@ -973,9 +1193,10 @@ Nested array object schemas are:
 | runtime identity | `identity_id:string`, `host_boot_id:string`, `scope_generation:u64`, `pid:u32`, `process_generation:u64`, `process_start_time_ns:u64`, `exec_generation:u32`, `first_source_ordinal:u64`, `last_source_ordinal:u64`, `observation_count:u64` |
 | runtime observation | `source_ordinal:u64`, `timestamp_unix_ms:u128`, `event_source:string`, `event_type:string`, `raw_event_id:string|null`, `pid:u32`, `ppid:u32`, `actor:string`, `resource:string`, `action:string`, `outcome:string|null`, `return_value:i64|null`, `errno:i32|null`, `container_id:string|null`, `cgroup_id:string|null`, `relation_status:string`, `relation_reason:string`, `process_executable:string|null`, `process_started_at_unix_ms:u128|null`, `runtime_identity_id:string|null`, `parent_process_generation:u64|null`, `parent_exec_generation:u32|null` |
 | runtime binding | `source_ordinal:u64`, `record_type:enum`, `schema_version:u32`, `agent_run_id:string`, `adapter:string`, `workload_id:string`, `start_marker:string`, `host_boot_id:string`, `init_process_start_time_ticks:u64`, `cgroup_device:u64`, `cgroup_id:u64`, `runtime_handler:string|null`; the last eleven fields are the exact runtime-binding v1 lifecycle wire shape |
+| Kubernetes attribution | `source_ordinal:u64` plus the exact eleven-field closed K1 lifecycle wire shape above, including its nested runtime-binding object |
 | collector lifecycle | `source_ordinal:u64`, `schema_version:u32`, `timestamp_unix_ms:u128`, `collector:string`, `collector_instance_id:string`, `state:enum`, `health:enum`, `stop_reason:enum|null`, `counters:object` with the same eight `u64` fields as timeline lifecycle |
 | finding | `source_ordinal:u64`, `schema_version:u32`, `kind:enum`, `decision:enum`, `reason:string`, `evidence_ref:string`, `runtime:object`, `evidence_boundary:enum`; runtime uses `runtime:string`, `container_id:string|null`, `pod_uid:string|null`, `cgroup_id:u64|null` |
-| observation gap | `source_ordinal:u64`, `schema_version:u32`, `timestamp_unix_ms:u128`, `operation:string`, `kind:string`, `count:u64`, `detail:string` using the normalized table above, plus optional `runtime_source:string` and `runtime_reason:string` as defined below |
+| observation gap | `source_ordinal:u64`, `schema_version:u32`, `timestamp_unix_ms:u128`, `operation:string`, `kind:string`, `count:u64`, `detail:string` using the normalized table above, plus the optional paired `runtime_source:string`/`runtime_reason:string` or `kubernetes_cluster_id:string`/`kubernetes_reason:string` fields defined below |
 | issue | `code:enum`, `source_ordinal:u64|null`, `count:u64` |
 
 Version 1 accepts at most one capability manifest; a duplicate manifest is a
@@ -991,6 +1212,16 @@ binding active at the end of the run. Each element belongs to the projected
 Agent Run and remains in authoritative `source_ordinal` order. The projector
 and frozen-record validator both reconstruct the active binding state and
 enforce the lifecycle identity and sequence rules in Section 6.1.
+
+`kubernetes_attributions` follows the same default-compatible v1 extension
+rule: new projection output always includes it and a legacy v1 record may omit
+it as empty. The projector preserves every validated K1 observed, retired, and
+suspended fact in source order. It replays runtime and K1 state together,
+requires the referenced D1 observation to precede K1 observation, requires K1
+retirement/suspension before D1 ends, and consumes K1 suspension credits exactly
+once. The frozen-record validator repeats those checks. The Saved Run Viewer
+renders a separate K1 lifecycle panel and links each K1 fact to its Exact D1
+binding source fact without reconstructing raw Kubernetes names.
 
 A Finding whose `evidence_ref` is `runtime_binding:<workload_id>` is resolved
 only by a `runtime_binding_observed` fact from the same run that appears before
@@ -1011,6 +1242,13 @@ The frozen-record validator replays gaps and binding facts together in
 with reason `socket_unavailable` or `inventory_invalid` grants one suspension
 credit. `daemon_restart` and `identity_transition` do not grant suspension
 credit, and every credit is single-use.
+
+For `kubernetes_metadata_unavailable`, projection replaces the source detail
+with the normalized bounded detail in Section 6.1 and adds required
+`kubernetes_cluster_id` and `kubernetes_reason` fields. The reason is exactly
+one of the six K1 reasons listed there. Other gaps omit both fields. Every K1
+gap adds one `observation_gap` issue and prevents complete evidence; late attach
+counts a relationship boundary rather than a number of missing syscalls.
 
 Issue code is exactly `missing_capability`, `unsupported_capability`,
 `missing_lifecycle_start`, `missing_lifecycle_terminal`, `collector_loss`,
@@ -1202,7 +1440,7 @@ network, guest, or runtime paths become explicit capability gaps.
 | Local Linux CLI | Managed launch or protected process-tree attach |
 | Linux self-hosted CI | Same CLI managed-run boundary; runner isolation remains external |
 | Docker/containerd | Host eBPF observation joined to container and cgroup identity |
-| Kubernetes | Node eBPF observation joined to Pod/container/cgroup identity; bounded beta |
+| Kubernetes containerd/K3s | Implemented K1 node eBPF observation joined to claimed Pod/container/cgroup identity; Experimental pending designated live qualification |
 | gVisor | Host/runtime boundary visibility, not every guest syscall |
 | Kata or Firecracker | Host/VMM/shim visibility; guest semantics require a guest collector |
 | macOS or Windows | No eBPF runtime observation support |
@@ -1264,6 +1502,16 @@ blocking prototypes are not part of the active product.
   qualification inputs. Full executable and workspace paths and the command
   fingerprint do not cross the persistence seam; only bounded identity and
   redacted supervisor metadata are retained.
+- K1 persists the operator-defined cluster UUID, Pod UID, container kind, and
+  domain-separated namespace/node/container/runtime-class references. Raw Pod
+  names, namespace and node names, labels, annotations, resource versions,
+  tokens, and source error bodies do not cross the persistence or diagnostic
+  seam. The projected token is mounted only in the non-root source container;
+  the root collector has no Kubernetes API credential.
+- K1 privacy references are deterministic unkeyed pseudonyms, not secrets or
+  anonymity. Low-entropy identifiers remain enumerable and references remain
+  linkable across runs; Pod UID and the full runtime container identity remain
+  explicit by contract.
 - Raw kernel payload exists only as a bounded implementation detail and may not
   cross the persistence seam without an explicit, reviewed profile.
 - Observation scopes prevent accidental host-wide collection.
@@ -1290,6 +1538,8 @@ state:
 - collector restart or death;
 - runtime socket loss, daemon restart, invalid runtime inventory, or stale
   container identity transition;
+- Kubernetes API or CRI loss, invalid/changed A/B Pod snapshot, source epoch or
+  daemon restart, K1 identity transition, or K1 late attach;
 - late attach, PID reuse ambiguity, or missing process lineage;
 - unsupported syscall, io_uring, guest, or remote operation path;
 - local storage failure or incomplete terminal flush.
@@ -1318,17 +1568,24 @@ Implemented today:
   descriptor-bound recovery, and bounded stable-snapshot readers for
   plain/rotated or verified saved runs;
 - `apolysis-accountability`: the pure Agent Observation Record projection,
-  independent summary axes, optional declared-intent comparison, and
-  review-oriented findings;
+  independent summary axes, optional declared-intent comparison, typed K1 claim
+  admission and lifecycle validation, and review-oriented findings;
 - `apolysis-viewer`: strict Agent Observation Record v1 validation and
-  deterministic standalone offline HTML presentation with source traceability;
-- `apolysis-kubernetes` and `apolysis-visibility`: bounded runtime metadata and
-  visibility-boundary assessment;
+  deterministic standalone offline HTML presentation with runtime/K1 source
+  traceability;
+- `apolysis-kubernetes`: the pure bounded A/runtime/B qualification coordinator,
+  claim intersection, K1 lifecycle, outage/restart recovery, and Exact D1 join;
+- `apolysis-kubernetes-source`: the non-root namespace-scoped Pod LIST/watch
+  source and strict privacy-safe Unix IPC protocol;
+- `apolysis-visibility`: visibility-boundary assessment;
 - `apolysis-daemon`: long-lived observer, bounded queue, local socket, runtime
   registration, complete Docker/containerd inventory qualification, stable
   container/cgroup binding, bounded runtime-source and daemon-restart recovery,
-  scoped lifecycle persistence, idempotent unfinished-instance recovery,
-  receipt-owned local operations, and identity-bound journaled retention.
+  two-phase K1/runtime lifecycle persistence and recovery, tenant-atomic query,
+  scoped collector lifecycle, idempotent unfinished-instance recovery,
+  receipt-owned local operations, and identity-bound journaled retention;
+- `apolysisd-control` and `deploy/kubernetes`: the typed operator ingress and
+  least-privilege two-container node DaemonSet contract.
 
 The live collector synchronizes its capability manifest and lifecycle start to
 stable storage after successful attachment and before releasing a managed
@@ -1347,9 +1604,19 @@ content-off eBPF container/cgroup attribution with capability and hash-chain
 evidence. The independent retained private-containerd gate covers stable and
 replacement complete inventories plus socket gap -> suspension -> fresh
 observation under the isolation and cleanup contract in section 5.3.
-Destructive systemd runtime-service restart and K1/VKE qualification remain
-open. Bounded local daemon filesystem operations are implemented; no Supported
-live-host profile is granted, and the bounded Kubernetes beta remains a target.
+The K1 implementation covers typed claims, privacy-safe Pod metadata, complete
+A/runtime/B closure, application/init/ephemeral containers, D1 reuse,
+observed/retired/suspended lifecycle, explicit API/CRI/snapshot/restart/
+transition/late-attach gaps, tenant-gated query, AOR projection, and viewer
+navigation. In the combined path, D1 reconciliation receives only the full
+identity keys authorized by the exact claim/A/B intersection; raw routing
+candidates cannot attach scope. Its deterministic and deployment contracts
+pass locally, but its
+designated VKE live gate has not run in this workspace because the required
+kubeconfig and `kubectl` are absent. That preflight result is a skip, not a
+pass, and does not promote Kubernetes. Destructive systemd runtime-service
+restart and release qualification remain open. Bounded local daemon filesystem
+operations are implemented; no Supported live-host profile is granted.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification
@@ -1372,6 +1639,29 @@ them as historical implementation input; they do not define this architecture.
   link. The viewer can show the Exact Runtime Identity roster and each
   observation's reported PID/PPID, but cannot construct a canonical process
   tree without unsafe PID-based inference.
+- K1 is limited to one namespace and node per DaemonSet Pod, one explicitly
+  configured containerd or K3s runtime domain, READY marked Pod sandboxes, and
+  exact typed claims for application, init, or ephemeral container slots. It
+  does not observe Docker-backed Kubernetes, arbitrary/unclaimed Pods, multiple
+  namespaces from one source token, or runtime/container metadata that cannot
+  form an Exact D1 identity.
+- The canonical DaemonSet supports only its own dedicated Agent namespace. It
+  cannot be copied per workload namespace while sharing the same node runtime:
+  one node observer must exclusively own the runtime domain. Cluster-wide or
+  cross-namespace attribution needs a newly designed authorization/source seam.
+- The dedicated namespace must remain operator-controlled. Exact claims prevent
+  a Pod writer from acquiring another run's D1/scope, but a malformed marked
+  sandbox deliberately fails the complete scan and can degrade node K1/runtime
+  availability; K1 does not resist that authorized-namespace denial of service.
+- Direct host CRI socket ownership keeps the collector node-trusted because the
+  protocol includes mutating methods. Capability and token separation reduce
+  privilege but do not enforce read-only access; that requires a future
+  allowlist broker.
+- K1 watches only to trigger a fresh capture. Its authority is two complete Pod
+  LISTs around one complete CRI inventory, so API pagination or runtime latency
+  bounds convergence and churn can repeatedly yield an explicit snapshot gap.
+  Node-local state has no gap-free cross-node handoff: a rescheduled Pod has a
+  new UID and is independently qualified on its destination node.
 - eBPF sees kernel/runtime operations, not logical reasoning or hidden remote
   provider state.
 - Relative paths, file-descriptor-relative operations, namespaces, overlays,
@@ -1428,17 +1718,20 @@ them as historical implementation input; they do not define this architecture.
 ## 15. Direction and release gates
 
 The local Agent Run workflow, non-privileged projection/viewer, bounded daemon
-operations, and the completed D1/D2 implementation with retained independent
-Docker and private-containerd qualification form the current foundation. The
-next bounded direction is K1 least-privilege Kubernetes node and Pod
-attribution, followed by release preparation. Its designated, runtime- and
-network-ready VKE validation must cover representative reschedule, sensor loss,
-runtime boundary, cleanup, and privacy. Docker evidence cannot be reused as
-containerd or Kubernetes evidence, and private-containerd evidence cannot be
-reused as Kubernetes evidence. Destructive systemd runtime-service restart
-qualification remains an independent, optional claim. No profile advances
-beyond Experimental or Candidate until its exact workload/kernel/runtime and
-applicable release evidence passes.
+operations, completed D1/D2 work with retained independent Docker and
+private-containerd qualification, and completed deterministic K1 contract form
+the current foundation. The next bounded step is the designated, runtime- and
+network-ready VKE live qualification, followed by release preparation. That
+gate must cover representative same-Pod restart, source loss and recovery,
+cross-node new-UID handoff, runtime boundary, cleanup, and privacy. In this
+workspace its required kubeconfig and `kubectl` are absent, so it has not run;
+the canonical preflight result is a skip and must not be reported as a pass.
+Docker evidence cannot be reused as containerd or Kubernetes evidence, and
+private-containerd evidence cannot be reused as Kubernetes evidence.
+Destructive systemd runtime-service restart qualification remains an
+independent, optional claim. No profile advances beyond Experimental or
+Candidate until its exact workload/kernel/runtime and applicable release
+evidence passes.
 
 Cross-cutting rules are durable: scope before capture, capability before claim,
 no silent absence, stable identity before inference, privacy before

@@ -160,6 +160,7 @@ async fn tenant_scoped_queries_and_session_lists_do_not_cross_tenant_boundaries(
     let DaemonResponse::Session {
         session: None,
         runtime_bindings,
+        kubernetes_attributions,
         ..
     } = request(
         &server.config.socket_path,
@@ -170,6 +171,7 @@ async fn tenant_scoped_queries_and_session_lists_do_not_cross_tenant_boundaries(
         panic!("cross-tenant query must not return an Agent Run");
     };
     assert!(runtime_bindings.is_empty());
+    assert!(kubernetes_attributions.is_empty());
 
     let DaemonResponse::Session {
         session: Some(session),

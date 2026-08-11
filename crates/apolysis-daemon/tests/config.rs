@@ -18,10 +18,6 @@ fn parses_bounded_runtime_configuration() {
             "/run/containerd/containerd.sock",
             "--k3s-containerd-socket",
             "/run/k3s/containerd/containerd.sock",
-            "--kubernetes-kubectl",
-            "/usr/local/bin/kubectl",
-            "--kubernetes-cri-socket",
-            "/run/k3s/containerd/containerd.sock",
             "--proc-root",
             "/host/proc",
             "--cgroup-root",
@@ -62,14 +58,6 @@ fn parses_bounded_runtime_configuration() {
         config.k3s_containerd_socket,
         Some(PathBuf::from("/run/k3s/containerd/containerd.sock"))
     );
-    assert_eq!(
-        config.kubernetes_kubectl,
-        Some(PathBuf::from("/usr/local/bin/kubectl"))
-    );
-    assert_eq!(
-        config.kubernetes_cri_socket,
-        Some(PathBuf::from("/run/k3s/containerd/containerd.sock"))
-    );
     assert_eq!(config.proc_root, PathBuf::from("/host/proc"));
     assert_eq!(config.cgroup_root, PathBuf::from("/host/sys/fs/cgroup"));
     assert_eq!(
@@ -88,6 +76,83 @@ fn parses_bounded_runtime_configuration() {
         config.collector_checkpoint_interval,
         Duration::from_secs(15)
     );
+}
+
+#[test]
+fn parses_complete_kubernetes_node_profile() {
+    let config = DaemonConfig::from_args(
+        [
+            "--containerd-socket",
+            "/run/containerd/containerd.sock",
+            "--kubernetes-source-socket",
+            "/run/apolysis/kubernetes-source.sock",
+            "--kubernetes-cluster-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--kubernetes-namespace",
+            "qualification",
+            "--kubernetes-node-name",
+            "worker-a.example.internal",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .expect("complete Kubernetes node profile");
+
+    assert_eq!(
+        config.kubernetes_source_socket,
+        Some(PathBuf::from("/run/apolysis/kubernetes-source.sock"))
+    );
+    assert_eq!(
+        config.kubernetes_cluster_id.as_deref(),
+        Some("11111111-1111-1111-1111-111111111111")
+    );
+    assert_eq!(
+        config.kubernetes_namespace.as_deref(),
+        Some("qualification")
+    );
+    assert_eq!(
+        config.kubernetes_node_name.as_deref(),
+        Some("worker-a.example.internal")
+    );
+}
+
+#[test]
+fn rejects_partial_or_ambiguous_kubernetes_node_profiles() {
+    for arguments in [
+        vec![
+            "--kubernetes-source-socket",
+            "/run/apolysis/kubernetes-source.sock",
+        ],
+        vec![
+            "--containerd-socket",
+            "/run/containerd/containerd.sock",
+            "--k3s-containerd-socket",
+            "/run/k3s/containerd/containerd.sock",
+            "--kubernetes-source-socket",
+            "/run/apolysis/kubernetes-source.sock",
+            "--kubernetes-cluster-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--kubernetes-namespace",
+            "qualification",
+            "--kubernetes-node-name",
+            "worker-a.example.internal",
+        ],
+    ] {
+        let error = DaemonConfig::from_args(arguments.into_iter().map(str::to_string))
+            .expect_err("unsafe Kubernetes node profile must fail closed");
+        assert!(error.contains("Kubernetes node profile"), "{error}");
+    }
+}
+
+#[test]
+fn rejects_the_legacy_kubectl_production_path() {
+    let error = DaemonConfig::from_args(
+        ["--kubernetes-kubectl", "/usr/local/bin/kubectl"]
+            .into_iter()
+            .map(str::to_string),
+    )
+    .expect_err("kubectl shelling must not remain a production option");
+    assert!(error.contains("unknown argument"), "{error}");
 }
 
 #[test]

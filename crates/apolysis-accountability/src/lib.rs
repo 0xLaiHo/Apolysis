@@ -17,7 +17,7 @@ pub use health::{AdapterKind, ComponentState, HealthSnapshot};
 pub use intent::{
     decode_intent_frame, ActionClass, IntentError, IntentRequest, ResourceKind, ResourceSelector,
     RetentionTier, RuntimeSelector, SessionIntent, WorkloadSelector, DEFAULT_TENANT_ID,
-    INTENT_SCHEMA_V1, MAX_INTENT_FRAME_BYTES,
+    INTENT_SCHEMA_V1, MAX_INTENT_FRAME_BYTES, MAX_KUBERNETES_CLAIMS_PER_INTENT,
 };
 pub use projection::{
     project_agent_run, validate_agent_observation_record_v1, AgentObservationRecord,
@@ -25,10 +25,11 @@ pub use projection::{
     CollectorHealthProjection, CollectorLifecycleHealth, CollectorLifecycleState,
     CollectorStopReason, EvidenceState, ObservationRecordSourceIntegrity, ProjectedCapability,
     ProjectedCapabilityManifest, ProjectedCollectorLifecycle, ProjectedFinding,
-    ProjectedLifecycleCounters, ProjectedObservationGap, ProjectedRuntimeBinding,
-    ProjectedRuntimeIdentity, ProjectedRuntimeObservation, ProjectionError, ProjectionIssue,
-    ProjectionIssueCode, ReviewState, AGENT_OBSERVATION_RECORD_SCHEMA_V1,
-    MAX_AGENT_RUN_PROJECTION_BATCHES, MAX_AGENT_RUN_PROJECTION_RECORDS,
+    ProjectedKubernetesAttribution, ProjectedLifecycleCounters, ProjectedObservationGap,
+    ProjectedRuntimeBinding, ProjectedRuntimeIdentity, ProjectedRuntimeObservation,
+    ProjectionError, ProjectionIssue, ProjectionIssueCode, ReviewState,
+    AGENT_OBSERVATION_RECORD_SCHEMA_V1, MAX_AGENT_RUN_PROJECTION_BATCHES,
+    MAX_AGENT_RUN_PROJECTION_RECORDS,
 };
 pub use queue::{BoundedPriorityQueue, PushOutcome, QueuePriority, QueueStats};
 pub use session::{

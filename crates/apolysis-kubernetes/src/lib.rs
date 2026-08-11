@@ -13,6 +13,18 @@ use apolysis_core::{
     CanonicalEvent, EventSource, EventType,
 };
 
+mod qualification;
+
+pub use qualification::{
+    KubernetesAttributionCoordinator, KubernetesAttributionEffect, KubernetesAttributionGapKind,
+    KubernetesAttributionPlan, KubernetesAttributionSummary, KubernetesContainerCandidate,
+    KubernetesPodCandidate, KubernetesPodSnapshot, KubernetesQualificationCycle,
+    KubernetesQualificationError, KubernetesRuntimeInventory, KubernetesSnapshotIdentity,
+    KubernetesSourceUnavailableReason, MAX_KUBERNETES_CONTAINERS_PER_POD,
+    MAX_KUBERNETES_REGISTERED_CLAIMS, MAX_KUBERNETES_SNAPSHOT_CONTAINERS,
+    MAX_KUBERNETES_SNAPSHOT_PODS,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KubernetesMetadata {
     pub pod_name: String,

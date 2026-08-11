@@ -474,6 +474,281 @@ fn runtime_binding_observed_and_retired_records_are_known_auxiliary_evidence() {
 }
 
 #[test]
+fn kubernetes_attribution_projects_only_after_its_exact_runtime_binding() {
+    let agent_run_id = "run-kubernetes-attribution";
+    let runtime_binding = containerd_runtime_binding_auxiliary(agent_run_id);
+    let kubernetes_attribution = kubernetes_attribution_auxiliary(
+        "kubernetes_attribution_observed",
+        agent_run_id,
+        runtime_binding.clone(),
+    );
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1000),
+        lifecycle(agent_run_id, 1001, "started", "healthy", Value::Null),
+        network_observation(agent_run_id, 1002),
+        runtime_binding,
+        kubernetes_attribution,
+        lifecycle(
+            agent_run_id,
+            1003,
+            "stopped",
+            "healthy",
+            json!("agent_exited"),
+        ),
+    ])])
+    .expect("exact Kubernetes attribution remains queryable");
+
+    assert_eq!(record.kubernetes_attributions.len(), 1);
+    assert_eq!(record.kubernetes_attributions[0].source_ordinal, 5);
+    assert_eq!(
+        record.kubernetes_attributions[0].wire.pod_uid,
+        "22222222-2222-2222-2222-222222222222"
+    );
+    assert!(record
+        .issues
+        .iter()
+        .all(|issue| issue.code != ProjectionIssueCode::UnknownRecordType));
+    assert!(validate_agent_observation_record_v1(&record).is_ok());
+}
+
+#[test]
+fn kubernetes_suspension_without_a_matching_source_gap_fails_closed() {
+    let agent_run_id = "run-kubernetes-unqualified-suspend";
+    let observed = containerd_runtime_binding_auxiliary(agent_run_id);
+    let kubernetes_observed = kubernetes_attribution_auxiliary(
+        "kubernetes_attribution_observed",
+        agent_run_id,
+        observed.clone(),
+    );
+    let suspended = kubernetes_attribution_auxiliary(
+        "kubernetes_attribution_suspended",
+        agent_run_id,
+        observed.clone(),
+    );
+
+    for records in [
+        vec![
+            capability(agent_run_id, 1000),
+            observed.clone(),
+            kubernetes_observed.clone(),
+            suspended.clone(),
+        ],
+        vec![
+            capability(agent_run_id, 1000),
+            observed.clone(),
+            kubernetes_observed.clone(),
+            kubernetes_metadata_gap(
+                agent_run_id,
+                1001,
+                "33333333-3333-3333-3333-333333333333",
+                "kubernetes_api_unavailable",
+            ),
+            suspended.clone(),
+        ],
+        vec![
+            capability(agent_run_id, 1000),
+            observed,
+            kubernetes_observed,
+            kubernetes_metadata_gap(
+                agent_run_id,
+                1001,
+                "11111111-1111-1111-1111-111111111111",
+                "kubernetes_daemon_restart",
+            ),
+            suspended,
+        ],
+    ] {
+        assert!(
+            matches!(
+                project_agent_run([AgentRunRecordBatch::plain(records)]),
+                Err(ProjectionError::MalformedRecord { .. })
+            ),
+            "only a preceding source outage for the same cluster can suspend an active link"
+        );
+    }
+}
+
+#[test]
+fn runtime_binding_cannot_retire_while_kubernetes_attribution_is_active() {
+    let agent_run_id = "run-kubernetes-order-invalid";
+    let observed = containerd_runtime_binding_auxiliary(agent_run_id);
+    let mut retired = observed.clone();
+    retired["record_type"] = json!("runtime_binding_retired");
+    let result = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1000),
+        lifecycle(agent_run_id, 1001, "started", "healthy", Value::Null),
+        network_observation(agent_run_id, 1002),
+        observed.clone(),
+        kubernetes_attribution_auxiliary("kubernetes_attribution_observed", agent_run_id, observed),
+        retired,
+        lifecycle(
+            agent_run_id,
+            1003,
+            "stopped",
+            "healthy",
+            json!("agent_exited"),
+        ),
+    ])]);
+
+    assert!(matches!(
+        result,
+        Err(ProjectionError::MalformedRecord { .. })
+    ));
+}
+
+#[test]
+fn kubernetes_attribution_retires_before_its_runtime_binding() {
+    let agent_run_id = "run-kubernetes-order-valid";
+    let observed = containerd_runtime_binding_auxiliary(agent_run_id);
+    let mut retired = observed.clone();
+    retired["record_type"] = json!("runtime_binding_retired");
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1000),
+        lifecycle(agent_run_id, 1001, "started", "healthy", Value::Null),
+        network_observation(agent_run_id, 1002),
+        observed.clone(),
+        kubernetes_attribution_auxiliary(
+            "kubernetes_attribution_observed",
+            agent_run_id,
+            observed.clone(),
+        ),
+        kubernetes_attribution_auxiliary("kubernetes_attribution_retired", agent_run_id, observed),
+        retired,
+        lifecycle(
+            agent_run_id,
+            1003,
+            "stopped",
+            "healthy",
+            json!("agent_exited"),
+        ),
+    ])])
+    .expect("attribution retirement precedes runtime retirement");
+
+    assert_eq!(record.kubernetes_attributions.len(), 2);
+    assert!(validate_agent_observation_record_v1(&record).is_ok());
+}
+
+#[test]
+fn kubernetes_source_gap_suspends_exact_active_attribution_and_projects_fixed_metadata() {
+    let agent_run_id = "run-kubernetes-source-gap";
+    let observed = containerd_runtime_binding_auxiliary(agent_run_id);
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1000),
+        observed.clone(),
+        kubernetes_attribution_auxiliary(
+            "kubernetes_attribution_observed",
+            agent_run_id,
+            observed.clone(),
+        ),
+        kubernetes_metadata_gap(
+            agent_run_id,
+            1001,
+            "11111111-1111-1111-1111-111111111111",
+            "kubernetes_api_unavailable",
+        ),
+        kubernetes_attribution_auxiliary(
+            "kubernetes_attribution_suspended",
+            agent_run_id,
+            observed,
+        ),
+    ])])
+    .expect("same-cluster source gap authorizes one active attribution suspension");
+
+    let gap = &record.observation_gaps[0];
+    assert_eq!(gap.detail, "kubernetes_source_unavailable");
+    assert_eq!(
+        gap.kubernetes_cluster_id.as_deref(),
+        Some("11111111-1111-1111-1111-111111111111")
+    );
+    assert_eq!(
+        gap.kubernetes_reason.as_deref(),
+        Some("kubernetes_api_unavailable")
+    );
+    validate_agent_observation_record_v1(&record)
+        .expect("frozen validator must rebuild the same Kubernetes source-gap state");
+
+    let mut wrong_cluster = record.clone();
+    wrong_cluster.observation_gaps[0].kubernetes_cluster_id =
+        Some("33333333-3333-3333-3333-333333333333".to_string());
+    assert!(
+        validate_agent_observation_record_v1(&wrong_cluster).is_err(),
+        "frozen validation must not apply a source gap to another cluster"
+    );
+
+    let mut non_suspending_reason = record;
+    non_suspending_reason.observation_gaps[0].detail = "kubernetes_daemon_restart".to_string();
+    non_suspending_reason.observation_gaps[0].kubernetes_reason =
+        Some("kubernetes_daemon_restart".to_string());
+    assert!(
+        validate_agent_observation_record_v1(&non_suspending_reason).is_err(),
+        "daemon restart gaps retire dormant links and cannot authorize suspension"
+    );
+}
+
+#[test]
+fn kubernetes_source_gap_is_valid_before_collector_lifecycle_and_without_active_attribution() {
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![kubernetes_metadata_gap(
+        "run-kubernetes-empty-source-gap",
+        1000,
+        "11111111-1111-1111-1111-111111111111",
+        "kubernetes_api_unavailable",
+    )])])
+    .expect("Kubernetes metadata availability is independent of collector lifecycle");
+
+    assert_eq!(record.observation_gaps.len(), 1);
+    assert_eq!(record.summary.evidence_state, EvidenceState::Incomplete);
+}
+
+#[test]
+fn one_kubernetes_source_gap_suspends_each_link_active_at_that_boundary_once() {
+    let agent_run_id = "run-kubernetes-multi-suspend";
+    let first_runtime = containerd_runtime_binding_auxiliary(agent_run_id);
+    let mut second_runtime = first_runtime.clone();
+    second_runtime["workload_id"] = json!(format!("containerd/{}", "f".repeat(64)));
+    second_runtime["start_marker"] = json!("1786410124123456789");
+    second_runtime["init_process_start_time_ticks"] = json!(124);
+    second_runtime["cgroup_id"] = json!(910);
+
+    let first_observed = kubernetes_attribution_auxiliary(
+        "kubernetes_attribution_observed",
+        agent_run_id,
+        first_runtime.clone(),
+    );
+    let mut second_observed = kubernetes_attribution_auxiliary(
+        "kubernetes_attribution_observed",
+        agent_run_id,
+        second_runtime.clone(),
+    );
+    second_observed["pod_uid"] = json!("33333333-3333-3333-3333-333333333333");
+    second_observed["container_ref"] = json!("c".repeat(64));
+    let mut first_suspended = first_observed.clone();
+    first_suspended["record_type"] = json!("kubernetes_attribution_suspended");
+    let mut second_suspended = second_observed.clone();
+    second_suspended["record_type"] = json!("kubernetes_attribution_suspended");
+
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1000),
+        first_runtime,
+        second_runtime,
+        first_observed,
+        second_observed,
+        kubernetes_metadata_gap(
+            agent_run_id,
+            1001,
+            "11111111-1111-1111-1111-111111111111",
+            "kubernetes_snapshot_invalid",
+        ),
+        first_suspended,
+        second_suspended,
+    ])])
+    .expect("one source outage covers every link active at its exact boundary");
+
+    assert_eq!(record.kubernetes_attributions.len(), 4);
+    validate_agent_observation_record_v1(&record)
+        .expect("frozen validation must rebuild per-link credits from one source boundary");
+}
+
+#[test]
 fn validated_runtime_binding_observation_resolves_its_missing_intent_finding() {
     let agent_run_id = "run-runtime-finding";
     let workload_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1870,6 +2145,60 @@ fn runtime_binding_auxiliary(record_type: &'static str, agent_run_id: &str) -> V
         "cgroup_device": 7,
         "cgroup_id": 909,
         "runtime_handler": "runc"
+    })
+}
+
+fn containerd_runtime_binding_auxiliary(agent_run_id: &str) -> Value {
+    json!({
+        "record_type": "runtime_binding_observed",
+        "schema_version": 1,
+        "agent_run_id": agent_run_id,
+        "adapter": "containerd",
+        "workload_id": format!("containerd/{}", "e".repeat(64)),
+        "start_marker": "1786410123123456789",
+        "host_boot_id": "82b46386-b87a-4d86-93f6-232bb04c37fb",
+        "init_process_start_time_ticks": 123,
+        "cgroup_device": 7,
+        "cgroup_id": 909,
+        "runtime_handler": "runc"
+    })
+}
+
+fn kubernetes_attribution_auxiliary(
+    record_type: &'static str,
+    agent_run_id: &str,
+    runtime_binding: Value,
+) -> Value {
+    json!({
+        "record_type": record_type,
+        "schema_version": 1,
+        "agent_run_id": agent_run_id,
+        "cluster_id": "11111111-1111-1111-1111-111111111111",
+        "namespace_ref": "a".repeat(64),
+        "pod_uid": "22222222-2222-2222-2222-222222222222",
+        "node_ref": "b".repeat(64),
+        "runtime_class_ref": null,
+        "container_kind": "application",
+        "container_ref": "d".repeat(64),
+        "runtime_binding": runtime_binding,
+    })
+}
+
+fn kubernetes_metadata_gap(
+    agent_run_id: &str,
+    timestamp_unix_ms: u64,
+    cluster_id: &str,
+    reason: &str,
+) -> Value {
+    json!({
+        "record_type": "observation_gap",
+        "schema_version": 1,
+        "timestamp_unix_ms": timestamp_unix_ms,
+        "agent_run_id": agent_run_id,
+        "operation": "kubernetes_metadata",
+        "kind": "kubernetes_metadata_unavailable",
+        "count": 1,
+        "detail": format!("cluster={cluster_id},reason={reason}"),
     })
 }
 

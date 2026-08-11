@@ -18,11 +18,10 @@ use tokio::sync::{oneshot, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::{
-    render_prometheus_metrics, run_observer_runtime, run_runtime_adapter,
-    run_runtime_inventory_adapter, scope_channel, ContainerdCriRuntimeAdapter, CriRuntimeClient,
-    DaemonConfig, DaemonState, DockerEngineClient, DockerEnginePollingRuntimeAdapter,
-    KubernetesCliClient, KubernetesCliRuntimeAdapter, RetentionError, RuntimeAdapterSummary,
-    RuntimeSourceGapReason,
+    render_prometheus_metrics, run_observer_runtime, run_runtime_inventory_adapter, scope_channel,
+    ContainerdCriRuntimeAdapter, CriRuntimeClient, DaemonConfig, DaemonState, DockerEngineClient,
+    DockerEnginePollingRuntimeAdapter, KubernetesNodeAttributionTask, RetentionError,
+    RuntimeAdapterSummary, RuntimeSourceGapReason,
 };
 
 pub const DAEMON_SCHEMA_V1: u32 = 1;
@@ -46,6 +45,8 @@ pub enum DaemonResponse {
         session: Option<SessionState>,
         #[serde(default)]
         runtime_bindings: Vec<crate::RuntimeBinding>,
+        #[serde(default)]
+        kubernetes_attributions: Vec<apolysis_core::KubernetesAttributionWireV1>,
     },
     SessionList {
         schema_version: u32,
@@ -130,6 +131,18 @@ pub async fn serve(
                 return Err(error);
             }
         };
+    let kubernetes_task = match KubernetesNodeAttributionTask::start(&config, Arc::clone(&state)) {
+        Ok(task) => task,
+        Err(error) => {
+            drop(metrics_shutdown);
+            if let Some(task) = metrics_task.take() {
+                task.abort();
+            }
+            drop(listener);
+            remove_socket_if_socket(&config.socket_path)?;
+            return Err(error);
+        }
+    };
     let (writer_shutdown, writer_shutdown_receiver) = oneshot::channel();
     let mut writer_task = {
         let state = Arc::clone(&state);
@@ -214,6 +227,12 @@ pub async fn serve(
     drop(listener);
     while let Some(result) = handlers.join_next().await {
         log_connection_result(result);
+    }
+
+    if let Some(task) = kubernetes_task {
+        if let Err(error) = task.shutdown(config.shutdown_drain_timeout).await {
+            eprintln!("apolysisd: Kubernetes attribution task stopped with error: {error}");
+        }
     }
 
     if let Some(observer_shutdown) = observer_shutdown {
@@ -446,80 +465,56 @@ fn start_runtime_adapters(
         }));
     }
 
-    if let Some(socket_path) = config.containerd_socket.clone() {
-        let (shutdown, receiver) = oneshot::channel();
-        shutdowns.push(shutdown);
-        let proc_root = config.proc_root.clone();
-        let cgroup_root = config.cgroup_root.clone();
-        let scan_interval = config.runtime_adapter_scan_interval;
-        let seen_capacity = config.runtime_adapter_seen_capacity;
-        let state = Arc::clone(&state);
-        tasks.push(tokio::spawn(async move {
-            let client = CriRuntimeClient::new(socket_path);
-            match ContainerdCriRuntimeAdapter::new(
-                AdapterKind::Containerd,
-                client,
-                proc_root,
-                cgroup_root,
-                scan_interval,
-                seen_capacity,
-            ) {
-                Ok(adapter) => run_runtime_inventory_adapter(adapter, state, receiver).await,
-                Err(error) => degraded_summary(state, AdapterKind::Containerd, error).await,
-            }
-        }));
+    if config.kubernetes_source_socket.is_none() {
+        if let Some(socket_path) = config.containerd_socket.clone() {
+            let (shutdown, receiver) = oneshot::channel();
+            shutdowns.push(shutdown);
+            let proc_root = config.proc_root.clone();
+            let cgroup_root = config.cgroup_root.clone();
+            let scan_interval = config.runtime_adapter_scan_interval;
+            let seen_capacity = config.runtime_adapter_seen_capacity;
+            let state = Arc::clone(&state);
+            tasks.push(tokio::spawn(async move {
+                let client = CriRuntimeClient::new(socket_path);
+                match ContainerdCriRuntimeAdapter::new(
+                    AdapterKind::Containerd,
+                    client,
+                    proc_root,
+                    cgroup_root,
+                    scan_interval,
+                    seen_capacity,
+                ) {
+                    Ok(adapter) => run_runtime_inventory_adapter(adapter, state, receiver).await,
+                    Err(error) => degraded_summary(state, AdapterKind::Containerd, error).await,
+                }
+            }));
+        }
     }
 
-    if let Some(socket_path) = config.k3s_containerd_socket.clone() {
-        let (shutdown, receiver) = oneshot::channel();
-        shutdowns.push(shutdown);
-        let proc_root = config.proc_root.clone();
-        let cgroup_root = config.cgroup_root.clone();
-        let scan_interval = config.runtime_adapter_scan_interval;
-        let seen_capacity = config.runtime_adapter_seen_capacity;
-        let state = Arc::clone(&state);
-        tasks.push(tokio::spawn(async move {
-            let client = CriRuntimeClient::new(socket_path).with_image_endpoint(None);
-            match ContainerdCriRuntimeAdapter::new(
-                AdapterKind::K3sContainerd,
-                client,
-                proc_root,
-                cgroup_root,
-                scan_interval,
-                seen_capacity,
-            ) {
-                Ok(adapter) => run_runtime_inventory_adapter(adapter, state, receiver).await,
-                Err(error) => degraded_summary(state, AdapterKind::K3sContainerd, error).await,
-            }
-        }));
-    }
-
-    if let Some(kubectl_path) = config.kubernetes_kubectl.clone() {
-        let (shutdown, receiver) = oneshot::channel();
-        shutdowns.push(shutdown);
-        let proc_root = config.proc_root.clone();
-        let cgroup_root = config.cgroup_root.clone();
-        let scan_interval = config.runtime_adapter_scan_interval;
-        let seen_capacity = config.runtime_adapter_seen_capacity;
-        let cri_socket = config
-            .kubernetes_cri_socket
-            .clone()
-            .or_else(|| config.k3s_containerd_socket.clone())
-            .unwrap_or_else(|| "/run/k3s/containerd/containerd.sock".into());
-        let state = Arc::clone(&state);
-        tasks.push(tokio::spawn(async move {
-            let kubernetes = KubernetesCliClient::new(kubectl_path);
-            let cri = CriRuntimeClient::new(cri_socket).with_image_endpoint(None);
-            let adapter = KubernetesCliRuntimeAdapter::new(
-                kubernetes,
-                cri,
-                proc_root,
-                cgroup_root,
-                scan_interval,
-                seen_capacity,
-            );
-            run_runtime_adapter(adapter, state, receiver).await
-        }));
+    if config.kubernetes_source_socket.is_none() {
+        if let Some(socket_path) = config.k3s_containerd_socket.clone() {
+            let (shutdown, receiver) = oneshot::channel();
+            shutdowns.push(shutdown);
+            let proc_root = config.proc_root.clone();
+            let cgroup_root = config.cgroup_root.clone();
+            let scan_interval = config.runtime_adapter_scan_interval;
+            let seen_capacity = config.runtime_adapter_seen_capacity;
+            let state = Arc::clone(&state);
+            tasks.push(tokio::spawn(async move {
+                let client = CriRuntimeClient::new(socket_path).with_image_endpoint(None);
+                match ContainerdCriRuntimeAdapter::new(
+                    AdapterKind::K3sContainerd,
+                    client,
+                    proc_root,
+                    cgroup_root,
+                    scan_interval,
+                    seen_capacity,
+                ) {
+                    Ok(adapter) => run_runtime_inventory_adapter(adapter, state, receiver).await,
+                    Err(error) => degraded_summary(state, AdapterKind::K3sContainerd, error).await,
+                }
+            }));
+        }
     }
 
     (shutdowns, tasks)
@@ -608,13 +603,14 @@ async fn dispatch(request: IntentRequest, state: &DaemonState, now_unix_ms: u64)
             tenant_id,
             session_id,
         } => {
-            let (session, runtime_bindings) = state
-                .query_with_runtime_bindings_for_tenant(&session_id, &tenant_id)
+            let (session, runtime_bindings, kubernetes_attributions) = state
+                .query_with_workload_context_for_tenant(&session_id, &tenant_id)
                 .await;
             DaemonResponse::Session {
                 schema_version: DAEMON_SCHEMA_V1,
                 session,
                 runtime_bindings,
+                kubernetes_attributions,
             }
         }
         IntentRequest::ListSessions {

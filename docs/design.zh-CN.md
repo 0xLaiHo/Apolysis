@@ -1,7 +1,7 @@
 # Apolysis 设计文档
 
 > [English](design.md) | 简体中文
-> 最后审查：2026-08-11
+> 最后审查：2026-08-12
 
 本文是唯一的详细产品文档，权威定义 Apolysis 是什么、目标系统如何工作、稳定 record 与资格
 contract、当前已经实现什么、未来方向，以及产品声明止步于何处。
@@ -32,8 +32,9 @@ build；它们都不是 observer-side 产品依赖。
 ## 2. 用户与决策
 
 主要操作者是在自有 Linux 基础设施上运行 Agent 的 platform、runtime-security、AppSec 或
-工程团队。首批受支持 workflow 是本地 Agent CLI、Linux self-hosted CI 和 container；
-container 归属稳定后再进入有界 Kubernetes node workflow。
+工程团队。首批受支持 workflow 是本地 Agent CLI、Linux self-hosted CI 和 container。K1
+implementation 增加了有界 Kubernetes containerd/K3s node workflow，但不会把仍未完成资格
+验证的 profile 晋级到 Experimental 以上。
 
 对于一次 Agent Run，操作者需要回答：
 
@@ -54,6 +55,8 @@ container 归属稳定后再进入有界 Kubernetes node workflow。
 ```text
 Agent Run
   |- Observation Scope
+  |- Kubernetes Workload Claim
+  |- Kubernetes Attribution
   |- Runtime Identity
   |    `- Runtime Observation
   |         `- Operation Outcome
@@ -80,6 +83,8 @@ exact。
 | Protected Attach | 对已运行 Agent 的资格化准入；不声明更早历史或 pre-anchor continuity |
 | Collection Boundary | Collector Capability 开始适用的位置；更早活动是以 gap 表示的未知历史 |
 | Runtime Identity | 区分复用与偶然匹配的稳定 process/workload identity |
+| Kubernetes Workload Claim | Operator 为一次 Agent Run 与 claim revision 授权的 exact cluster/namespace/Pod/container slot |
+| Kubernetes Attribution | 从一条 exact claim 与稳定 Pod candidate 到一条 active Exact D1 runtime binding 的 qualified lifecycle relation |
 | Runtime Observation | 在 capability 与 scope 内报告的受支持 process/file/network/credential operation |
 | Operation Outcome | 在声明 source 语义内的 `attempted`、`succeeded`、`failed`、`denied`、`pending` 或 `unknown` |
 | Collector Capability | 某一环境 boundary 的版本化 operation/source/outcome 声明 |
@@ -302,8 +307,148 @@ containerd，private-containerd 证据也不能外推到 Kubernetes。因此 con
 profile 继续保持 Experimental，任何 profile 都不会因此成为 Supported。
 
 通过 systemd 实际重启 Docker/containerd service 仍属于非破坏性 D1/D2 闭环之外的额外、破坏性
-opt-in qualification。这些 gate 与 K1/VKE Kubernetes qualification 仍保持 open；它们不会使
-已保留的 Docker 或 private-containerd 证据失效。
+opt-in qualification。这些 gate 与 K1/VKE Kubernetes live qualification 仍保持 open；它们
+不会使已保留的 Docker 或 private-containerd 证据失效。
+
+#### Kubernetes node 与 Pod 归属（K1）
+
+K1 以每个 node 一个双容器 DaemonSet Pod 的形态部署。Root collector 负责加载 eBPF、访问
+host `/proc`、cgroup、BPF、trace/BTF、恰好一个 CRI runtime socket，以及本地状态边界；它不
+持有 service-account token。它不是 privileged container，不能 privilege escalation，使用
+read-only root filesystem，drop 全部 ambient capability，并且只增加 `BPF`、`PERFMON`、
+`SYS_RESOURCE` 与 `DAC_READ_SEARCH`；不会获得 `SYS_ADMIN`。Pod 不加入 host PID 或 network
+namespace。Metadata-source container 以
+UID/GID `65532` 运行，drop 全部
+capability，使用 read-only root filesystem，并且只有它接收 projected、轮换的
+service-account token。生产启动会验证精确 effective UID/GID，且 effective capability 集合必须
+为空。其 Role 仅允许在 DaemonSet 自身专用 Agent namespace 中对 Pod 执行
+`list`、`watch`；automatic token mounting 被关闭。它没有 cluster-wide 或
+cross-namespace read path。
+该专用 namespace 是 operator-controlled trust domain：不受信 tenant 不得在其中获得 Pod
+`create`、`update` 或 `patch` authority。
+
+两个容器只共享一个有界 memory-backed IPC volume。Source 拥有 mode `0700` directory 与
+UID/GID `65532`、mode `0660` Unix socket；source 先以不可预测的 private name bind，完成全部
+资格校验后再用一次 no-replace rename 发布。collector 在 strict supplemental-group policy 下获得
+shared GID `65532`，以及穿越/读取该
+private directory 所需的 `DAC_READ_SEARCH`（以及 BPF 所需 capability）。双方都会围绕有界
+framed I/O 验证 socket type、ownership、mode、
+connect 前后 inode identity 与 peer credential。Stale-socket recovery 使用 nonblocking
+liveness probe，且只删除精确证明的 inode。Collector 的持久 host directory 是独立 operator 前置条件，必须
+预先创建为 root 所有、mode `0700`；DaemonSet 不创建宽泛 host path。一个 K1 daemon 恰好拥有
+一个 `containerd` 或 `k3s_containerd` inventory domain；同时配置两个 socket 会被拒绝。
+随仓库交付的 canonical manifest 固定使用 VKE/containerd path
+`/run/containerd/containerd.sock`。K3s 已有实现支持，但 operator 必须提供匹配 K3s socket 且保持
+本文 security/ownership contract 的 manifest 或 overlay；仓库当前不交付该 overlay。但 host CRI
+socket 在协议上仍暴露 mutating method，因此 collector 仍是 node-trusted。移除
+`SYS_ADMIN`、隔离 token 与收窄 host mount 都是相对的 privilege reduction，而不是真正 read-only
+runtime boundary。真正的 read-only CRI access 需要未来增加 allowlist broker，不能直接拥有 socket。
+
+Operator authorization 通过 `SessionIntent.kubernetes_claims` 进入，而不是来自发现的 Pod
+metadata。每条 claim 具有一个非零 revision 与精确 tuple
+`(cluster_id,namespace_ref,pod_uid,container_kind,container_ref)`；同一 intent 的所有 claim
+共享 revision，duplicate slot 会被拒绝。Operator 必须为 deployment 生成跨 cluster 唯一且
+immutable 的 `cluster_id`；source 只验证 canonical non-zero UUID shape，无法发现误复用或证明
+cluster identity。
+
+| Claim field | Contract |
+| --- | --- |
+| `schema_version` | u32 常量 `1` |
+| `claim_revision` | 同一 intent 每条 claim 共用的非零 u64 |
+| `cluster_id` | Canonical lowercase non-zero UUID |
+| `namespace_ref` | 64-byte lowercase hexadecimal namespace pseudonym |
+| `pod_uid` | Canonical lowercase non-zero Pod UUID |
+| `container_kind` | `application`、`init` 或 `ephemeral` |
+| `container_ref` | 64-byte lowercase hexadecimal container-name pseudonym |
+
+一个 intent 最多携带 256 条 K1 claim。Unknown claim field、mixed revision、duplicate exact slot、
+malformed reference，以及 expired/invalid parent intent 都会在 daemon state mutation 前 fail。
+`apolysisd-control` 从 standard input 读取一个有界、类型化 control request，验证本地 daemon
+socket 与 peer，应用单一 I/O deadline，并在不回显被拒
+value 的情况下转发 request。它是通过 `kubectl exec` 进入 collector container 的预期 operator
+ingress。Source label 与 annotation 始终只是 discovery input，不能创建或扩大 claim。
+
+Kubernetes node task 显式启用 CRI Pod-sandbox metadata join。Standalone containerd 保留既有
+direct-container-only 行为，K3s 保留既有 sandbox-label 行为。在 K1 mode 中，只有 READY 且 label
+精确为 `apolysis.dev/observe=true` 的 Pod sandbox 才参与；unmarked sandbox 会在 private metadata
+解析前被忽略。Marked sandbox 必须携带 `metadata.namespace`；不同 namespace 即使 session value
+相同也会被忽略，而 configured namespace 还要求标准 label `io.kubernetes.pod.namespace` 精确相同。
+Sandbox Agent Run 可来自 label `apolysis.session_id` 或 annotation
+`apolysis.dev/session-id`，并归一化为 inherited `apolysis.session_id`。Direct container session
+label 仍是 candidate D1 identity 的有效 routing input，但同时存在 inherited routing 时必须相同。
+Direct 与 inherited session metadata 都不能授权 D1/scope attach。Present empty/invalid session
+value、label/annotation 冲突、target namespace 缺失/冲突、READY target sandbox ID duplicate，或在
+list/inspect 中出现 direct/inherited conflict，都会使 complete CRI inventory 整体非法。
+Diagnostic 只报告固定 category，永不回显被拒 metadata。Adapter 的 final candidate re-list 使用
+完全相同的 K1 mode；canonical set 变化会使 inventory 非法。
+
+该 fail-closed metadata 行为也是显式 availability boundary。Operator namespace 内一条 malformed
+marked sandbox 会使该 node 的 K1/runtime cycle degraded。Exact typed claim 会阻止这类 metadata
+扩大 authorization，但 K1 不承诺抵抗已经拥有该专用 namespace Pod 写权限的 principal 发起的 DoS。
+
+资格化是一次 closed transaction：
+
+```text
+complete paginated Pod LIST A
+  -> complete containerd/K3s CRI inventory (whole-scan request_timeout)
+  -> complete paginated Pod LIST B
+  -> exact typed-claim intersection
+  -> filter to claim-authorized full D1 identities
+  -> D1 reconcile/attach before durable Kubernetes attribution
+```
+
+Watch 只提供 dirty hint，永远不是权威。LIST A 与 LIST B 必须具有相同 source epoch、cluster、
+namespace 与 node identity，严格递增的非零 sequence，以及 byte-equivalent canonical Pod
+candidate。Candidate 包含 Pod UID、deletion/marker state、runtime-class reference、每个
+application/init/ephemeral container slot 与 running container ID，以及从 Pod resource version
+派生的 ephemeral `pod_revision_ref`。同一 epoch 的后续 cycle 必须从上次 terminal sequence 之后
+开始。任何 pagination、decoding、bound、duplicate、revision 或 A/B mismatch 都使整个 snapshot
+非法；failure 永远不会被解释为空 list。
+
+Intersection 要求 marked 且非 deleting 的 Pod、精确 claim slot、具有 canonical full ID 的 running
+container，以及属于同一 Agent Run、携带完整 Exact D1 identity 的 candidate。只有最终精确的
+`claim -> A/B Pod UID+slot -> runtime container ID -> full D1 identity` key 才进入 admitted
+inventory。D1 reconciliation 与 scope attach 只消费该 filtered inventory；unclaimed、mismatched 或
+metadata-only candidate 不能产生 D1 state 或 scope ownership。Durable effect ordering 会先 observe
+D1，再 observe 对应 K1 attribution。Kubernetes metadata 只是 additive：不能制造 runtime identity，
+也不能升级 stale/inferred binding。Raw namespace、
+node、container 与 runtime-class name 会在 IPC 前转换为 domain-separated SHA-256 reference。
+`pod_revision_ref`、source epoch 与 source sequence 只用于关闭资格竞态，绝不跨越 persistence seam。
+持久化 reference 是面向 content-off profile、deterministic 且 unkeyed 的 SHA-256 pseudonym，不是
+anonymization 或 confidentiality：低 entropy name 可被离线枚举，相同 value 可跨 run 链接。Pod UID
+与 nested D1 full container ID 仍然显式。
+
+```text
+reference_v1(kind, raw) = lowerhex(SHA-256(
+  "apolysis:kubernetes-reference:v1" || 0x00 ||
+  kind || 0x00 || UTF-8(raw)
+))
+pod_revision_ref = lowerhex(SHA-256(
+  "apolysis:kubernetes-pod-revision:v1" || 0x00 || UTF-8(resourceVersion)
+))
+```
+
+`kind` 恰好是 `namespace`、`node`、`container` 或 `runtime_class`。Namespace/container input
+必须是 canonical lowercase DNS label；node/runtime class input 必须是有界 canonical lowercase
+DNS subdomain。第二个公式只用于 qualification，绝不是持久化 identifier。
+
+相同 qualified cycle 是 no-op。成功 cycle 中缺失 Pod/container 会 retire K1 attribution。同一 Pod
+内 container restart 会改变 D1 identity，并生成有序 K1 identity-transition gap、旧 K1 retire、
+fresh D1 qualification 与新 K1 observe。新出现的 K1 link 若引用 cycle 前已存在的 runtime binding，
+会记录一个 `kubernetes_late_attach` relation boundary；同一 atomic cycle 新建的 D1 binding 不会。
+Declared outage、identity transition 或 restart 的 recovery 不会被误标为 late attach。
+
+Kubernetes API 丢失会发出 API gap 并 suspend K1，同时保持独立健康的 D1 collection active。CRI
+丢失会先使 K1 runtime metadata unavailable 并 suspend K1，再应用普通 D1 runtime gap 与
+suspension。若一次成功 CRI scan 无法证明 claimed runtime join（runtime identity 缺失、冲突、重复
+或非法），也会走相同的 K1→D1 `inventory_invalid` suspension；仅 Pod A/B source churn 时只
+suspend K1，并保留独立 exact 的 D1 binding。两类恢复都必须经过 fresh complete A/runtime/B cycle
+才恢复 attribution。Source epoch 变化或 daemon state recovery 会发出 `kubernetes_daemon_restart`，retire 既有 active/dormant
+K1 state，并只 re-observe fresh qualified link。关闭 claim 或替换 claim revision 时，会在其 D1
+binding 前，以同一事务 retire K1 link 与 K1 独占的 containerd/K3s D1 binding，并在确认替换前
+untrack 对应 scope；即使 Kubernetes metadata 当前 unavailable 也保持该语义。独立 Docker binding
+不会被该 K1 transaction 撤销。Cross-node reschedule 不是 continuity：旧 Pod UID retire，新 Pod
+UID 在有界 handoff 后独立 observe；系统不声明 gap-free ownership。
 
 Protected attach 会把初始 process 与 thread identifier 归一化为 TGID，并要求 root 是活着的
 thread-group leader。一个 `/proc` start tick 会转换成 boot-time 半开区间
@@ -335,8 +480,8 @@ Review State 相互独立。缺失 lifecycle、不支持的 outcome、diagnostic
 record 与 source-integrity finding 会保留为可查询限制；mixed Agent Run、损坏 storage、非法
 lifecycle 顺序、重复 canonical observation、不兼容 schema 与 content-policy violation 会
 fail closed。自由文本 Finding reason 与 Gap detail 会 canonicalize，而不是复制到派生 artifact。
-经过验证的 runtime-binding lifecycle fact 会按 source order 保留在 projection 中；验证会重建
-其 lifecycle，而不是把它们归约为当前 active set。
+经过验证的 runtime-binding 与 Kubernetes-attribution lifecycle fact 会按 source order 保留在
+projection 中；验证会重建两种 lifecycle，而不是把它们归约为当前 active set。
 
 Complete evidence 要求完整的当前 v1 operation/source/outcome capability contract。Partial 或
 伪造 manifest 与无法解析的 Finding reference 会作为 typed issue 保留，不能成为 complete。
@@ -351,7 +496,7 @@ tail、remote query API 或交互式 viewer。
 `apolysis run view --input <agent-observation-record.json> --output
 <viewer.html>` 是非特权 Saved Run Viewer adapter。它只接受一份 Agent Observation Record
 v1，验证其类型、schema、summary、identity reference、source ordinal、Finding link、
-runtime-binding lifecycle 与状态一致性，然后渲染确定性的 self-contained HTML。格式错误或
+runtime-binding/K1 lifecycle 与状态一致性，然后渲染确定性的 self-contained HTML。格式错误或
 内部不一致的 record 会 fail closed，且不会替换现有 output。Reader 有界并拒绝 symlink 与非
 普通文件；publisher 在使用独占、mode 为 `0600` 的同目录 temporary file、同步文件与目录并
 原子 rename 前，会拒绝 output alias。
@@ -366,6 +511,7 @@ Viewer 提供：
   summary；
 - Exact Runtime Identity roster，以及 Runtime Observation 中保留的 reported PID/PPID field；
 - 有序的 observed、retired 与 suspended runtime-binding lifecycle；
+- 带 Exact D1 source link 的有序 observed、retired 与 suspended K1 lifecycle；
 - 有序 process、file、network 与 credential timeline；
 - 受支持的 outcome 与 attribution status；
 - collector health、loss、truncation 与 unsupported capability gap；
@@ -381,7 +527,8 @@ Agent Observation Record v1 不携带权威 parent Runtime Identity link。因�
 派生的 v1 对象是一份 JSON object，永远不会追加回 timeline JSONL。Top level 是
 `record_type`、`schema_version`、`agent_run_id`、`source_integrity`、`summary`、
 `capability_manifests`、`runtime_identities`、`runtime_observations`、
-`runtime_bindings`、`collector_lifecycle`、`findings`、`observation_gaps` 与 `issues`。每个投影后
+`runtime_bindings`、`kubernetes_attributions`、`collector_lifecycle`、`findings`、
+`observation_gaps` 与 `issues`。每个投影后
 的 source fact 携带来自权威输入顺序、从 1 开始的 `source_ordinal`。Summary 保留 typed count
 与 grouping map，不合并 Evidence State、Collector Health 与 Review State。
 
@@ -488,6 +635,7 @@ annotation 或 tool payload。
 | `accountability_finding` | Typed review decision、有界 canonical reason、evidence reference、runtime identity 与 evidence boundary |
 | `observation_gap` | 可能缺失或不可用证据的 typed operation、kind、count 与 bounded detail |
 | `runtime_binding_observed` / `runtime_binding_retired` / `runtime_binding_suspended` | 围绕单一 stable workload identity 的持久 Docker/containerd binding lifecycle |
+| `kubernetes_attribution_observed` / `kubernetes_attribution_retired` / `kubernetes_attribution_suspended` | 围绕一条 Exact observed containerd/K3s runtime binding 的持久 claimed Pod/container attribution lifecycle |
 | `observer_diagnostic` | Typed bounded attach、verifier、ABI、decode、truncation、pressure、loss 或 summary diagnostic |
 | `visibility_assessment` | Runtime profile、host visibility scope、metadata/guest-collector requirement 与 bounded subject |
 
@@ -699,6 +847,8 @@ reason。
 | `late_attach` | `collector_lifecycle`、`1` | `collection_boundary:protected_existing_process_attach,history:unknown,provenance:<external_registration\|proc_discovery>,root_selection:<registration_qualified\|inferred>` | 相同 bounded detail |
 | `runtime_metadata_unavailable` | `runtime_metadata`、`1` | `source=<docker\|containerd\|k3s_containerd>,reason=<socket_unavailable\|daemon_restart\|inventory_invalid>` | `runtime_source_unavailable` |
 | `runtime_metadata_unavailable` | `runtime_metadata`、`1` | 相同 source set 加 `reason=identity_transition` | `runtime_identity_transition` |
+| `kubernetes_metadata_unavailable` | `kubernetes_metadata`、`1` | `cluster=<canonical-nonzero-UUID>,reason=<kubernetes_api_unavailable\|kubernetes_runtime_unavailable\|kubernetes_snapshot_invalid>` | 分别为 `kubernetes_source_unavailable`、`kubernetes_runtime_unavailable` 或 `kubernetes_snapshot_invalid` |
+| `kubernetes_metadata_unavailable` | `kubernetes_metadata`、`1` | 相同 cluster shape 加 `reason=<kubernetes_daemon_restart\|kubernetes_identity_transition\|kubernetes_late_attach>` | 相同 bounded reason |
 
 Runtime-metadata detail 不得包含 path、payload、socket name 或 backend text。每条 gap 都增加
 一条 AOR `observation_gap` issue，并阻止 evidence 成为 complete。Runtime adapter 可以独立
@@ -736,6 +886,29 @@ fresh complete inventory 先写 `reason=daemon_restart` gap，再退役 dormant 
 identity 存在时写 observed。Failure 永远不是 empty inventory。不存在独立 transition record；
 canonical identity-transition representation 就是有序的 gap -> retired -> observed sequence。
 
+Kubernetes-attribution lifecycle record 具有下列精确 closed shape：
+
+| Field | Type | Value 或含义 |
+| --- | --- | --- |
+| `record_type` | enum | `kubernetes_attribution_observed`、`kubernetes_attribution_retired` 或 `kubernetes_attribution_suspended` |
+| `schema_version` | u32 | 常量 `1` |
+| `agent_run_id` | string | 所属 canonical Agent Run ID |
+| `cluster_id` | string | Operator 配置的 canonical lowercase non-zero UUID |
+| `namespace_ref` | string | 64-byte lowercase hexadecimal domain-separated privacy reference |
+| `pod_uid` | string | Canonical lowercase non-zero Kubernetes Pod UUID |
+| `node_ref` | string | 64-byte lowercase hexadecimal domain-separated privacy reference |
+| `runtime_class_ref` | string\|null | 相同 64-byte privacy reference，或显式 `null` |
+| `container_kind` | enum | `application`、`init` 或 `ephemeral` |
+| `container_ref` | string | 64-byte lowercase hexadecimal domain-separated privacy reference |
+| `runtime_binding` | object | 属于同一 Agent Run 的完整有效 v1 `runtime_binding_observed` object；adapter 恰好为 `containerd` 或 `k3s_containerd` |
+
+Lifecycle key 是 `(cluster_id,pod_uid,container_kind,container_ref)`。Observation 要求 embedded D1
+identity 已先 active。Suspension 或 retirement 必须匹配完整 active K1 identity，并且 K1 必须在其
+D1 identity 结束前先结束。K1 suspension 会消费同 cluster 与 active key 之前一条尚未匹配的
+API/runtime/snapshot-unavailable gap credit。Restart、identity-transition 与 late-attach gap 都是
+可见 boundary，但不授权 suspension。`claim_revision`、raw name、`pod_revision_ref`、source
+epoch/sequence、label、annotation、path、PID、endpoint、token 与 backend text 都不是 wire field。
+
 AOR projector 会 strict-decode 这三种 record type，把每条 record 绑定到投影中的 Agent Run，并
 跟踪 active `(adapter,workload_id)` key。重复 observation，或 full identity 与 active binding
 不匹配的 retirement/suspension 都会 fail closed。Suspension 还必须消费同一 adapter 之前一条
@@ -771,6 +944,7 @@ evidence 成为 incomplete。
 | `schema_version` | u32 | 常量 `1` |
 | `session` | object|null | 匹配的 `SessionState`；不存在或对该 tenant 不可见时为 `null` |
 | `runtime_bindings` | array<object> | 该可见 Agent Run 的 active binding；始终存在，`session` 为 `null` 时为空数组 |
+| `kubernetes_attributions` | array<object> | 该可见 Agent Run 的 active、fresh qualified K1 record；始终存在，`session` 为 `null` 时为空数组 |
 
 每个 `runtime_bindings` element 恰好包含下列必需 nested field：
 
@@ -786,15 +960,17 @@ evidence 成为 incomplete。
 | `identity.cgroup.inode` | u64 | 正数 cgroup-filesystem inode identity |
 | `runtime_handler` | string|null | 有界 opaque handler name，或 `null` |
 
-该数组只包含 active、经过 fresh qualification 的 binding；dormant、suspended 与 retired binding
-不会返回，entry 按 adapter/workload key 排序。省略 `tenant_id` 时默认为 `default`。Daemon 会先
+两个 array 都只包含 active、经过 fresh qualification 的 state；dormant、suspended 与 retired
+entry 不会返回。Runtime binding 按 adapter/workload key 排序，Kubernetes attribution 按其 exact
+lifecycle key 排序。每个 `kubernetes_attributions` element 都具有上文 closed K1 wire shape，并
+引用一条返回的 active D1 binding。省略 `tenant_id` 时默认为 `default`。Daemon 会先
 要求 request tenant 等于目标 Agent Run 的 registered tenant，之后才读取 binding。`session` 与
-`runtime_bindings` 来自同一个 tenant-gated atomic snapshot，因此并发 tenant replacement 不能
-把授权判断与 binding disclosure 分离。不存在或 cross-tenant 的 Agent Run 因而返回
-`session:null` 与 `runtime_bindings:[]`，避免 binding identity
-成为跨 tenant existence oracle。Query 保持与 persistence 相同的 privacy boundary：它不暴露 raw
-label、namespace、PID、container name、cgroup/runtime/socket path、endpoint、backend error 或
-payload。
+`runtime_bindings` 与 `kubernetes_attributions` 来自同一个 tenant-gated atomic snapshot，因此
+并发 tenant replacement 不能把授权判断与 workload disclosure 分离。不存在或 cross-tenant 的
+Agent Run 因而返回 `session:null`、`runtime_bindings:[]` 与
+`kubernetes_attributions:[]`，避免 workload identity 成为跨 tenant existence oracle。Query 保持
+与 persistence 相同的 privacy boundary：它不暴露 raw label、annotation、namespace、node、
+container name、PID、cgroup/runtime/socket path、endpoint、backend error 或 payload。
 
 ### 6.3 Agent Observation Record v1
 
@@ -813,6 +989,7 @@ record。
 | `runtime_identities` | array<object> | Exact identity aggregate |
 | `runtime_observations` | array<object> | Canonical supported observation |
 | `runtime_bindings` | array<object> | 有序、经过验证的 runtime-binding lifecycle fact；新的 v1 output 始终包含该 field |
+| `kubernetes_attributions` | array<object> | 有序、经过验证的 K1 lifecycle fact；新的 v1 output 始终包含该 field |
 | `collector_lifecycle` | array<object> | 有序 lifecycle fact |
 | `findings` | array<object> | Typed review finding |
 | `observation_gaps` | array<object> | Normalized bounded gap |
@@ -837,9 +1014,10 @@ Nested array object schema 是：
 | runtime identity | `identity_id:string`、`host_boot_id:string`、`scope_generation:u64`、`pid:u32`、`process_generation:u64`、`process_start_time_ns:u64`、`exec_generation:u32`、`first_source_ordinal:u64`、`last_source_ordinal:u64`、`observation_count:u64` |
 | runtime observation | `source_ordinal:u64`、`timestamp_unix_ms:u128`、`event_source:string`、`event_type:string`、`raw_event_id:string|null`、`pid:u32`、`ppid:u32`、`actor:string`、`resource:string`、`action:string`、`outcome:string|null`、`return_value:i64|null`、`errno:i32|null`、`container_id:string|null`、`cgroup_id:string|null`、`relation_status:string`、`relation_reason:string`、`process_executable:string|null`、`process_started_at_unix_ms:u128|null`、`runtime_identity_id:string|null`、`parent_process_generation:u64|null`、`parent_exec_generation:u32|null` |
 | runtime binding | `source_ordinal:u64`、`record_type:enum`、`schema_version:u32`、`agent_run_id:string`、`adapter:string`、`workload_id:string`、`start_marker:string`、`host_boot_id:string`、`init_process_start_time_ticks:u64`、`cgroup_device:u64`、`cgroup_id:u64`、`runtime_handler:string|null`；后十一个 field 是精确的 runtime-binding v1 lifecycle wire shape |
+| Kubernetes attribution | `source_ordinal:u64` 加上文精确、closed 的十一 field K1 lifecycle wire shape，包括 nested runtime-binding object |
 | collector lifecycle | `source_ordinal:u64`、`schema_version:u32`、`timestamp_unix_ms:u128`、`collector:string`、`collector_instance_id:string`、`state:enum`、`health:enum`、`stop_reason:enum|null`、`counters:object`；counter 与 timeline lifecycle 使用相同八个 `u64` field |
 | finding | `source_ordinal:u64`、`schema_version:u32`、`kind:enum`、`decision:enum`、`reason:string`、`evidence_ref:string`、`runtime:object`、`evidence_boundary:enum`；runtime 使用 `runtime:string`、`container_id:string|null`、`pod_uid:string|null`、`cgroup_id:u64|null` |
-| observation gap | `source_ordinal:u64`、`schema_version:u32`、`timestamp_unix_ms:u128`、`operation:string`、`kind:string`、`count:u64`、`detail:string`；使用上表 normalized value，并包含下文定义的可选 `runtime_source:string` 与 `runtime_reason:string` |
+| observation gap | `source_ordinal:u64`、`schema_version:u32`、`timestamp_unix_ms:u128`、`operation:string`、`kind:string`、`count:u64`、`detail:string`；使用上表 normalized value，并包含下文定义的可选成对 `runtime_source:string`/`runtime_reason:string` 或 `kubernetes_cluster_id:string`/`kubernetes_reason:string` field |
 | issue | `code:enum`、`source_ordinal:u64|null`、`count:u64` |
 
 Version 1 最多接受一份 capability manifest；重复 manifest 是 structural error，不会创建第二个
@@ -852,6 +1030,14 @@ array；缺少该 field 的旧 v1 AOR 会按空数组读取。该数组保留每
 保留 run 结束时 active 的 binding。每个 element 都属于投影中的 Agent Run，并保持权威
 `source_ordinal` 顺序。Projector 与 frozen-record validator 都会重建 active binding state，并
 执行 6.1 节的 lifecycle identity 与 sequence rule。
+
+`kubernetes_attributions` 使用相同 default-compatible v1 extension 规则：新的 projection output
+始终包含该 array，legacy v1 record 可以把缺失 field 读取为空。Projector 按 source order 保留每条
+经过验证的 K1 observed、retired 与 suspended fact，共同 replay runtime/K1 state，要求 referenced
+D1 observation 先于 K1 observation、K1 retirement/suspension 先于 D1 结束，并且每个 K1
+suspension credit 只消费一次。Frozen-record validator 会重复这些检查。Saved Run Viewer 渲染独立
+K1 lifecycle panel，并把每条 K1 fact 链接到其 Exact D1 binding source fact，而不重建 raw
+Kubernetes name。
 
 当 Finding 的 `evidence_ref` 为 `runtime_binding:<workload_id>` 时，只有同一 run 中先于该
 Finding 出现，且 `adapter`、`workload_id`、`cgroup_id` 与 Finding 的 runtime、container ID、
@@ -868,6 +1054,12 @@ kind 会省略这两个 field。该字段对是 default-compatible 的 v1 extens
 会按 `source_ordinal` 顺序共同重放 gap 与 binding fact。只有同 adapter、更早且尚未消费、
 reason 为 `socket_unavailable` 或 `inventory_invalid` 的 gap 才授予一次 suspension credit；
 `daemon_restart` 与 `identity_transition` 不授予 suspension credit，每个 credit 只能消费一次。
+
+对 `kubernetes_metadata_unavailable`，projection 会把 source detail 替换为 6.1 节的 normalized
+bounded detail，并增加必需的 `kubernetes_cluster_id` 与 `kubernetes_reason` field。Reason 恰好是
+该节列出的六种 K1 reason 之一。其他 gap 会省略这两个 field。每条 K1 gap 都增加一个
+`observation_gap` issue 并阻止 complete evidence；late attach 表示一个 relation boundary，不是
+missing syscall 数量。
 
 Issue code 恰好是 `missing_capability`、`unsupported_capability`、
 `missing_lifecycle_start`、`missing_lifecycle_terminal`、`collector_loss`、
@@ -1029,7 +1221,7 @@ filesystem、network、guest 或 runtime path 成为显式 capability gap。
 | 本地 Linux CLI | Managed launch 或受保护的 process-tree attach |
 | Linux self-hosted CI | 使用相同 CLI managed-run boundary；runner isolation 由外部提供 |
 | Docker/containerd | Host eBPF observation 关联 container 与 cgroup identity |
-| Kubernetes | Node eBPF observation 关联 Pod/container/cgroup identity；有界 Beta |
+| Kubernetes containerd/K3s | 已实现 K1 node eBPF observation 与 claimed Pod/container/cgroup identity 的 join；指定 live qualification 前仍为 Experimental |
 | gVisor | Host/runtime boundary visibility，不是每个 guest syscall |
 | Kata 或 Firecracker | Host/VMM/shim visibility；guest semantics 需要 guest collector |
 | macOS 或 Windows | 不支持 eBPF runtime observation |
@@ -1082,6 +1274,14 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 - Registration 的 host/start/executable/command-fingerprint/workspace value 是资格校验输入。
   完整 executable path、workspace path 与 command fingerprint 不跨越 persistence seam；只保留
   有界 identity 与脱敏 supervisor metadata。
+- K1 持久化 operator 定义的 cluster UUID、Pod UID、container kind，以及 domain-separated
+  namespace/node/container/runtime-class reference。Raw Pod name、namespace/node name、label、
+  annotation、resource version、token 与 source error body 都不跨越 persistence 或 diagnostic
+  seam。Projected token 只挂载到 non-root source container；root collector 没有 Kubernetes API
+  credential。
+- K1 privacy reference 是 deterministic unkeyed pseudonym，不是 secret 或 anonymity。低 entropy
+  identifier 仍可枚举，reference 仍可跨 run 链接；Pod UID 与完整 runtime container identity 按
+  contract 保持显式。
 - Raw kernel payload 只是有界实现细节，没有显式 review profile 时不得跨越 persistence
   seam。
 - Observation Scope 防止意外 host-wide collection。
@@ -1104,6 +1304,8 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 - collector restart 或 death；
 - runtime socket 丢失、daemon restart、非法 runtime inventory 或陈旧 container identity
   transition；
+- Kubernetes API/CRI 丢失、非法或变化的 A/B Pod snapshot、source epoch/daemon restart、K1
+  identity transition 或 K1 late attach；
 - late attach、PID reuse ambiguity 或 missing process lineage；
 - unsupported syscall、io_uring、guest 或 remote operation path；
 - local storage failure 或 incomplete terminal flush。
@@ -1129,15 +1331,21 @@ Implemented today：
 - `apolysis-store`：rotation、可选本地 hash-chain envelope、no-follow descriptor-bound
   recovery，以及读取 plain/rotated 或 verified saved run 的有界 stable-snapshot reader；
 - `apolysis-accountability`：纯 Agent Observation Record projection、相互独立的 summary
-  axis、可选声明意图对比与面向复查的 finding；
-- `apolysis-viewer`：严格验证 Agent Observation Record v1，并提供带 source traceability 的
-  确定性 standalone 离线 HTML 展示；
-- `apolysis-kubernetes` 与 `apolysis-visibility`：有界 runtime metadata 与 visibility
-  boundary assessment；
+  axis、可选声明意图对比、typed K1 claim admission/lifecycle validation 与面向复查的 finding；
+- `apolysis-viewer`：严格验证 Agent Observation Record v1，并提供带 runtime/K1 source
+  traceability 的确定性 standalone 离线 HTML 展示；
+- `apolysis-kubernetes`：纯、有界 A/runtime/B qualification coordinator、claim intersection、
+  K1 lifecycle、outage/restart recovery 与 Exact D1 join；
+- `apolysis-kubernetes-source`：non-root namespace-scoped Pod LIST/watch source 与严格、
+  privacy-safe Unix IPC protocol；
+- `apolysis-visibility`：visibility boundary assessment；
 - `apolysis-daemon`：long-lived observer、有界 queue、本地 socket、runtime registration、
   完整 Docker/containerd inventory qualification、稳定 container/cgroup binding、有界
-  runtime-source 与 daemon-restart recovery、scoped lifecycle persistence、幂等的未完成实例
-  恢复、receipt-owned local operation 与 identity-bound journaled retention。
+  runtime-source 与 daemon-restart recovery、two-phase K1/runtime lifecycle persistence 与
+  recovery、tenant-atomic query、scoped collector lifecycle、幂等的未完成实例恢复、
+  receipt-owned local operation 与 identity-bound journaled retention；
+- `apolysisd-control` 与 `deploy/kubernetes`：typed operator ingress 与 least-privilege 双容器
+  node DaemonSet contract。
 
 Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 与 lifecycle
 start 同步到稳定存储；对 protected existing-process attach，它会先持久化唯一的 unknown-history
@@ -1150,9 +1358,16 @@ Docker/containerd stable identity 与 runtime recovery 已通过 typed runtime-m
 私有 daemon-lifecycle recovery，以及具备 capability 与 hash-chain 证据的 content-off eBPF
 exact container/cgroup 归属。独立、保留的 private-containerd gate 按 section 5.3 的隔离与
 cleanup contract，覆盖 stable/replacement complete inventory 以及 socket gap -> suspension ->
-fresh observation。破坏性 systemd runtime-service restart 与 K1/VKE qualification 仍保持
-open。本地有界 daemon filesystem operation 已实现；当前没有授予任何 Supported live-host
-profile，有界 Kubernetes Beta 仍是 target。
+fresh observation。K1 implementation 已覆盖 typed claim、privacy-safe Pod metadata、complete
+A/runtime/B closure、application/init/ephemeral container、D1 reuse、observed/retired/suspended
+lifecycle、显式 API/CRI/snapshot/restart/transition/late-attach gap、tenant-gated query、AOR
+projection 与 viewer navigation。在 combined path 中，D1 reconciliation 只接收由 exact
+claim/A/B intersection 授权的 full identity key；raw routing candidate 不能 attach scope。其
+deterministic/deployment contract 已在本地通过，但本
+workspace 因缺少所需 kubeconfig 与 `kubectl`，尚未运行指定 VKE live gate。该 preflight 结果是
+skip，不是 pass，也不会晋级 Kubernetes。破坏性 systemd runtime-service restart 与 release
+qualification 仍保持 open。本地有界 daemon filesystem operation 已实现；当前没有授予任何
+Supported live-host profile。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃
@@ -1170,6 +1385,23 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 - Agent Observation Record v1 缺少权威 parent Runtime Identity link。Viewer 可以展示 Exact
   Runtime Identity roster 与每条 observation 的 reported PID/PPID，但不能依赖不安全的
   PID-based inference 构造 canonical process tree。
+- K1 限于每个 DaemonSet Pod 一个 namespace/node、一个显式配置的 containerd 或 K3s runtime
+  domain、READY marked Pod sandbox，以及针对 application/init/ephemeral container slot 的 exact
+  typed claim。它不观测 Docker-backed Kubernetes、任意/unclaimed Pod、一个 source token 下的
+  multiple namespace，或无法形成 Exact D1 identity 的 runtime/container metadata。
+- Canonical DaemonSet 只支持自身专用 Agent namespace。不能针对每个 workload namespace 复制并
+  共享同一 node runtime：一个 node observer 必须独占 runtime domain。Cluster-wide 或
+  cross-namespace attribution 需要重新设计 authorization/source seam。
+- 专用 namespace 必须保持 operator-controlled。Exact claim 会阻止 Pod writer 获得其他 run 的
+  D1/scope，但 malformed marked sandbox 会按设计使 complete scan fail，并可降低 node
+  K1/runtime availability；K1 不抵抗这种 authorized-namespace DoS。
+- 直接拥有 host CRI socket 会使 collector 保持 node-trusted，因为协议包含 mutating method。
+  Capability 与 token 隔离会收敛 privilege，但不强制 read-only access；这需要未来的 allowlist
+  broker。
+- K1 watch 只触发 fresh capture。权威来源是围绕一次 complete CRI inventory 的两次 complete Pod
+  LIST，因此 API pagination 或 runtime latency 会限制 convergence，持续 churn 可能重复产生显式
+  snapshot gap。Node-local state 不提供 gap-free cross-node handoff：rescheduled Pod 使用新 UID，
+  并在 destination node 上独立资格化。
 - eBPF 看到 kernel/runtime operation，看不到逻辑推理或隐藏的 remote provider state。
 - Relative path、fd-relative operation、namespace、overlay 与 guest runtime 需要显式解析和
   capability limit。
@@ -1212,14 +1444,16 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 
 ## 15. 方向与 release gate
 
-本地 Agent Run workflow、非特权 projection/viewer、有界 daemon 运维，以及已完成的 D1/D2
-implementation 与分别保留的 Docker/private-containerd qualification 构成当前基础。下一项有界
-方向是 K1 least-privilege Kubernetes node/Pod 归属，随后进行 release 准备。指定的
-runtime-ready 且 network-ready VKE validation 必须覆盖代表性 reschedule、sensor loss、runtime
-boundary、cleanup 与 privacy。Docker 证据不能复用成 containerd 或 Kubernetes 证据，
-private-containerd 证据也不能复用成 Kubernetes 证据。破坏性 systemd runtime-service restart
-qualification 保持独立、可选声明。在相应 exact workload/kernel/runtime 与适用 release 证据
-通过前，任何 profile 都不会超越 Experimental 或 Candidate。
+本地 Agent Run workflow、非特权 projection/viewer、有界 daemon 运维、完成的 D1/D2 工作与
+分别保留的 Docker/private-containerd qualification，以及完成的 deterministic K1 contract 构成
+当前基础。下一项有界工作是在指定 runtime-ready、network-ready VKE 上完成 live qualification，
+随后进行 release 准备。该 gate 必须覆盖代表性 same-Pod restart、source loss/recovery、cross-node
+new-UID handoff、runtime boundary、cleanup 与 privacy。本 workspace 缺少其必需 kubeconfig 与
+`kubectl`，因此尚未运行；规范 preflight 结果是 skip，不能报告为 pass。Docker 证据不能复用成
+containerd 或 Kubernetes 证据，private-containerd 证据也不能复用成 Kubernetes 证据。破坏性
+systemd runtime-service restart qualification 保持独立、可选声明。在相应 exact
+workload/kernel/runtime 与适用 release 证据通过前，任何 profile 都不会超越 Experimental 或
+Candidate。
 
 跨领域规则长期有效：scope before capture、capability before claim、no silent absence、stable
 identity before inference、privacy before persistence、observation 而非 enforcement、viewer

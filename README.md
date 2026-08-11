@@ -88,7 +88,11 @@ an exact one.
 - Qualified Docker/containerd runtime binding and bounded source recovery from
   stable, complete inventories. The exact identity, transition, and gap
   contracts are defined in the design document.
-- Kubernetes metadata correlation remains a bounded beta target.
+- The deterministic K1 Kubernetes attribution contract is implemented for
+  containerd and K3s nodes: typed operator claims, Pod/runtime identity
+  qualification, explicit attribution lifecycle and gaps, tenant-gated query,
+  saved-run projection, and offline viewing. The Kubernetes profile remains
+  Experimental until its designated live VKE qualification passes.
 - Content-off persistence for exec arguments and process commands, with
   credential and network redaction.
 - Ordered JSONL output, rotation, optional local hash-chain envelopes, and
@@ -135,13 +139,33 @@ The privileged collector and non-privileged operator viewer remain separate
 trust boundaries. Remote export and any central multi-tenant evidence plane are
 deferred beyond the bounded beta.
 
+On Kubernetes, the target deployment is one two-container DaemonSet Pod per
+node. A root collector owns eBPF, host runtime access, and local state but has no
+Kubernetes API token. A non-root metadata source has only namespace-scoped Pod
+`list/watch` access and sends bounded snapshots over a shared-group Unix
+socket. Operators register exact, typed workload claims through the local
+`apolysisd-control` boundary. The host state directory must be pre-created as a
+root-owned mode-`0700` directory.
+
+The shipped canonical manifest is limited to its own dedicated Agent namespace
+and the VKE/containerd socket; it is not cluster-wide. K3s is implemented but
+requires an operator-supplied manifest or overlay with the matching K3s socket
+and the same trust controls. That namespace must be operator-controlled; an
+untrusted tenant must not be able to create or modify Pods in it. Typed claims
+prevent metadata from expanding authorization, but do not prevent a namespace
+writer from degrading K1 availability with malformed marked metadata. The
+collector is still node-trusted because a host
+CRI socket carries mutating protocol authority. Token isolation, reduced
+capabilities, and content-off pseudonyms narrow exposure but do not make that
+collector read-only or the metadata anonymous.
+
 ## Supported environments
 
 | Environment | Direction |
 | --- | --- |
 | Local Linux Agent CLI | First stable workflow |
 | Docker/containerd on operator-controlled Linux | Stable target after local collector correctness |
-| Kubernetes node and Pod attribution | Bounded beta after container identity is stable |
+| Kubernetes containerd/K3s node and Pod attribution | Deterministic K1 implementation present; Experimental pending designated live VKE qualification |
 | Linux self-hosted CI runner | CLI managed-run path only; no maintained composite Action |
 | macOS, Windows, or vendor-managed Agent runtime | Unsupported for eBPF runtime observation |
 
@@ -149,9 +173,10 @@ deferred beyond the bounded beta.
 
 `v0.3.0` remains the latest public research release and demonstrates the live
 collector, managed Agent launch, JSONL timeline, privacy redaction, and release
-packaging. The active Cargo workspace is now limited to ten crates: core,
+packaging. The active Cargo workspace is now limited to eleven crates: core,
 observer, accountability findings, local storage, daemon, CLI, saved-run
-viewer, Kubernetes metadata, visibility assessment, and release verification.
+viewer, Kubernetes attribution, the isolated Kubernetes metadata source,
+visibility assessment, and release verification.
 Superseded contracts, central services, policy actuation, Agent feedback
 control, sandbox execution, and broad production-qualification prototypes have
 left active builds and default gates.
@@ -169,11 +194,13 @@ change the experimental support status by itself.
 
 The D1/D2 runtime-binding implementation, deterministic contracts, and retained
 non-destructive qualification are complete for both Docker and an independently
-isolated private standalone containerd runtime. The evidence remains
-profile-specific: it does not extend Docker claims to containerd or either
-runtime's claims to Kubernetes. Destructive runtime-service restart, K1/VKE,
-and release qualification remain open. None of these results promotes a
-profile.
+isolated private standalone containerd runtime. The K1 contract and
+implementation are also complete for the bounded containerd/K3s Kubernetes
+workflow, without promoting that profile. Evidence remains profile-specific:
+Docker and private-containerd results do not qualify Kubernetes. The designated
+VKE live gate has not run in this workspace because its required kubeconfig and
+`kubectl` are unavailable; its canonical result is a skip, not a pass.
+Destructive runtime-service restart and release qualification also remain open.
 
 The scope reset is a roadmap decision, not a retroactive production claim.
 Apolysis remains experimental until the supported collector, attribution,
@@ -252,10 +279,10 @@ third-party workload behavior still require a documented threat model.
 
 ## High-level roadmap
 
-1. Keep the active workspace bounded to eBPF collection, Observation Scope,
-   attribution, local storage, daemon, CLI, and operator investigation.
-2. Validate least-privilege K1 node/Pod attribution on the designated,
-   runtime- and network-ready VKE test cluster as an explicitly bounded beta.
+1. Keep the implemented K1 contract bounded to explicit operator claims,
+   containerd/K3s identity, node-local collection, and content-off metadata.
+2. Run the least-privilege K1 live gate on the designated, runtime- and
+   network-ready VKE cluster when its explicit prerequisites are available.
 3. Keep destructive runtime-service restart qualification separate and prepare
    a release without extending Docker evidence to containerd or Kubernetes.
 4. Promote a release only after applicable kernel, runtime, privacy,

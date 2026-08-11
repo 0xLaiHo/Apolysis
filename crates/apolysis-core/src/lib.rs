@@ -10,10 +10,18 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod fields;
+mod kubernetes_attribution;
 mod runtime_binding;
 pub mod scalars;
 pub mod vocabulary;
 
+pub use kubernetes_attribution::{
+    kubernetes_reference_v1, KubernetesAttributionOptionalRef, KubernetesAttributionRecordType,
+    KubernetesAttributionWireV1, KubernetesAttributionWireValidationError, KubernetesContainerKind,
+    KubernetesReferenceError, KubernetesReferenceKind, KubernetesWorkloadClaimV1,
+    KUBERNETES_ATTRIBUTION_SCHEMA_VERSION, KUBERNETES_REFERENCE_BYTES,
+    MAX_KUBERNETES_POD_UID_BYTES,
+};
 pub use runtime_binding::{
     validate_runtime_container_id_v1, validate_runtime_cri_start_marker_v1,
     validate_runtime_docker_start_marker_v1, validate_runtime_workload_identity_v1,
@@ -478,6 +486,7 @@ pub enum ObservationGapKind {
     CollectorRestart,
     LateAttach,
     RuntimeMetadataUnavailable,
+    KubernetesMetadataUnavailable,
 }
 
 impl ObservationGapKind {
@@ -488,6 +497,7 @@ impl ObservationGapKind {
             Self::CollectorRestart => "collector_restart",
             Self::LateAttach => "late_attach",
             Self::RuntimeMetadataUnavailable => "runtime_metadata_unavailable",
+            Self::KubernetesMetadataUnavailable => "kubernetes_metadata_unavailable",
         }
     }
 }
