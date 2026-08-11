@@ -9,6 +9,7 @@ members = [
     "crates/apolysis-visibility",
     "crates/apolysis-viewer",
     "crates/apolysis-cli",
+    "crates/apolysis-release-verifier",
 ]
 resolver = "2"
 
@@ -21,6 +22,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 aya = "0.13.1"
+flate2 = "1"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

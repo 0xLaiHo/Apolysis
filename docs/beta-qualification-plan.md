@@ -52,7 +52,7 @@ semantics, remote outcome verification, and enforcement.
 | L1 Protected existing-process attach | Admit an existing tree only through a registration-qualified current root or unique inferred discovery, reject raw PID scope, activate from seeded identities, and persist one ordered late-attach boundary gap | C3, C4 |
 | L2 Agent Observation Record projection | Produce one queryable run aggregate and summary over observation, capability, identity, health, finding, and gap records | C1, C2, C3, C4 |
 | L3 Non-privileged saved-run viewer | Investigate exactly one Agent Observation Record v1 through a private, standalone offline view without raw JSONL or privileged access | L2 |
-| L4 Local daemon operations | Qualify install, health, stop, cleanup, permissions, retention, and failure recovery | C4, L2 |
+| L4 Local daemon operations | Qualify the exact-five-artifact manifest, fixed-path inspect/plan/apply lifecycle, receipt ownership, staged-root behavior, concrete systemd health/stop, state-preserving uninstall, retention, and failure recovery | C4, L2 |
 | D1 Container identity | Stabilize Docker/containerd cgroup and container attribution across churn and PID reuse | C3, C4 |
 | D2 Runtime recovery | Qualify daemon restart and Docker/containerd runtime socket recovery | D1, C4 |
 | K1 Kubernetes attribution and deployment | Bind Pod/runtime identity and deploy a least-privilege node collector with a non-privileged viewer path | D1, D2, L2, L3 |
@@ -137,8 +137,41 @@ environment breadth.
   Because v1 lacks an authoritative parent Runtime Identity link, the viewer
   shows the Exact Runtime Identity roster and reported PID/PPID facts without
   constructing a canonical process tree.
-- Install, shutdown, cleanup, retention, permissions, and corruption recovery
-  are bounded and tested.
+- Release manifest schema v2 contains exactly the `apolysis`, `apolysisd`, and
+  `apolysisd-health` binaries, the CO-RE object, and the systemd unit, with the
+  required kind, digest, size, and mode. Missing, duplicate, additional, or
+  changed bundle content is rejected. Verification also rejects non-canonical
+  or extended archive structure and requires libbpf parsing of the real CO-RE
+  object through `bpftool gen skeleton`.
+- Daemon install, inspect, managed replacement, and uninstall map only that
+  closed set to documented fixed paths. Inspect/plan/apply preflights the full
+  set and binds a plan to the source and target snapshot. Receipt ownership is
+  required for replacement and removal; symlink, non-regular, hard-linked,
+  unmanaged, changed, or stale state fails before publication. Identical
+  reinstall is a no-op, and default uninstall preserves `/var/lib/apolysis`
+  and unrelated files. Owner and full mode proofs, including special bits, are
+  part of the receipt boundary.
+- A synchronized private operation journal precedes file publication. Reopen
+  testing proves rollback of pre-commit interruption and completion of
+  committed install or uninstall cleanup; inspection reports that recovery.
+  Unknown or changed transaction state fails closed. This gate proves durable
+  convergence rather than instantaneous multi-path visibility.
+- The deterministic staged-root gate exercises filesystem publication,
+  rollback, permissions, and state preservation without activating systemd or
+  eBPF. It cannot close the separate opt-in privileged gate, which uses the
+  shipped concrete systemd unit, reuses the daemon health protocol, waits for
+  eBPF/storage readiness, verifies bounded SIGTERM shutdown and restart
+  recovery, and proves cleanup on a real host.
+- Destructive retention takes time only from the daemon clock, validates the
+  open timeline descriptor and directory identity, blocks late persistence
+  with a tombstone, and uses a synchronized staging/committed journal. Startup
+  rolls staging back and completes committed cleanup; replacement, unknown
+  content, or corrupt/conflicting recovery state fails closed. Hash-chain
+  recovery likewise rejects links and path replacement and keeps recoverable
+  tail bytes in a private create-new quarantine file. Destructive apply is
+  limited to the local default context; non-default requests do not mutate
+  state. The independent terminal retention catalog fails closed at its bound
+  without consuming active-run capacity.
 
 ### Container and Kubernetes
 

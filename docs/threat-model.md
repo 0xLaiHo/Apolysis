@@ -39,6 +39,11 @@ was blocked, rolled back, or contained.
 - **Userspace observer and daemon:** trusted to decode the ABI, join runtime
   identity, redact sensitive content, preserve gaps, and write bounded local
   records.
+- **Local daemon operations:** trusted to map one manifest-defined closed
+  artifact set to fixed host paths, prove managed ownership through a local
+  receipt, and preserve retained Agent Runs. The release bundle and staged
+  root are untrusted filesystem input; the staged-root path does not invoke
+  systemd or grant a live-host qualification claim.
 - **Runtime metadata sources:** trusted only for documented container, cgroup,
   Pod, and process identity fields. They do not prove guest semantics or remote
   effects.
@@ -62,6 +67,8 @@ was blocked, rolled back, or contained.
 - Content-off persistence and redaction guarantees for argv, paths, socket
   values, labels, annotations, and payloads.
 - Local timeline integrity, file permissions, retention, and cleanup behavior.
+- Release-manifest artifact identity, fixed installation destinations, install
+  receipt integrity, and state-preserving uninstall behavior.
 - Projection source order and integrity plus the independent evidence,
   collector-health, and review-state semantics of the derived record.
 - Private atomic publication of the derived Agent Observation Record without
@@ -138,6 +145,9 @@ was blocked, rolled back, or contained.
   record is complete.
 - Local files, runtime sockets, or cleanup paths expose or modify data outside
   the selected Agent Run.
+- A caller-chosen retention timestamp, replaced run directory or timeline,
+  late writer, interrupted purge, forged journal, or unknown trash content
+  causes a live or unrelated Agent Run to be removed.
 
 ### Privilege and supply-chain misuse
 
@@ -147,6 +157,17 @@ was blocked, rolled back, or contained.
   container runtime sockets, node credentials, or privileged output paths.
 - A substituted BPF object or binary reports capabilities that do not match the
   loaded implementation.
+- A release manifest names an extra, missing, duplicate, linked, non-regular,
+  hard-linked, oversized, or changed artifact, or attempts to redirect a
+  bundle path to a destination outside the closed install set.
+- A linked, non-regular, hard-linked, unmanaged, or receipt-divergent target,
+  or a filesystem change after planning, is accepted for managed replacement
+  or uninstall.
+- A forged or damaged receipt is treated as sufficient ownership, or default
+  uninstall removes `/var/lib/apolysis` or another unrelated file.
+- An interrupted multi-file install or uninstall leaves a mixed release that a
+  later operation silently accepts, or a forged transaction journal causes
+  recovery to replace or remove an unrelated file.
 - A symlink, non-regular file, rotation substitution, source churn, oversized
   record set, or tampered hash chain changes what the non-privileged projection
   reads.
@@ -201,6 +222,38 @@ was blocked, rolled back, or contained.
 - Redact credential, private path, and socket values before persistence.
 - Use restrictive local permissions, bounded retention, safe rotation, and
   target-specific cleanup.
+- Require release manifest schema v2 to describe exactly the CLI, daemon,
+  health client, CO-RE object, and systemd unit with their fixed kinds, hashes,
+  sizes, and modes. Map these entries to five compiled-in destinations rather
+  than treating manifest paths as destinations.
+- Put daemon lifecycle filesystem changes behind inspect, plan, and apply.
+  Preflight the complete source and target set, bind the opaque plan to exact
+  filesystem identities, reject links, non-regular files, multiple links,
+  unmanaged targets, receipt divergence, and stale plans. Anchor root, parent,
+  publication, and removal operations to open directory descriptors. Before
+  publication, synchronize a private owner-bound pre-commit/committed journal;
+  on reopen, roll back pre-commit work or finish committed cleanup only when
+  every recorded identity still matches. Use the receipt as the only
+  replacement/removal authority, make identical reinstall a no-op, and
+  preserve `/var/lib/apolysis` and unrelated files on default uninstall.
+- Keep staged-root qualification deterministic and filesystem-only. Exercise
+  the concrete shipped systemd unit, existing daemon health protocol, eBPF
+  readiness, bounded stop/restart, and cleanup only through a separate opt-in
+  privileged live-host gate; a skipped live gate cannot establish live-host
+  support.
+- Take destructive-retention time only from the daemon clock. Bind candidates
+  to the already-open, single-link timeline descriptor and run-directory
+  identity, install tombstones before mutation, and move only the qualified
+  closed set under a private same-filesystem trash root. Synchronize a typed
+  staging/committed journal so startup can roll back staging or finish
+  committed cleanup, and fail closed on replacement, unknown content, journal
+  corruption, or conflicting recreated state. Limit destructive apply to the
+  local default context and reject legacy non-default requests without
+  mutation.
+- Open hash-chain timelines once without following links; require a regular,
+  single-link file and verify that its path still names the open descriptor
+  before recovery or append. Preserve a recoverable corrupt tail only in a
+  private create-new quarantine file; fail closed on middle corruption.
 - Open every saved-run segment without following symlinks, require regular
   files, bind the active file plus contiguous `.N` archives to device/inode and
   timestamp snapshots, read oldest archive through active, and fail if the set
@@ -274,6 +327,10 @@ A supported profile cannot be described as Beta-ready when:
 - the viewer requires privileged host access;
 - the kernel, capability, runtime, performance, retention, and cleanup envelope
   is undocumented or untested;
+- fixed-path local install, receipt-owned replacement/uninstall, concrete
+  systemd health and bounded stop, state preservation, interruption recovery,
+  or crash-safe retention lacks its applicable staged-root or opt-in live-host
+  evidence;
 - an unresolved high-severity issue affects collector privilege, scope,
   attribution, privacy, local storage, or viewer isolation.
 

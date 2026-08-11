@@ -9,6 +9,7 @@ default-run = "apolysis"
 [dependencies]
 apolysis-accountability = { path = "../apolysis-accountability" }
 apolysis-core = { path = "../apolysis-core" }
+apolysis-daemon = { path = "../apolysis-daemon" }
 apolysis-observer = { path = "../apolysis-observer" }
 apolysis-kubernetes = { path = "../apolysis-kubernetes" }
 apolysis-store = { path = "../apolysis-store" }
