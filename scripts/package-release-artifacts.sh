@@ -32,34 +32,54 @@ fi
 [[ -n "$release_version" ]] || fail "set APOLYSIS_RELEASE_VERSION"
 
 release_target="${APOLYSIS_RELEASE_TARGET:-$(default_target)}"
+safe_component_pattern='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+[[ "$release_version" =~ $safe_component_pattern ]] || fail "release version is not a safe bounded component"
+[[ "$release_target" =~ $safe_component_pattern ]] || fail "release target is not a safe bounded component"
 release_binary="${APOLYSIS_RELEASE_BINARY:-target/release/apolysis}"
+release_daemon_binary="${APOLYSIS_RELEASE_DAEMON_BINARY:-target/release/apolysisd}"
+release_health_binary="${APOLYSIS_RELEASE_HEALTH_BINARY:-target/release/apolysisd-health}"
 release_bpf_object="${APOLYSIS_RELEASE_BPF_OBJECT:-target/ebpf/apolysis_observer.bpf.o}"
+release_systemd_unit="${APOLYSIS_RELEASE_SYSTEMD_UNIT:-deploy/systemd/apolysisd.service}"
 output_dir="${APOLYSIS_RELEASE_OUTPUT_DIR:-target/release-artifacts}"
 package_base="apolysis-${release_version}-${release_target}"
 package_name="${package_base}.tar.gz"
-package_path="$output_dir/$package_name"
 manifest_name="apolysis-release-manifest.json"
-manifest_path="$output_dir/$manifest_name"
-checksum_path="$package_path.sha256"
+published_package_path="$output_dir/$package_name"
+published_manifest_path="$output_dir/$manifest_name"
+published_checksum_path="$published_package_path.sha256"
 
 [[ -f "$release_binary" ]] || fail "missing CLI binary: $release_binary"
 [[ -x "$release_binary" ]] || fail "CLI binary is not executable: $release_binary"
+[[ -f "$release_daemon_binary" ]] || fail "missing daemon binary: $release_daemon_binary"
+[[ -x "$release_daemon_binary" ]] || fail "daemon binary is not executable: $release_daemon_binary"
+[[ -f "$release_health_binary" ]] || fail "missing health binary: $release_health_binary"
+[[ -x "$release_health_binary" ]] || fail "health binary is not executable: $release_health_binary"
 [[ -f "$release_bpf_object" ]] || fail "missing CO-RE BPF object: $release_bpf_object"
+[[ -f "$release_systemd_unit" ]] || fail "missing systemd unit: $release_systemd_unit"
 
 mkdir -p "$output_dir"
+[[ -d "$output_dir" && ! -L "$output_dir" ]] || fail "release output is not a plain directory"
 tmpdir="$(mktemp -d "$output_dir/.packaging.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT
 
 stage="$tmpdir/$package_base"
-mkdir -p "$stage/bin" "$stage/ebpf" "$stage/docs"
+publish="$tmpdir/publish"
+mkdir -p "$stage/bin" "$stage/ebpf" "$stage/systemd" "$stage/docs" "$publish"
+chmod 0755 "$stage" "$stage/bin" "$stage/ebpf" "$stage/systemd" "$stage/docs"
+package_path="$publish/$package_name"
+manifest_path="$publish/$manifest_name"
+checksum_path="$publish/$package_name.sha256"
 
 install -m 0755 "$release_binary" "$stage/bin/apolysis"
+install -m 0755 "$release_daemon_binary" "$stage/bin/apolysisd"
+install -m 0755 "$release_health_binary" "$stage/bin/apolysisd-health"
 install -m 0644 "$release_bpf_object" "$stage/ebpf/apolysis_observer.bpf.o"
+install -m 0644 "$release_systemd_unit" "$stage/systemd/apolysisd.service"
 install -m 0644 README.md "$stage/README.md"
 install -m 0644 README.zh-CN.md "$stage/README.zh-CN.md"
 install -m 0644 docs/jsonl-schema-v1.md "$stage/docs/jsonl-schema-v1.md"
 
-python3 - "$stage/$manifest_name" "$release_version" "$release_target" "$package_name" "$stage/bin/apolysis" "$stage/ebpf/apolysis_observer.bpf.o" <<'PY'
+python3 -I - "$stage/$manifest_name" "$release_version" "$release_target" "$package_name" "$stage" <<'PY'
 import hashlib
 import json
 import sys
@@ -70,17 +90,31 @@ manifest_path = Path(sys.argv[1])
 release_version = sys.argv[2]
 release_target = sys.argv[3]
 package_name = sys.argv[4]
-binary_path = Path(sys.argv[5])
-bpf_path = Path(sys.argv[6])
+stage = Path(sys.argv[5])
 
 def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 def size(path: Path) -> int:
     return path.stat().st_size
 
+artifact_contract = [
+    ("bin/apolysis", "cli_binary", "0755", 128 * 1024 * 1024),
+    ("bin/apolysisd", "daemon_binary", "0755", 256 * 1024 * 1024),
+    ("bin/apolysisd-health", "health_binary", "0755", 64 * 1024 * 1024),
+    ("ebpf/apolysis_observer.bpf.o", "core_bpf_object", "0644", 32 * 1024 * 1024),
+    ("systemd/apolysisd.service", "systemd_unit", "0644", 1024 * 1024),
+]
+for relative_path, _, _, maximum_size in artifact_contract:
+    assert size(stage / relative_path) <= maximum_size, f"oversized artifact: {relative_path}"
+assert sum(size(stage / path) for path, _, _, _ in artifact_contract) <= 512 * 1024 * 1024
+
 manifest = {
-    "schema_version": 1,
+    "schema_version": 2,
     "release_version": release_version,
     "target": release_target,
     "created_at_unix_ms": int(time.time() * 1000),
@@ -91,26 +125,62 @@ manifest = {
     },
     "artifacts": [
         {
-            "path": "bin/apolysis",
-            "kind": "cli_binary",
-            "sha256": sha256(binary_path),
-            "size_bytes": size(binary_path),
-        },
-        {
-            "path": "ebpf/apolysis_observer.bpf.o",
-            "kind": "core_bpf_object",
-            "sha256": sha256(bpf_path),
-            "size_bytes": size(bpf_path),
-        },
+            "path": relative_path,
+            "kind": kind,
+            "sha256": sha256(stage / relative_path),
+            "size_bytes": size(stage / relative_path),
+            "mode": mode,
+        }
+        for relative_path, kind, mode, _ in artifact_contract
     ],
 }
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
+chmod 0644 "$stage/$manifest_name"
 
-tar -czf "$package_path" -C "$tmpdir" "$package_base"
-(cd "$output_dir" && sha256sum "$package_name" >"$package_name.sha256")
-cp "$stage/$manifest_name" "$manifest_path"
+tar --owner=0 --group=0 --numeric-owner -czf "$package_path" -C "$tmpdir" "$package_base"
+(cd "$publish" && sha256sum "$package_name" >"$package_name.sha256")
+install -m 0644 "$stage/$manifest_name" "$manifest_path"
 
-printf 'apolysis-release-artifacts: package=%s sha256=%s\n' "$package_path" "$(sha256 "$package_path")"
-printf 'apolysis-release-artifacts: manifest=%s\n' "$manifest_path"
-printf 'apolysis-release-artifacts: checksum=%s\n' "$checksum_path"
+python3 -I - \
+    "$output_dir" \
+    "$package_path" "$package_name" \
+    "$manifest_path" "$manifest_name" \
+    "$checksum_path" "$package_name.sha256" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1])
+pairs = [(Path(sys.argv[index]), sys.argv[index + 1]) for index in range(2, len(sys.argv), 2)]
+metadata = os.lstat(output)
+if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+    raise RuntimeError("release output is not a plain directory")
+
+created = []
+directory_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+try:
+    for source, name in pairs:
+        destination = output / name
+        os.link(source, destination, follow_symlinks=False)
+        source_metadata = os.lstat(source)
+        created.append((destination, source_metadata.st_dev, source_metadata.st_ino))
+    os.fsync(directory_fd)
+except BaseException:
+    for destination, device, inode in reversed(created):
+        try:
+            destination_metadata = os.lstat(destination)
+            if (destination_metadata.st_dev, destination_metadata.st_ino) == (device, inode):
+                os.unlink(destination)
+        except FileNotFoundError:
+            pass
+    os.fsync(directory_fd)
+    raise
+finally:
+    os.close(directory_fd)
+PY
+
+printf 'apolysis-release-artifacts: package=%s sha256=%s\n' "$published_package_path" "$(sha256 "$published_package_path")"
+printf 'apolysis-release-artifacts: manifest=%s\n' "$published_manifest_path"
+printf 'apolysis-release-artifacts: checksum=%s\n' "$published_checksum_path"

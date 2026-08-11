@@ -1,5 +1,8 @@
-.PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
-	test-local-agent-command-attribution test-qualification qualify-live
+.PHONY: build test lint clean build-ebpf build-release-verifier test-live quickstart test-quickstart \
+	test-local-agent-command-attribution test-qualification \
+	test-release-artifacts verify-release-artifacts test-local-daemon-live-gate-contract \
+	qualify-local-daemon-systemd \
+	qualify-local-daemon-install qualify-live
 
 build: build-ebpf
 	cargo build --workspace
@@ -16,6 +19,9 @@ clean:
 
 build-ebpf:
 	./scripts/build-ebpf.sh
+
+build-release-verifier:
+	cargo build --release -p apolysis-release-verifier
 
 test-live: build-ebpf
 	./scripts/test-live-observer.sh
@@ -45,6 +51,27 @@ test-local-agent-command-attribution:
 
 test-qualification:
 	./scripts/test-qualification-envelope.sh
+
+test-release-artifacts: build-ebpf build-release-verifier
+	bash ./scripts/test-release-artifacts.sh
+
+verify-release-artifacts: build-release-verifier
+	./scripts/verify-release-artifacts.sh
+
+# Zero-privilege safety contract for the two opt-in local daemon live gates.
+test-local-daemon-live-gate-contract:
+	bash ./scripts/test-local-daemon-live-gate-contract.sh
+
+# Explicit, privileged and non-CI. Uses transient systemd units and one bounded
+# temporary state root; it never installs into /usr/local or /var/lib/apolysis.
+qualify-local-daemon-systemd: test-local-daemon-live-gate-contract
+	APOLYSIS_LIVE_SYSTEMD=1 ./scripts/test-local-daemon-systemd.sh
+
+# Explicit, privileged and non-CI. Refuses any pre-existing managed path or
+# state root, installs the real bundle, validates readiness/stop/uninstall, and
+# removes only state and group objects created by the gate itself.
+qualify-local-daemon-install: test-local-daemon-live-gate-contract build-release-verifier
+	APOLYSIS_LIVE_SYSTEM_INSTALL=1 ./scripts/qualify-local-daemon-install.sh
 
 # Privileged, explicit and non-CI. Produces paired raw evidence below
 # target/qualification/ and remains non-zero while the profile is Candidate.

@@ -208,7 +208,7 @@ async fn tenant_scoped_queries_and_session_lists_do_not_cross_tenant_boundaries(
 }
 
 #[tokio::test]
-async fn retention_purge_request_dry_runs_then_removes_only_matching_tenant_state() {
+async fn retention_preview_is_compatible_but_destructive_apply_is_default_context_only() {
     let server = TestServer::start("retention-purge").await;
     let short_window = apolysis_accountability::RetentionTier::Short.retention_window_ms();
     let expires_at = 4_102_444_800_000_u64;
@@ -298,32 +298,63 @@ async fn retention_purge_request_dry_runs_then_removes_only_matching_tenant_stat
         "dry-run must not remove timeline state"
     );
 
-    let apply_request = format!(
-        r#"{{"type":"apply_retention","tenant_id":"tenant-a","dry_run":false,"now_unix_ms":{purge_now}}}"#
+    let unsafe_apply_request = format!(
+        r#"{{"type":"apply_retention","tenant_id":"default","dry_run":false,"now_unix_ms":{purge_now}}}"#
     );
+    assert!(
+        matches!(
+            request(&server.config.socket_path, unsafe_apply_request.as_bytes()).await,
+            DaemonResponse::Error { code, .. }
+                if code == "retention_clock_override_forbidden"
+        ),
+        "a client clock must not drive destructive retention"
+    );
+    assert!(timeline_path.exists(), "rejected apply must preserve state");
+
+    assert!(matches!(
+        request(
+            &server.config.socket_path,
+            br#"{"type":"apply_retention","tenant_id":"tenant-a","dry_run":false}"#,
+        )
+        .await,
+        DaemonResponse::Error { code, .. } if code == "retention_tenant_unsupported"
+    ));
+    assert!(timeline_path.exists(), "rejected apply must preserve state");
+
+    let before = current_unix_ms();
+    let response = request(
+        &server.config.socket_path,
+        br#"{"type":"apply_retention","tenant_id":"default","dry_run":false}"#,
+    )
+    .await;
+    let after = current_unix_ms();
     let DaemonResponse::RetentionPurge {
+        tenant_id,
         dry_run,
+        now_unix_ms,
         eligible_session_ids,
         purged_session_ids,
         ..
-    } = request(&server.config.socket_path, apply_request.as_bytes()).await
+    } = response
     else {
-        panic!("expected retention apply response");
+        panic!("expected daemon-clock retention response");
     };
+    assert_eq!(tenant_id, "default");
     assert!(!dry_run);
-    assert_eq!(eligible_session_ids, vec!["tenant-a-purge"]);
-    assert_eq!(purged_session_ids, vec!["tenant-a-purge"]);
-    assert!(
-        !timeline_path.exists(),
-        "apply must remove purged session timeline state"
-    );
+    assert!((before..=after).contains(&now_unix_ms));
+    assert!(eligible_session_ids.is_empty());
+    assert!(purged_session_ids.is_empty());
+    assert!(timeline_path.exists(), "future state must remain retained");
     assert!(matches!(
         request(
             &server.config.socket_path,
             br#"{"type":"query","tenant_id":"tenant-a","session_id":"tenant-a-purge"}"#,
         )
         .await,
-        DaemonResponse::Session { session: None, .. }
+        DaemonResponse::Session {
+            session: Some(_),
+            ..
+        }
     ));
     assert!(matches!(
         request(
@@ -860,6 +891,14 @@ fn config(name: &str, max_connections: usize) -> DaemonConfig {
         request_timeout: Duration::from_millis(100),
         ..DaemonConfig::default()
     }
+}
+
+fn current_unix_ms() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after Unix epoch")
+        .as_millis();
+    u64::try_from(millis).expect("current Unix timestamp fits u64")
 }
 
 fn unused_loopback_addr() -> SocketAddr {

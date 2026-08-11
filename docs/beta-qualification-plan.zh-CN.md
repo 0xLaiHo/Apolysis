@@ -46,7 +46,7 @@
 | L1 受保护的 existing-process attach | 仅通过 registration-qualified current root 或唯一 inferred discovery 准入现有 process tree，拒绝原始 PID scope，从 seeded identity 激活，并持久化一条有序的 late-attach boundary gap | C3、C4 |
 | L2 Agent Observation Record projection | 为 observation、capability、identity、health、finding 与 gap record 生成单次 run 的可查询 aggregate 和 summary | C1、C2、C3、C4 |
 | L3 非特权 saved-run viewer | 无需原始 JSONL 或 privileged access，通过私有 standalone 离线视图调查恰好一份 Agent Observation Record v1 | L2 |
-| L4 本地 daemon 运维 | 验证 install、health、stop、cleanup、permission、retention 与 failure recovery | C4、L2 |
+| L4 本地 daemon 运维 | 验证恰好 5 个 artifact 的 manifest、固定路径 inspect/plan/apply lifecycle、receipt ownership、staged-root 行为、具体 systemd health/stop、保留 state 的 uninstall、retention 与 failure recovery | C4、L2 |
 | D1 Container identity | 稳定 Docker/containerd cgroup 与 container attribution，并抵御 churn 与 PID reuse | C3、C4 |
 | D2 Runtime recovery | 验证 daemon restart 与 Docker/containerd runtime socket recovery | D1、C4 |
 | K1 Kubernetes attribution 与部署 | 绑定 Pod/runtime identity，并部署 least-privilege node collector 与 non-privileged viewer path | D1、D2、L2、L3 |
@@ -114,8 +114,32 @@
 - Active、failed、incomplete、mixed-integrity、带 gap 或其他受限 record 会保留相应状态，
   绝不渲染为 clean 或 complete。由于 v1 缺少权威 parent Runtime Identity link，viewer 只展示
   Exact Runtime Identity roster 与 reported PID/PPID fact，不构造 canonical process tree。
-- Install、shutdown、cleanup、retention、permission 与 corruption recovery 均有边界并通过
-  测试。
+- Release manifest schema v2 恰好包含 `apolysis`、`apolysisd` 与
+  `apolysisd-health` binary、CO-RE object 和 systemd unit，并记录要求的 kind、digest、size
+  与 mode。缺失、重复、多余或已变化的 bundle content 会被拒绝。验证还会拒绝 non-canonical
+  或带扩展 metadata 的 archive structure，并要求 `bpftool gen skeleton` 通过 libbpf 解析真实
+  CO-RE object。
+- Daemon install、inspect、managed replacement 与 uninstall 只把该封闭集合映射到文档化的
+  固定路径。Inspect/plan/apply 会预检完整集合，并把 plan 绑定到 source 与 target snapshot。
+  Replacement 和 removal 必须有 receipt ownership；symlink、non-regular、hard-linked、
+  unmanaged、已变化或 stale 的状态都会在 publication 前失败。相同内容的 reinstall 是 no-op，
+  默认卸载保留 `/var/lib/apolysis` 与无关文件。Owner 与包含 special bit 的完整 mode proof 都
+  属于 receipt boundary。
+- 文件 publication 前必须先同步一个私有 operation journal。Reopen 测试要证明 pre-commit
+  中断可回滚，committed install 或 uninstall cleanup 可完成，且 inspection 会报告这次恢复。
+  未知或已变化的 transaction state 必须 fail closed。该 gate 证明 durable convergence，而不
+  宣称多条 path 能瞬时同时可见。
+- 确定性 staged-root gate 在不激活 systemd 或 eBPF 的情况下验证 filesystem publication、
+  rollback、permission 与 state preservation。它不能关闭独立的 opt-in privileged gate；后者
+  使用随包提供的具体 systemd unit，复用 daemon health protocol，等待 eBPF/storage readiness，
+  验证有界 SIGTERM shutdown 与 restart recovery，并在真实 host 证明 cleanup。
+- 破坏性 retention 只从 daemon clock 取时间，验证已打开的 timeline descriptor 与 directory
+  identity，通过 tombstone 阻止 late persistence，并使用经过同步的 staging/committed journal。
+  Startup 会回滚 staging、完成已提交 cleanup；replacement、未知内容或损坏/冲突的 recovery
+  state 都会 fail closed。Hash-chain recovery 同样拒绝 link 与 path replacement，并把可恢复的
+  tail byte 保留到私有 create-new quarantine file。破坏性 apply 只适用于本地 default context；
+  非 default 请求不会修改 state。独立 terminal retention catalog 达到上界时 fail closed，且不
+  占用 active-run capacity。
 
 ### Container 与 Kubernetes
 

@@ -23,6 +23,14 @@ pub(crate) mod commands {
     pub(crate) const PROJECT: &str = "project";
     /// Render one Agent Observation Record as an offline investigation report.
     pub(crate) const VIEW: &str = "view";
+    /// Manage the bounded local daemon installation lifecycle.
+    pub(crate) const DAEMON: &str = "daemon";
+    /// Install the fixed daemon artifact set into an explicit root.
+    pub(crate) const INSTALL: &str = "install";
+    /// Inspect the fixed daemon artifact set in an explicit root.
+    pub(crate) const INSPECT: &str = "inspect";
+    /// Remove receipt-owned artifacts while preserving Agent Run state.
+    pub(crate) const UNINSTALL: &str = "uninstall";
     /// Ingest intent records from a supported harness log.
     pub(crate) const INGEST: &str = "ingest";
     /// Correlate intent records with observed host-side timeline events.
@@ -87,18 +95,26 @@ pub(crate) mod options {
     pub(crate) const WORKSPACE_ROOT: &str = "--workspace-root";
     /// Visibility validation scenario selector.
     pub(crate) const SCENARIO: &str = "--scenario";
+    /// Unpacked release bundle directory.
+    pub(crate) const BUNDLE: &str = "--bundle";
+    /// Explicit alternate filesystem root for bounded daemon operations.
+    pub(crate) const ROOT: &str = "--root";
 }
 
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
     format!(
-        "usage: apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>]\n       apolysis {run} {project} {input} <path> [{input} <path> ...] {output} <path>\n       apolysis {run} {view} {input} <path> {output} <path>\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
+        "usage: apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>]\n       apolysis {run} {project} {input} <path> [{input} <path> ...] {output} <path>\n       apolysis {run} {view} {input} <path> {output} <path>\n       apolysis {daemon} {install} {bundle} <dir> {root} <dir>\n       apolysis {daemon} {inspect} {root} <dir>\n       apolysis {daemon} {uninstall} {root} <dir>\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
         observe = commands::OBSERVE,
         intent = commands::INTENT,
         verify = commands::VERIFY,
         run = commands::RUN,
         project = commands::PROJECT,
         view = commands::VIEW,
+        daemon = commands::DAEMON,
+        install = commands::INSTALL,
+        inspect = commands::INSPECT,
+        uninstall = commands::UNINSTALL,
         ingest = commands::INGEST,
         correlate = commands::CORRELATE,
         hash_chain = commands::HASH_CHAIN,
@@ -127,5 +143,7 @@ pub(crate) fn usage() -> String {
         duration_seconds = options::DURATION_SECONDS,
         workspace_root = options::WORKSPACE_ROOT,
         scenario = options::SCENARIO,
+        bundle = options::BUNDLE,
+        root = options::ROOT,
     )
 }

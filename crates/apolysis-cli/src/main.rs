@@ -15,6 +15,7 @@ use apolysis_accountability::{
     MAX_AGENT_RUN_PROJECTION_BATCHES, MAX_AGENT_RUN_PROJECTION_RECORDS,
 };
 use apolysis_core::{now_unix_ms, JsonLine, SessionIntentRecord};
+use apolysis_daemon::{LocalDaemonChange, LocalDaemonOperations};
 use apolysis_observer::{
     observe_fixture, observe_live, redact_command_text_for_persistence, AgentDiscoveryRequest,
     AgentRunRequest, FixtureObserveRequest, LiveObserveRequest, LiveScope,
@@ -44,10 +45,138 @@ async fn run(args: Vec<String>) -> Result<i32, String> {
     match args.first().map(String::as_str) {
         Some(commands::OBSERVE) => observe_command(args).await,
         Some(commands::RUN) => run_command(args),
+        Some(commands::DAEMON) => daemon_command(args),
         Some(commands::INTENT) => intent_command(args).await,
         Some(commands::VISIBILITY) => visibility_command(args).await,
         Some(commands::VERIFY) => verify_command(args).await,
         _ => Err(usage()),
+    }
+}
+
+fn daemon_command(args: Vec<String>) -> Result<i32, String> {
+    match args.get(1).map(String::as_str) {
+        Some(commands::INSTALL) => daemon_install_command(args),
+        Some(commands::INSPECT) => daemon_inspect_command(args),
+        Some(commands::UNINSTALL) => daemon_uninstall_command(args),
+        _ => Err(usage()),
+    }
+}
+
+fn daemon_install_command(args: Vec<String>) -> Result<i32, String> {
+    let request = LocalDaemonRequest::parse(args, true)?;
+    let bundle_root = request
+        .bundle_root
+        .ok_or_else(|| "daemon install requires --bundle <dir>".to_string())?;
+    let mut operations = LocalDaemonOperations::open_staged(&request.root)
+        .map_err(|error| format!("daemon install failed: {error}"))?;
+    let plan = operations
+        .plan(LocalDaemonChange::Install { bundle_root })
+        .map_err(|error| format!("daemon install failed: {error}"))?;
+    let report = operations
+        .apply(plan)
+        .map_err(|error| format!("daemon install failed: {error}"))?;
+    let inspection = operations
+        .inspect()
+        .map_err(|error| format!("daemon install verification failed: {error}"))?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "install",
+            "changed_files": report.changed_files(),
+            "installed": inspection.installed(),
+            "release_version": inspection.release_version(),
+            "target": inspection.target(),
+            "agent_run_state_preserved": report.preserved_agent_run_state(),
+            "recovered_interrupted_operation": inspection.recovered_interrupted_operation(),
+            "systemd_activated": false,
+        })
+    );
+    Ok(0)
+}
+
+fn daemon_inspect_command(args: Vec<String>) -> Result<i32, String> {
+    let request = LocalDaemonRequest::parse(args, false)?;
+    let operations = LocalDaemonOperations::open_staged(&request.root)
+        .map_err(|error| format!("daemon inspect failed: {error}"))?;
+    let inspection = operations
+        .inspect()
+        .map_err(|error| format!("daemon inspect failed: {error}"))?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "inspect",
+            "installed": inspection.installed(),
+            "release_version": inspection.release_version(),
+            "target": inspection.target(),
+            "recovered_interrupted_operation": inspection.recovered_interrupted_operation(),
+            "systemd_activated": false,
+        })
+    );
+    Ok(0)
+}
+
+fn daemon_uninstall_command(args: Vec<String>) -> Result<i32, String> {
+    let request = LocalDaemonRequest::parse(args, false)?;
+    let mut operations = LocalDaemonOperations::open_staged(&request.root)
+        .map_err(|error| format!("daemon uninstall failed: {error}"))?;
+    let recovered_interrupted_operation = operations
+        .inspect()
+        .map_err(|error| format!("daemon uninstall failed: {error}"))?
+        .recovered_interrupted_operation();
+    let plan = operations
+        .plan(LocalDaemonChange::UninstallPreserveState)
+        .map_err(|error| format!("daemon uninstall failed: {error}"))?;
+    let report = operations
+        .apply(plan)
+        .map_err(|error| format!("daemon uninstall failed: {error}"))?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "uninstall",
+            "changed_files": report.changed_files(),
+            "installed": false,
+            "agent_run_state_preserved": report.preserved_agent_run_state(),
+            "recovered_interrupted_operation": recovered_interrupted_operation,
+            "systemd_activated": false,
+        })
+    );
+    Ok(0)
+}
+
+struct LocalDaemonRequest {
+    root: PathBuf,
+    bundle_root: Option<PathBuf>,
+}
+
+impl LocalDaemonRequest {
+    fn parse(args: Vec<String>, allow_bundle: bool) -> Result<Self, String> {
+        let mut root = None;
+        let mut bundle_root = None;
+        let mut index = 2;
+        while index < args.len() {
+            let option = args[index].as_str();
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| format!("{option} requires a value"))?;
+            match option {
+                options::ROOT if root.is_none() => root = Some(PathBuf::from(value)),
+                options::BUNDLE if allow_bundle && bundle_root.is_none() => {
+                    bundle_root = Some(PathBuf::from(value));
+                }
+                _ => return Err(usage()),
+            }
+            index += 2;
+        }
+        let root = root.ok_or_else(|| {
+            "daemon filesystem operations require an explicit --root <dir>".to_string()
+        })?;
+        if allow_bundle && bundle_root.is_none() {
+            return Err("daemon install requires --bundle <dir>".to_string());
+        }
+        Ok(Self { root, bundle_root })
     }
 }
 

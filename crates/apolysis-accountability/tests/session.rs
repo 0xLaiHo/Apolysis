@@ -2,7 +2,7 @@
 
 use apolysis_accountability::{
     ActionClass, AssociationOutcome, RegisterOutcome, RegistryError, RetentionTier, SessionIntent,
-    SessionRegistry, SessionStatus,
+    SessionRegistry, SessionStatus, MAX_RETAINED_AGENT_RUNS,
 };
 
 const NOW_MS: u64 = 1_780_000_000_000;
@@ -92,6 +92,46 @@ fn enforces_session_capacity_without_rejecting_replacement() {
     assert_eq!(
         registry.register(intent("session-a", NOW_MS + 2_000), NOW_MS),
         Ok(RegisterOutcome::Replaced)
+    );
+}
+
+#[test]
+fn closed_agent_run_retention_catalog_is_independently_bounded_and_fails_closed() {
+    let mut registry = SessionRegistry::new(1, 1);
+    for index in 0..MAX_RETAINED_AGENT_RUNS {
+        registry
+            .restore_closed_agent_run(intent(&format!("closed-agent-run-{index}"), NOW_MS + 1_000))
+            .expect("restore closed Agent Run within the retention catalog bound");
+    }
+
+    let error = registry
+        .restore_closed_agent_run(intent("closed-agent-run-overflow", NOW_MS + 1_000))
+        .expect_err("closed retention catalog must fail closed at its independent bound");
+
+    assert_eq!(
+        error,
+        RegistryError::ClosedAgentRunCapacityReached {
+            capacity: MAX_RETAINED_AGENT_RUNS,
+        }
+    );
+    assert!(registry.get("closed-agent-run-0").is_some());
+    assert!(registry.get("closed-agent-run-overflow").is_none());
+    registry
+        .register(intent("active-agent-run", NOW_MS + 1_000), NOW_MS)
+        .expect("closed retention catalog must not consume active capacity");
+    assert_eq!(
+        registry.close("active-agent-run"),
+        Err(RegistryError::ClosedAgentRunCapacityReached {
+            capacity: MAX_RETAINED_AGENT_RUNS,
+        }),
+        "a full retention catalog must reject close without dropping the active Agent Run"
+    );
+    assert_eq!(
+        registry
+            .get("active-agent-run")
+            .expect("failed close preserves the active Agent Run")
+            .status,
+        SessionStatus::Active
     );
 }
 
@@ -240,61 +280,105 @@ fn lists_sessions_by_tenant_and_retention_tier() {
 }
 
 #[test]
-fn retention_purge_is_tenant_scoped_and_only_removes_inactive_expired_sessions() {
+fn retention_purge_only_removes_closed_agent_runs_from_the_default_context() {
     let mut registry = SessionRegistry::new(8, 2);
     let short_window = RetentionTier::Short.retention_window_ms();
     let purge_now = NOW_MS + short_window + 2_000;
     registry
         .register(
             intent_for_tenant(
-                "tenant-a-purge",
+                "default-purge",
                 NOW_MS + 1_000,
-                "tenant-a",
+                apolysis_accountability::DEFAULT_TENANT_ID,
                 RetentionTier::Short,
             ),
             NOW_MS,
         )
-        .expect("tenant-a purge session");
+        .expect("default-context purge Agent Run");
     registry
         .register(
             intent_for_tenant(
-                "tenant-a-keep-active",
+                "default-keep-active",
                 purge_now + 60_000,
-                "tenant-a",
+                apolysis_accountability::DEFAULT_TENANT_ID,
                 RetentionTier::Short,
             ),
             NOW_MS,
         )
-        .expect("tenant-a active session");
+        .expect("default-context active Agent Run");
     registry
         .register(
             intent_for_tenant(
-                "tenant-b-purge",
+                "non-default-keep",
                 NOW_MS + 1_000,
                 "tenant-b",
                 RetentionTier::Short,
             ),
             NOW_MS,
         )
-        .expect("tenant-b purge session");
+        .expect("non-default Agent Run");
     registry
-        .associate_cgroup("tenant-a-purge", 41)
+        .associate_cgroup("default-purge", 41)
         .expect("associate purged cgroup");
-    registry.close("tenant-a-purge").expect("close tenant-a");
-    registry.close("tenant-b-purge").expect("close tenant-b");
+    registry
+        .close("default-purge")
+        .expect("close default-context Agent Run");
+    registry
+        .close("non-default-keep")
+        .expect("close non-default Agent Run");
 
-    let dry_run = registry.retention_purge_report_for_tenant("tenant-a", purge_now, true);
-    assert_eq!(dry_run.eligible_session_ids, vec!["tenant-a-purge"]);
+    let dry_run = registry.retention_purge_report_for_tenant(
+        apolysis_accountability::DEFAULT_TENANT_ID,
+        purge_now,
+        true,
+    );
+    assert_eq!(dry_run.eligible_session_ids, vec!["default-purge"]);
     assert!(dry_run.purged_session_ids.is_empty());
-    assert!(registry.get("tenant-a-purge").is_some());
+    assert!(registry.get("default-purge").is_some());
 
-    let applied = registry.apply_retention_for_tenant("tenant-a", purge_now);
-    assert_eq!(applied.eligible_session_ids, vec!["tenant-a-purge"]);
-    assert_eq!(applied.purged_session_ids, vec!["tenant-a-purge"]);
-    assert_eq!(registry.get("tenant-a-purge"), None);
+    let applied = registry.apply_retention(purge_now);
+    assert_eq!(applied.eligible_session_ids, vec!["default-purge"]);
+    assert_eq!(applied.purged_session_ids, vec!["default-purge"]);
+    assert_eq!(registry.get("default-purge"), None);
     assert_eq!(registry.session_for_cgroup(41), None);
-    assert!(registry.get("tenant-a-keep-active").is_some());
-    assert!(registry.get("tenant-b-purge").is_some());
+    assert!(registry.get("default-keep-active").is_some());
+    assert!(registry.get("non-default-keep").is_some());
+}
+
+#[test]
+fn expired_agent_run_without_a_durable_close_is_not_retention_eligible() {
+    let mut registry = SessionRegistry::new(2, 2);
+    let agent_run_id = "expired-without-durable-close";
+    let expires_at_unix_ms = NOW_MS + 1;
+    let purge_now = expires_at_unix_ms + RetentionTier::Short.retention_window_ms() + 1;
+    registry
+        .register(
+            intent_for_tenant(
+                agent_run_id,
+                expires_at_unix_ms,
+                apolysis_accountability::DEFAULT_TENANT_ID,
+                RetentionTier::Short,
+            ),
+            NOW_MS,
+        )
+        .expect("register Agent Run");
+    assert_eq!(
+        registry.expire(expires_at_unix_ms),
+        vec![agent_run_id.to_string()]
+    );
+
+    let report = registry.apply_retention(purge_now);
+
+    assert!(report.eligible_session_ids.is_empty());
+    assert!(report.purged_session_ids.is_empty());
+    assert_eq!(report.retained_session_ids, vec![agent_run_id]);
+    assert_eq!(
+        registry
+            .get(agent_run_id)
+            .expect("non-durable terminal Agent Run remains")
+            .status,
+        SessionStatus::Expired
+    );
 }
 
 fn intent(session_id: &str, expires_at_unix_ms: u64) -> SessionIntent {

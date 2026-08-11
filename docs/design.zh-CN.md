@@ -269,7 +269,66 @@ Agent Observation Record v1 不携带权威 parent Runtime Identity link。因�
 作为已存储事实展示，不推断 parent edge。它也不会从空结果推导隐藏的 success verdict，更
 不会把三个 summary axis 合并为 clean verdict。
 
-### 5.5 后置的中央边界
+### 5.5 本地 daemon 运维
+
+Linux release bundle 包含 `apolysis`、`apolysisd` 与 `apolysisd-health`
+binary、CO-RE object 和 systemd unit。Release manifest schema v2 会把恰好这 5 个可安装
+artifact 绑定到各自的 kind、SHA-256 digest、byte length 与要求的 mode。Manifest path 不会
+成为任意 destination；installer 只把这一封闭 artifact 集合映射到
+`/usr/local/bin/apolysis`、`/usr/local/bin/apolysisd`、
+`/usr/local/bin/apolysisd-health`、
+`/usr/local/lib/apolysis/apolysis_observer.bpf.o` 与
+`/etc/systemd/system/apolysisd.service`。
+
+Release verifier 只接受一条有界且 canonical 的 gzip/tar stream，拒绝重复或扩展 archive metadata
+与非普通 member，检查封闭 manifest 和 systemd contract、可执行 ELF 结构，并要求
+`bpftool gen skeleton` 能解析打包的 CO-RE object。Package contract test 使用刚构建的真实
+object；production verifier 没有 structural fixture 开关。
+
+`apolysis daemon install --bundle <dir> --root <root>`、`inspect` 与 `uninstall` 是
+`LocalDaemonOperations` 的 adapter。这个 deep module 只暴露 inspect、plan 与 apply，并隐藏
+bundle validation、完整 target preflight、filesystem snapshot、descriptor-anchored staging、
+sync、crash recovery 与 receipt ownership。Root、bundle、parent 与 mutation 都以已打开的
+directory 为锚，并使用 no-follow 语义。Receipt proof 会绑定 owner、包含 special bit 的 mode、
+digest、size 与 file identity。它会拒绝 linked 或非普通 source/target、hard-linked artifact、
+非法或已变化的 bundle、非托管 conflict、已变化的 managed file 和 stale plan。成功安装会发布
+`/usr/local/lib/apolysis/install-receipt-v1.json`；重复安装相同托管内容是 no-op。默认卸载只会
+删除仍可由该 receipt 证明 ownership 的 artifact，并始终保留 `/var/lib/apolysis` 与无关 host
+file。
+
+每次有 mutation 的 apply 都会在发布各个文件前写入并同步一个固定、私有、mode `0600` 的
+operation journal。重新打开 module 时会回滚 pre-commit transaction，或完成已经 committed 的
+cleanup，并通过 inspection 暴露 `recovered_interrupted_operation`。Replacement 与 removal
+使用经 identity 复核的 descriptor-relative operation；发生变化或未知的 journal/transaction
+sibling 会 fail closed，等待人工修复。这提供 durable interruption recovery，但不宣称 5 条
+host path 能在一个瞬间可见的 filesystem transaction 中同时变化。
+
+Staged root 会执行相同的固定路径 filesystem contract，但不调用 systemd、group management
+或 eBPF。产品支持随包 systemd unit 这一种具体 integration，不提供抽象 service-manager
+interface。在真实 host 上，该 unit 要求显式 provision `apolysis` group；systemd 负责
+activation、SIGTERM shutdown 与有界 drain deadline，资格验证复用 daemon 现有 health
+protocol。Runtime/state directory 为 mode `0750`，daemon timeline 为 `0640`，私有
+quarantine 与 retention journal 为 `0600`，显式管理的本地 socket 保持 `0660`。Staged-root
+验证不能替代 opt-in privileged gate；后者会加载真实 bundle、等待 eBPF 与 storage readiness、
+停止 unit，并验证保留 state 的卸载。
+
+Uninstall 不是 retention。破坏性 retention 从 daemon clock 取得时间，依据 directory identity
+与已经打开的 single-link timeline descriptor 验证每个 closed Agent Run，阻止 late write，并把
+准确集合 staged 到私有的同 filesystem trash root。同步的 typed journal 区分 staging 与已提交
+cleanup。Startup 会回滚未完成的 staging transaction，并完成已提交 cleanup；unsafe target
+replacement、未知内容、journal corruption 或冲突 live state 都会 fail closed。非 mutation 的
+preview 可以为确定性测试使用显式时间，但 caller 不能为破坏性 apply 提供时间。破坏性 apply
+只适用于本地 default context；旧 schema 的非 default 请求会在零 mutation 下被拒绝，多租户
+删除仍保持 deferred。Terminal retention catalog 具有独立的 4,096 Agent Run 上界；达到上界
+时会 fail closed，既不驱逐 retained state，也不占用 active-run capacity。
+
+Hash-chain recovery 会以 no-follow 语义只打开 timeline 一次，并在 validation、quarantine、
+truncate 与后续 append 中复用该 descriptor。它拒绝 symbolic link、multiply linked file 与
+path replacement。可恢复的 corrupt tail 会保留在私有 create-new quarantine file 中；middle
+corruption 仍会 fail closed。Recovery 与 retention 都不会把由此产生的 integrity 或 Collector
+Restart 限制改写成 complete evidence。
+
+### 5.6 后置的中央边界
 
 Remote export、custody、organization authorization、object storage、跨 run search 与 HA
 都不属于有界 Beta。只有当重复使用证明需要中央服务，并由新的架构决策定义边界后，它们才会
@@ -387,7 +446,9 @@ Finding 永不宣称操作已经被阻止。BPF-LSM 与 seccomp block prototype 
 - Raw kernel payload 只是有界实现细节，没有显式 review profile 时不得跨越 persistence
   seam。
 - Observation Scope 防止意外 host-wide collection。
-- 本地文件使用限制性权限与有界 retention。
+- 本地文件使用限制性权限与有界 retention。Daemon lifecycle change 只接受由
+  manifest/receipt 证明 ownership 的固定 artifact 集合，在 mutation 前拒绝 linked 或非托管
+  substitution，并在默认卸载中保留 saved Agent Run。
 - Viewer 是非特权组件，无法接触 BPF map、host PID namespace、container socket 或 node
   credential。
 - Standalone viewer 会转义所有存储文本，并使用禁止网络连接与外部 asset 的限制性 Content
@@ -419,12 +480,13 @@ Implemented today：
   diagnostic；
 - `apolysis-cli`：fixture/live observation、托管 Agent launch、通过 registration 或 discovery
   完成的 protected existing-process attach、非特权 saved-run projection 与 Saved Run Viewer
-  发布、可选 Codex intent correlation、visibility 与 verification command；
+  发布、可选 Codex intent correlation、visibility、verification 与有界 daemon
+  install/inspect/uninstall command；
 - `apolysis-core`：当前 JSONL vocabulary、record type、版本化 Collector Capability
   manifest 与 collector lifecycle schema，包括由 producer 与 projection 共同消费的唯一
   lifecycle vocabulary 和完整 AuditObserver v1 operation/source/outcome contract；
-- `apolysis-store`：rotation、可选本地 hash-chain envelope，以及读取 plain/rotated 或 verified
-  saved run 的有界 stable-snapshot reader；
+- `apolysis-store`：rotation、可选本地 hash-chain envelope、no-follow descriptor-bound
+  recovery，以及读取 plain/rotated 或 verified saved run 的有界 stable-snapshot reader；
 - `apolysis-accountability`：纯 Agent Observation Record projection、相互独立的 summary
   axis、可选声明意图对比与面向复查的 finding；
 - `apolysis-viewer`：严格验证 Agent Observation Record v1，并提供带 source traceability 的
@@ -432,7 +494,8 @@ Implemented today：
 - `apolysis-kubernetes` 与 `apolysis-visibility`：有界 runtime metadata 与 visibility
   boundary assessment；
 - `apolysis-daemon`：long-lived observer、有界 queue、本地 socket、runtime registration
-  prototype、scoped lifecycle persistence 与幂等的未完成实例恢复。
+  prototype、scoped lifecycle persistence、幂等的未完成实例恢复、receipt-owned local
+  operation 与 identity-bound journaled retention。
 
 Live collector 会在成功 attach 后、释放托管 Agent gate 前把 capability manifest 与 lifecycle
 start 同步到稳定存储；对 protected existing-process attach，它会先持久化唯一的 unknown-history
@@ -440,7 +503,8 @@ start 同步到稳定存储；对 protected existing-process attach，它会先�
 daemon 会在显式移除 scope 与正常关闭时把这些配对 gap 持久化到所属 Agent Run。单次运行内
 稳定的 scope/process generation、周期累计 lifecycle checkpoint、显式 terminal reason 与
 restart-gap recovery、可查询 saved-run projection 与非特权 Saved Run Viewer 已实现。本地
-daemon operations 和有界 Kubernetes Beta 仍是 target。
+有界本地 daemon filesystem operation 已实现；Supported live-host profile 与有界 Kubernetes
+Beta 仍是 target。
 
 中央 contracts、Gateway、PostgreSQL projection、evidence-object 集群、
 policy/feedback/control plane、sandbox runner 与广泛 qualification machinery 已移出活跃
@@ -448,6 +512,11 @@ workspace。Git 历史保留它们作为历史实现输入；它们不定义本�
 
 ## 13. 限制
 
+- 本地 daemon 运维只面向文档化的 Linux/systemd layout 与 5 个固定 runtime artifact；它不是
+  发行版 package manager，也不是通用任意 prefix installer。Staged-root 验证证明有界
+  filesystem 行为，不证明 privileged activation；live claim 需要显式 systemd/eBPF gate。
+  默认卸载有意不清除已保留的 Agent Run。Transaction profile 要求 procfs 可用，且 managed
+  filesystem 支持 Linux `O_TMPFILE` 与 `renameat2`；不支持的 host 会在 publication 前失败。
 - L3 渲染一份有界、本地、冻结的 Agent Observation Record v1。它不是 live tail、跨 run
   search、remote query surface 或中央 query plane。
 - Agent Observation Record v1 缺少权威 parent Runtime Identity link。Viewer 可以展示 Exact

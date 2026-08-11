@@ -1,10 +1,140 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use apolysis_store::{HashChainStore, StoreError, ZERO_HASH};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn recovery_refuses_a_timeline_symlink_without_touching_its_target() {
+    let external = temp_path("symlink-external");
+    let timeline = temp_path("symlink-timeline");
+    {
+        let mut store = HashChainStore::create_or_recover(&external)
+            .expect("create external fixture")
+            .store;
+        store
+            .append_json(1, r#"{"type":"external"}"#)
+            .expect("append external fixture");
+        store.flush().expect("flush external fixture");
+    }
+    let before = std::fs::read(&external).expect("read external before refusal");
+    symlink(&external, &timeline).expect("create timeline symlink");
+
+    let error = HashChainStore::create_or_recover(&timeline)
+        .expect_err("recovery must not follow a timeline symlink");
+
+    assert!(matches!(error, StoreError::Io(_)));
+    assert_eq!(
+        std::fs::read(&external).expect("read external after refusal"),
+        before
+    );
+    assert!(std::fs::symlink_metadata(&timeline)
+        .expect("timeline symlink remains")
+        .file_type()
+        .is_symlink());
+
+    cleanup(&[timeline, external]);
+}
+
+#[test]
+fn recovery_refuses_a_multiply_linked_timeline_without_unlinking_external_data() {
+    let external = temp_path("hardlink-external");
+    let timeline = temp_path("hardlink-timeline");
+    {
+        let mut store = HashChainStore::create_or_recover(&external)
+            .expect("create external fixture")
+            .store;
+        store
+            .append_json(1, r#"{"type":"external"}"#)
+            .expect("append external fixture");
+        store.flush().expect("flush external fixture");
+    }
+    std::fs::hard_link(&external, &timeline).expect("create timeline hard link");
+    let before = std::fs::metadata(&external).expect("external metadata before refusal");
+    let bytes = std::fs::read(&external).expect("external bytes before refusal");
+
+    let error = HashChainStore::create_or_recover(&timeline)
+        .expect_err("recovery must not adopt a multiply linked timeline");
+
+    assert!(matches!(error, StoreError::Io(_)));
+    let after = std::fs::metadata(&external).expect("external metadata after refusal");
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    assert_eq!(after.nlink(), 2);
+    assert_eq!(std::fs::read(&external).expect("external bytes"), bytes);
+
+    cleanup(&[timeline, external]);
+}
+
+#[test]
+fn a_new_timeline_is_not_group_writable_or_world_readable() {
+    let timeline = temp_path("private-mode");
+
+    drop(
+        HashChainStore::create_or_recover(&timeline)
+            .expect("create private timeline")
+            .store,
+    );
+
+    let mode = std::fs::metadata(&timeline)
+        .expect("timeline metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o640);
+
+    cleanup(&[timeline]);
+}
+
+#[test]
+fn a_new_timeline_parent_is_private() {
+    let root = temp_path("private-parent-root");
+    let timeline = root.join("agent-run/timeline.jsonl");
+
+    drop(
+        HashChainStore::create_or_recover(&timeline)
+            .expect("create timeline and parent")
+            .store,
+    );
+
+    let mode = std::fs::metadata(timeline.parent().expect("timeline parent"))
+        .expect("timeline parent metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o750);
+
+    std::fs::remove_dir_all(root).expect("remove private parent fixture");
+}
+
+#[test]
+fn an_open_store_refuses_to_write_after_its_timeline_path_is_replaced() {
+    let timeline = temp_path("replaced-open-timeline");
+    let retired = temp_path("replaced-open-retired");
+    let mut store = HashChainStore::create_or_recover(&timeline)
+        .expect("create timeline")
+        .store;
+    store
+        .append_json(1, r#"{"type":"before"}"#)
+        .expect("append before replacement");
+    store.flush().expect("flush before replacement");
+    std::fs::rename(&timeline, &retired).expect("retire open timeline path");
+    std::fs::write(&timeline, b"operator-owned replacement\n").expect("write replacement");
+
+    let error = store
+        .append_json(1, r#"{"type":"after"}"#)
+        .expect_err("open store must reject a replacement path");
+
+    assert!(matches!(error, StoreError::Io(_)));
+    assert_eq!(
+        std::fs::read(&timeline).expect("read replacement"),
+        b"operator-owned replacement\n"
+    );
+    drop(store);
+    cleanup(&[timeline, retired]);
+}
 
 #[test]
 fn hashes_are_deterministic_and_sequences_are_chained() {
@@ -77,6 +207,9 @@ fn truncated_tail_is_quarantined_and_valid_prefix_is_preserved() {
         std::fs::read_to_string(&quarantine).unwrap(),
         r#"{"schema_version":1"#
     );
+    let quarantine_metadata = std::fs::metadata(&quarantine).expect("quarantine metadata");
+    assert_eq!(quarantine_metadata.permissions().mode() & 0o7777, 0o600);
+    assert_eq!(quarantine_metadata.nlink(), 1);
 
     cleanup(&[path, quarantine]);
 }
