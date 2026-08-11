@@ -2,7 +2,7 @@
 
 [![Release Validation](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml/badge.svg)](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml)
 [![Latest Release](https://img.shields.io/github/v/release/0xLaiHo/Apolysis?sort=semver)](https://github.com/0xLaiHo/Apolysis/releases)
-[![License](https://img.shields.io/github/license/0xLaiHo/Apolysis)](LICENSE)
+[![License](https://img.shields.io/github/license/0xLaiHo/Apolysis)](https://github.com/0xLaiHo/Apolysis/blob/main/LICENSE)
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
@@ -14,11 +14,13 @@ Apolysis 是面向用户可控 Linux 环境的实验性 **eBPF Agent 运行时�
 跨 provider 证据平台的可选附加项。Apolysis 不是 Agent orchestrator、sandbox、策略执行
 引擎、MCP gateway、SIEM 或多租户证据 SaaS。
 
-![Apolysis 实时 eBPF 审计：声明的 Agent workload 被匹配，一次未声明的凭证路径访问尝试被标记为 missing_intent；凭证路径在 timeline 中已脱敏](docs/assets/codex-live-demo/live-ebpf-demo.gif)
+![Apolysis 实时 eBPF 审计：声明的 Agent workload 被匹配，一次未声明的凭证路径访问尝试被标记为 missing_intent；凭证路径在 timeline 中已脱敏](https://raw.githubusercontent.com/0xLaiHo/Apolysis/main/docs/assets/codex-live-demo/live-ebpf-demo.gif)
 
-演示素材：[实时 asciinema cast](docs/assets/codex-live-demo/live-ebpf-demo.cast)、
-[零特权 quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast) 和
-[公开证据摘录](docs/codex-live-demo-public-assets.md)。
+演示素材：[实时 asciinema cast](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/live-ebpf-demo.cast)、
+[零特权 quickstart cast](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/codex-live-demo.cast)、
+[公开 summary](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/summary.json) 和
+[脱敏证据摘录](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/evidence-excerpt.jsonl)。Raw live timeline 不会提交；
+公开素材会在发布前完成筛选、限界与脱敏。
 
 ## 五分钟零特权试用
 
@@ -26,8 +28,9 @@ Apolysis 是面向用户可控 Linux 环境的实验性 **eBPF Agent 运行时�
 make build && make quickstart
 ```
 
-Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它不需要 root 或 eBPF，用于展示
-当前 record 和调查体验。参见 [Quickstart](docs/quickstart.md)。
+Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它不需要 root 或 eBPF。Fixture
+会展示一条与观测匹配的声明 action，以及一次被报告为 `missing_intent` 的未声明凭证读取；
+生成输出只写入 `target/quickstart/`。
 
 ## 产品问题
 
@@ -71,7 +74,9 @@ Quickstart 使用随包 fixture 运行观测与可选的声明意图对比。它
   existing-process attach。
 - Existing-process admission 只对当前 root 做资格校验；本次 run 的 exact event identity
   从 activation 后开始。
-- 支持 local、Docker/containerd 和 Kubernetes 原型的 runtime metadata 关联。
+- 已完成基于稳定 complete inventory 的 Docker/containerd runtime binding 与有界 source
+  recovery 资格验证；精确 identity、transition 与 gap 合同由设计文档定义。
+- Kubernetes metadata 关联仍是有界 Beta 目标。
 - Exec 参数与 process command 默认 content-off 持久化，并对凭证和网络内容脱敏。
 - 提供有序 JSONL、输出轮转、可选本地 hash-chain envelope，以及 drop、map pressure、ABI
   mismatch、decode failure 和 truncation 的类型化诊断。
@@ -117,7 +122,7 @@ Agent command / container / Pod
 | 本地 Linux Agent CLI | 首个稳定 workflow |
 | 用户可控 Linux 上的 Docker/containerd | 本地 collector 正确性完成后的稳定目标 |
 | Kubernetes node 与 Pod 归属 | Container identity 稳定后的有界 Beta |
-| Linux self-hosted CI runner | 通过 CLI managed-run boundary 支持；不维护 composite Action |
+| Linux self-hosted CI runner | 仅提供 CLI managed-run path；不维护 composite Action |
 | macOS、Windows 或厂商托管 Agent runtime | 不支持 eBPF runtime observation |
 
 ## 当前仓库状态
@@ -135,17 +140,20 @@ HTML 调查视图。本地 projection 与 viewer 不会引入 live tail、跨 ru
 service，也不会改变当前 experimental support 状态。
 
 本地 daemon operations 方向现包含经过 manifest 验证的 Linux bundle，以及有界、保留状态的
-host lifecycle。具体的文件系统、恢复与资格 contract 统一记录在 design 和 Beta 资格文档中；
-这项工作本身不会改变 experimental support 状态。
+host lifecycle。具体的文件系统、恢复与资格 contract 统一记录在 design 中；这项工作本身
+不会改变 experimental support 状态。
+
+D1/D2 runtime-binding implementation、deterministic contract 与保留的非破坏性资格验证已经完成，
+并分别覆盖 Docker 和独立隔离的私有 standalone containerd runtime。这些证据保持 profile-specific：
+不能把 Docker 声明外推到 containerd，也不能把任一 runtime 的声明外推到 Kubernetes。破坏性的
+runtime-service restart、K1/VKE 与 release qualification 仍保持 open。这些结果都不会晋级任何
+profile。
 
 范围重置是一项路线图决策，不是追溯性的生产声明。在受支持 collector、归属、失败、性能和
-隐私路径通过新的有界 Beta 门禁前，Apolysis 仍是实验性项目。
-首个资格 contract 现仅把 Linux 6.12/x86_64 原生 host 命名为 Candidate；当前尚无
-Supported 环境，数值性能预算仍由证据门禁。仓库已提供版本化、content-free 的 synthetic
-workload；显式 collector-off/on 路径现会保留 monotonic latency、隔离的 collector resource
-sample、按 phase 归因的 burst loss 与 pair-bootstrap summary，但没有保留的 privileged 证据和
-reviewed 数值 budget 时，这些输出不会授予支持。详见
-[Beta 资格包络](docs/qualification-envelope.zh-CN.md)。
+隐私路径通过新的有界 Beta 门禁前，Apolysis 仍是实验性项目。资格 contract 将 Linux
+6.12/x86_64 原生 host 定义为 Candidate；目前没有任何
+Supported 环境，container 与 Kubernetes profile 仍是 Experimental。确切的机器可读权威与晋级
+规则见[设计文档](docs/design.zh-CN.md)。
 
 ## 构建与测试
 
@@ -185,6 +193,16 @@ make test-live
   --output .apolysis/codex-live/saved-run-view.html
 ```
 
+验证复制出的 hash-chain timeline，且不修改源文件：
+
+```bash
+./target/debug/apolysis verify hash-chain \
+  --input /var/lib/apolysis/sessions/<agent-run-id>/timeline.jsonl \
+  --output target/hash-chain-verification.json
+```
+
+退出码 `0` 表示有效，`1` 表示已写出验证失败报告，`2` 表示命令无法运行。
+
 ## 托管 Agent 实时观测示例
 
 ```bash
@@ -205,21 +223,28 @@ sudo -E ./target/debug/apolysis observe \
 
 1. 保持活跃 workspace 只包含 eBPF collection、Observation Scope、attribution、本地 storage、
    daemon、CLI 与操作者调查能力。
-2. 在保持 outcome-aware 语义与单次运行内稳定 runtime identity 的同时，验证 collector
-   lifecycle、health/gap 报告、本地 Agent Run 调查 workflow 与有界本地 daemon 运维。
-3. 先验证 container 归属，再交付有界 Kubernetes Beta；在此之前不扩张中央平台。
+2. 在指定的 runtime-ready 且 network-ready VKE 测试集群上验证 least-privilege K1 node/Pod
+   归属这一明确有界的 Beta。
+3. 将破坏性 runtime-service restart qualification 保持独立，并在不把 Docker 证据外推到
+   containerd 或 Kubernetes 的前提下准备 release。
+4. 只有适用的 kernel、runtime、privacy、performance、packaging、cleanup 与 no-silent-gap
+   gate 全部通过后才晋级 release。
+
+## 贡献
+
+使用聚焦 branch，并通过仓库的 integration Pull Request workflow 提交变更。适用验证与运维
+披露以仓库内自动化和 Pull Request template 为准。禁止提交 secret、kubeconfig、签名材料、
+私有 capture、生成的 timeline 或本地 release artifact。
+
+## 安全报告
+
+Apolysis 是观测工具，不是 sandbox 或独立 attestation boundary。请使用 GitHub private
+vulnerability reporting 报告漏洞。若该功能不可用，只能公开一个最小通知，不能包含 exploit
+细节、secret、私有 log、path、argv、socket value、label、annotation 或 payload。报告应说明
+受影响 commit/release、复现边界、所需权限，以及对 confidentiality、integrity、availability
+或 observation accuracy 的影响。
 
 ## 文档
 
-- [范围决策](docs/adr/0004-focus-on-ebpf-agent-observability.md)
-- [设计文档](docs/design.zh-CN.md)
-- [路线图](docs/roadmap.zh-CN.md)
-- [有界 Beta 验证计划](docs/beta-qualification-plan.zh-CN.md)
-- [Quickstart](docs/quickstart.md)
-- [JSONL 模式](docs/jsonl-schema-v1.md)
-- [Agent Observation Record v1](docs/agent-observation-record-v1.zh-CN.md)
-- [威胁模型](docs/threat-model.md)
-- [可见性验证](docs/visibility-validation.md)
-- [实时演示运行手册](docs/codex-live-demo-runbook.md)
-- [贡献指南](CONTRIBUTING.md)
-- [安全策略](SECURITY.md)
+- [英文设计与完整产品 contract](docs/design.md)
+- [简体中文设计与完整产品 contract](docs/design.zh-CN.md)

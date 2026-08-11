@@ -157,14 +157,19 @@ async fn tenant_scoped_queries_and_session_lists_do_not_cross_tenant_boundaries(
         DaemonResponse::Ack { operation, .. } if operation == "register"
     ));
 
-    assert!(matches!(
-        request(
-            &server.config.socket_path,
-            br#"{"type":"query","tenant_id":"tenant-b","session_id":"tenant-a-session"}"#,
-        )
-        .await,
-        DaemonResponse::Session { session: None, .. }
-    ));
+    let DaemonResponse::Session {
+        session: None,
+        runtime_bindings,
+        ..
+    } = request(
+        &server.config.socket_path,
+        br#"{"type":"query","tenant_id":"tenant-b","session_id":"tenant-a-session"}"#,
+    )
+    .await
+    else {
+        panic!("cross-tenant query must not return an Agent Run");
+    };
+    assert!(runtime_bindings.is_empty());
 
     let DaemonResponse::Session {
         session: Some(session),
@@ -486,48 +491,119 @@ async fn startup_docker_adapter_ingests_marked_running_container() {
     let cgroup = cgroup_root.join("system.slice/docker-container-abc.scope");
     std::fs::create_dir_all(&cgroup).expect("create fake cgroup");
     std::fs::create_dir_all(proc_root.join("1234")).expect("create fake proc pid");
+    std::fs::create_dir_all(proc_root.join("sys/kernel/random")).expect("create fake proc sys");
+    std::fs::write(
+        proc_root.join("sys/kernel/random/boot_id"),
+        "82b46386-b87a-4d86-93f6-232bb04c37fb\n",
+    )
+    .expect("write fake host boot id");
     std::fs::write(
         proc_root.join("1234/cgroup"),
         "0::/system.slice/docker-container-abc.scope\n",
     )
     .expect("write fake proc cgroup");
+    std::fs::write(
+        proc_root.join("1234/stat"),
+        format!("1234 (container init) S {} 321\n", vec!["0"; 18].join(" ")),
+    )
+    .expect("write fake proc stat");
     config.docker_socket = Some(docker_socket.clone());
     config.proc_root = proc_root;
     config.cgroup_root = cgroup_root;
+    config.runtime_adapter_scan_interval = Duration::from_secs(60);
 
-    let docker = fake_docker_engine(
-        &docker_socket,
-        vec![
-            (
-                "GET /containers/json HTTP/1.1\r\n",
-                r#"[{"Id":"container-abc","Labels":{"apolysis.session_id":"session-docker"}}]"#,
-            ),
-            (
-                "GET /containers/container-abc/json HTTP/1.1\r\n",
-                r#"{
-                    "Id":"container-abc",
-                    "State":{"Pid":1234},
+    let docker_responses = vec![
+        (
+            "GET /containers/json HTTP/1.1\r\n",
+            r#"[{"Id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","Labels":{"apolysis.session_id":"session-docker"}}]"#,
+        ),
+        (
+            "GET /containers/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/json HTTP/1.1\r\n",
+            r#"{
+                    "Id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "State":{
+                        "Pid":1234,
+                        "Running":true,
+                        "StartedAt":"2026-08-11T01:02:03.000000000Z"
+                    },
                     "Config":{
                         "Image":"alpine:3.20",
                         "Labels":{"apolysis.session_id":"session-docker"}
                     },
                     "HostConfig":{"Runtime":"runsc"}
                 }"#,
-            ),
-        ],
-    );
+        ),
+        (
+            "GET /containers/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/json HTTP/1.1\r\n",
+            r#"{
+                    "Id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "State":{
+                        "Pid":1234,
+                        "Running":true,
+                        "StartedAt":"2026-08-11T01:02:03.000000000Z"
+                    },
+                    "Config":{
+                        "Image":"alpine:3.20",
+                        "Labels":{"apolysis.session_id":"session-docker"}
+                    },
+                    "HostConfig":{"Runtime":"runsc"}
+                }"#,
+        ),
+        (
+            "GET /containers/json HTTP/1.1\r\n",
+            r#"[{"Id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","Labels":{"apolysis.session_id":"session-docker"}}]"#,
+        ),
+    ];
 
     let server = TestServer::start_config(config.clone()).await;
+    let register = br#"{
+        "type":"register",
+        "intent":{
+            "schema_version":1,
+            "session_id":"session-docker",
+            "expires_at_unix_ms":4102444800000,
+            "declared_actions":["test"],
+            "allowed_resources":[],
+            "workload_selectors":[]
+        }
+    }"#;
+    assert!(matches!(
+        request(&config.socket_path, register).await,
+        DaemonResponse::Ack { .. }
+    ));
+    let docker = fake_docker_engine(&docker_socket, docker_responses);
     let timeline_path = config
         .state_dir
         .join("sessions/session-docker/timeline.jsonl");
-    let timeline = wait_for_file_contains(&timeline_path, "runtime_workload_discovered").await;
+    let timeline = wait_for_file_contains(&timeline_path, "runtime_binding_observed").await;
     assert!(timeline.contains(r#""adapter":"docker""#));
-    assert!(timeline.contains(r#""workload_id":"container-abc""#));
-    assert!(timeline.contains(&format!(
-        r#""cgroup_id":{}"#,
+    assert!(timeline.contains(
+        r#""workload_id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef""#
+    ));
+    assert!(timeline.contains(r#""start_marker":"2026-08-11T01:02:03.000000000Z""#));
+    let DaemonResponse::Session {
+        session: Some(session),
+        runtime_bindings,
+        ..
+    } = request(
+        &config.socket_path,
+        br#"{"type":"query","session_id":"session-docker"}"#,
+    )
+    .await
+    else {
+        panic!("expected runtime-attributed Agent Run query");
+    };
+    assert_eq!(session.intent.session_id, "session-docker");
+    assert_eq!(runtime_bindings.len(), 1);
+    assert_eq!(runtime_bindings[0].agent_run_id, "session-docker");
+    assert_eq!(
+        runtime_bindings[0].identity.workload_id,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(
+        runtime_bindings[0].identity.cgroup.inode,
         std::fs::metadata(&cgroup).unwrap().ino()
-    )));
+    );
 
     server.stop().await;
     docker.await.expect("fake docker engine");
@@ -654,6 +730,14 @@ async fn restart_quarantines_corrupt_tail_and_keeps_valid_session_recoverable() 
     assert!(timeline.contains(r#""record_type":"intent_registered""#));
     assert!(timeline.contains(r#""record_type":"integrity_finding""#));
     assert!(timeline.contains(r#""reason":"hash_chain_tail_quarantined""#));
+    let private_state_path = config.state_dir.to_string_lossy();
+    assert!(
+        !timeline.contains(private_state_path.as_ref()),
+        "integrity metadata must not persist the private daemon state path"
+    );
+    assert!(!timeline.contains("timeline_path"));
+    assert!(!timeline.contains("quarantine_path"));
+    assert!(timeline.contains(r#""artifact":"agent_run_timeline""#));
 
     let quarantine = quarantine_files(timeline_path.parent().unwrap());
     assert_eq!(quarantine.len(), 1);

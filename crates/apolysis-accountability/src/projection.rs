@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use apolysis_core::{
     audit_observer_capability_contract_v1, AuditObserverCapabilityContract, OperationOutcome,
-    AUDIT_OBSERVER_COLLECTOR, CGROUP_OBSERVATION_SCOPE, CONTENT_OFF_PRIVACY_PROFILE,
-    PROCESS_TREE_OBSERVATION_SCOPE,
+    RuntimeBindingRecordType, RuntimeBindingWireV1, AUDIT_OBSERVER_COLLECTOR,
+    CGROUP_OBSERVATION_SCOPE, CONTENT_OFF_PRIVACY_PROFILE, PROCESS_TREE_OBSERVATION_SCOPE,
 };
 pub use apolysis_core::{
     CollectorHealthState as CollectorLifecycleHealth, CollectorLifecycleState, CollectorStopReason,
@@ -91,6 +91,8 @@ pub struct AgentObservationRecord {
     pub capability_manifests: Vec<ProjectedCapabilityManifest>,
     pub runtime_identities: Vec<ProjectedRuntimeIdentity>,
     pub runtime_observations: Vec<ProjectedRuntimeObservation>,
+    #[serde(default)]
+    pub runtime_bindings: Vec<ProjectedRuntimeBinding>,
     pub collector_lifecycle: Vec<ProjectedCollectorLifecycle>,
     pub findings: Vec<ProjectedFinding>,
     pub observation_gaps: Vec<ProjectedObservationGap>,
@@ -296,6 +298,13 @@ pub struct ProjectedRuntimeObservation {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectedRuntimeBinding {
+    pub source_ordinal: u64,
+    #[serde(flatten)]
+    pub wire: RuntimeBindingWireV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectedFinding {
     pub source_ordinal: u64,
     pub schema_version: u32,
@@ -316,6 +325,10 @@ pub struct ProjectedObservationGap {
     pub kind: String,
     pub count: u64,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_reason: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -362,6 +375,7 @@ pub enum AgentObservationRecordValidationError {
     InvalidProjectionIssue,
     InvalidCapabilityManifest,
     InvalidRuntimeObservation,
+    InvalidRuntimeBinding,
     InvalidSourceOrder,
     InvalidObservationGap,
 }
@@ -469,6 +483,13 @@ pub fn validate_agent_observation_record_v1(
     )?;
     validate_source_ordinal_sequence(
         record
+            .runtime_bindings
+            .iter()
+            .map(|binding| binding.source_ordinal),
+        &mut source_ordinals,
+    )?;
+    validate_source_ordinal_sequence(
+        record
             .collector_lifecycle
             .iter()
             .map(|lifecycle| lifecycle.source_ordinal),
@@ -488,6 +509,7 @@ pub fn validate_agent_observation_record_v1(
     validate_required_presence_issues(record)?;
     validate_projected_capabilities(record)?;
     validate_projected_observations(record)?;
+    validate_projected_runtime_bindings(record)?;
     validate_gaps_and_loss(record)?;
     validate_finding_references(record)?;
     validate_summary_states(record)?;
@@ -607,6 +629,7 @@ fn validate_projected_source_order(
                 }
                 late_attach_seen = true;
             }
+            ProjectedSourceFact::Gap(gap) if gap.kind == "runtime_metadata_unavailable" => {}
             ProjectedSourceFact::Gap(_) => {
                 active_collector_instance(&lifecycle_progress, *ordinal)
                     .map_err(|_| AgentObservationRecordValidationError::InvalidSourceOrder)?;
@@ -986,8 +1009,14 @@ fn validate_gaps_and_loss(
 ) -> Result<(), AgentObservationRecordValidationError> {
     let mut expected_gap_issues = Vec::new();
     for gap in &record.observation_gaps {
+        let runtime_metadata_valid = if gap.kind == "runtime_metadata_unavailable" {
+            valid_projected_runtime_gap_metadata(gap)
+        } else {
+            gap.runtime_source.is_none() && gap.runtime_reason.is_none()
+        };
         let valid = gap.schema_version == AGENT_OBSERVATION_RECORD_SCHEMA_V1
             && gap.count > 0
+            && runtime_metadata_valid
             && match gap.kind.as_str() {
                 "late_attach" => {
                     gap.operation == "collector_lifecycle"
@@ -998,6 +1027,13 @@ fn validate_gaps_and_loss(
                 "collector_restart" => {
                     valid_collector_restart_gap_shape(&gap.operation, gap.count)
                         && gap.detail == "unfinished_collector_instance"
+                }
+                "runtime_metadata_unavailable" => {
+                    valid_runtime_metadata_gap_shape(&gap.operation, gap.count)
+                        && matches!(
+                            gap.detail.as_str(),
+                            "runtime_source_unavailable" | "runtime_identity_transition"
+                        )
                 }
                 _ => false,
             };
@@ -1091,7 +1127,16 @@ fn validate_finding_references(
         {
             return Err(AgentObservationRecordValidationError::InvalidFindingReference);
         }
-        if !raw_event_ids.contains(finding.evidence_ref.as_str()) {
+        if !raw_event_ids.contains(finding.evidence_ref.as_str())
+            && !record.runtime_bindings.iter().any(|binding| {
+                binding.wire.record_type == RuntimeBindingRecordType::Observed
+                    && runtime_binding_supports_finding(
+                        &binding.wire,
+                        binding.source_ordinal,
+                        finding,
+                    )
+            })
+        {
             expected_unresolved.push((Some(finding.source_ordinal), 1_u64));
         }
     }
@@ -1103,6 +1148,58 @@ fn validate_finding_references(
         .collect::<Vec<_>>();
     if actual_unresolved != expected_unresolved {
         return Err(AgentObservationRecordValidationError::InvalidFindingReference);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ProjectedRuntimeBindingFact<'a> {
+    Gap(&'a ProjectedObservationGap),
+    Binding(&'a ProjectedRuntimeBinding),
+}
+
+fn validate_projected_runtime_bindings(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let mut facts = BTreeMap::new();
+    for gap in &record.observation_gaps {
+        if gap.kind == "runtime_metadata_unavailable" {
+            facts.insert(gap.source_ordinal, ProjectedRuntimeBindingFact::Gap(gap));
+        }
+    }
+    for binding in &record.runtime_bindings {
+        facts.insert(
+            binding.source_ordinal,
+            ProjectedRuntimeBindingFact::Binding(binding),
+        );
+    }
+
+    let invalid = |_| AgentObservationRecordValidationError::InvalidRuntimeBinding;
+    let mut active = BTreeMap::new();
+    let mut source_gap_credits = BTreeMap::new();
+    for (ordinal, fact) in facts {
+        match fact {
+            ProjectedRuntimeBindingFact::Gap(gap) => {
+                if gap.schema_version == AGENT_OBSERVATION_RECORD_SCHEMA_V1
+                    && valid_runtime_metadata_gap_shape(&gap.operation, gap.count)
+                    && gap.detail == "runtime_source_unavailable"
+                {
+                    if let (Some(source), Some("socket_unavailable" | "inventory_invalid")) =
+                        (gap.runtime_source.as_deref(), gap.runtime_reason.as_deref())
+                    {
+                        increment(&mut source_gap_credits, source).map_err(invalid)?;
+                    }
+                }
+            }
+            ProjectedRuntimeBindingFact::Binding(binding) => {
+                let wire = &binding.wire;
+                if wire.validate().is_err() || wire.agent_run_id != record.agent_run_id {
+                    return Err(AgentObservationRecordValidationError::InvalidRuntimeBinding);
+                }
+                apply_runtime_binding_state(&mut active, &mut source_gap_credits, wire, ordinal)
+                    .map_err(invalid)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1417,6 +1514,13 @@ struct ObserverDiagnosticWire {
     count: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeGapCreditKind {
+    SourceUnavailable,
+    IdentityTransition,
+    DaemonRestart,
+}
+
 #[derive(Clone, Copy)]
 struct ValidatedLifecycle {
     state: CollectorLifecycleState,
@@ -1457,6 +1561,7 @@ pub fn project_agent_run(
     let mut runtime_identities = Vec::new();
     let mut identity_index = HashMap::<ExactIdentityKey, usize>::new();
     let mut runtime_observations = Vec::new();
+    let mut runtime_bindings = Vec::new();
     let mut collector_lifecycle = Vec::new();
     let mut lifecycle_progress = BTreeMap::<String, LifecycleProgress>::new();
     let mut late_attach_progress = None;
@@ -1469,6 +1574,8 @@ pub fn project_agent_run(
     let mut gap_kind_counts = BTreeMap::new();
     let mut finding_kind_counts = BTreeMap::new();
     let mut raw_event_ids = BTreeSet::new();
+    let mut active_runtime_bindings = BTreeMap::new();
+    let mut runtime_source_gap_credits = BTreeMap::<String, u64>::new();
     let mut known_missing_observation_count = 0_u64;
     let mut unknown_history_boundary_count = 0_u64;
     let mut has_unknown_records = false;
@@ -1687,6 +1794,14 @@ pub fn project_agent_run(
                             field: "collector_restart",
                         });
                     }
+                    if wire.kind == "runtime_metadata_unavailable"
+                        && !valid_runtime_metadata_gap_shape(&wire.operation, wire.count)
+                    {
+                        return Err(ProjectionError::MalformedRecord {
+                            ordinal,
+                            field: "runtime_metadata_unavailable",
+                        });
+                    }
                     if wire.kind == "late_attach" {
                         if wire.operation != "collector_lifecycle" || wire.count != 1 {
                             return Err(ProjectionError::MalformedRecord {
@@ -1704,7 +1819,7 @@ pub fn project_agent_run(
                             .checked_add(1)
                             .ok_or(ProjectionError::ArithmeticOverflow)?;
                         late_attach_progress = Some(LateAttachProgress::AwaitingCapability);
-                    } else {
+                    } else if wire.kind != "runtime_metadata_unavailable" {
                         if !lifecycle_progress
                             .values()
                             .any(|progress| *progress == LifecycleProgress::Started)
@@ -1718,6 +1833,21 @@ pub fn project_agent_run(
                         }
                     }
                     let detail = normalized_gap_detail(&wire, ordinal)?;
+                    let (runtime_source, runtime_reason) =
+                        if wire.kind == "runtime_metadata_unavailable" {
+                            let (source, reason, kind) = runtime_gap_credit(&wire, ordinal)?;
+                            if kind == RuntimeGapCreditKind::SourceUnavailable {
+                                let count = runtime_source_gap_credits
+                                    .entry(source.to_string())
+                                    .or_default();
+                                *count = count
+                                    .checked_add(1)
+                                    .ok_or(ProjectionError::ArithmeticOverflow)?;
+                            }
+                            (Some(source.to_string()), Some(reason.to_string()))
+                        } else {
+                            (None, None)
+                        };
                     increment(&mut gap_kind_counts, &wire.kind)?;
                     issues.push(ProjectionIssue {
                         code: ProjectionIssueCode::ObservationGap,
@@ -1732,6 +1862,8 @@ pub fn project_agent_run(
                         kind: wire.kind,
                         count: wire.count,
                         detail,
+                        runtime_source,
+                        runtime_reason,
                     });
                 }
                 "accountability_finding" => {
@@ -1798,6 +1930,23 @@ pub fn project_agent_run(
                         }
                     }
                 }
+                "runtime_binding_observed"
+                | "runtime_binding_retired"
+                | "runtime_binding_suspended" => {
+                    let wire: RuntimeBindingWireV1 = decode(value, ordinal)?;
+                    bind_agent_run(&mut agent_run_id, &wire.agent_run_id, ordinal)?;
+                    validate_runtime_binding_wire(&wire, ordinal)?;
+                    apply_runtime_binding_state(
+                        &mut active_runtime_bindings,
+                        &mut runtime_source_gap_credits,
+                        &wire,
+                        ordinal,
+                    )?;
+                    runtime_bindings.push(ProjectedRuntimeBinding {
+                        source_ordinal: ordinal,
+                        wire,
+                    });
+                }
                 record_type if is_known_auxiliary_record(record_type) => {}
                 _ => {
                     has_unknown_records = true;
@@ -1826,7 +1975,16 @@ pub fn project_agent_run(
     }
     let mut has_unresolved_finding_evidence = false;
     for finding in &findings {
-        if !raw_event_ids.contains(finding.evidence_ref.as_str()) {
+        if !raw_event_ids.contains(finding.evidence_ref.as_str())
+            && !runtime_bindings.iter().any(|binding| {
+                binding.wire.record_type == RuntimeBindingRecordType::Observed
+                    && runtime_binding_supports_finding(
+                        &binding.wire,
+                        binding.source_ordinal,
+                        finding,
+                    )
+            })
+        {
             has_unresolved_finding_evidence = true;
             issues.push(ProjectionIssue {
                 code: ProjectionIssueCode::UnresolvedFindingEvidence,
@@ -1951,6 +2109,7 @@ pub fn project_agent_run(
         capability_manifests,
         runtime_identities,
         runtime_observations,
+        runtime_bindings,
         collector_lifecycle,
         findings,
         observation_gaps,
@@ -2261,6 +2420,36 @@ fn valid_collector_restart_gap_shape(operation: &str, count: u64) -> bool {
     operation == "collector_lifecycle" && count == 1
 }
 
+fn valid_runtime_metadata_gap_shape(operation: &str, count: u64) -> bool {
+    operation == "runtime_metadata" && count == 1
+}
+
+fn valid_runtime_source(source: &str) -> bool {
+    matches!(source, "docker" | "containerd" | "k3s_containerd")
+}
+
+fn valid_runtime_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "socket_unavailable" | "daemon_restart" | "inventory_invalid" | "identity_transition"
+    )
+}
+
+fn valid_projected_runtime_gap_metadata(gap: &ProjectedObservationGap) -> bool {
+    match (gap.runtime_source.as_deref(), gap.runtime_reason.as_deref()) {
+        (None, None) => true,
+        (Some(source), Some(reason)) => {
+            valid_runtime_source(source)
+                && valid_runtime_reason(reason)
+                && match reason {
+                    "identity_transition" => gap.detail == "runtime_identity_transition",
+                    _ => gap.detail == "runtime_source_unavailable",
+                }
+        }
+        _ => false,
+    }
+}
+
 fn normalized_gap_detail(
     wire: &ObservationGapWire,
     ordinal: u64,
@@ -2289,11 +2478,70 @@ fn normalized_gap_detail(
         }
         "missing_entry" | "missing_exit" => Ok("bounded_loss_counter".to_string()),
         "collector_restart" => Ok("unfinished_collector_instance".to_string()),
+        "runtime_metadata_unavailable" => {
+            let parts = wire.detail.split(',').collect::<Vec<_>>();
+            if parts.len() != 2
+                || !matches!(
+                    parts[0],
+                    "source=docker" | "source=containerd" | "source=k3s_containerd"
+                )
+                || !matches!(
+                    parts[1],
+                    "reason=socket_unavailable"
+                        | "reason=daemon_restart"
+                        | "reason=inventory_invalid"
+                        | "reason=identity_transition"
+                )
+            {
+                return Err(ProjectionError::MalformedRecord {
+                    ordinal,
+                    field: "runtime_metadata_unavailable",
+                });
+            }
+            if parts[1] == "reason=identity_transition" {
+                Ok("runtime_identity_transition".to_string())
+            } else {
+                Ok("runtime_source_unavailable".to_string())
+            }
+        }
         _ => Err(ProjectionError::MalformedRecord {
             ordinal,
             field: "observation_gap",
         }),
     }
+}
+
+fn runtime_gap_credit(
+    wire: &ObservationGapWire,
+    ordinal: u64,
+) -> Result<(&str, &str, RuntimeGapCreditKind), ProjectionError> {
+    let mut parts = wire.detail.split(',');
+    let source = parts.next().and_then(|part| part.strip_prefix("source="));
+    let reason = parts.next().and_then(|part| part.strip_prefix("reason="));
+    if parts.next().is_some() {
+        return Err(ProjectionError::MalformedRecord {
+            ordinal,
+            field: "runtime_metadata_unavailable",
+        });
+    }
+    let source =
+        source.filter(|source| matches!(*source, "docker" | "containerd" | "k3s_containerd"));
+    let kind = match reason {
+        Some("socket_unavailable" | "inventory_invalid") => {
+            Some(RuntimeGapCreditKind::SourceUnavailable)
+        }
+        Some("identity_transition") => Some(RuntimeGapCreditKind::IdentityTransition),
+        Some("daemon_restart") => Some(RuntimeGapCreditKind::DaemonRestart),
+        _ => None,
+    };
+    source
+        .zip(reason)
+        .zip(kind)
+        .map(|((source, reason), kind)| (source, reason, kind))
+        .ok_or(ProjectionError::MalformedRecord {
+            ordinal,
+            field: "runtime_metadata_unavailable",
+        })
 }
 
 fn validate_finding(wire: &FindingWire, ordinal: u64) -> Result<(), ProjectionError> {
@@ -2313,6 +2561,86 @@ fn validate_finding(wire: &FindingWire, ordinal: u64) -> Result<(), ProjectionEr
         return Err(ProjectionError::ContentPolicyViolation { ordinal });
     }
     Ok(())
+}
+
+fn validate_runtime_binding_wire(
+    wire: &RuntimeBindingWireV1,
+    ordinal: u64,
+) -> Result<(), ProjectionError> {
+    if wire.validate().is_err() {
+        return Err(ProjectionError::MalformedRecord {
+            ordinal,
+            field: "runtime_binding",
+        });
+    }
+    Ok(())
+}
+
+fn runtime_binding_supports_finding(
+    wire: &RuntimeBindingWireV1,
+    source_ordinal: u64,
+    finding: &ProjectedFinding,
+) -> bool {
+    source_ordinal < finding.source_ordinal
+        && finding.evidence_ref == format!("runtime_binding:{}", wire.workload_id)
+        && finding.runtime.runtime == wire.adapter
+        && finding.runtime.container_id.as_deref() == Some(wire.workload_id.as_str())
+        && finding.runtime.cgroup_id == Some(wire.cgroup_id)
+}
+
+fn apply_runtime_binding_state(
+    active: &mut BTreeMap<(String, String), RuntimeBindingWireV1>,
+    source_gap_credits: &mut BTreeMap<String, u64>,
+    wire: &RuntimeBindingWireV1,
+    ordinal: u64,
+) -> Result<(), ProjectionError> {
+    let key = (wire.adapter.clone(), wire.workload_id.clone());
+    match wire.record_type {
+        RuntimeBindingRecordType::Observed => {
+            if active.contains_key(&key) {
+                return Err(runtime_binding_sequence_error(ordinal));
+            }
+            active.insert(key, wire.clone());
+        }
+        RuntimeBindingRecordType::Retired | RuntimeBindingRecordType::Suspended => {
+            if active
+                .get(&key)
+                .is_none_or(|current| !current.has_same_identity(wire))
+            {
+                return Err(runtime_binding_sequence_error(ordinal));
+            }
+            if wire.record_type == RuntimeBindingRecordType::Suspended {
+                consume_runtime_source_gap_credit(source_gap_credits, &wire.adapter, ordinal)?;
+            }
+            active.remove(&key);
+        }
+    }
+    Ok(())
+}
+
+fn consume_runtime_source_gap_credit(
+    credits: &mut BTreeMap<String, u64>,
+    adapter: &str,
+    ordinal: u64,
+) -> Result<(), ProjectionError> {
+    let Some(count) = credits.get_mut(adapter) else {
+        return Err(runtime_binding_sequence_error(ordinal));
+    };
+    if *count == 0 {
+        return Err(runtime_binding_sequence_error(ordinal));
+    }
+    *count -= 1;
+    if *count == 0 {
+        credits.remove(adapter);
+    }
+    Ok(())
+}
+
+fn runtime_binding_sequence_error(ordinal: u64) -> ProjectionError {
+    ProjectionError::MalformedRecord {
+        ordinal,
+        field: "runtime_binding_sequence",
+    }
 }
 
 fn finding_kind_name(kind: &FindingKind) -> &'static str {

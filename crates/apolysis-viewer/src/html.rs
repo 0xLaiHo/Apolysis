@@ -72,6 +72,7 @@ pub(crate) fn render_record(
         &relation_indexes,
         &identity_indexes,
     );
+    render_runtime_bindings(&mut output, record);
     render_identities(&mut output, record, &identity_indexes);
     render_capabilities(&mut output, record);
     output.push_str("</main></div><footer><span>Apolysis saved-run viewer</span><span>No live observer · no runtime socket · no network access</span></footer></div><script>");
@@ -127,15 +128,22 @@ fn render_navigation(output: &mut String, record: &AgentObservationRecord) {
     );
     nav_button(
         output,
-        "identities",
+        "runtime-bindings",
         "05",
+        "Runtime bindings",
+        Some(record.runtime_bindings.len()),
+    );
+    nav_button(
+        output,
+        "identities",
+        "06",
         "Runtime identities",
         Some(record.runtime_identities.len()),
     );
     nav_button(
         output,
         "capabilities",
-        "06",
+        "07",
         "Capabilities",
         Some(record.capability_manifests.len()),
     );
@@ -315,7 +323,14 @@ fn render_findings(
                 push_formatted(
                     output,
                     format_args!(
-                        "<button type=\"button\" class=\"trace-button\" data-evidence-target=\"observation-{source_ordinal}\">Open supporting observation <span>source ordinal {source_ordinal}</span></button>"
+                        "<button type=\"button\" class=\"trace-button\" data-evidence-target=\"observation-{source_ordinal}\" data-evidence-panel=\"observations\">Open supporting observation <span>source ordinal {source_ordinal}</span></button>"
+                    ),
+                );
+            } else if let Some(source_ordinal) = runtime_binding_target(record, finding) {
+                push_formatted(
+                    output,
+                    format_args!(
+                        "<button type=\"button\" class=\"trace-button\" data-evidence-target=\"runtime-binding-{source_ordinal}\" data-evidence-panel=\"runtime-bindings\">Open supporting runtime binding <span>source ordinal {source_ordinal}</span></button>"
                     ),
                 );
             } else {
@@ -326,6 +341,25 @@ fn render_findings(
         output.push_str("</div>");
     }
     panel_end(output);
+}
+
+fn runtime_binding_target(
+    record: &AgentObservationRecord,
+    finding: &apolysis_accountability::ProjectedFinding,
+) -> Option<u64> {
+    record
+        .runtime_bindings
+        .iter()
+        .find(|binding| {
+            let wire = &binding.wire;
+            wire.record_type.is_observed()
+                && binding.source_ordinal < finding.source_ordinal
+                && finding.evidence_ref == format!("runtime_binding:{}", wire.workload_id)
+                && finding.runtime.runtime == wire.adapter
+                && finding.runtime.container_id.as_deref() == Some(wire.workload_id.as_str())
+                && finding.runtime.cgroup_id == Some(wire.cgroup_id)
+        })
+        .map(|binding| binding.source_ordinal)
 }
 
 fn render_collection(output: &mut String, record: &AgentObservationRecord) {
@@ -591,6 +625,64 @@ fn render_observations(
             );
             optional_number(output, observation.parent_exec_generation);
             output.push_str("</dd></div></dl></details></div></article>");
+        }
+        output.push_str("</div>");
+    }
+    panel_end(output);
+}
+
+fn render_runtime_bindings(output: &mut String, record: &AgentObservationRecord) {
+    panel_start(
+        output,
+        "runtime-bindings",
+        "Runtime bindings",
+        "Validated runtime lifecycle evidence. Only an observed binding can support a Finding reference.",
+    );
+    if record.runtime_bindings.is_empty() {
+        output.push_str("<p class=\"empty-state\">No runtime binding lifecycle records.</p>");
+    } else {
+        output.push_str("<div class=\"stack\">");
+        for (index, binding) in record.runtime_bindings.iter().enumerate() {
+            let wire = &binding.wire;
+            push_formatted(
+                output,
+                format_args!(
+                    "<article id=\"runtime-binding-{}\" class=\"evidence-card runtime-binding-card searchable\">",
+                    binding.source_ordinal
+                ),
+            );
+            source_header(
+                output,
+                binding.source_ordinal,
+                &format!("/runtime_bindings/{index}"),
+            );
+            output.push_str("<div class=\"finding-title\"><div><span class=\"severity-label\">Runtime lifecycle</span><h3>");
+            output.push_str(wire.record_type.as_str());
+            output.push_str("</h3></div><span class=\"decision\">");
+            push_escaped(output, &wire.adapter);
+            output.push_str("</span></div><dl class=\"fact-grid\"><div><dt>Agent Run</dt><dd><bdi class=\"fact-text\">");
+            push_escaped(output, &wire.agent_run_id);
+            output.push_str(
+                "</bdi></dd></div><div><dt>Workload ID</dt><dd><bdi class=\"fact-text\">",
+            );
+            push_escaped(output, &wire.workload_id);
+            output.push_str(
+                "</bdi></dd></div><div><dt>Start marker</dt><dd><bdi class=\"fact-text\">",
+            );
+            push_escaped(output, &wire.start_marker);
+            output.push_str(
+                "</bdi></dd></div><div><dt>Host boot ID</dt><dd><bdi class=\"fact-text\">",
+            );
+            push_escaped(output, &wire.host_boot_id);
+            push_formatted(
+                output,
+                format_args!(
+                    "</bdi></dd></div><div><dt>Init process start ticks</dt><dd class=\"mono-value\">{}</dd></div><div><dt>Cgroup device</dt><dd class=\"mono-value\">{}</dd></div><div><dt>Cgroup ID</dt><dd class=\"mono-value\">{}</dd></div><div><dt>Runtime handler</dt><dd><bdi class=\"fact-text\">",
+                    wire.init_process_start_time_ticks, wire.cgroup_device, wire.cgroup_id
+                ),
+            );
+            optional_text(output, wire.runtime_handler.0.as_deref());
+            output.push_str("</bdi></dd></div></dl></article>");
         }
         output.push_str("</div>");
     }
@@ -1025,7 +1117,8 @@ summary { color: var(--ink-soft); cursor: pointer; font-weight: 600; }
 .resource { color: var(--accent); }
 .observation-facts { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .detail-grid { margin-top: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.observation-card.is-targeted { outline: 3px solid var(--accent); outline-offset: 2px; }
+.observation-card.is-targeted, .runtime-binding-card.is-targeted { outline: 3px solid var(--accent); outline-offset: 2px; }
+.runtime-binding-card { scroll-margin-top: 100px; }
 .identity-boundary { border-left-color: var(--blue); }
 .identity-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .identity-heading strong { font: 650 21px/1 "SFMono-Regular", monospace; }
@@ -1152,7 +1245,7 @@ const SCRIPT: &str = r#"
       eventFilter.value = "0";
       relationFilter.value = "0";
       applyObservationFilters();
-      activatePanel("observations");
+      activatePanel(button.dataset.evidencePanel || "observations");
       const target = document.getElementById(button.dataset.evidenceTarget);
       if (target) {
         target.classList.add("is-targeted");

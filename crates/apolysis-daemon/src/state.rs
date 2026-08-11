@@ -15,8 +15,9 @@ use apolysis_accountability::{
     SessionRegistry, SessionState,
 };
 use apolysis_core::{
-    CollectorFailureReason, CollectorLifecycleCounters, CollectorLifecycleRecord, ObservationGap,
-    ObservationGapKind,
+    CollectorCapabilityManifest, CollectorFailureReason, CollectorLifecycleCounters,
+    CollectorLifecycleRecord, ObservationGap, ObservationGapKind, RuntimeBindingRecordType,
+    RuntimeBindingRuntimeHandler, RuntimeBindingWireV1, RUNTIME_BINDING_SCHEMA_VERSION,
 };
 use apolysis_store::HashChainStore;
 use serde_json::{json, Value};
@@ -28,22 +29,76 @@ use crate::{
         validate_agent_run_retention_target, RetentionError,
     },
     DaemonConfig, DaemonRecord, EventPipeline, RecordDeliveryMode, RecordWriteOutcome,
-    RuntimeWorkload, ScopeController, WriterSummary,
+    RuntimeBinding, RuntimeBindingCoordinator, RuntimeBindingEffect, RuntimeBindingGapKind,
+    RuntimeBindingReconcile, RuntimeInventory, RuntimeWorkload, RuntimeWorkloadIdentity,
+    ScopeController, WriterSummary,
 };
 
 // The on-disk directory name predates the Agent Run domain terminology.
 const LEGACY_AGENT_RUN_STORAGE_DIR: &str = "sessions";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeSourceGapReason {
+    SocketUnavailable,
+    InventoryInvalid,
+}
+
+impl RuntimeSourceGapReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::SocketUnavailable => "socket_unavailable",
+            Self::InventoryInvalid => "inventory_invalid",
+        }
+    }
+}
+
 pub struct DaemonState {
     registry: RwLock<SessionRegistry>,
+    runtime_bindings: Mutex<ManagedRuntimeBindings>,
     health: RwLock<HealthSnapshot>,
     stores: Mutex<AgentRunStores>,
+    collector_capability_agent_runs: Mutex<BTreeSet<String>>,
     paused_agent_runs: RwLock<BTreeMap<String, String>>,
     agent_runs_dir: PathBuf,
     storage_writable: AtomicBool,
     scope: Option<ScopeController>,
     pipeline: EventPipeline,
     collector_checkpoint_interval: Duration,
+}
+
+struct ManagedRuntimeBindings {
+    committed: RuntimeBindingCoordinator,
+    pending: Option<PendingRuntimeBindingApplication>,
+}
+
+#[derive(Clone)]
+struct PendingRuntimeBindingApplication {
+    candidate: RuntimeBindingCoordinator,
+    reconciliation: RuntimeBindingReconcile,
+    gap_batches: Vec<RuntimeBindingGapBatch>,
+    next_gap_batch: usize,
+    next_effect_batch: usize,
+}
+
+#[derive(Clone)]
+struct RuntimeBindingGapBatch {
+    agent_run_id: String,
+    payloads: Vec<Value>,
+    effects: Vec<RuntimeBindingEffect>,
+}
+
+struct RuntimeBindingEffectApplicationError {
+    message: String,
+    next_effect_batch: usize,
+}
+
+impl RuntimeBindingEffectApplicationError {
+    fn new(message: String, next_effect_batch: usize) -> Self {
+        Self {
+            message,
+            next_effect_batch,
+        }
+    }
 }
 
 struct ManagedAgentRunStore {
@@ -78,6 +133,8 @@ impl DaemonState {
         recover_retention_transactions(&agent_runs_dir)
             .map_err(|error| format!("failed to recover retention state: {error}"))?;
         let mut registry = SessionRegistry::new(config.max_sessions, config.max_pending);
+        let mut recovered_runtime_bindings = Vec::new();
+        let mut collector_capability_agent_runs = BTreeSet::new();
         let mut stores = BTreeMap::new();
         let now_unix_ms = current_unix_ms()?;
         let mut recovered_integrity_issue = false;
@@ -110,12 +167,10 @@ impl DaemonState {
             }
             let mut recovery = HashChainStore::create_or_recover(&timeline)
                 .map_err(|error| format!("failed to recover Agent Run {agent_run_id}: {error}"))?;
-            if let Some(quarantine_path) = recovery.quarantined_path.as_deref() {
+            if recovery.quarantined_path.is_some() {
                 append_integrity_finding(
                     &mut recovery.store,
                     &agent_run_id,
-                    &timeline,
-                    quarantine_path,
                     recovery.records.len(),
                 )?;
                 recovered_integrity_issue = true;
@@ -125,20 +180,49 @@ impl DaemonState {
                 &agent_run_id,
                 &recovery.records,
             )?;
-            if let Some(recovered) = replay_persisted_agent_run(&recovery.records, now_unix_ms)? {
-                if recovered.intent.session_id != agent_run_id {
+            let capability_records = recovery
+                .records
+                .iter()
+                .filter(|record| {
+                    record.payload.get("record_type").and_then(Value::as_str)
+                        == Some("collector_capability_manifest")
+                })
+                .collect::<Vec<_>>();
+            if capability_records.len() > 1 {
+                return Err(format!(
+                    "failed to restore Agent Run {agent_run_id}: duplicate Collector Capability manifest"
+                ));
+            }
+            if let Some(capability) = capability_records.first() {
+                if capability
+                    .payload
+                    .get("agent_run_id")
+                    .and_then(Value::as_str)
+                    != Some(agent_run_id.as_str())
+                {
+                    return Err(format!(
+                        "failed to restore Agent Run {agent_run_id}: Collector Capability identity mismatch"
+                    ));
+                }
+                collector_capability_agent_runs.insert(agent_run_id.clone());
+            }
+            let recovered =
+                replay_persisted_agent_run(&recovery.records, &agent_run_id, now_unix_ms)?;
+            recovered_runtime_bindings.extend(recovered.runtime_bindings);
+            if let Some(registration) = recovered.registration {
+                if registration.intent.session_id != agent_run_id {
                     return Err(format!(
                         "failed to restore Agent Run {agent_run_id}: durable Agent Run identity mismatch"
                     ));
                 }
-                match recovered.status {
+                match registration.status {
                     RecoveredAgentRunStatus::Active => {
                         registry
-                            .register(recovered.intent, now_unix_ms)
+                            .register(registration.intent, now_unix_ms)
                             .map_err(|error| {
                                 format!("failed to restore Agent Run {agent_run_id}: {error}")
                             })?;
-                        for cgroup_id in recovered.cgroup_ids {
+                        for cgroup_id in registration.cgroup_ids {
                             registry
                                 .discover_cgroup(&agent_run_id, cgroup_id)
                                 .map_err(|error| {
@@ -150,7 +234,7 @@ impl DaemonState {
                     }
                     RecoveredAgentRunStatus::Closed => {
                         registry
-                            .restore_closed_agent_run(recovered.intent)
+                            .restore_closed_agent_run(registration.intent)
                             .map_err(|error| {
                                 format!(
                                     "failed to restore closed Agent Run {agent_run_id}: {error}"
@@ -177,13 +261,21 @@ impl DaemonState {
             ComponentState::Ready
         });
         health.set_ebpf(ComponentState::Unavailable);
+        let runtime_bindings =
+            RuntimeBindingCoordinator::recover_dormant(recovered_runtime_bindings)
+                .map_err(|error| format!("failed to restore runtime binding state: {error}"))?;
         Ok(Self {
             registry: RwLock::new(registry),
+            runtime_bindings: Mutex::new(ManagedRuntimeBindings {
+                committed: runtime_bindings,
+                pending: None,
+            }),
             health: RwLock::new(health),
             stores: Mutex::new(AgentRunStores {
                 active: stores,
                 write_blocked: BTreeSet::new(),
             }),
+            collector_capability_agent_runs: Mutex::new(collector_capability_agent_runs),
             paused_agent_runs: RwLock::new(BTreeMap::new()),
             agent_runs_dir,
             storage_writable: AtomicBool::new(true),
@@ -198,16 +290,60 @@ impl DaemonState {
         intent: SessionIntent,
         now_unix_ms: u64,
     ) -> Result<RegisterOutcome, String> {
+        let runtime_bindings = self.runtime_bindings.lock().await;
         let mut registry = self.registry.write().await;
+        let previous_intent = registry
+            .get(&intent.session_id)
+            .map(|state| state.intent.clone());
+        let refresh_bindings = if registry.is_scope_admitted(&intent.session_id) {
+            Vec::new()
+        } else {
+            runtime_bindings
+                .committed
+                .bindings_for_agent_run(&intent.session_id)
+        };
         let mut candidate = registry.clone();
         let outcome = candidate
             .register(intent.clone(), now_unix_ms)
             .map_err(registry_error)?;
-        self.persist(
-            &intent.session_id,
-            json!({"record_type":"intent_registered","intent":intent}),
-        )
-        .await?;
+        let mut refreshed = Vec::new();
+        if let Some(scope) = &self.scope {
+            for binding in &refresh_bindings {
+                if let Err(error) = scope
+                    .refresh_runtime_agent_run(
+                        &binding.agent_run_id,
+                        Some(&intent),
+                        binding.identity.cgroup.inode,
+                        &binding.identity.workload_id,
+                    )
+                    .await
+                {
+                    rollback_runtime_scope_contexts(scope, previous_intent.as_ref(), &refreshed)
+                        .await
+                        .map_err(|rollback| {
+                            format!("{error}; scope context rollback failed: {rollback}")
+                        })?;
+                    return Err(error);
+                }
+                refreshed.push(binding.clone());
+            }
+        }
+        if let Err(error) = self
+            .persist(
+                &intent.session_id,
+                json!({"record_type":"intent_registered","intent":intent}),
+            )
+            .await
+        {
+            if let Some(scope) = &self.scope {
+                rollback_runtime_scope_contexts(scope, previous_intent.as_ref(), &refreshed)
+                    .await
+                    .map_err(|rollback| {
+                        format!("{error}; scope context rollback failed: {rollback}")
+                    })?;
+            }
+            return Err(error);
+        }
         *registry = candidate;
         Ok(outcome)
     }
@@ -237,46 +373,104 @@ impl DaemonState {
     }
 
     pub async fn close(&self, session_id: &str) -> Result<(), String> {
+        let mut runtime_bindings = self.runtime_bindings.lock().await;
+        self.resume_pending_runtime_binding_application(&mut runtime_bindings)
+            .await?;
+        let runtime_scope_context: BTreeMap<_, _> = runtime_bindings
+            .committed
+            .bindings_for_agent_run(session_id)
+            .into_iter()
+            .map(|binding| (binding.identity.cgroup.inode, binding))
+            .collect();
+        let mut runtime_candidate = runtime_bindings.committed.clone();
+        runtime_candidate.retire_agent_run(session_id);
         let mut registry = self.registry.write().await;
         let mut candidate = registry.clone();
         let closed = candidate.close(session_id).map_err(registry_error)?;
         let mut removed = Vec::new();
         if let Some(scope) = &self.scope {
             for cgroup_id in &closed.cgroup_ids {
-                if let Err(error) = scope
-                    .untrack_agent_run(session_id, Some(&closed.intent), *cgroup_id)
-                    .await
-                {
+                let result = if let Some(binding) = runtime_scope_context.get(cgroup_id) {
+                    scope
+                        .untrack_runtime_agent_run(
+                            session_id,
+                            Some(&closed.intent),
+                            *cgroup_id,
+                            &binding.identity.workload_id,
+                        )
+                        .await
+                } else {
+                    scope
+                        .untrack_agent_run(session_id, Some(&closed.intent), *cgroup_id)
+                        .await
+                };
+                if let Err(error) = result {
                     for removed_id in removed {
-                        let _ = scope
-                            .track_agent_run(session_id, Some(&closed.intent), removed_id)
-                            .await;
+                        let _ = restore_closed_scope(
+                            scope,
+                            session_id,
+                            &closed.intent,
+                            removed_id,
+                            runtime_scope_context.get(&removed_id),
+                        )
+                        .await;
                     }
                     return Err(error);
                 }
                 removed.push(*cgroup_id);
             }
         }
-        if let Err(error) = self
-            .persist(
-                session_id,
-                json!({"record_type":"session_closed","session_id":session_id}),
-            )
-            .await
-        {
-            if let Some(scope) = &self.scope {
-                for cgroup_id in removed {
-                    if let Err(rollback) = scope
-                        .track_agent_run(session_id, Some(&closed.intent), cgroup_id)
+        let close_persisted = if let Some(scope) = &self.scope {
+            match scope.close_agent_run(session_id).await {
+                Ok(persisted) => persisted,
+                Err(error) => {
+                    for cgroup_id in &removed {
+                        if let Err(rollback) = restore_closed_scope(
+                            scope,
+                            session_id,
+                            &closed.intent,
+                            *cgroup_id,
+                            runtime_scope_context.get(cgroup_id),
+                        )
                         .await
-                    {
-                        return Err(format!("{error}; scope rollback failed: {rollback}"));
+                        {
+                            return Err(format!("{error}; scope rollback failed: {rollback}"));
+                        }
                     }
+                    return Err(error);
                 }
             }
-            return Err(error);
+        } else {
+            false
+        };
+        if !close_persisted {
+            if let Err(error) = self
+                .persist(
+                    session_id,
+                    json!({"record_type":"session_closed","session_id":session_id}),
+                )
+                .await
+            {
+                if let Some(scope) = &self.scope {
+                    for cgroup_id in removed {
+                        if let Err(rollback) = restore_closed_scope(
+                            scope,
+                            session_id,
+                            &closed.intent,
+                            cgroup_id,
+                            runtime_scope_context.get(&cgroup_id),
+                        )
+                        .await
+                        {
+                            return Err(format!("{error}; scope rollback failed: {rollback}"));
+                        }
+                    }
+                }
+                return Err(error);
+            }
         }
         *registry = candidate;
+        runtime_bindings.committed = runtime_candidate;
         Ok(())
     }
 
@@ -294,6 +488,27 @@ impl DaemonState {
             .await
             .get_for_tenant(session_id, tenant_id)
             .cloned()
+    }
+
+    pub async fn query_with_runtime_bindings_for_tenant(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+    ) -> (Option<SessionState>, Vec<RuntimeBinding>) {
+        // Keep the established runtime-bindings -> registry lock order used by
+        // register/close so the authorization decision and returned binding
+        // set form one consistent snapshot.
+        let runtime_bindings = self.runtime_bindings.lock().await;
+        let registry = self.registry.read().await;
+        let session = registry.get_for_tenant(session_id, tenant_id).cloned();
+        let bindings = if session.is_some() {
+            runtime_bindings
+                .committed
+                .bindings_for_agent_run(session_id)
+        } else {
+            Vec::new()
+        };
+        (session, bindings)
     }
 
     pub async fn list_for_tenant(
@@ -536,6 +751,369 @@ impl DaemonState {
         self.health.write().await.set_adapter(adapter, state);
     }
 
+    pub async fn reconcile_runtime_inventory(
+        &self,
+        inventory: RuntimeInventory,
+    ) -> Result<RuntimeBindingReconcile, String> {
+        let adapter = inventory.adapter;
+        let mut runtime_bindings = self.runtime_bindings.lock().await;
+        let resumed = self
+            .resume_pending_runtime_binding_application(&mut runtime_bindings)
+            .await?;
+        let mut candidate = runtime_bindings.committed.clone();
+        let mut reconciliation = candidate
+            .reconcile(inventory)
+            .map_err(|error| error.to_string())?;
+        let missing_intent_attaches = {
+            let registry = self.registry.read().await;
+            reconciliation
+                .effects
+                .iter()
+                .filter(|effect| {
+                    matches!(
+                        effect,
+                        RuntimeBindingEffect::Attach { binding }
+                            if !registry.is_scope_admitted(&binding.agent_run_id)
+                    )
+                })
+                .count()
+        };
+        reconciliation.summary.attached = reconciliation
+            .summary
+            .attached
+            .saturating_sub(missing_intent_attaches);
+        reconciliation.summary.missing_intent = missing_intent_attaches;
+        let applied = self
+            .stage_runtime_binding_application(
+                &mut runtime_bindings,
+                candidate,
+                reconciliation,
+                None,
+            )
+            .await?;
+        self.set_adapter(adapter, ComponentState::Ready).await;
+        Ok(merge_runtime_binding_reconciliations(resumed, applied))
+    }
+
+    pub async fn runtime_source_unavailable(
+        &self,
+        adapter: AdapterKind,
+        reason: RuntimeSourceGapReason,
+    ) -> Result<RuntimeBindingReconcile, String> {
+        let mut runtime_bindings = self.runtime_bindings.lock().await;
+        let resumed = self
+            .resume_pending_runtime_binding_application(&mut runtime_bindings)
+            .await?;
+        let mut candidate = runtime_bindings.committed.clone();
+        let reconciliation = candidate
+            .source_unavailable(adapter)
+            .map_err(|error| error.to_string())?;
+        let applied = self
+            .stage_runtime_binding_application(
+                &mut runtime_bindings,
+                candidate,
+                reconciliation,
+                Some(reason),
+            )
+            .await?;
+        self.set_adapter(adapter, ComponentState::Degraded).await;
+        Ok(merge_runtime_binding_reconciliations(resumed, applied))
+    }
+
+    pub async fn runtime_bindings_for_agent_run(&self, agent_run_id: &str) -> Vec<RuntimeBinding> {
+        self.runtime_bindings
+            .lock()
+            .await
+            .committed
+            .bindings_for_agent_run(agent_run_id)
+    }
+
+    pub(crate) async fn runtime_container_id_for_cgroup(
+        &self,
+        agent_run_id: &str,
+        cgroup_id: u64,
+    ) -> Option<String> {
+        self.runtime_bindings
+            .lock()
+            .await
+            .committed
+            .bindings_for_agent_run(agent_run_id)
+            .into_iter()
+            .find(|binding| binding.identity.cgroup.inode == cgroup_id)
+            .map(|binding| binding.identity.workload_id)
+    }
+
+    async fn resume_pending_runtime_binding_application(
+        &self,
+        runtime_bindings: &mut ManagedRuntimeBindings,
+    ) -> Result<RuntimeBindingReconcile, String> {
+        if runtime_bindings.pending.is_none() {
+            return Ok(RuntimeBindingReconcile::default());
+        }
+        self.finish_pending_runtime_binding_application(runtime_bindings)
+            .await
+    }
+
+    async fn stage_runtime_binding_application(
+        &self,
+        runtime_bindings: &mut ManagedRuntimeBindings,
+        candidate: RuntimeBindingCoordinator,
+        reconciliation: RuntimeBindingReconcile,
+        source_reason: Option<RuntimeSourceGapReason>,
+    ) -> Result<RuntimeBindingReconcile, String> {
+        let pending_reconciliation = runtime_binding_reconcile_without_gaps(&reconciliation);
+        let gap_batches = runtime_binding_gap_batches(&reconciliation.effects, source_reason)?;
+        if pending_reconciliation.effects.is_empty() && gap_batches.is_empty() {
+            runtime_bindings.committed = candidate;
+            return Ok(reconciliation);
+        }
+        runtime_bindings.pending = Some(PendingRuntimeBindingApplication {
+            candidate,
+            reconciliation: pending_reconciliation,
+            gap_batches,
+            next_gap_batch: 0,
+            next_effect_batch: 0,
+        });
+        self.finish_pending_runtime_binding_application(runtime_bindings)
+            .await?;
+        Ok(reconciliation)
+    }
+
+    async fn finish_pending_runtime_binding_application(
+        &self,
+        runtime_bindings: &mut ManagedRuntimeBindings,
+    ) -> Result<RuntimeBindingReconcile, String> {
+        let mut applied_gap_effects = Vec::new();
+        loop {
+            let batch = runtime_bindings
+                .pending
+                .as_ref()
+                .and_then(|pending| pending.gap_batches.get(pending.next_gap_batch).cloned());
+            let Some(batch) = batch else {
+                break;
+            };
+            self.persist_batch(&batch.agent_run_id, batch.payloads)
+                .await?;
+            let pending = runtime_bindings
+                .pending
+                .as_mut()
+                .ok_or_else(|| "runtime binding application lost pending state".to_string())?;
+            pending.next_gap_batch = pending.next_gap_batch.saturating_add(1);
+            applied_gap_effects.extend(batch.effects);
+        }
+        let pending = runtime_bindings
+            .pending
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "runtime binding application is not pending".to_string())?;
+        match self
+            .apply_runtime_binding_effects(
+                &pending.reconciliation.effects,
+                pending.next_effect_batch,
+            )
+            .await
+        {
+            Ok(next_effect_batch) => {
+                let pending = runtime_bindings
+                    .pending
+                    .as_mut()
+                    .ok_or_else(|| "runtime binding application lost pending state".to_string())?;
+                pending.next_effect_batch = next_effect_batch;
+            }
+            Err(error) => {
+                let pending = runtime_bindings
+                    .pending
+                    .as_mut()
+                    .ok_or_else(|| "runtime binding application lost pending state".to_string())?;
+                pending.next_effect_batch = error.next_effect_batch;
+                return Err(error.message);
+            }
+        }
+        let completed = runtime_bindings
+            .pending
+            .take()
+            .ok_or_else(|| "runtime binding application lost completed state".to_string())?;
+        runtime_bindings.committed = completed.candidate;
+        applied_gap_effects.extend(completed.reconciliation.effects);
+        let mut reconciliation = runtime_binding_reconcile_for_effects(
+            applied_gap_effects,
+            completed.reconciliation.summary.active,
+        );
+        reconciliation.summary.attached = completed.reconciliation.summary.attached;
+        Ok(reconciliation)
+    }
+
+    async fn apply_runtime_binding_effects(
+        &self,
+        effects: &[RuntimeBindingEffect],
+        next_effect_batch: usize,
+    ) -> Result<usize, RuntimeBindingEffectApplicationError> {
+        if effects.is_empty() {
+            return Ok(0);
+        }
+
+        let mut registry = self.registry.write().await;
+        let mut candidate = registry.clone();
+        let mut missing_intent_bindings = BTreeSet::new();
+        for effect in effects {
+            match effect {
+                RuntimeBindingEffect::Suspend { binding }
+                | RuntimeBindingEffect::Retire { binding }
+                | RuntimeBindingEffect::RetireDormant { binding } => {
+                    candidate
+                        .retire_cgroup(&binding.agent_run_id, binding.identity.cgroup.inode)
+                        .map_err(|error| {
+                            RuntimeBindingEffectApplicationError::new(
+                                registry_error(error),
+                                next_effect_batch,
+                            )
+                        })?;
+                }
+                RuntimeBindingEffect::Attach { binding } => {
+                    let outcome = candidate
+                        .discover_cgroup(&binding.agent_run_id, binding.identity.cgroup.inode)
+                        .map_err(|error| {
+                            RuntimeBindingEffectApplicationError::new(
+                                registry_error(error),
+                                next_effect_batch,
+                            )
+                        })?;
+                    if outcome == AssociationOutcome::MissingIntent {
+                        missing_intent_bindings
+                            .insert((binding.agent_run_id.clone(), binding.identity.cgroup.inode));
+                    }
+                }
+                RuntimeBindingEffect::PersistGap { .. } => {}
+            }
+        }
+
+        let mut applied_scope_effects = Vec::new();
+        if let Some(scope) = &self.scope {
+            for effect in effects {
+                let result = match effect {
+                    RuntimeBindingEffect::Suspend { binding }
+                    | RuntimeBindingEffect::Retire { binding } => {
+                        let intent = registry
+                            .get(&binding.agent_run_id)
+                            .map(|state| state.intent.clone());
+                        scope
+                            .untrack_runtime_agent_run(
+                                &binding.agent_run_id,
+                                intent.as_ref(),
+                                binding.identity.cgroup.inode,
+                                &binding.identity.workload_id,
+                            )
+                            .await
+                    }
+                    RuntimeBindingEffect::Attach { binding } => {
+                        let intent = candidate
+                            .get(&binding.agent_run_id)
+                            .map(|state| state.intent.clone());
+                        scope
+                            .track_runtime_agent_run(
+                                &binding.agent_run_id,
+                                intent.as_ref(),
+                                binding.identity.cgroup.inode,
+                                &binding.identity.workload_id,
+                            )
+                            .await
+                    }
+                    RuntimeBindingEffect::RetireDormant { .. } => continue,
+                    RuntimeBindingEffect::PersistGap { .. } => continue,
+                };
+                if let Err(error) = result {
+                    let rollback = rollback_runtime_scope_effects(
+                        scope,
+                        &registry,
+                        &candidate,
+                        &applied_scope_effects,
+                    )
+                    .await;
+                    return Err(RuntimeBindingEffectApplicationError::new(
+                        match rollback {
+                            Ok(()) => error,
+                            Err(rollback) => {
+                                format!("{error}; runtime scope rollback failed: {rollback}")
+                            }
+                        },
+                        next_effect_batch,
+                    ));
+                }
+                applied_scope_effects.push(effect.clone());
+            }
+        }
+
+        let mut effect_batches = BTreeMap::<String, Vec<Value>>::new();
+        for effect in effects {
+            let (record_type, binding) = match effect {
+                RuntimeBindingEffect::Suspend { binding } => {
+                    (RuntimeBindingRecordType::Suspended, binding)
+                }
+                RuntimeBindingEffect::Retire { binding }
+                | RuntimeBindingEffect::RetireDormant { binding } => {
+                    (RuntimeBindingRecordType::Retired, binding)
+                }
+                RuntimeBindingEffect::Attach { binding } => {
+                    (RuntimeBindingRecordType::Observed, binding)
+                }
+                RuntimeBindingEffect::PersistGap { .. } => continue,
+            };
+            let payloads = effect_batches
+                .entry(binding.agent_run_id.clone())
+                .or_default();
+            payloads.push(
+                runtime_binding_payload(record_type, binding).map_err(|error| {
+                    RuntimeBindingEffectApplicationError::new(error, next_effect_batch)
+                })?,
+            );
+            if matches!(effect, RuntimeBindingEffect::Attach { .. })
+                && missing_intent_bindings
+                    .contains(&(binding.agent_run_id.clone(), binding.identity.cgroup.inode))
+            {
+                payloads.extend(runtime_binding_missing_intent_payloads(binding).map_err(
+                    |error| RuntimeBindingEffectApplicationError::new(error, next_effect_batch),
+                )?);
+            }
+        }
+        let effect_batch_count = effect_batches.len();
+        if next_effect_batch > effect_batch_count {
+            return Err(RuntimeBindingEffectApplicationError::new(
+                "runtime binding effect progress exceeds the pending batch count".to_string(),
+                next_effect_batch,
+            ));
+        }
+        for (batch_index, (agent_run_id, payloads)) in effect_batches
+            .into_iter()
+            .enumerate()
+            .skip(next_effect_batch)
+        {
+            if let Err(error) = self.persist_batch(&agent_run_id, payloads).await {
+                if let Some(scope) = &self.scope {
+                    if let Err(rollback) = rollback_runtime_scope_effects(
+                        scope,
+                        &registry,
+                        &candidate,
+                        &applied_scope_effects,
+                    )
+                    .await
+                    {
+                        return Err(RuntimeBindingEffectApplicationError::new(
+                            format!("{error}; runtime scope rollback failed: {rollback}"),
+                            batch_index,
+                        ));
+                    }
+                }
+                return Err(RuntimeBindingEffectApplicationError::new(
+                    error,
+                    batch_index,
+                ));
+            }
+        }
+
+        *registry = candidate;
+        Ok(effect_batch_count)
+    }
+
     pub async fn persist_collector_lifecycle(
         &self,
         record: CollectorLifecycleRecord,
@@ -544,6 +1122,65 @@ impl DaemonState {
         let payload = serde_json::from_str(&record.to_json_line())
             .map_err(|error| format!("failed to encode collector lifecycle: {error}"))?;
         self.persist(&agent_run_id, payload).await
+    }
+
+    pub async fn persist_collector_start_boundary(
+        &self,
+        capability: CollectorCapabilityManifest,
+        started: CollectorLifecycleRecord,
+    ) -> Result<(), String> {
+        let agent_run_id = started.agent_run_id().to_string();
+        if capability.agent_run_id != agent_run_id {
+            return Err(
+                "collector capability and lifecycle Agent Run identities differ".to_string(),
+            );
+        }
+        let capability_payload = serde_json::from_str(&capability.to_json_line())
+            .map_err(|error| format!("failed to encode collector capability: {error}"))?;
+        let started_payload: Value = serde_json::from_str(&started.to_json_line())
+            .map_err(|error| format!("failed to encode collector lifecycle: {error}"))?;
+        if started_payload.get("state").and_then(Value::as_str) != Some("started") {
+            return Err("collector start boundary requires a started lifecycle record".to_string());
+        }
+
+        let mut declared = self.collector_capability_agent_runs.lock().await;
+        let first_start = !declared.contains(&agent_run_id);
+        let mut payloads = Vec::with_capacity(if first_start { 2 } else { 1 });
+        if first_start {
+            payloads.push(capability_payload);
+        }
+        payloads.push(started_payload);
+        self.persist_batch(&agent_run_id, payloads).await?;
+        if first_start {
+            declared.insert(agent_run_id);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn persist_collector_agent_run_close_boundary(
+        &self,
+        agent_run_id: &str,
+        stopped: Option<CollectorLifecycleRecord>,
+    ) -> Result<(), String> {
+        let mut payloads = Vec::with_capacity(if stopped.is_some() { 2 } else { 1 });
+        if let Some(stopped) = stopped {
+            if stopped.agent_run_id() != agent_run_id {
+                return Err("collector terminal and closed Agent Run identities differ".to_string());
+            }
+            let stopped_payload: Value = serde_json::from_str(&stopped.to_json_line())
+                .map_err(|error| format!("failed to encode collector lifecycle: {error}"))?;
+            if stopped_payload.get("state").and_then(Value::as_str) != Some("stopped")
+                || stopped_payload.get("stop_reason").and_then(Value::as_str)
+                    != Some("agent_run_closed")
+            {
+                return Err(
+                    "collector close boundary requires an agent_run_closed terminal".to_string(),
+                );
+            }
+            payloads.push(stopped_payload);
+        }
+        payloads.push(json!({"record_type":"session_closed","session_id":agent_run_id}));
+        self.persist_batch(agent_run_id, payloads).await
     }
 
     pub async fn persist_collector_failure_for_tracked_runs(
@@ -689,6 +1326,23 @@ impl DaemonState {
         result
     }
 
+    async fn persist_batch(&self, session_id: &str, payloads: Vec<Value>) -> Result<(), String> {
+        if !self.storage_writable.load(Ordering::Acquire) {
+            return Err(
+                "Agent Run storage is unavailable; restart after repairing storage".to_string(),
+            );
+        }
+        let result = self.persist_batch_inner(session_id, payloads).await;
+        if result.is_err() {
+            self.storage_writable.store(false, Ordering::Release);
+            self.health
+                .write()
+                .await
+                .set_storage(ComponentState::Unavailable);
+        }
+        result
+    }
+
     async fn persist_missing_intent_finding(
         &self,
         workload: &RuntimeWorkload,
@@ -758,30 +1412,7 @@ impl DaemonState {
 
     async fn persist_inner(&self, session_id: &str, payload: Value) -> Result<(), String> {
         let mut stores = self.stores.lock().await;
-        if stores.write_blocked.contains(session_id) {
-            return Err("Agent Run storage write is blocked".to_string());
-        }
-        if !stores.active.contains_key(session_id) {
-            let timeline = self.agent_runs_dir.join(session_id).join("timeline.jsonl");
-            refuse_unsafe_storage_path_before_open(&self.agent_runs_dir, session_id, &timeline)
-                .map_err(|_| "unsafe Agent Run storage target".to_string())?;
-            let recovery = HashChainStore::create_or_recover(&timeline)
-                .map_err(|error| format!("failed to recover Agent Run timeline: {error}"))?;
-            let agent_run_dir = self.agent_runs_dir.join(session_id);
-            let identity = capture_agent_run_storage_identity(&agent_run_dir, &recovery.store)
-                .map_err(|_| "unsafe Agent Run storage identity".to_string())?;
-            stores.active.insert(
-                session_id.to_string(),
-                ManagedAgentRunStore {
-                    store: recovery.store,
-                    identity,
-                },
-            );
-        }
-        let store = stores
-            .active
-            .get_mut(session_id)
-            .ok_or_else(|| "Agent Run store was not initialized".to_string())?;
+        let store = managed_store_for_write(&mut stores, &self.agent_runs_dir, session_id)?;
         let payload = serde_json::to_string(&payload)
             .map_err(|error| format!("failed to serialize Agent Run record: {error}"))?;
         store
@@ -793,6 +1424,58 @@ impl DaemonState {
             .flush()
             .map_err(|error| format!("failed to flush Agent Run timeline: {error}"))
     }
+
+    async fn persist_batch_inner(
+        &self,
+        session_id: &str,
+        payloads: Vec<Value>,
+    ) -> Result<(), String> {
+        let mut stores = self.stores.lock().await;
+        let store = managed_store_for_write(&mut stores, &self.agent_runs_dir, session_id)?;
+        let payloads = payloads
+            .into_iter()
+            .map(|payload| {
+                serde_json::to_string(&payload)
+                    .map_err(|error| format!("failed to serialize Agent Run record: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        store
+            .store
+            .append_json_batch_and_flush(1, &payloads)
+            .map(|_| ())
+            .map_err(|error| format!("failed to append Agent Run timeline batch: {error}"))
+    }
+}
+
+fn managed_store_for_write<'a>(
+    stores: &'a mut AgentRunStores,
+    agent_runs_dir: &Path,
+    session_id: &str,
+) -> Result<&'a mut ManagedAgentRunStore, String> {
+    if stores.write_blocked.contains(session_id) {
+        return Err("Agent Run storage write is blocked".to_string());
+    }
+    if !stores.active.contains_key(session_id) {
+        let timeline = agent_runs_dir.join(session_id).join("timeline.jsonl");
+        refuse_unsafe_storage_path_before_open(agent_runs_dir, session_id, &timeline)
+            .map_err(|_| "unsafe Agent Run storage target".to_string())?;
+        let recovery = HashChainStore::create_or_recover(&timeline)
+            .map_err(|error| format!("failed to recover Agent Run timeline: {error}"))?;
+        let agent_run_dir = agent_runs_dir.join(session_id);
+        let identity = capture_agent_run_storage_identity(&agent_run_dir, &recovery.store)
+            .map_err(|_| "unsafe Agent Run storage identity".to_string())?;
+        stores.active.insert(
+            session_id.to_string(),
+            ManagedAgentRunStore {
+                store: recovery.store,
+                identity,
+            },
+        );
+    }
+    stores
+        .active
+        .get_mut(session_id)
+        .ok_or_else(|| "Agent Run store was not initialized".to_string())
 }
 
 fn capture_agent_run_storage_identity(
@@ -1004,16 +1687,13 @@ fn registry_error(error: RegistryError) -> String {
 fn append_integrity_finding(
     store: &mut HashChainStore,
     session_id: &str,
-    timeline_path: &Path,
-    quarantine_path: &Path,
     valid_records: usize,
 ) -> Result<(), String> {
     let payload = json!({
         "record_type":"integrity_finding",
         "session_id":session_id,
         "reason":"hash_chain_tail_quarantined",
-        "timeline_path":timeline_path.to_string_lossy(),
-        "quarantine_path":quarantine_path.to_string_lossy(),
+        "artifact":"agent_run_timeline",
         "valid_records":valid_records
     });
     let payload = serde_json::to_string(&payload)
@@ -1043,6 +1723,225 @@ fn adapter_name(adapter: AdapterKind) -> &'static str {
     }
 }
 
+fn runtime_binding_reconcile_without_gaps(
+    reconciliation: &RuntimeBindingReconcile,
+) -> RuntimeBindingReconcile {
+    let effects = reconciliation
+        .effects
+        .iter()
+        .filter(|effect| !matches!(effect, RuntimeBindingEffect::PersistGap { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut pending = runtime_binding_reconcile_for_effects(effects, reconciliation.summary.active);
+    pending.summary.attached = reconciliation.summary.attached;
+    pending
+}
+
+fn runtime_binding_gap_batches(
+    effects: &[RuntimeBindingEffect],
+    source_reason: Option<RuntimeSourceGapReason>,
+) -> Result<Vec<RuntimeBindingGapBatch>, String> {
+    let mut batches = BTreeMap::<String, (Vec<Value>, Vec<RuntimeBindingEffect>)>::new();
+    for effect in effects {
+        let RuntimeBindingEffect::PersistGap { binding, kind } = effect else {
+            continue;
+        };
+        let reason = match kind {
+            RuntimeBindingGapKind::IdentityTransition => "identity_transition",
+            RuntimeBindingGapKind::DaemonRestart => "daemon_restart",
+            RuntimeBindingGapKind::RuntimeSourceUnavailable => source_reason
+                .unwrap_or(RuntimeSourceGapReason::SocketUnavailable)
+                .as_str(),
+        };
+        let gap = ObservationGap::new(
+            &binding.agent_run_id,
+            "runtime_metadata",
+            ObservationGapKind::RuntimeMetadataUnavailable,
+            1,
+            format!(
+                "source={},reason={reason}",
+                adapter_name(binding.identity.adapter)
+            ),
+        );
+        let payload = serde_json::from_str(&gap.to_json_line()).map_err(|error| {
+            format!("failed to encode runtime metadata Observation Gap: {error}")
+        })?;
+        let batch = batches.entry(binding.agent_run_id.clone()).or_default();
+        batch.0.push(payload);
+        batch.1.push(effect.clone());
+    }
+    Ok(batches
+        .into_iter()
+        .map(
+            |(agent_run_id, (payloads, effects))| RuntimeBindingGapBatch {
+                agent_run_id,
+                payloads,
+                effects,
+            },
+        )
+        .collect())
+}
+
+fn runtime_binding_reconcile_for_effects(
+    effects: Vec<RuntimeBindingEffect>,
+    active: usize,
+) -> RuntimeBindingReconcile {
+    RuntimeBindingReconcile::from_effects(effects, active)
+}
+
+fn merge_runtime_binding_reconciliations(
+    mut first: RuntimeBindingReconcile,
+    second: RuntimeBindingReconcile,
+) -> RuntimeBindingReconcile {
+    first.effects.extend(second.effects);
+    first.summary.gaps = first.summary.gaps.saturating_add(second.summary.gaps);
+    first.summary.suspended = first
+        .summary
+        .suspended
+        .saturating_add(second.summary.suspended);
+    first.summary.retired = first.summary.retired.saturating_add(second.summary.retired);
+    first.summary.attached = first
+        .summary
+        .attached
+        .saturating_add(second.summary.attached);
+    first.summary.unchanged = first
+        .summary
+        .unchanged
+        .saturating_add(second.summary.unchanged);
+    first.summary.missing_intent = first
+        .summary
+        .missing_intent
+        .saturating_add(second.summary.missing_intent);
+    first.summary.active = second.summary.active;
+    first
+}
+
+fn runtime_binding_payload(
+    record_type: RuntimeBindingRecordType,
+    binding: &RuntimeBinding,
+) -> Result<Value, String> {
+    let wire = RuntimeBindingWireV1 {
+        record_type,
+        schema_version: RUNTIME_BINDING_SCHEMA_VERSION,
+        agent_run_id: binding.agent_run_id.clone(),
+        adapter: adapter_name(binding.identity.adapter).to_string(),
+        workload_id: binding.identity.workload_id.clone(),
+        start_marker: binding.identity.start_marker.clone(),
+        host_boot_id: binding.identity.host_boot_id.clone(),
+        init_process_start_time_ticks: binding.identity.init_process_start_time_ticks,
+        cgroup_device: binding.identity.cgroup.device,
+        cgroup_id: binding.identity.cgroup.inode,
+        runtime_handler: RuntimeBindingRuntimeHandler(binding.runtime_handler.clone()),
+    };
+    wire.validate().map_err(|error| error.to_string())?;
+    serde_json::to_value(wire)
+        .map_err(|error| format!("failed to encode runtime binding lifecycle record: {error}"))
+}
+
+fn runtime_binding_missing_intent_payloads(binding: &RuntimeBinding) -> Result<Vec<Value>, String> {
+    let effect = ObservedEffect {
+        session_id: binding.agent_run_id.clone(),
+        evidence_ref: format!("runtime_binding:{}", binding.identity.workload_id),
+        kind: EffectKind::Exec,
+        actor: binding.identity.workload_id.clone(),
+        resource: binding.identity.workload_id.clone(),
+        runtime: RuntimeIdentity {
+            runtime: adapter_name(binding.identity.adapter).to_string(),
+            container_id: Some(binding.identity.workload_id.clone()),
+            pod_uid: None,
+            cgroup_id: Some(binding.identity.cgroup.inode),
+        },
+        evidence_boundary: EvidenceBoundary::HostBoundary,
+    };
+    AccountabilityAnalyzer::evaluate(None, &effect)
+        .into_iter()
+        .map(finding_payload)
+        .collect()
+}
+
+async fn restore_closed_scope(
+    scope: &ScopeController,
+    agent_run_id: &str,
+    intent: &SessionIntent,
+    cgroup_id: u64,
+    runtime_binding: Option<&RuntimeBinding>,
+) -> Result<(), String> {
+    if let Some(binding) = runtime_binding {
+        scope
+            .track_runtime_agent_run(
+                agent_run_id,
+                Some(intent),
+                cgroup_id,
+                &binding.identity.workload_id,
+            )
+            .await
+    } else {
+        scope
+            .track_agent_run(agent_run_id, Some(intent), cgroup_id)
+            .await
+    }
+}
+
+async fn rollback_runtime_scope_contexts(
+    scope: &ScopeController,
+    previous_intent: Option<&SessionIntent>,
+    bindings: &[RuntimeBinding],
+) -> Result<(), String> {
+    for binding in bindings.iter().rev() {
+        scope
+            .refresh_runtime_agent_run(
+                &binding.agent_run_id,
+                previous_intent,
+                binding.identity.cgroup.inode,
+                &binding.identity.workload_id,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn rollback_runtime_scope_effects(
+    scope: &ScopeController,
+    registry: &SessionRegistry,
+    candidate: &SessionRegistry,
+    effects: &[RuntimeBindingEffect],
+) -> Result<(), String> {
+    for effect in effects.iter().rev() {
+        match effect {
+            RuntimeBindingEffect::Attach { binding } => {
+                let intent = candidate
+                    .get(&binding.agent_run_id)
+                    .map(|state| state.intent.clone());
+                scope
+                    .untrack_runtime_agent_run(
+                        &binding.agent_run_id,
+                        intent.as_ref(),
+                        binding.identity.cgroup.inode,
+                        &binding.identity.workload_id,
+                    )
+                    .await?;
+            }
+            RuntimeBindingEffect::Suspend { binding }
+            | RuntimeBindingEffect::Retire { binding } => {
+                let intent = registry
+                    .get(&binding.agent_run_id)
+                    .map(|state| state.intent.clone());
+                scope
+                    .track_runtime_agent_run(
+                        &binding.agent_run_id,
+                        intent.as_ref(),
+                        binding.identity.cgroup.inode,
+                        &binding.identity.workload_id,
+                    )
+                    .await?;
+            }
+            RuntimeBindingEffect::RetireDormant { .. } => {}
+            RuntimeBindingEffect::PersistGap { .. } => {}
+        }
+    }
+    Ok(())
+}
+
 fn container_identity(workload: &RuntimeWorkload) -> Option<String> {
     match workload.adapter {
         AdapterKind::Docker | AdapterKind::Containerd | AdapterKind::K3sContainerd => {
@@ -1053,6 +1952,11 @@ fn container_identity(workload: &RuntimeWorkload) -> Option<String> {
 }
 
 struct RecoveredAgentRun {
+    registration: Option<RecoveredAgentRunRegistration>,
+    runtime_bindings: Vec<RuntimeBinding>,
+}
+
+struct RecoveredAgentRunRegistration {
     intent: SessionIntent,
     cgroup_ids: Vec<u64>,
     status: RecoveredAgentRunStatus,
@@ -1066,16 +1970,21 @@ enum RecoveredAgentRunStatus {
 
 fn replay_persisted_agent_run(
     records: &[apolysis_store::ChainRecord],
+    expected_agent_run_id: &str,
     now_unix_ms: u64,
-) -> Result<Option<RecoveredAgentRun>, String> {
+) -> Result<RecoveredAgentRun, String> {
     let mut intent: Option<SessionIntent> = None;
     let mut cgroup_ids = Vec::new();
+    let mut runtime_managed_cgroups = BTreeSet::new();
+    let mut runtime_bindings = BTreeMap::new();
     let mut closed = false;
     for record in records {
         match record.payload.get("record_type").and_then(Value::as_str) {
             Some("intent_registered") => {
                 if closed {
                     cgroup_ids.clear();
+                    runtime_bindings.clear();
+                    runtime_managed_cgroups.clear();
                 }
                 let value = record
                     .payload
@@ -1106,29 +2015,126 @@ fn replay_persisted_agent_run(
                     }
                 }
             }
+            Some("runtime_workload_discovered") => {
+                if let Some(cgroup_id) = record.payload.get("cgroup_id").and_then(Value::as_u64) {
+                    runtime_managed_cgroups.insert(cgroup_id);
+                }
+            }
+            Some("runtime_binding_observed") => {
+                let binding = runtime_binding_from_payload(&record.payload, expected_agent_run_id)?;
+                runtime_managed_cgroups.insert(binding.identity.cgroup.inode);
+                let key = runtime_binding_replay_key(&binding);
+                if runtime_bindings.contains_key(&key) {
+                    return Err(
+                        "runtime binding observed while already active in durable lifecycle"
+                            .to_string(),
+                    );
+                }
+                runtime_bindings.insert(key, binding);
+            }
+            Some("runtime_binding_retired") | Some("runtime_binding_suspended") => {
+                let binding = runtime_binding_from_payload(&record.payload, expected_agent_run_id)?;
+                runtime_managed_cgroups.insert(binding.identity.cgroup.inode);
+                let key = runtime_binding_replay_key(&binding);
+                let Some(active) = runtime_bindings.get(&key) else {
+                    return Err(
+                        "runtime binding lifecycle ended while inactive in durable lifecycle"
+                            .to_string(),
+                    );
+                };
+                if active != &binding {
+                    return Err(
+                        "runtime binding retirement identity mismatch in durable lifecycle"
+                            .to_string(),
+                    );
+                }
+                runtime_bindings.remove(&key);
+            }
             Some("session_closed") => {
                 closed = true;
                 cgroup_ids.clear();
+                runtime_bindings.clear();
+            }
+            Some(record_type) if record_type.starts_with("runtime_binding_") => {
+                return Err("unsupported runtime binding lifecycle record type".to_string());
             }
             _ => {}
         }
     }
+    cgroup_ids.retain(|cgroup_id| !runtime_managed_cgroups.contains(cgroup_id));
     cgroup_ids.sort_unstable();
+    let runtime_bindings = runtime_bindings.into_values().collect::<Vec<_>>();
     let Some(intent) = intent else {
-        return Ok(None);
+        return Ok(RecoveredAgentRun {
+            registration: None,
+            runtime_bindings,
+        });
     };
+    if !closed && intent.expires_at_unix_ms <= now_unix_ms {
+        return Ok(RecoveredAgentRun {
+            registration: None,
+            runtime_bindings,
+        });
+    }
     let status = if closed {
         RecoveredAgentRunStatus::Closed
-    } else if intent.expires_at_unix_ms > now_unix_ms {
-        RecoveredAgentRunStatus::Active
     } else {
-        return Ok(None);
+        RecoveredAgentRunStatus::Active
     };
-    Ok(Some(RecoveredAgentRun {
-        intent,
-        cgroup_ids,
-        status,
-    }))
+    Ok(RecoveredAgentRun {
+        registration: Some(RecoveredAgentRunRegistration {
+            intent,
+            cgroup_ids,
+            status,
+        }),
+        runtime_bindings,
+    })
+}
+
+fn runtime_binding_replay_key(binding: &RuntimeBinding) -> (AdapterKind, String) {
+    (
+        binding.identity.adapter,
+        binding.identity.workload_id.clone(),
+    )
+}
+
+fn runtime_binding_from_payload(
+    payload: &Value,
+    expected_agent_run_id: &str,
+) -> Result<RuntimeBinding, String> {
+    let record: RuntimeBindingWireV1 = serde_json::from_value(payload.clone()).map_err(|_| {
+        "runtime binding lifecycle record does not match the exact schema".to_string()
+    })?;
+    if record.schema_version != RUNTIME_BINDING_SCHEMA_VERSION {
+        return Err("runtime binding schema_version must be 1".to_string());
+    }
+    record.validate().map_err(|error| error.to_string())?;
+    let adapter = match record.adapter.as_str() {
+        "docker" => AdapterKind::Docker,
+        "containerd" => AdapterKind::Containerd,
+        "k3s_containerd" => AdapterKind::K3sContainerd,
+        _ => return Err("runtime binding adapter is unsupported".to_string()),
+    };
+    let binding = RuntimeBinding {
+        agent_run_id: record.agent_run_id,
+        identity: RuntimeWorkloadIdentity {
+            adapter,
+            workload_id: record.workload_id,
+            start_marker: record.start_marker,
+            host_boot_id: record.host_boot_id,
+            init_process_start_time_ticks: record.init_process_start_time_ticks,
+            cgroup: crate::CgroupIdentity {
+                device: record.cgroup_device,
+                inode: record.cgroup_id,
+            },
+        },
+        runtime_handler: record.runtime_handler.0,
+    };
+    if binding.agent_run_id != expected_agent_run_id {
+        return Err("runtime binding Agent Run identity mismatch".to_string());
+    }
+    binding.validate().map_err(|error| error.to_string())?;
+    Ok(binding)
 }
 
 fn current_unix_ms() -> Result<u64, String> {
@@ -1232,6 +2238,214 @@ mod tests {
         std::fs::remove_dir_all(&config.state_dir).expect("clean test state");
     }
 
+    #[tokio::test]
+    async fn runtime_gap_batches_resume_after_a_later_agent_run_write_failure() {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let config = DaemonConfig {
+            state_dir: std::env::temp_dir().join(format!(
+                "apolysis-runtime-gap-batch-retry-{}-{id}",
+                std::process::id()
+            )),
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(&config).expect("daemon state");
+        let agent_run_a = "agent-run-gap-batch-a";
+        let agent_run_b = "agent-run-gap-batch-b";
+        state
+            .register(test_intent(agent_run_a), 1_700_000_000_000)
+            .await
+            .expect("register first Agent Run");
+        state
+            .register(test_intent(agent_run_b), 1_700_000_000_000)
+            .await
+            .expect("register second Agent Run");
+        state
+            .reconcile_runtime_inventory(RuntimeInventory::new(
+                AdapterKind::Docker,
+                vec![
+                    test_runtime_binding(agent_run_a, "container-gap-a", 701),
+                    test_runtime_binding(agent_run_b, "container-gap-b", 702),
+                ],
+            ))
+            .await
+            .expect("attach both runtime bindings");
+
+        let timeline_b = config
+            .state_dir
+            .join("sessions")
+            .join(agent_run_b)
+            .join("timeline.jsonl");
+        let displaced_b = timeline_b.with_extension("displaced");
+        std::fs::rename(&timeline_b, &displaced_b).expect("displace second timeline");
+        std::fs::write(&timeline_b, b"").expect("replace second timeline path");
+
+        let first_error = state
+            .runtime_source_unavailable(
+                AdapterKind::Docker,
+                RuntimeSourceGapReason::SocketUnavailable,
+            )
+            .await
+            .expect_err("second Agent Run gap batch must fail");
+        assert!(
+            first_error.contains("timeline path changed"),
+            "{first_error}"
+        );
+        let timeline_a = config
+            .state_dir
+            .join("sessions")
+            .join(agent_run_a)
+            .join("timeline.jsonl");
+        assert_eq!(
+            std::fs::read_to_string(&timeline_a)
+                .expect("read first timeline")
+                .matches("runtime_metadata_unavailable")
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(&displaced_b)
+                .expect("read displaced second timeline")
+                .matches("runtime_metadata_unavailable")
+                .count(),
+            0
+        );
+
+        std::fs::remove_file(&timeline_b).expect("remove replacement timeline");
+        std::fs::rename(&displaced_b, &timeline_b).expect("restore second timeline identity");
+        state.storage_writable.store(true, Ordering::Release);
+        let resumed = state
+            .runtime_source_unavailable(
+                AdapterKind::Docker,
+                RuntimeSourceGapReason::SocketUnavailable,
+            )
+            .await
+            .expect("resume pending Agent Run gap and suspends");
+        assert_eq!(resumed.summary.gaps, 1);
+        assert_eq!(resumed.summary.suspended, 2);
+        assert!(state
+            .runtime_bindings_for_agent_run(agent_run_a)
+            .await
+            .is_empty());
+        assert!(state
+            .runtime_bindings_for_agent_run(agent_run_b)
+            .await
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&timeline_a)
+                .expect("reread first timeline")
+                .matches("runtime_metadata_unavailable")
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(&timeline_b)
+                .expect("read restored second timeline")
+                .matches("runtime_metadata_unavailable")
+                .count(),
+            1
+        );
+
+        drop(state);
+        std::fs::remove_dir_all(&config.state_dir).expect("clean test state");
+    }
+
+    #[tokio::test]
+    async fn runtime_effect_batches_resume_without_rewriting_an_earlier_agent_run() {
+        let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let config = DaemonConfig {
+            state_dir: std::env::temp_dir().join(format!(
+                "apolysis-runtime-effect-batch-retry-{}-{id}",
+                std::process::id()
+            )),
+            ..DaemonConfig::default()
+        };
+        let state = DaemonState::new(&config).expect("daemon state");
+        let agent_run_a = "agent-run-effect-batch-a";
+        let agent_run_b = "agent-run-effect-batch-b";
+        state
+            .register(test_intent(agent_run_a), 1_700_000_000_000)
+            .await
+            .expect("register first Agent Run");
+        state
+            .register(test_intent(agent_run_b), 1_700_000_000_000)
+            .await
+            .expect("register second Agent Run");
+        state
+            .reconcile_runtime_inventory(RuntimeInventory::new(
+                AdapterKind::Docker,
+                vec![
+                    test_runtime_binding(agent_run_a, "container-effect-a", 711),
+                    test_runtime_binding(agent_run_b, "container-effect-b", 712),
+                ],
+            ))
+            .await
+            .expect("attach both runtime bindings");
+
+        let timeline_b = config
+            .state_dir
+            .join("sessions")
+            .join(agent_run_b)
+            .join("timeline.jsonl");
+        let displaced_b = timeline_b.with_extension("displaced");
+        std::fs::rename(&timeline_b, &displaced_b).expect("displace second timeline");
+        std::fs::write(&timeline_b, b"").expect("replace second timeline path");
+
+        let first_error = state
+            .reconcile_runtime_inventory(RuntimeInventory::new(AdapterKind::Docker, Vec::new()))
+            .await
+            .expect_err("second Agent Run lifecycle batch must fail");
+        assert!(
+            first_error.contains("timeline path changed"),
+            "{first_error}"
+        );
+        let timeline_a = config
+            .state_dir
+            .join("sessions")
+            .join(agent_run_a)
+            .join("timeline.jsonl");
+        assert_eq!(
+            std::fs::read_to_string(&timeline_a)
+                .expect("read first timeline")
+                .matches("runtime_binding_retired")
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(&displaced_b)
+                .expect("read displaced second timeline")
+                .matches("runtime_binding_retired")
+                .count(),
+            0
+        );
+
+        std::fs::remove_file(&timeline_b).expect("remove replacement timeline");
+        std::fs::rename(&displaced_b, &timeline_b).expect("restore second timeline identity");
+        state.storage_writable.store(true, Ordering::Release);
+        let resumed = state
+            .reconcile_runtime_inventory(RuntimeInventory::new(AdapterKind::Docker, Vec::new()))
+            .await
+            .expect("resume pending lifecycle batches");
+        assert_eq!(resumed.summary.retired, 2);
+        assert_eq!(
+            std::fs::read_to_string(&timeline_a)
+                .expect("reread first timeline")
+                .matches("runtime_binding_retired")
+                .count(),
+            1,
+            "the already durable first Agent Run batch must not be appended twice"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&timeline_b)
+                .expect("read restored second timeline")
+                .matches("runtime_binding_retired")
+                .count(),
+            1
+        );
+
+        drop(state);
+        std::fs::remove_dir_all(&config.state_dir).expect("clean test state");
+    }
+
     fn test_intent(agent_run_id: &str) -> SessionIntent {
         SessionIntent {
             schema_version: 1,
@@ -1242,6 +2456,32 @@ mod tests {
             declared_actions: vec![ActionClass::Test],
             allowed_resources: Vec::new(),
             workload_selectors: Vec::new(),
+        }
+    }
+
+    fn test_runtime_binding(
+        agent_run_id: &str,
+        workload_id: &str,
+        cgroup_inode: u64,
+    ) -> RuntimeBinding {
+        let token = workload_id.bytes().fold(1_u64, |token, byte| {
+            token.wrapping_mul(16_777_619).wrapping_add(u64::from(byte))
+        });
+        let token = if token == 0 { 1 } else { token };
+        RuntimeBinding {
+            agent_run_id: agent_run_id.to_string(),
+            identity: RuntimeWorkloadIdentity {
+                adapter: AdapterKind::Docker,
+                workload_id: format!("{token:016x}").repeat(4),
+                start_marker: format!("2026-08-11T01:02:03.{:09}Z", token % 1_000_000_000),
+                host_boot_id: "82b46386-b87a-4d86-93f6-232bb04c37fb".to_string(),
+                init_process_start_time_ticks: cgroup_inode,
+                cgroup: crate::CgroupIdentity {
+                    device: 7,
+                    inode: cgroup_inode,
+                },
+            },
+            runtime_handler: Some("runc".to_string()),
         }
     }
 }

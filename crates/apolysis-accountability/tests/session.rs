@@ -207,6 +207,48 @@ fn resolves_cgroup_ownership_for_active_and_pending_workloads() {
 }
 
 #[test]
+fn retires_exact_cgroup_ownership_before_numeric_identity_reuse() {
+    let mut registry = SessionRegistry::new(4, 4);
+    registry
+        .register(intent("session-a", NOW_MS + 10_000), NOW_MS)
+        .expect("register first Agent Run");
+    registry
+        .register(intent("session-b", NOW_MS + 10_000), NOW_MS)
+        .expect("register replacement Agent Run");
+    registry
+        .associate_cgroup("session-a", 42)
+        .expect("associate original cgroup identity");
+
+    assert_eq!(
+        registry.retire_cgroup("session-b", 42),
+        Err(RegistryError::CgroupAlreadyAssigned {
+            cgroup_id: 42,
+            session_id: "session-a".to_string(),
+        })
+    );
+    assert_eq!(registry.session_for_cgroup(42), Some("session-a"));
+
+    assert_eq!(registry.retire_cgroup("session-a", 42), Ok(true));
+    assert_eq!(registry.retire_cgroup("session-a", 42), Ok(false));
+    assert!(registry
+        .get("session-a")
+        .expect("first Agent Run remains queryable")
+        .cgroup_ids
+        .is_empty());
+    registry
+        .associate_cgroup("session-b", 42)
+        .expect("retired numeric cgroup identity may be rebound");
+    assert_eq!(registry.session_for_cgroup(42), Some("session-b"));
+
+    registry
+        .discover_cgroup("pending-agent-run", 77)
+        .expect("record pending runtime workload");
+    assert_eq!(registry.retire_cgroup("pending-agent-run", 77), Ok(true));
+    assert_eq!(registry.pending_count(), 0);
+    assert_eq!(registry.session_for_cgroup(77), None);
+}
+
+#[test]
 fn rejects_association_for_expired_or_unknown_sessions() {
     let mut registry = SessionRegistry::new(2, 2);
     registry
