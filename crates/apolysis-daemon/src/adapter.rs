@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::{CStr, CString};
 use std::future::Future;
-use std::os::unix::fs::MetadataExt;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,10 +18,19 @@ use tokio::net::UnixStream;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::oneshot;
 
-use crate::DaemonState;
+use crate::runtime_binding::{
+    canonical_cri_rfc3339_to_unix_nanos, validate_cri_start_marker, validate_docker_start_marker,
+    validate_runtime_container_id, validate_runtime_workload_identity, CgroupIdentity,
+    RuntimeBinding, RuntimeInventory, RuntimeWorkloadIdentity, MAX_RUNTIME_INVENTORY_BINDINGS,
+};
+use crate::{DaemonState, RuntimeSourceGapReason};
 
 pub const APOLYSIS_SESSION_LABEL: &str = "apolysis.session_id";
 pub const APOLYSIS_SESSION_ANNOTATION: &str = "apolysis.dev/session-id";
+const MAX_RUNTIME_ADAPTER_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_RUNTIME_ADAPTER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const CRICTL_EXECUTABLE_CONFIGURATION_ERROR: &str =
+    "APOLYSIS_CRICTL must be an absolute secure executable file";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeWorkload {
@@ -70,13 +81,20 @@ pub struct KubernetesPodSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DockerEngineClient {
     socket_path: PathBuf,
+    request_timeout: Duration,
 }
 
 impl DockerEngineClient {
     pub fn new(socket_path: impl Into<PathBuf>) -> Self {
         Self {
             socket_path: socket_path.into(),
+            request_timeout: DEFAULT_RUNTIME_ADAPTER_REQUEST_TIMEOUT,
         }
+    }
+
+    pub fn with_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
+        self
     }
 
     pub async fn inspect_container(&self, container_id: &str) -> Result<Value, String> {
@@ -97,25 +115,37 @@ impl DockerEngineClient {
     }
 
     async fn get_json(&self, path: &str) -> Result<Value, String> {
-        let mut stream = UnixStream::connect(&self.socket_path)
+        let request = async {
+            let mut stream = UnixStream::connect(&self.socket_path)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "failed to connect Docker Engine socket {}: {error}",
+                        self.socket_path.display()
+                    )
+                })?;
+            let request =
+                format!("GET {path} HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n");
+            stream
+                .write_all(request.as_bytes())
+                .await
+                .map_err(|error| format!("failed to write Docker Engine request: {error}"))?;
+            let mut response = Vec::new();
+            stream
+                .take((MAX_RUNTIME_ADAPTER_RESPONSE_BYTES + 1) as u64)
+                .read_to_end(&mut response)
+                .await
+                .map_err(|error| format!("failed to read Docker Engine response: {error}"))?;
+            if response.len() > MAX_RUNTIME_ADAPTER_RESPONSE_BYTES {
+                return Err(format!(
+                    "Docker Engine response exceeds {MAX_RUNTIME_ADAPTER_RESPONSE_BYTES} bytes"
+                ));
+            }
+            parse_http_json_response(&response)
+        };
+        tokio::time::timeout(self.request_timeout, request)
             .await
-            .map_err(|error| {
-                format!(
-                    "failed to connect Docker Engine socket {}: {error}",
-                    self.socket_path.display()
-                )
-            })?;
-        let request = format!("GET {path} HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n");
-        stream
-            .write_all(request.as_bytes())
-            .await
-            .map_err(|error| format!("failed to write Docker Engine request: {error}"))?;
-        let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .await
-            .map_err(|error| format!("failed to read Docker Engine response: {error}"))?;
-        parse_http_json_response(&response)
+            .map_err(|_| "failed to read Docker Engine response: request timed out".to_string())?
     }
 }
 
@@ -185,6 +215,82 @@ impl DockerEnginePollingRuntimeAdapter {
         }
     }
 
+    pub async fn scan_inventory(&self) -> Result<RuntimeInventory, String> {
+        self.scan_inventory_typed()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn scan_inventory_typed(&self) -> Result<RuntimeInventory, RuntimeInventoryScanError> {
+        let host_boot_id =
+            host_boot_id(&self.proc_root).map_err(RuntimeInventoryScanError::inventory_invalid)?;
+        let container_ids = self
+            .client
+            .list_marked_running_container_ids()
+            .await
+            .map_err(|error| {
+                runtime_inventory_scan_error_with_category(
+                    error,
+                    RuntimeInventoryInvalidCategory::List,
+                )
+            })?;
+        ensure_bounded_runtime_candidates(container_ids.len()).map_err(|_| {
+            RuntimeInventoryScanError::inventory_invalid_with_category(
+                RuntimeInventoryInvalidCategory::Count,
+            )
+        })?;
+        for container_id in &container_ids {
+            validate_runtime_container_id(container_id).map_err(|_| {
+                RuntimeInventoryScanError::inventory_invalid_with_category(
+                    RuntimeInventoryInvalidCategory::Id,
+                )
+            })?;
+        }
+        let initial_container_ids = canonical_docker_container_ids(container_ids);
+        let mut bindings = Vec::with_capacity(initial_container_ids.len());
+        for container_id in &initial_container_ids {
+            bindings.push(
+                docker_runtime_binding_from_client(
+                    &self.client,
+                    &self.proc_root,
+                    &self.cgroup_root,
+                    &host_boot_id,
+                    container_id,
+                )
+                .await
+                .map_err(runtime_inventory_scan_error)?,
+            );
+        }
+        let fresh_container_ids = self
+            .client
+            .list_marked_running_container_ids()
+            .await
+            .map_err(|error| {
+                runtime_inventory_scan_error_with_category(
+                    error,
+                    RuntimeInventoryInvalidCategory::List,
+                )
+            })?;
+        ensure_bounded_runtime_candidates(fresh_container_ids.len()).map_err(|_| {
+            RuntimeInventoryScanError::inventory_invalid_with_category(
+                RuntimeInventoryInvalidCategory::Count,
+            )
+        })?;
+        for container_id in &fresh_container_ids {
+            validate_runtime_container_id(container_id).map_err(|_| {
+                RuntimeInventoryScanError::inventory_invalid_with_category(
+                    RuntimeInventoryInvalidCategory::Id,
+                )
+            })?;
+        }
+        if initial_container_ids != canonical_docker_container_ids(fresh_container_ids) {
+            return Err(RuntimeInventoryScanError::inventory_invalid_with_category(
+                RuntimeInventoryInvalidCategory::DoubleInspect,
+            ));
+        }
+        Ok(RuntimeInventory::new(AdapterKind::Docker, bindings))
+    }
+
     async fn next_polled_workload(&mut self) -> Result<Option<RuntimeWorkload>, String> {
         loop {
             while let Some(container_id) = self.pending_container_ids.pop_front() {
@@ -219,6 +325,269 @@ impl DockerEnginePollingRuntimeAdapter {
     }
 }
 
+fn canonical_docker_container_ids(mut container_ids: Vec<String>) -> Vec<String> {
+    container_ids.sort();
+    container_ids
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DockerInspectIdentity {
+    container_id: String,
+    agent_run_id: String,
+    pid: u32,
+    start_marker: String,
+    runtime_handler: Option<String>,
+}
+
+async fn docker_runtime_binding_from_client(
+    client: &DockerEngineClient,
+    proc_root: &Path,
+    cgroup_root: &Path,
+    host_boot_id: &str,
+    candidate_id: &str,
+) -> Result<RuntimeBinding, String> {
+    let first = docker_inspect_identity(&client.inspect_container(candidate_id).await?)?;
+    if first.container_id != candidate_id {
+        return Err(format!(
+            "Docker inspect identity changed from listed id {candidate_id} to {}",
+            first.container_id
+        ));
+    }
+    let first_start_time = process_start_time_ticks(proc_root, first.pid)?;
+    let first_cgroup = cgroup_identity_from_pid(first.pid, proc_root, cgroup_root)?;
+
+    let second = docker_inspect_identity(&client.inspect_container(candidate_id).await?)?;
+    let second_start_time = process_start_time_ticks(proc_root, second.pid)?;
+    let second_cgroup = cgroup_identity_from_pid(second.pid, proc_root, cgroup_root)?;
+    if first != second || first_start_time != second_start_time || first_cgroup != second_cgroup {
+        return Err(format!(
+            "Docker runtime identity changed while qualifying container {candidate_id}"
+        ));
+    }
+
+    let binding = RuntimeBinding {
+        agent_run_id: first.agent_run_id,
+        identity: RuntimeWorkloadIdentity {
+            adapter: AdapterKind::Docker,
+            workload_id: first.container_id,
+            start_marker: first.start_marker,
+            host_boot_id: host_boot_id.to_string(),
+            init_process_start_time_ticks: first_start_time,
+            cgroup: first_cgroup,
+        },
+        runtime_handler: first.runtime_handler,
+    };
+    validate_runtime_workload_identity(
+        binding.identity.adapter,
+        &binding.identity.workload_id,
+        &binding.identity.start_marker,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(binding)
+}
+
+fn docker_inspect_identity(inspect: &Value) -> Result<DockerInspectIdentity, String> {
+    if inspect
+        .get("State")
+        .and_then(|state| state.get("Running"))
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("Docker inspect State.Running must be true".to_string());
+    }
+    let labels = labels_field(inspect, &["Config", "Labels"])?;
+    let agent_run_id = labels
+        .get(APOLYSIS_SESSION_LABEL)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|agent_run_id| !agent_run_id.is_empty())
+        .ok_or_else(|| format!("Docker inspect {APOLYSIS_SESSION_LABEL} must be non-empty"))?;
+    Ok(DockerInspectIdentity {
+        container_id: string_field(inspect, &["Id"])
+            .ok_or_else(|| "Docker inspect Id must be non-empty".to_string())?,
+        agent_run_id: agent_run_id.to_string(),
+        pid: docker_container_pid_from_engine_inspect(inspect)?,
+        start_marker: docker_start_marker(inspect).ok_or_else(|| {
+            "Docker inspect State.StartedAt must be non-empty, bounded, and non-zero".to_string()
+        })?,
+        runtime_handler: string_field(inspect, &["HostConfig", "Runtime"]),
+    })
+}
+
+fn docker_start_marker(inspect: &Value) -> Option<String> {
+    let marker = string_field(inspect, &["State", "StartedAt"])?;
+    validate_docker_start_marker(&marker).ok()?;
+    Some(marker)
+}
+
+fn host_boot_id(proc_root: &Path) -> Result<String, String> {
+    let path = proc_root.join("sys/kernel/random/boot_id");
+    let value = std::fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read host boot id {}: {error}", path.display()))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("host boot id {} must not be empty", path.display()));
+    }
+    Ok(value.to_string())
+}
+
+fn process_start_time_ticks(proc_root: &Path, pid: u32) -> Result<u64, String> {
+    let path = proc_root.join(pid.to_string()).join("stat");
+    let stat = std::fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read process stat {}: {error}", path.display()))?;
+    let command_end = stat
+        .rfind(')')
+        .ok_or_else(|| format!("process stat {} has no command terminator", path.display()))?;
+    let fields = stat[command_end + 1..]
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let start_time = fields.get(19).ok_or_else(|| {
+        format!(
+            "process stat {} does not contain field 22 starttime",
+            path.display()
+        )
+    })?;
+    start_time.parse::<u64>().map_err(|error| {
+        format!(
+            "process stat {} has invalid field 22 starttime: {error}",
+            path.display()
+        )
+    })
+}
+
+fn cgroup_identity_from_pid(
+    pid: u32,
+    proc_root: &Path,
+    cgroup_root: &Path,
+) -> Result<CgroupIdentity, String> {
+    let proc_cgroup_path = proc_root.join(pid.to_string()).join("cgroup");
+    let proc_cgroup = std::fs::read_to_string(&proc_cgroup_path).map_err(|error| {
+        format!(
+            "failed to read process cgroup file {}: {error}",
+            proc_cgroup_path.display()
+        )
+    })?;
+    let relative = proc_cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| "process cgroup data does not contain a cgroup v2 entry".to_string())?;
+    cgroup_identity_from_relative_path(relative, cgroup_root)
+}
+
+fn cgroup_identity_from_relative_path(
+    relative: &str,
+    cgroup_root: &Path,
+) -> Result<CgroupIdentity, String> {
+    let mut directory = open_directory_path_no_follow(cgroup_root, "cgroup root")?;
+    let mut saw_component = false;
+    for component in Path::new(relative.trim()).components() {
+        match component {
+            Component::Normal(part) => {
+                saw_component = true;
+                directory = open_directory_at_no_follow(
+                    directory.as_raw_fd(),
+                    part,
+                    "cgroup path must not contain a symbolic link or non-directory component",
+                )?;
+            }
+            Component::ParentDir => {
+                return Err("cgroup path must not contain a parent component".to_string());
+            }
+            Component::CurDir | Component::RootDir => {}
+            Component::Prefix(_) => {
+                return Err("cgroup path must not contain a platform prefix".to_string());
+            }
+        }
+    }
+    if !saw_component {
+        return Err("cgroup path must identify a non-root cgroup".to_string());
+    }
+    let metadata = fd_metadata(directory.as_raw_fd(), "failed to stat cgroup directory")?;
+    Ok(CgroupIdentity {
+        device: metadata.st_dev,
+        inode: metadata.st_ino,
+    })
+}
+
+fn open_directory_path_no_follow(path: &Path, description: &str) -> Result<OwnedFd, String> {
+    let (anchor, components) = if path.is_absolute() {
+        ("/", path.components().skip(1).collect::<Vec<_>>())
+    } else {
+        (".", path.components().collect::<Vec<_>>())
+    };
+    let anchor: &CStr = if anchor == "/" { c"/" } else { c"." };
+    // SAFETY: anchor is a valid C string and the returned descriptor is uniquely owned.
+    let raw = unsafe {
+        libc::open(
+            anchor.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(format!(
+            "failed to open {description} anchor: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: raw is a newly opened descriptor owned by this function.
+    let mut directory = unsafe { OwnedFd::from_raw_fd(raw) };
+    for component in components {
+        match component {
+            Component::Normal(part) => {
+                directory = open_directory_at_no_follow(
+                    directory.as_raw_fd(),
+                    part,
+                    &format!(
+                        "{description} must not contain a symbolic link or non-directory component"
+                    ),
+                )?;
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "{description} must not contain traversal components"
+                ));
+            }
+        }
+    }
+    Ok(directory)
+}
+
+fn open_directory_at_no_follow(
+    parent: RawFd,
+    component: &std::ffi::OsStr,
+    error_context: &str,
+) -> Result<OwnedFd, String> {
+    let component = CString::new(component.as_bytes())
+        .map_err(|_| format!("{error_context}: path component contains NUL"))?;
+    // SAFETY: parent is an open directory descriptor and component is a valid C string.
+    let raw = unsafe {
+        libc::openat(
+            parent,
+            component.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(format!(
+            "{error_context}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: raw is a newly opened descriptor owned by this function.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+fn fd_metadata(fd: RawFd, context: &str) -> Result<libc::stat, String> {
+    // SAFETY: zero initialization is valid for libc::stat before fstat fills it.
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: fd is open and metadata points to writable storage.
+    if unsafe { libc::fstat(fd, &mut metadata) } != 0 {
+        return Err(format!("{context}: {}", std::io::Error::last_os_error()));
+    }
+    Ok(metadata)
+}
+
 impl RuntimeAdapterBackend for DockerEnginePollingRuntimeAdapter {
     fn kind(&self) -> AdapterKind {
         AdapterKind::Docker
@@ -228,6 +597,26 @@ impl RuntimeAdapterBackend for DockerEnginePollingRuntimeAdapter {
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeWorkload>, String>> + Send + '_>> {
         Box::pin(self.next_polled_workload())
+    }
+}
+
+impl RuntimeInventoryAdapter for DockerEnginePollingRuntimeAdapter {
+    fn kind(&self) -> AdapterKind {
+        AdapterKind::Docker
+    }
+
+    fn scan_interval(&self) -> Duration {
+        self.scan_interval
+    }
+
+    fn scan_inventory(
+        &self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<RuntimeInventory, RuntimeInventoryScanError>> + Send + '_>,
+    > {
+        Box::pin(DockerEnginePollingRuntimeAdapter::scan_inventory_typed(
+            self,
+        ))
     }
 }
 
@@ -303,6 +692,145 @@ pub trait RuntimeAdapterBackend: Send + 'static {
     fn next_workload(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeWorkload>, String>> + Send + '_>>;
+}
+
+pub trait RuntimeInventoryAdapter: Send + Sync + 'static {
+    fn kind(&self) -> AdapterKind;
+    fn scan_interval(&self) -> Duration;
+    fn scan_inventory(
+        &self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<RuntimeInventory, RuntimeInventoryScanError>> + Send + '_>,
+    >;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeInventoryInvalidCategory {
+    HostBoot,
+    List,
+    Count,
+    Id,
+    InspectShape,
+    InspectState,
+    InspectLabel,
+    InspectPid,
+    InspectStartMarker,
+    ProcStart,
+    CgroupPath,
+    CgroupIdentity,
+    DoubleInspect,
+    BindingValidation,
+    Unclassified,
+}
+
+impl RuntimeInventoryInvalidCategory {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::HostBoot => "host_boot",
+            Self::List => "list",
+            Self::Count => "count",
+            Self::Id => "id",
+            Self::InspectShape => "inspect_shape",
+            Self::InspectState => "inspect_state",
+            Self::InspectLabel => "inspect_label",
+            Self::InspectPid => "inspect_pid",
+            Self::InspectStartMarker => "inspect_start_marker",
+            Self::ProcStart => "proc_start",
+            Self::CgroupPath => "cgroup_path",
+            Self::CgroupIdentity => "cgroup_identity",
+            Self::DoubleInspect => "double_inspect",
+            Self::BindingValidation => "binding_validation",
+            Self::Unclassified => "unclassified",
+        }
+    }
+}
+
+pub struct RuntimeInventoryScanError {
+    reason: RuntimeSourceGapReason,
+    invalid_category: Option<RuntimeInventoryInvalidCategory>,
+}
+
+impl RuntimeInventoryScanError {
+    pub fn socket_unavailable(_diagnostic: impl Into<String>) -> Self {
+        Self {
+            reason: RuntimeSourceGapReason::SocketUnavailable,
+            invalid_category: None,
+        }
+    }
+
+    pub fn inventory_invalid(_diagnostic: impl Into<String>) -> Self {
+        Self {
+            reason: RuntimeSourceGapReason::InventoryInvalid,
+            invalid_category: Some(RuntimeInventoryInvalidCategory::Unclassified),
+        }
+    }
+
+    fn inventory_invalid_with_category(category: RuntimeInventoryInvalidCategory) -> Self {
+        Self {
+            reason: RuntimeSourceGapReason::InventoryInvalid,
+            invalid_category: Some(category),
+        }
+    }
+
+    pub const fn reason(&self) -> RuntimeSourceGapReason {
+        self.reason
+    }
+
+    pub const fn inventory_invalid_category(&self) -> Option<RuntimeInventoryInvalidCategory> {
+        self.invalid_category
+    }
+}
+
+impl std::fmt::Display for RuntimeInventoryScanError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "runtime inventory scan failed: {}",
+            runtime_source_gap_reason_code(self.reason)
+        )
+    }
+}
+
+impl std::fmt::Debug for RuntimeInventoryScanError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeInventoryScanError")
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::error::Error for RuntimeInventoryScanError {}
+
+fn runtime_inventory_scan_error(message: String) -> RuntimeInventoryScanError {
+    runtime_inventory_scan_error_with_category(
+        message,
+        RuntimeInventoryInvalidCategory::Unclassified,
+    )
+}
+
+fn runtime_inventory_scan_error_with_category(
+    message: String,
+    invalid_category: RuntimeInventoryInvalidCategory,
+) -> RuntimeInventoryScanError {
+    let normalized = message.to_ascii_lowercase();
+    let source_unavailable = normalized.starts_with("failed to connect docker engine socket")
+        || normalized.starts_with("failed to write docker engine request")
+        || normalized.starts_with("failed to read docker engine response")
+        || normalized.starts_with("failed to run ")
+        || normalized.contains("code = unavailable")
+        || normalized.contains("connection refused")
+        || normalized.contains("connection reset")
+        || normalized.contains("connection error")
+        || normalized.contains("dial unix")
+        || normalized.contains("deadline exceeded")
+        || normalized == "crictl runtime source unavailable"
+        || (normalized.starts_with("crictl ") && normalized.contains("no such file or directory"));
+    if source_unavailable {
+        RuntimeInventoryScanError::socket_unavailable(message)
+    } else {
+        RuntimeInventoryScanError::inventory_invalid_with_category(invalid_category)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -729,10 +1257,7 @@ pub fn cgroup_id_from_proc_cgroup(proc_cgroup: &str, cgroup_root: &Path) -> Resu
         .find_map(|line| line.strip_prefix("0::"))
         .ok_or_else(|| "process cgroup data does not contain a cgroup v2 entry".to_string())?
         .trim();
-    let path = cgroup_root.join(normalized_cgroup_relative_path(relative));
-    std::fs::metadata(&path)
-        .map_err(|error| format!("failed to stat cgroup path {}: {error}", path.display()))
-        .map(|metadata| metadata.ino())
+    cgroup_identity_from_relative_path(relative, cgroup_root).map(|identity| identity.inode)
 }
 
 pub fn cgroup_id_from_cri_inspect_cgroups_path(
@@ -744,11 +1269,14 @@ pub fn cgroup_id_from_cri_inspect_cgroups_path(
     else {
         return Ok(None);
     };
-    let relative = relative_cgroup_path_from_cri_cgroups_path(&cgroups_path)?;
-    let path = cgroup_root.join(relative);
-    std::fs::metadata(&path)
-        .map_err(|error| format!("failed to stat CRI cgroupsPath {}: {error}", path.display()))
-        .map(|metadata| Some(metadata.ino()))
+    let relative = safe_relative_cgroup_path_from_cri(&cgroups_path)?;
+    cgroup_identity_from_relative_path(
+        relative
+            .to_str()
+            .ok_or_else(|| "CRI cgroupsPath must be UTF-8".to_string())?,
+        cgroup_root,
+    )
+    .map(|identity| Some(identity.inode))
 }
 
 fn relative_cgroup_path_from_cri_cgroups_path(cgroups_path: &str) -> Result<PathBuf, String> {
@@ -890,18 +1418,22 @@ pub async fn run_runtime_adapter_with_policy<B: RuntimeAdapterBackend>(
                                         summary.backend_recoveries.saturating_add(1);
                                 }
                             }
-                            Err(error) => {
+                            Err(_error) => {
                                 summary.ingest_errors = summary.ingest_errors.saturating_add(1);
-                                eprintln!("apolysisd: runtime adapter {adapter:?} ingest error: {error}");
+                                eprintln!(
+                                    "apolysisd: runtime adapter={adapter:?} code=ingest_failed"
+                                );
                                 state.set_adapter(adapter, ComponentState::Degraded).await;
                             }
                         }
                     }
                     Ok(None) => break,
-                    Err(error) => {
+                    Err(_error) => {
                         consecutive_backend_errors = consecutive_backend_errors.saturating_add(1);
                         summary.backend_errors = summary.backend_errors.saturating_add(1);
-                        eprintln!("apolysisd: runtime adapter {adapter:?} backend error: {error}");
+                        eprintln!(
+                            "apolysisd: runtime adapter={adapter:?} code=backend_unavailable"
+                        );
                         state.set_adapter(adapter, ComponentState::Degraded).await;
                         let delay = adapter_backoff_delay(
                             backoff_policy,
@@ -921,9 +1453,145 @@ pub async fn run_runtime_adapter_with_policy<B: RuntimeAdapterBackend>(
     summary
 }
 
+pub async fn run_runtime_inventory_adapter<B: RuntimeInventoryAdapter>(
+    backend: B,
+    state: Arc<DaemonState>,
+    shutdown: oneshot::Receiver<()>,
+) -> RuntimeAdapterSummary {
+    run_runtime_inventory_adapter_with_policy(
+        backend,
+        state,
+        shutdown,
+        AdapterBackoffPolicy::default(),
+    )
+    .await
+}
+
+pub async fn run_runtime_inventory_adapter_with_policy<B: RuntimeInventoryAdapter>(
+    backend: B,
+    state: Arc<DaemonState>,
+    mut shutdown: oneshot::Receiver<()>,
+    backoff_policy: AdapterBackoffPolicy,
+) -> RuntimeAdapterSummary {
+    let adapter = backend.kind();
+    let scan_interval = backend.scan_interval();
+    let mut summary = RuntimeAdapterSummary {
+        adapter,
+        discovered: 0,
+        missing_intent: 0,
+        backend_errors: 0,
+        backend_recoveries: 0,
+        ingest_errors: 0,
+    };
+    let mut consecutive_errors = 0_u64;
+    let mut outage_reported = false;
+
+    loop {
+        let scan = tokio::select! {
+            _ = &mut shutdown => break,
+            scan = backend.scan_inventory() => scan,
+        };
+        match scan {
+            Ok(inventory) => match state.reconcile_runtime_inventory(inventory).await {
+                Ok(reconciliation) => {
+                    summary.discovered = summary
+                        .discovered
+                        .saturating_add(reconciliation.summary.attached as u64);
+                    summary.missing_intent = summary
+                        .missing_intent
+                        .saturating_add(reconciliation.summary.missing_intent as u64);
+                    if consecutive_errors > 0 {
+                        summary.backend_recoveries = summary.backend_recoveries.saturating_add(1);
+                    }
+                    consecutive_errors = 0;
+                    outage_reported = false;
+                    if wait_for_runtime_scan(&mut shutdown, scan_interval).await {
+                        break;
+                    }
+                }
+                Err(_error) => {
+                    consecutive_errors = consecutive_errors.saturating_add(1);
+                    summary.backend_errors = summary.backend_errors.saturating_add(1);
+                    let report_outage = !outage_reported;
+                    outage_reported = true;
+                    if report_outage {
+                        eprintln!(
+                            "apolysisd: runtime inventory adapter={adapter:?} code=reconcile_failed reason=inventory_invalid"
+                        );
+                    }
+                    if let Err(_gap_error) = state
+                        .runtime_source_unavailable(
+                            adapter,
+                            RuntimeSourceGapReason::InventoryInvalid,
+                        )
+                        .await
+                    {
+                        summary.ingest_errors = summary.ingest_errors.saturating_add(1);
+                        if report_outage {
+                            eprintln!(
+                                "apolysisd: runtime inventory adapter={adapter:?} code=gap_persist_failed reason=inventory_invalid"
+                            );
+                        }
+                    }
+                    state.set_adapter(adapter, ComponentState::Degraded).await;
+                    let delay = adapter_backoff_delay(backoff_policy, adapter, consecutive_errors);
+                    if wait_for_runtime_scan(&mut shutdown, delay).await {
+                        break;
+                    }
+                }
+            },
+            Err(error) => {
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                summary.backend_errors = summary.backend_errors.saturating_add(1);
+                let reason = error.reason();
+                let report_outage = !outage_reported;
+                outage_reported = true;
+                if report_outage {
+                    eprintln!(
+                        "apolysisd: runtime inventory adapter={adapter:?} code=scan_failed reason={}",
+                        runtime_source_gap_reason_code(reason)
+                    );
+                }
+                if let Err(_gap_error) = state.runtime_source_unavailable(adapter, reason).await {
+                    summary.ingest_errors = summary.ingest_errors.saturating_add(1);
+                    if report_outage {
+                        eprintln!(
+                            "apolysisd: runtime inventory adapter={adapter:?} code=gap_persist_failed reason={}",
+                            runtime_source_gap_reason_code(reason)
+                        );
+                    }
+                }
+                state.set_adapter(adapter, ComponentState::Degraded).await;
+                let delay = adapter_backoff_delay(backoff_policy, adapter, consecutive_errors);
+                if wait_for_runtime_scan(&mut shutdown, delay).await {
+                    break;
+                }
+            }
+        }
+    }
+
+    summary
+}
+
+const fn runtime_source_gap_reason_code(reason: RuntimeSourceGapReason) -> &'static str {
+    match reason {
+        RuntimeSourceGapReason::SocketUnavailable => "socket_unavailable",
+        RuntimeSourceGapReason::InventoryInvalid => "inventory_invalid",
+    }
+}
+
+async fn wait_for_runtime_scan(shutdown: &mut oneshot::Receiver<()>, delay: Duration) -> bool {
+    tokio::select! {
+        _ = shutdown => true,
+        _ = tokio::time::sleep(delay) => false,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CriRuntimeClient {
     crictl_path: PathBuf,
+    crictl_proof: Option<CriExecutableProof>,
+    configuration_error: Option<String>,
     runtime_endpoint: String,
     image_endpoint: Option<String>,
     timeout: Duration,
@@ -932,8 +1600,14 @@ pub struct CriRuntimeClient {
 impl CriRuntimeClient {
     pub fn new(socket_path: impl AsRef<Path>) -> Self {
         let endpoint = format!("unix://{}", socket_path.as_ref().display());
+        let (crictl_path, crictl_proof, configuration_error) = match configured_crictl_path() {
+            Ok((path, proof)) => (path, Some(proof), None),
+            Err(error) => (PathBuf::new(), None, Some(error)),
+        };
         Self {
-            crictl_path: PathBuf::from("crictl"),
+            crictl_path,
+            crictl_proof,
+            configuration_error,
             runtime_endpoint: endpoint.clone(),
             image_endpoint: Some(endpoint),
             timeout: Duration::from_secs(5),
@@ -942,11 +1616,26 @@ impl CriRuntimeClient {
 
     pub fn with_crictl_path(mut self, crictl_path: impl Into<PathBuf>) -> Self {
         self.crictl_path = crictl_path.into();
+        match validate_crictl_override(&self.crictl_path) {
+            Ok(proof) => {
+                self.crictl_proof = Some(proof);
+                self.configuration_error = None;
+            }
+            Err(error) => {
+                self.crictl_proof = None;
+                self.configuration_error = Some(error);
+            }
+        }
         self
     }
 
     pub fn with_image_endpoint(mut self, image_endpoint: Option<String>) -> Self {
         self.image_endpoint = image_endpoint;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
         self
     }
 
@@ -987,8 +1676,24 @@ impl CriRuntimeClient {
     }
 
     async fn crictl_json(&self, command_args: &[&str]) -> Result<Value, String> {
+        if let Some(error) = &self.configuration_error {
+            return Err(error.clone());
+        }
+        let executable = self.open_verified_crictl_override()?;
         let timeout = format!("{}s", self.timeout.as_secs().max(1));
-        let mut command = TokioCommand::new(&self.crictl_path);
+        let executable_path = PathBuf::from(format!("/proc/self/fd/{}", executable.as_raw_fd()));
+        let mut command = TokioCommand::new(&executable_path);
+        let descriptor = executable.as_raw_fd();
+        // SAFETY: the closure only clears FD_CLOEXEC on the already-open executable descriptor in
+        // the child between fork and exec, using an async-signal-safe syscall.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(descriptor, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         command
             .arg("--config")
             .arg("/dev/null")
@@ -1000,22 +1705,261 @@ impl CriRuntimeClient {
             command.arg("--image-endpoint").arg(image_endpoint);
         }
         command.args(command_args);
-        let output = command.output().await.map_err(|error| {
-            format!(
-                "failed to run {}: {error}",
-                self.crictl_path.as_path().display()
-            )
-        })?;
+        let output = run_bounded_command(&mut command, self.timeout, "crictl").await;
+        let post_execution_proof = self.verify_crictl_override();
+        let output = output?;
+        post_execution_proof?;
         if !output.status.success() {
-            return Err(format!(
-                "crictl {:?} failed: {}",
-                command_args,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+            return Err(crictl_command_failure(&output.stderr));
         }
         serde_json::from_slice(&output.stdout)
             .map_err(|error| format!("failed to decode crictl JSON: {error}"))
     }
+
+    fn open_verified_crictl_override(&self) -> Result<OwnedFd, String> {
+        let expected = self
+            .crictl_proof
+            .ok_or_else(|| CRICTL_EXECUTABLE_CONFIGURATION_ERROR.to_string())?;
+        let executable = open_validated_crictl_override(&self.crictl_path)?;
+        if executable.proof != expected {
+            return Err("APOLYSIS_CRICTL executable identity changed".to_string());
+        }
+        Ok(executable.descriptor)
+    }
+
+    fn verify_crictl_override(&self) -> Result<(), String> {
+        let expected = self
+            .crictl_proof
+            .ok_or_else(|| CRICTL_EXECUTABLE_CONFIGURATION_ERROR.to_string())?;
+        let actual = validate_crictl_override(&self.crictl_path)?;
+        if actual != expected {
+            return Err("APOLYSIS_CRICTL executable identity changed".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn crictl_command_failure(stderr: &[u8]) -> String {
+    let normalized = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    if normalized.contains("code = unavailable")
+        || normalized.contains("connection refused")
+        || normalized.contains("connection reset")
+        || normalized.contains("connection error")
+        || normalized.contains("dial unix")
+        || normalized.contains("deadline exceeded")
+    {
+        "crictl runtime source unavailable".to_string()
+    } else {
+        "crictl command failed".to_string()
+    }
+}
+
+struct BoundedCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+async fn run_bounded_command(
+    command: &mut TokioCommand,
+    timeout: Duration,
+    command_name: &str,
+) -> Result<BoundedCommandOutput, String> {
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to run {command_name}: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("failed to run {command_name}: stdout pipe unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("failed to run {command_name}: stderr pipe unavailable"))?;
+    enum Collection {
+        Complete(Vec<u8>, Vec<u8>, ExitStatus),
+        StdoutOversized,
+        StderrOversized,
+    }
+    let collected = tokio::time::timeout(timeout, async {
+        let mut stdout_read = Box::pin(read_bounded_output(stdout));
+        let mut stderr_read = Box::pin(read_bounded_output(stderr));
+        let mut child_wait = Box::pin(child.wait());
+        let mut stdout = None;
+        let mut stderr = None;
+        let mut status = None;
+        loop {
+            tokio::select! {
+                result = &mut stdout_read, if stdout.is_none() => {
+                    let (bytes, oversized) = result?;
+                    if oversized {
+                        return Ok::<_, String>(Collection::StdoutOversized);
+                    }
+                    stdout = Some(bytes);
+                }
+                result = &mut stderr_read, if stderr.is_none() => {
+                    let (bytes, oversized) = result?;
+                    if oversized {
+                        return Ok::<_, String>(Collection::StderrOversized);
+                    }
+                    stderr = Some(bytes);
+                }
+                result = &mut child_wait, if status.is_none() => {
+                    status = Some(result.map_err(|error| error.to_string())?);
+                }
+            }
+            if stdout.is_some() && stderr.is_some() && status.is_some() {
+                return Ok(Collection::Complete(
+                    stdout
+                        .take()
+                        .ok_or_else(|| "runtime stdout collection lost state".to_string())?,
+                    stderr
+                        .take()
+                        .ok_or_else(|| "runtime stderr collection lost state".to_string())?,
+                    status
+                        .take()
+                        .ok_or_else(|| "runtime status collection lost state".to_string())?,
+                ));
+            }
+        }
+    })
+    .await;
+    let collection = match collected {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!("failed to run {command_name}: timed out"));
+        }
+    };
+    let (stdout, stderr, status) = match collection {
+        Collection::Complete(stdout, stderr, status) => (stdout, stderr, status),
+        Collection::StdoutOversized => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!(
+                "crictl stdout exceeds {MAX_RUNTIME_ADAPTER_RESPONSE_BYTES} bytes"
+            ));
+        }
+        Collection::StderrOversized => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!(
+                "crictl stderr exceeds {MAX_RUNTIME_ADAPTER_RESPONSE_BYTES} bytes"
+            ));
+        }
+    };
+    Ok(BoundedCommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+async fn read_bounded_output<R>(reader: R) -> Result<(Vec<u8>, bool), String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    reader
+        .take((MAX_RUNTIME_ADAPTER_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| format!("failed to read runtime command output: {error}"))?;
+    let oversized = bytes.len() > MAX_RUNTIME_ADAPTER_RESPONSE_BYTES;
+    Ok((bytes, oversized))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CriExecutableProof {
+    device: u64,
+    inode: u64,
+}
+
+fn configured_crictl_path() -> Result<(PathBuf, CriExecutableProof), String> {
+    let Some(configured) = std::env::var_os("APOLYSIS_CRICTL") else {
+        return Err(CRICTL_EXECUTABLE_CONFIGURATION_ERROR.to_string());
+    };
+    let path = PathBuf::from(configured);
+    let proof = validate_crictl_override(&path)?;
+    Ok((path, proof))
+}
+
+fn validate_crictl_override(path: &Path) -> Result<CriExecutableProof, String> {
+    open_validated_crictl_override(path).map(|executable| executable.proof)
+}
+
+struct OpenCriExecutable {
+    descriptor: OwnedFd,
+    proof: CriExecutableProof,
+}
+
+fn open_validated_crictl_override(path: &Path) -> Result<OpenCriExecutable, String> {
+    if !path.is_absolute() {
+        return Err(CRICTL_EXECUTABLE_CONFIGURATION_ERROR.to_string());
+    }
+    let components: Vec<_> = path.components().collect();
+    if components
+        .iter()
+        .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err("APOLYSIS_CRICTL path must not contain traversal components".to_string());
+    }
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "APOLYSIS_CRICTL must reference an executable file".to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "APOLYSIS_CRICTL must reference an executable file".to_string())?;
+    let directory = open_directory_path_no_follow(parent, "APOLYSIS_CRICTL path")?;
+    let file_name = CString::new(file_name.as_bytes())
+        .map_err(|_| "APOLYSIS_CRICTL path contains NUL".to_string())?;
+    // SAFETY: directory is an open directory descriptor, file_name is a valid C string, and the
+    // newly returned descriptor is uniquely owned below.
+    let raw = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            file_name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(format!(
+            "APOLYSIS_CRICTL path must not contain symbolic links and must reference an existing executable file: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: raw is a newly opened descriptor owned by this function.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
+    let metadata = fd_metadata(
+        descriptor.as_raw_fd(),
+        "failed to inspect APOLYSIS_CRICTL executable",
+    )?;
+    let mode = metadata.st_mode;
+    // SAFETY: geteuid has no preconditions and does not dereference pointers.
+    let effective_uid = unsafe { libc::geteuid() };
+    if mode & libc::S_IFMT != libc::S_IFREG
+        || metadata.st_nlink != 1
+        || metadata.st_uid != effective_uid
+        || mode & 0o111 == 0
+        || mode & 0o022 != 0
+        || mode & 0o7000 != 0
+    {
+        return Err(
+            "APOLYSIS_CRICTL must be a singly-linked, owner-controlled executable file".to_string(),
+        );
+    }
+    Ok(OpenCriExecutable {
+        proof: CriExecutableProof {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        },
+        descriptor,
+    })
 }
 
 pub struct ContainerdCriRuntimeAdapter {
@@ -1054,6 +1998,86 @@ impl ContainerdCriRuntimeAdapter {
             seen_capacity,
             scan_interval,
         })
+    }
+
+    pub async fn scan_inventory(&self) -> Result<RuntimeInventory, String> {
+        self.scan_inventory_typed()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn scan_inventory_typed(&self) -> Result<RuntimeInventory, RuntimeInventoryScanError> {
+        let host_boot_id = host_boot_id(&self.proc_root).map_err(|_| {
+            RuntimeInventoryScanError::inventory_invalid_with_category(
+                RuntimeInventoryInvalidCategory::HostBoot,
+            )
+        })?;
+        let include_pod_sandbox_labels = self.adapter == AdapterKind::K3sContainerd;
+        let candidates = self
+            .client
+            .list_marked_running_container_candidates(include_pod_sandbox_labels)
+            .await
+            .map_err(|error| {
+                runtime_inventory_scan_error_with_category(
+                    error,
+                    RuntimeInventoryInvalidCategory::List,
+                )
+            })?;
+        ensure_bounded_runtime_candidates(candidates.len()).map_err(|_| {
+            RuntimeInventoryScanError::inventory_invalid_with_category(
+                RuntimeInventoryInvalidCategory::Count,
+            )
+        })?;
+        for candidate in &candidates {
+            validate_runtime_container_id(&candidate.container_id).map_err(|_| {
+                RuntimeInventoryScanError::inventory_invalid_with_category(
+                    RuntimeInventoryInvalidCategory::Id,
+                )
+            })?;
+        }
+        let initial_candidates = canonical_cri_candidates(candidates);
+        let mut bindings = Vec::with_capacity(initial_candidates.len());
+        for candidate in initial_candidates.iter().cloned() {
+            bindings.push(
+                cri_runtime_binding_from_client(
+                    self.adapter,
+                    &self.client,
+                    &self.proc_root,
+                    &self.cgroup_root,
+                    &host_boot_id,
+                    candidate,
+                )
+                .await?,
+            );
+        }
+        let fresh_candidates = self
+            .client
+            .list_marked_running_container_candidates(include_pod_sandbox_labels)
+            .await
+            .map_err(|error| {
+                runtime_inventory_scan_error_with_category(
+                    error,
+                    RuntimeInventoryInvalidCategory::List,
+                )
+            })?;
+        ensure_bounded_runtime_candidates(fresh_candidates.len()).map_err(|_| {
+            RuntimeInventoryScanError::inventory_invalid_with_category(
+                RuntimeInventoryInvalidCategory::Count,
+            )
+        })?;
+        for candidate in &fresh_candidates {
+            validate_runtime_container_id(&candidate.container_id).map_err(|_| {
+                RuntimeInventoryScanError::inventory_invalid_with_category(
+                    RuntimeInventoryInvalidCategory::Id,
+                )
+            })?;
+        }
+        if initial_candidates != canonical_cri_candidates(fresh_candidates) {
+            return Err(RuntimeInventoryScanError::inventory_invalid_with_category(
+                RuntimeInventoryInvalidCategory::DoubleInspect,
+            ));
+        }
+        Ok(RuntimeInventory::new(self.adapter, bindings))
     }
 
     async fn next_cri_workload(&mut self) -> Result<Option<RuntimeWorkload>, String> {
@@ -1114,6 +2138,235 @@ impl ContainerdCriRuntimeAdapter {
     }
 }
 
+fn canonical_cri_candidates(
+    mut candidates: Vec<CriContainerCandidate>,
+) -> Vec<CriContainerCandidate> {
+    candidates.sort_by(|left, right| {
+        left.container_id
+            .cmp(&right.container_id)
+            .then_with(|| left.inherited_labels.cmp(&right.inherited_labels))
+    });
+    candidates
+}
+
+fn ensure_bounded_runtime_candidates(count: usize) -> Result<(), String> {
+    if count > MAX_RUNTIME_INVENTORY_BINDINGS {
+        return Err(format!(
+            "runtime inventory candidate count {count} exceeds maximum {MAX_RUNTIME_INVENTORY_BINDINGS}"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CriInspectIdentity {
+    container_id: String,
+    agent_run_id: String,
+    pid: u32,
+    start_marker: String,
+    runtime_handler: Option<String>,
+}
+
+async fn cri_runtime_binding_from_client(
+    adapter: AdapterKind,
+    client: &CriRuntimeClient,
+    proc_root: &Path,
+    cgroup_root: &Path,
+    host_boot_id: &str,
+    candidate: CriContainerCandidate,
+) -> Result<RuntimeBinding, RuntimeInventoryScanError> {
+    let first_inspect = client
+        .inspect_container(&candidate.container_id)
+        .await
+        .map_err(|error| {
+            runtime_inventory_scan_error_with_category(
+                error,
+                RuntimeInventoryInvalidCategory::InspectShape,
+            )
+        })?;
+    let first = cri_inspect_identity(&first_inspect, &candidate.inherited_labels)
+        .map_err(RuntimeInventoryScanError::inventory_invalid_with_category)?;
+    if first.container_id != candidate.container_id {
+        return Err(RuntimeInventoryScanError::inventory_invalid_with_category(
+            RuntimeInventoryInvalidCategory::Id,
+        ));
+    }
+    let first_start_time = process_start_time_ticks(proc_root, first.pid).map_err(|_| {
+        RuntimeInventoryScanError::inventory_invalid_with_category(
+            RuntimeInventoryInvalidCategory::ProcStart,
+        )
+    })?;
+    let first_cgroup =
+        cgroup_identity_from_cri_inspect(&first_inspect, first.pid, proc_root, cgroup_root)
+            .map_err(RuntimeInventoryScanError::inventory_invalid_with_category)?;
+
+    let second_inspect = client
+        .inspect_container(&candidate.container_id)
+        .await
+        .map_err(|error| {
+            runtime_inventory_scan_error_with_category(
+                error,
+                RuntimeInventoryInvalidCategory::InspectShape,
+            )
+        })?;
+    let second = cri_inspect_identity(&second_inspect, &candidate.inherited_labels)
+        .map_err(RuntimeInventoryScanError::inventory_invalid_with_category)?;
+    let second_start_time = process_start_time_ticks(proc_root, second.pid).map_err(|_| {
+        RuntimeInventoryScanError::inventory_invalid_with_category(
+            RuntimeInventoryInvalidCategory::ProcStart,
+        )
+    })?;
+    let second_cgroup =
+        cgroup_identity_from_cri_inspect(&second_inspect, second.pid, proc_root, cgroup_root)
+            .map_err(RuntimeInventoryScanError::inventory_invalid_with_category)?;
+    if first != second || first_start_time != second_start_time || first_cgroup != second_cgroup {
+        return Err(RuntimeInventoryScanError::inventory_invalid_with_category(
+            RuntimeInventoryInvalidCategory::DoubleInspect,
+        ));
+    }
+
+    let binding = RuntimeBinding {
+        agent_run_id: first.agent_run_id,
+        identity: RuntimeWorkloadIdentity {
+            adapter,
+            workload_id: format!(
+                "{}/{}",
+                container_runtime_identity_domain(adapter),
+                first.container_id
+            ),
+            start_marker: first.start_marker,
+            host_boot_id: host_boot_id.to_string(),
+            init_process_start_time_ticks: first_start_time,
+            cgroup: first_cgroup,
+        },
+        runtime_handler: first.runtime_handler,
+    };
+    binding.validate().map_err(|_| {
+        RuntimeInventoryScanError::inventory_invalid_with_category(
+            RuntimeInventoryInvalidCategory::BindingValidation,
+        )
+    })?;
+    Ok(binding)
+}
+
+fn cri_inspect_identity(
+    inspect: &Value,
+    inherited_labels: &BTreeMap<String, String>,
+) -> Result<CriInspectIdentity, RuntimeInventoryInvalidCategory> {
+    let state = string_field(inspect, &["status", "state"])
+        .ok_or(RuntimeInventoryInvalidCategory::InspectShape)?;
+    if state != "CONTAINER_RUNNING" {
+        return Err(RuntimeInventoryInvalidCategory::InspectState);
+    }
+    let mut labels = string_map_field(inspect, &["status", "labels"], "CRI status.labels")
+        .map_err(|_| RuntimeInventoryInvalidCategory::InspectLabel)?;
+    for (key, value) in inherited_labels {
+        labels.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+    let agent_run_id = labels
+        .get(APOLYSIS_SESSION_LABEL)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|agent_run_id| !agent_run_id.is_empty())
+        .ok_or(RuntimeInventoryInvalidCategory::InspectLabel)?;
+    Ok(CriInspectIdentity {
+        container_id: string_field(inspect, &["status", "id"])
+            .ok_or(RuntimeInventoryInvalidCategory::InspectShape)?,
+        agent_run_id: agent_run_id.to_string(),
+        pid: containerd_pid_from_cri_inspect(inspect)
+            .map_err(|_| RuntimeInventoryInvalidCategory::InspectPid)?,
+        start_marker: runtime_start_marker(inspect, &["status", "startedAt"])
+            .ok_or(RuntimeInventoryInvalidCategory::InspectStartMarker)?,
+        runtime_handler: string_field(inspect, &["info", "runtimeType"])
+            .or_else(|| string_field(inspect, &["status", "image", "runtimeHandler"])),
+    })
+}
+
+fn container_runtime_identity_domain(adapter: AdapterKind) -> &'static str {
+    match adapter {
+        AdapterKind::Containerd => "containerd",
+        AdapterKind::K3sContainerd => "k3s_containerd",
+        AdapterKind::Docker | AdapterKind::Kubernetes => unreachable!("validated CRI adapter"),
+    }
+}
+
+fn runtime_start_marker(value: &Value, path: &[&str]) -> Option<String> {
+    let mut value = value;
+    for segment in path {
+        value = value.get(segment)?;
+    }
+    match value {
+        Value::String(value) => canonical_positive_decimal(value)
+            .or_else(|| canonical_cri_rfc3339_to_unix_nanos(value).map(|value| value.to_string())),
+        Value::Number(value) => value
+            .as_u64()
+            .filter(|value| *value > 0)
+            .map(|value| value.to_string()),
+        _ => None,
+    }
+}
+
+fn canonical_positive_decimal(value: &str) -> Option<String> {
+    let value = value.trim();
+    validate_cri_start_marker(value).ok()?;
+    Some(value.to_string())
+}
+
+fn cgroup_identity_from_cri_inspect(
+    inspect: &Value,
+    pid: u32,
+    proc_root: &Path,
+    cgroup_root: &Path,
+) -> Result<CgroupIdentity, RuntimeInventoryInvalidCategory> {
+    let Some(cgroups_path) =
+        string_field(inspect, &["info", "runtimeSpec", "linux", "cgroupsPath"])
+    else {
+        return cgroup_identity_from_pid_for_inventory(pid, proc_root, cgroup_root);
+    };
+    let relative = safe_relative_cgroup_path_from_cri(&cgroups_path)
+        .map_err(|_| RuntimeInventoryInvalidCategory::CgroupPath)?;
+    cgroup_identity_from_relative_path(
+        relative
+            .to_str()
+            .ok_or(RuntimeInventoryInvalidCategory::CgroupPath)?,
+        cgroup_root,
+    )
+    .map_err(|_| RuntimeInventoryInvalidCategory::CgroupIdentity)
+}
+
+fn cgroup_identity_from_pid_for_inventory(
+    pid: u32,
+    proc_root: &Path,
+    cgroup_root: &Path,
+) -> Result<CgroupIdentity, RuntimeInventoryInvalidCategory> {
+    let proc_cgroup_path = proc_root.join(pid.to_string()).join("cgroup");
+    let proc_cgroup = std::fs::read_to_string(proc_cgroup_path)
+        .map_err(|_| RuntimeInventoryInvalidCategory::CgroupPath)?;
+    let relative = proc_cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or(RuntimeInventoryInvalidCategory::CgroupPath)?;
+    cgroup_identity_from_relative_path(relative, cgroup_root)
+        .map_err(|_| RuntimeInventoryInvalidCategory::CgroupIdentity)
+}
+
+fn safe_relative_cgroup_path_from_cri(cgroups_path: &str) -> Result<PathBuf, String> {
+    if cgroups_path.contains('/') {
+        reject_parent_cgroup_components(cgroups_path)?;
+    }
+    relative_cgroup_path_from_cri_cgroups_path(cgroups_path)
+}
+
+fn reject_parent_cgroup_components(path: &str) -> Result<(), String> {
+    if Path::new(path)
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err("cgroup path must not contain a parent component".to_string());
+    }
+    Ok(())
+}
+
 impl RuntimeAdapterBackend for ContainerdCriRuntimeAdapter {
     fn kind(&self) -> AdapterKind {
         self.adapter
@@ -1123,6 +2376,24 @@ impl RuntimeAdapterBackend for ContainerdCriRuntimeAdapter {
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeWorkload>, String>> + Send + '_>> {
         Box::pin(self.next_cri_workload())
+    }
+}
+
+impl RuntimeInventoryAdapter for ContainerdCriRuntimeAdapter {
+    fn kind(&self) -> AdapterKind {
+        self.adapter
+    }
+
+    fn scan_interval(&self) -> Duration {
+        self.scan_interval
+    }
+
+    fn scan_inventory(
+        &self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<RuntimeInventory, RuntimeInventoryScanError>> + Send + '_>,
+    > {
+        Box::pin(ContainerdCriRuntimeAdapter::scan_inventory_typed(self))
     }
 }
 

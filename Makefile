@@ -1,7 +1,7 @@
 .PHONY: build test lint clean build-ebpf build-release-verifier test-live quickstart test-quickstart \
 	test-local-agent-command-attribution test-qualification \
 	test-release-artifacts verify-release-artifacts test-local-daemon-live-gate-contract \
-	qualify-local-daemon-systemd \
+	qualify-runtime-binding-live qualify-private-containerd-live qualify-local-daemon-systemd \
 	qualify-local-daemon-install qualify-live
 
 build: build-ebpf
@@ -27,7 +27,7 @@ test-live: build-ebpf
 	./scripts/test-live-observer.sh
 
 # Zero-privilege trial: run the intent/side-effect accountability flow on the
-# bundled Codex mismatch fixture (no root, no eBPF). See docs/quickstart.md.
+# bundled Codex mismatch fixture (no root, no eBPF). See README.md.
 quickstart:
 	@mkdir -p target/quickstart
 	@cargo run -q -p apolysis-cli -- intent ingest \
@@ -61,6 +61,16 @@ verify-release-artifacts: build-release-verifier
 # Zero-privilege safety contract for the two opt-in local daemon live gates.
 test-local-daemon-live-gate-contract:
 	bash ./scripts/test-local-daemon-live-gate-contract.sh
+
+# Explicit, privileged and non-CI. Builds as the checkout owner, publishes a
+# verified root-owned test-binary copy, and runs one exact Docker/eBPF gate.
+qualify-runtime-binding-live:
+	APOLYSIS_LIVE_DOCKER_EBPF=1 ./scripts/run-runtime-binding-live.sh
+
+# Explicit, privileged and non-CI. Creates an isolated private containerd/CRI
+# runtime and never restarts or reconfigures the host's shared runtime or CNI.
+qualify-private-containerd-live:
+	APOLYSIS_PRIVATE_CONTAINERD_LIVE=1 ./scripts/run-private-containerd-live.sh
 
 # Explicit, privileged and non-CI. Uses transient systemd units and one bounded
 # temporary state root; it never installs into /usr/local or /var/lib/apolysis.

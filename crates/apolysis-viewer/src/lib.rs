@@ -215,6 +215,56 @@ mod tests {
     }
 
     #[test]
+    fn runtime_binding_finding_links_to_its_observed_binding_evidence() {
+        let mut record = reviewable_record();
+        let workload_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        record["runtime_bindings"] = json!([{
+            "source_ordinal": 3,
+            "record_type": "runtime_binding_observed",
+            "schema_version": 1,
+            "agent_run_id": "run-viewer-unit",
+            "adapter": "docker",
+            "workload_id": workload_id,
+            "start_marker": "2026-08-11T01:02:03.000000000Z",
+            "host_boot_id": "82b46386-b87a-4d86-93f6-232bb04c37fb",
+            "init_process_start_time_ticks": 123,
+            "cgroup_device": 7,
+            "cgroup_id": 909,
+            "runtime_handler": "runc",
+        }]);
+        record["collector_lifecycle"][1]["source_ordinal"] = json!(5);
+        record["findings"][0] = json!({
+            "source_ordinal": 4,
+            "schema_version": 1,
+            "kind": "missing_intent",
+            "decision": "review",
+            "reason": "observed side effect has no matching declared intent",
+            "evidence_ref": format!("runtime_binding:{workload_id}"),
+            "runtime": {
+                "runtime": "docker",
+                "container_id": workload_id,
+                "pod_uid": null,
+                "cgroup_id": 909,
+            },
+            "evidence_boundary": "host_boundary",
+        });
+        record["summary"]["finding_kind_counts"] = json!({"missing_intent": 1});
+
+        let html = render_agent_observation_record_v1(
+            &serde_json::to_vec(&record).expect("serialize runtime binding record"),
+        )
+        .expect("render runtime binding evidence");
+        let html = std::str::from_utf8(html.as_ref()).expect("viewer output is utf-8");
+
+        assert!(html.contains("data-panel=\"runtime-bindings\""));
+        assert!(html.contains("id=\"runtime-binding-3\""));
+        assert!(html.contains("data-evidence-target=\"runtime-binding-3\""));
+        assert!(html.contains("data-evidence-panel=\"runtime-bindings\""));
+        assert!(html.contains(workload_id));
+        assert!(!html.contains("Evidence reference is unresolved in this record."));
+    }
+
+    #[test]
     fn renderer_rejects_non_v1_and_trailing_payloads_with_payload_free_errors() {
         let mut record = reviewable_record();
         record["record_type"] = json!("APOLYSIS_SECRET_OTHER_RECORD");
@@ -301,6 +351,7 @@ mod tests {
                 "parent_process_generation": 3,
                 "parent_exec_generation": 1
             }],
+            "runtime_bindings": [],
             "collector_lifecycle": [{
                 "source_ordinal": 1,
                 "schema_version": 1,

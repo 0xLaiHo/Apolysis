@@ -13,7 +13,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 const TAR_BLOCK_BYTES: usize = 512;
-const README_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const DOCUMENTATION_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const USERSPACE_METADATA_BYTES: usize = 1024 * 1024;
 
 pub(crate) struct ObservedArtifact {
@@ -294,7 +294,7 @@ fn expected_files(package_base: &str) -> Result<BTreeMap<String, MemberContract>
         (
             format!("{package_base}/README.md"),
             MemberContract {
-                maximum_bytes: README_MAX_BYTES,
+                maximum_bytes: DOCUMENTATION_MAX_BYTES,
                 expected_mode: 0o644,
                 metadata_limit: 0,
                 capture_content: false,
@@ -304,7 +304,7 @@ fn expected_files(package_base: &str) -> Result<BTreeMap<String, MemberContract>
         (
             format!("{package_base}/README.zh-CN.md"),
             MemberContract {
-                maximum_bytes: README_MAX_BYTES,
+                maximum_bytes: DOCUMENTATION_MAX_BYTES,
                 expected_mode: 0o644,
                 metadata_limit: 0,
                 capture_content: false,
@@ -312,9 +312,19 @@ fn expected_files(package_base: &str) -> Result<BTreeMap<String, MemberContract>
             },
         ),
         (
-            format!("{package_base}/docs/jsonl-schema-v1.md"),
+            format!("{package_base}/docs/design.md"),
             MemberContract {
-                maximum_bytes: README_MAX_BYTES,
+                maximum_bytes: DOCUMENTATION_MAX_BYTES,
+                expected_mode: 0o644,
+                metadata_limit: 0,
+                capture_content: false,
+                artifact: false,
+            },
+        ),
+        (
+            format!("{package_base}/docs/design.zh-CN.md"),
+            MemberContract {
+                maximum_bytes: DOCUMENTATION_MAX_BYTES,
                 expected_mode: 0o644,
                 metadata_limit: 0,
                 capture_content: false,

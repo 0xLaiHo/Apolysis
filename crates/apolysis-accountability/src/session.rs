@@ -312,6 +312,47 @@ impl SessionRegistry {
         Ok(AssociationOutcome::MissingIntent)
     }
 
+    /// Retire one exact Agent Run/cgroup association before the numeric cgroup
+    /// identity can be assigned to another runtime workload.
+    ///
+    /// The operation is idempotent when the cgroup is already unowned, but it
+    /// fails closed when another Agent Run owns the cgroup.
+    pub fn retire_cgroup(
+        &mut self,
+        session_id: &str,
+        cgroup_id: u64,
+    ) -> Result<bool, RegistryError> {
+        match self.cgroup_index.get(&cgroup_id) {
+            Some(owner) if owner != session_id => {
+                return Err(RegistryError::CgroupAlreadyAssigned {
+                    cgroup_id,
+                    session_id: owner.clone(),
+                });
+            }
+            Some(_) => {}
+            None => return Ok(false),
+        }
+
+        self.cgroup_index.remove(&cgroup_id);
+        if let Some(state) = self.sessions.get_mut(session_id) {
+            state.cgroup_ids.retain(|candidate| *candidate != cgroup_id);
+        }
+        if let Some(state) = self.closed_agent_runs.get_mut(session_id) {
+            state.cgroup_ids.retain(|candidate| *candidate != cgroup_id);
+        }
+        if let Some(cgroups) = self.pending.get_mut(session_id) {
+            let previous_len = cgroups.len();
+            cgroups.retain(|candidate| *candidate != cgroup_id);
+            self.pending_count = self
+                .pending_count
+                .saturating_sub(previous_len.saturating_sub(cgroups.len()));
+            if cgroups.is_empty() {
+                self.pending.remove(session_id);
+            }
+        }
+        Ok(true)
+    }
+
     pub fn get(&self, session_id: &str) -> Option<&SessionState> {
         self.sessions
             .get(session_id)

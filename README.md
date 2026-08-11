@@ -2,7 +2,7 @@
 
 [![Release Validation](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml/badge.svg)](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml)
 [![Latest Release](https://img.shields.io/github/v/release/0xLaiHo/Apolysis?sort=semver)](https://github.com/0xLaiHo/Apolysis/releases)
-[![License](https://img.shields.io/github/license/0xLaiHo/Apolysis)](LICENSE)
+[![License](https://img.shields.io/github/license/0xLaiHo/Apolysis)](https://github.com/0xLaiHo/Apolysis/blob/main/LICENSE)
 
 [English](README.md) | [Simplified Chinese](README.zh-CN.md)
 
@@ -18,11 +18,14 @@ cross-provider evidence platform. Apolysis is not an Agent orchestrator,
 sandbox, policy-enforcement engine, MCP gateway, SIEM, or multi-tenant evidence
 SaaS.
 
-![Apolysis live eBPF audit: the declared Agent workload is matched and an undeclared credential-path access attempt is marked missing_intent; credential paths are redacted in the timeline](docs/assets/codex-live-demo/live-ebpf-demo.gif)
+![Apolysis live eBPF audit: the declared Agent workload is matched and an undeclared credential-path access attempt is marked missing_intent; credential paths are redacted in the timeline](https://raw.githubusercontent.com/0xLaiHo/Apolysis/main/docs/assets/codex-live-demo/live-ebpf-demo.gif)
 
-Demo assets: [live asciinema cast](docs/assets/codex-live-demo/live-ebpf-demo.cast),
-[unprivileged quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast),
-and [public evidence excerpt](docs/codex-live-demo-public-assets.md).
+Demo assets: [live asciinema cast](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/live-ebpf-demo.cast),
+[unprivileged quickstart cast](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/codex-live-demo.cast),
+the [public summary](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/summary.json), and the
+[redacted evidence excerpt](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/evidence-excerpt.jsonl).
+Raw live timelines are not committed; public assets are curated, bounded, and
+redacted before publication.
 
 ## Five-minute unprivileged tour
 
@@ -31,9 +34,10 @@ make build && make quickstart
 ```
 
 The quickstart runs the observation and optional declared-intent comparison
-against packaged fixtures. It does not require root or eBPF and is intended to
-show the current record and investigation experience. See
-[Quickstart](docs/quickstart.md).
+against packaged fixtures. It does not require root or eBPF. The fixture shows
+one declared action matched to an observation and one undeclared credential
+read reported as `missing_intent`; it writes generated output only below
+`target/quickstart/`.
 
 ## Product question
 
@@ -81,8 +85,10 @@ an exact one.
   explicit late-attach Collection Boundary.
 - Existing-process admission qualifies the current root; exact in-run event
   identity begins after activation.
-- Runtime metadata correlation for local, Docker/containerd, and Kubernetes
-  prototypes.
+- Qualified Docker/containerd runtime binding and bounded source recovery from
+  stable, complete inventories. The exact identity, transition, and gap
+  contracts are defined in the design document.
+- Kubernetes metadata correlation remains a bounded beta target.
 - Content-off persistence for exec arguments and process commands, with
   credential and network redaction.
 - Ordered JSONL output, rotation, optional local hash-chain envelopes, and
@@ -136,7 +142,7 @@ deferred beyond the bounded beta.
 | Local Linux Agent CLI | First stable workflow |
 | Docker/containerd on operator-controlled Linux | Stable target after local collector correctness |
 | Kubernetes node and Pod attribution | Bounded beta after container identity is stable |
-| Linux self-hosted CI runner | Supported through the CLI managed-run boundary; no maintained composite Action |
+| Linux self-hosted CI runner | CLI managed-run path only; no maintained composite Action |
 | macOS, Windows, or vendor-managed Agent runtime | Unsupported for eBPF runtime observation |
 
 ## Current repository state
@@ -158,21 +164,24 @@ central query service, or a change to the experimental support status.
 
 The local daemon operations direction now includes a manifest-verified Linux
 bundle and a bounded, state-preserving host lifecycle. Its detailed filesystem,
-recovery, and qualification contracts live in the design and beta
-qualification documents; this work does not change the experimental support
-status by itself.
+recovery, and qualification contracts live in the design; this work does not
+change the experimental support status by itself.
+
+The D1/D2 runtime-binding implementation, deterministic contracts, and retained
+non-destructive qualification are complete for both Docker and an independently
+isolated private standalone containerd runtime. The evidence remains
+profile-specific: it does not extend Docker claims to containerd or either
+runtime's claims to Kubernetes. Destructive runtime-service restart, K1/VKE,
+and release qualification remain open. None of these results promotes a
+profile.
 
 The scope reset is a roadmap decision, not a retroactive production claim.
 Apolysis remains experimental until the supported collector, attribution,
 failure, performance, and privacy paths pass their new bounded beta gates.
-The first qualification contract now names Linux 6.12/x86_64 native host as a
-Candidate only; no environment is yet Supported and numeric performance
-budgets remain evidence-gated. Versioned content-free synthetic workloads and
-an explicit paired collector-off/on path now retain monotonic latency, isolated
-collector resource samples, phase-scoped burst loss, and pair-bootstrap
-summaries, but their outputs do not grant support without retained privileged
-evidence and reviewed numeric budgets. See the
-[Beta qualification envelope](docs/qualification-envelope.md).
+The qualification contract names Linux 6.12/x86_64 native host as Candidate;
+no environment is yet Supported, while container and Kubernetes profiles
+remain Experimental. The exact machine-readable authority and promotion rules
+are described in the [design](docs/design.md).
 
 ## Build and test
 
@@ -213,6 +222,17 @@ Render that record as an offline Saved Run Viewer without root access:
   --output .apolysis/codex-live/saved-run-view.html
 ```
 
+Verify a copied hash-chain timeline without modifying it:
+
+```bash
+./target/debug/apolysis verify hash-chain \
+  --input /var/lib/apolysis/sessions/<agent-run-id>/timeline.jsonl \
+  --output target/hash-chain-verification.json
+```
+
+Exit `0` is valid, `1` is a written failed-verification report, and `2` means
+the command could not run.
+
 ## Live managed Agent example
 
 ```bash
@@ -234,23 +254,32 @@ third-party workload behavior still require a documented threat model.
 
 1. Keep the active workspace bounded to eBPF collection, Observation Scope,
    attribution, local storage, daemon, CLI, and operator investigation.
-2. Qualify collector lifecycle, health/gap reporting, and the local Agent Run
-   investigation workflow, including bounded local daemon operations, while
-   preserving outcome-aware semantics and stable in-run runtime identity.
-3. Qualify container attribution and then a bounded Kubernetes beta before
-   considering any central platform expansion.
+2. Validate least-privilege K1 node/Pod attribution on the designated,
+   runtime- and network-ready VKE test cluster as an explicitly bounded beta.
+3. Keep destructive runtime-service restart qualification separate and prepare
+   a release without extending Docker evidence to containerd or Kubernetes.
+4. Promote a release only after applicable kernel, runtime, privacy,
+   performance, packaging, cleanup, and no-silent-gap gates pass.
+
+## Contributing
+
+Use a focused branch and submit changes through the repository's integration
+Pull Request workflow. Follow the checked-in automation and Pull Request
+template for the applicable validation and operational disclosures. Never
+commit secrets, kubeconfigs, signing material, private captures, generated
+timelines, or local release artifacts.
+
+## Security reporting
+
+Apolysis is observability, not a sandbox or independent attestation boundary.
+Report vulnerabilities through GitHub private vulnerability reporting. If it
+is unavailable, open only a minimal public notice and do not include exploit
+details, secrets, private logs, paths, argv, socket values, labels, annotations,
+or payloads. Reports should identify the affected commit or release,
+reproduction boundary, required privileges, and impact on confidentiality,
+integrity, availability, or observation accuracy.
 
 ## Documentation
 
-- [Scope decision](docs/adr/0004-focus-on-ebpf-agent-observability.md)
-- [Design](docs/design.md)
-- [Roadmap](docs/roadmap.md)
-- [Bounded Beta qualification plan](docs/beta-qualification-plan.md)
-- [Quickstart](docs/quickstart.md)
-- [JSONL schema](docs/jsonl-schema-v1.md)
-- [Agent Observation Record v1](docs/agent-observation-record-v1.md)
-- [Threat model](docs/threat-model.md)
-- [Visibility validation](docs/visibility-validation.md)
-- [Live demo runbook](docs/codex-live-demo-runbook.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
+- [English design and complete product contract](docs/design.md)
+- [Simplified Chinese design and complete product contract](docs/design.zh-CN.md)

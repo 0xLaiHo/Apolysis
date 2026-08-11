@@ -7,23 +7,628 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use apolysis_accountability::{
-    ActionClass, ComponentState, QueuePriority, ResourceKind, ResourceSelector, SessionIntent,
+    project_agent_run, validate_agent_observation_record_v1, ActionClass, AdapterKind,
+    AgentRunRecordBatch, ComponentState, QueuePriority, ResourceKind, ResourceSelector,
+    SessionIntent,
 };
+use apolysis_core::CollectorCapabilityManifest;
 use apolysis_daemon::{
-    run_observer_runtime, scope_channel, DaemonConfig, DaemonRecord, DaemonState,
-    ObserverRuntimeBackend, ScopeOperation,
+    ingest_observer_batch, run_observer_runtime, scope_channel, CgroupIdentity, DaemonConfig,
+    DaemonRecord, DaemonState, ObserverRuntimeBackend, RuntimeBinding, RuntimeInventory,
+    RuntimeSourceGapReason, RuntimeWorkloadIdentity, ScopeOperation,
 };
 use apolysis_observer::abi::{
     KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN, FLAG_RETURN_VALUE,
     KERNEL_ABI_VERSION, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN, RESOURCE_LEN,
 };
 use apolysis_observer::{
-    DaemonKernelEvent, DaemonObserverBatch, DaemonObserverCounters, FileOperationCounters,
-    NetworkConnectCounters, OperationPairCounters, ScopeGeneration, ScopeObservationGapCounters,
+    audit_observer_capability_manifest, AyaLoaderPlan, DaemonKernelEvent, DaemonObserverBatch,
+    DaemonObserverCounters, FileOperationCounters, LiveScope, NetworkConnectCounters,
+    OperationPairCounters, ScopeGeneration, ScopeObservationGapCounters,
 };
+use apolysis_store::ChainRecord;
 use tokio::sync::oneshot;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[tokio::test]
+async fn runtime_inventory_enriches_kernel_observation_with_verified_container_identity() {
+    let config = config();
+    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
+    state
+        .register(intent("agent-run-container"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .reconcile_runtime_inventory(RuntimeInventory::new(
+            AdapterKind::Docker,
+            vec![RuntimeBinding {
+                agent_run_id: "agent-run-container".to_string(),
+                identity: RuntimeWorkloadIdentity {
+                    adapter: AdapterKind::Docker,
+                    workload_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                    start_marker: "2026-08-11T01:02:03Z".to_string(),
+                    host_boot_id: "82b46386-b87a-4d86-93f6-232bb04c37fb".to_string(),
+                    init_process_start_time_ticks: 42,
+                    cgroup: CgroupIdentity {
+                        device: 7,
+                        inode: 707,
+                    },
+                },
+                runtime_handler: Some("runc".to_string()),
+            }],
+        ))
+        .await
+        .expect("reconcile complete runtime inventory");
+    let pipeline = state.pipeline();
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+
+    let summary = ingest_observer_batch(&state, &pipeline, file_outcome_batch(707))
+        .await
+        .expect("ingest container-scoped kernel observation");
+    assert!(summary.submitted >= 1);
+    pipeline.fence().await.expect("flush observation");
+    writer_shutdown.send(()).expect("stop writer");
+    writer.await.unwrap().expect("drain writer");
+
+    let timeline = timeline(&config, "agent-run-container");
+    assert!(timeline.contains(
+        r#""container_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#
+    ));
+    assert!(timeline.contains(r#""cgroup_id":"707""#));
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn runtime_untrack_drain_keeps_verified_container_identity() {
+    let config = config();
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let backend = FakeBackend {
+        operations: Arc::clone(&operations),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        drain_batch: Some(file_outcome_batch(708)),
+        scoped_counters: BTreeMap::new(),
+    };
+    let (scope, receiver) = scope_channel(2);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+    state
+        .register(intent("agent-run-container-drain"), 1_700_000_000_000)
+        .await
+        .expect("register Agent Run");
+    state
+        .reconcile_runtime_inventory(RuntimeInventory::new(
+            AdapterKind::Docker,
+            vec![RuntimeBinding {
+                agent_run_id: "agent-run-container-drain".to_string(),
+                identity: RuntimeWorkloadIdentity {
+                    adapter: AdapterKind::Docker,
+                    workload_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                    start_marker: "2026-08-11T01:02:03Z".to_string(),
+                    host_boot_id: "82b46386-b87a-4d86-93f6-232bb04c37fb".to_string(),
+                    init_process_start_time_ticks: 42,
+                    cgroup: CgroupIdentity {
+                        device: 7,
+                        inode: 708,
+                    },
+                },
+                runtime_handler: Some("runc".to_string()),
+            }],
+        ))
+        .await
+        .expect("track runtime binding");
+
+    state
+        .reconcile_runtime_inventory(RuntimeInventory::new(AdapterKind::Docker, Vec::new()))
+        .await
+        .expect("retire runtime binding after draining its scope");
+
+    observer_shutdown
+        .send(())
+        .expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("drain writer");
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![(ScopeOperation::Track, 708), (ScopeOperation::Untrack, 708)]
+    );
+    let timeline = timeline(&config, "agent-run-container-drain");
+    assert!(timeline.contains(
+        r#""container_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb""#
+    ));
+
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn pending_runtime_registration_refreshes_intent_without_retracking_or_restarting() {
+    let config = config();
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let (scope, mut receiver) = scope_channel(4);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let pending = RuntimeBinding {
+        agent_run_id: "agent-run-refresh-context".to_string(),
+        identity: RuntimeWorkloadIdentity {
+            adapter: AdapterKind::Docker,
+            workload_id: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                .to_string(),
+            start_marker: "2026-08-11T01:02:03Z".to_string(),
+            host_boot_id: "82b46386-b87a-4d86-93f6-232bb04c37fb".to_string(),
+            init_process_start_time_ticks: 42,
+            cgroup: CgroupIdentity {
+                device: 7,
+                inode: 709,
+            },
+        },
+        runtime_handler: Some("runc".to_string()),
+    };
+    let pending_reconcile = {
+        let state = Arc::clone(&state);
+        let pending = pending.clone();
+        tokio::spawn(async move {
+            state
+                .reconcile_runtime_inventory(RuntimeInventory::new(
+                    AdapterKind::Docker,
+                    vec![pending],
+                ))
+                .await
+        })
+    };
+    let request = receiver.recv().await.expect("pending Track request");
+    assert_eq!(request.operation(), ScopeOperation::Track);
+    assert!(request.agent_intent().is_none());
+    request.complete(Ok(()));
+    pending_reconcile
+        .await
+        .expect("pending reconcile task")
+        .expect("pending reconcile");
+
+    let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(1);
+    let backend = ChannelBackend {
+        operations: Arc::clone(&operations),
+        batches: batch_receiver,
+    };
+    let pipeline = state.pipeline();
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, vec![709], receiver, state, observer_receiver).await
+        })
+    };
+    for _ in 0..100 {
+        if state.health().await.ebpf() == ComponentState::Ready {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(state.health().await.ebpf(), ComponentState::Ready);
+
+    state
+        .register(intent("agent-run-refresh-context"), 1_700_000_000_000)
+        .await
+        .expect("register pending runtime Agent Run");
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![(ScopeOperation::Track, 709)],
+        "context refresh must not call the eBPF backend"
+    );
+    batch_sender
+        .send(file_outcome_batch(709))
+        .await
+        .expect("release post-refresh event");
+    for _ in 0..100 {
+        pipeline.fence().await.expect("flush current observations");
+        if timeline(&config, "agent-run-refresh-context").contains("artifact.txt") {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let durable = timeline(&config, "agent-run-refresh-context");
+    assert!(durable.contains("artifact.txt"));
+    assert_eq!(durable.matches(r#""kind":"missing_intent""#).count(), 1);
+    assert_eq!(durable.matches(r#""state":"started""#).count(), 1);
+
+    observer_shutdown
+        .send(())
+        .expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("drain writer");
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn dynamically_tracked_agent_run_declares_capability_before_start_and_routes_events() {
+    let config = config();
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(1);
+    let backend = ChannelBackend {
+        operations: Arc::clone(&operations),
+        batches: batch_receiver,
+    };
+    let (scope, receiver) = scope_channel(2);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let pipeline = state.pipeline();
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+    for _ in 0..100 {
+        if state.health().await.ebpf() == ComponentState::Ready {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(state.health().await.ebpf(), ComponentState::Ready);
+
+    state
+        .register(
+            intent_with_workspace("agent-run-dynamic-boundary", "/workspace"),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("register dynamic Agent Run");
+    state
+        .discover_cgroup("agent-run-dynamic-boundary", 710)
+        .await
+        .expect("dynamically track Agent Run cgroup");
+    batch_sender
+        .send(file_outcome_batch_for_path(710, "/workspace/dynamic.txt"))
+        .await
+        .expect("release first dynamically scoped event");
+    for _ in 0..100 {
+        pipeline.fence().await.expect("flush dynamic observation");
+        if timeline(&config, "agent-run-dynamic-boundary").contains("/workspace/dynamic.txt") {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    observer_shutdown
+        .send(())
+        .expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("drain writer");
+    let durable = timeline(&config, "agent-run-dynamic-boundary");
+    cleanup(&config);
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![(ScopeOperation::Track, 710), (ScopeOperation::Untrack, 710)]
+    );
+    let capability = durable
+        .find(r#""record_type":"collector_capability_manifest""#)
+        .expect("dynamic Collector Capability manifest");
+    let started = durable
+        .find(r#""state":"started""#)
+        .expect("dynamic collector start");
+    let event = durable
+        .find("/workspace/dynamic.txt")
+        .expect("first dynamically scoped event");
+    assert!(capability < started);
+    assert!(started < event);
+    assert_eq!(
+        durable
+            .matches(r#""record_type":"collector_capability_manifest""#)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn runtime_source_recovery_keeps_one_collector_lifecycle_until_daemon_shutdown() {
+    let config = config();
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let backend = FakeBackend {
+        operations: Arc::clone(&operations),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        drain_batch: None,
+        scoped_counters: BTreeMap::new(),
+    };
+    let (scope, receiver) = scope_channel(4);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+    let agent_run_id = "agent-run-runtime-recovery";
+    state
+        .register(intent(agent_run_id), 1_700_000_000_000)
+        .await
+        .expect("register runtime Agent Run");
+    let binding = runtime_binding(agent_run_id, 711);
+    state
+        .reconcile_runtime_inventory(RuntimeInventory::new(
+            AdapterKind::Docker,
+            vec![binding.clone()],
+        ))
+        .await
+        .expect("attach runtime scope");
+    state
+        .runtime_source_unavailable(
+            AdapterKind::Docker,
+            RuntimeSourceGapReason::SocketUnavailable,
+        )
+        .await
+        .expect("suspend runtime scope during source outage");
+    state
+        .reconcile_runtime_inventory(RuntimeInventory::new(AdapterKind::Docker, vec![binding]))
+        .await
+        .expect("reattach runtime scope after source recovery");
+
+    observer_shutdown
+        .send(())
+        .expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("drain writer");
+
+    let durable = timeline(&config, agent_run_id);
+    assert_eq!(
+        durable
+            .matches(r#""record_type":"collector_capability_manifest""#)
+            .count(),
+        1
+    );
+    assert_eq!(durable.matches(r#""state":"started""#).count(), 1);
+    assert_eq!(
+        durable
+            .matches(r#""stop_reason":"agent_run_closed""#)
+            .count(),
+        0
+    );
+    assert_eq!(
+        durable
+            .matches(r#""stop_reason":"daemon_shutdown""#)
+            .count(),
+        1
+    );
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![
+            (ScopeOperation::Track, 711),
+            (ScopeOperation::Untrack, 711),
+            (ScopeOperation::Track, 711),
+            (ScopeOperation::Untrack, 711),
+        ]
+    );
+    let projected = project_agent_run([AgentRunRecordBatch::verified_hash_chain(
+        timeline_payloads(&durable),
+    )])
+    .expect("source recovery timeline must have a valid collector lifecycle");
+    validate_agent_observation_record_v1(&projected)
+        .expect("source recovery Agent Observation Record must remain valid");
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn daemon_shutdown_terminates_a_started_run_with_no_current_scope() {
+    let config = config();
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let backend = FakeBackend {
+        operations: Arc::clone(&operations),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        drain_batch: None,
+        scoped_counters: BTreeMap::new(),
+    };
+    let (scope, receiver) = scope_channel(4);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+    let agent_run_id = "agent-run-zero-scope-shutdown";
+    state
+        .register(intent(agent_run_id), 1_700_000_000_000)
+        .await
+        .expect("register runtime Agent Run");
+    state
+        .reconcile_runtime_inventory(RuntimeInventory::new(
+            AdapterKind::Docker,
+            vec![runtime_binding(agent_run_id, 712)],
+        ))
+        .await
+        .expect("attach runtime scope");
+    state
+        .runtime_source_unavailable(
+            AdapterKind::Docker,
+            RuntimeSourceGapReason::SocketUnavailable,
+        )
+        .await
+        .expect("drain final recoverable scope");
+
+    observer_shutdown
+        .send(())
+        .expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("drain writer");
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![(ScopeOperation::Track, 712), (ScopeOperation::Untrack, 712)]
+    );
+    let durable = timeline(&config, agent_run_id);
+    assert_eq!(durable.matches(r#""state":"started""#).count(), 1);
+    assert_eq!(
+        durable
+            .matches(r#""stop_reason":"agent_run_closed""#)
+            .count(),
+        0
+    );
+    assert_eq!(
+        durable
+            .matches(r#""stop_reason":"daemon_shutdown""#)
+            .count(),
+        1
+    );
+    let projected = project_agent_run([AgentRunRecordBatch::verified_hash_chain(
+        timeline_payloads(&durable),
+    )])
+    .expect("zero-scope shutdown timeline must have a valid collector lifecycle");
+    validate_agent_observation_record_v1(&projected)
+        .expect("zero-scope shutdown Agent Observation Record must remain valid");
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn explicit_close_terminates_a_started_run_after_recoverable_scope_drain() {
+    let config = config();
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let backend = FakeBackend {
+        operations: Arc::clone(&operations),
+        fail_counters: false,
+        fail_track: None,
+        fail_untrack: None,
+        batch: None,
+        drain_batch: None,
+        scoped_counters: BTreeMap::new(),
+    };
+    let (scope, receiver) = scope_channel(4);
+    let state = Arc::new(
+        DaemonState::new_with_scope(&config, Some(scope)).expect("daemon state with scope"),
+    );
+    let (writer_shutdown, writer_receiver) = oneshot::channel();
+    let writer = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move { state.run_writer(writer_receiver).await })
+    };
+    let (observer_shutdown, observer_receiver) = oneshot::channel();
+    let runtime = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            run_observer_runtime(backend, Vec::new(), receiver, state, observer_receiver).await
+        })
+    };
+    let agent_run_id = "agent-run-zero-scope-close";
+    state
+        .register(intent(agent_run_id), 1_700_000_000_000)
+        .await
+        .expect("register runtime Agent Run");
+    state
+        .reconcile_runtime_inventory(RuntimeInventory::new(
+            AdapterKind::Docker,
+            vec![runtime_binding(agent_run_id, 713)],
+        ))
+        .await
+        .expect("attach runtime scope");
+    state
+        .runtime_source_unavailable(
+            AdapterKind::Docker,
+            RuntimeSourceGapReason::SocketUnavailable,
+        )
+        .await
+        .expect("drain final recoverable scope");
+    state
+        .close(agent_run_id)
+        .await
+        .expect("explicitly close zero-scope Agent Run");
+
+    observer_shutdown
+        .send(())
+        .expect("request observer shutdown");
+    runtime.await.unwrap().expect("clean observer shutdown");
+    writer_shutdown.send(()).expect("request writer shutdown");
+    writer.await.unwrap().expect("drain writer");
+
+    assert_eq!(
+        *operations.lock().unwrap(),
+        vec![(ScopeOperation::Track, 713), (ScopeOperation::Untrack, 713)]
+    );
+    let durable = timeline(&config, agent_run_id);
+    assert_eq!(durable.matches(r#""state":"started""#).count(), 1);
+    assert_eq!(
+        durable
+            .matches(r#""stop_reason":"agent_run_closed""#)
+            .count(),
+        1
+    );
+    assert_eq!(
+        durable.matches(r#""record_type":"session_closed""#).count(),
+        1
+    );
+    assert_eq!(
+        durable
+            .matches(r#""stop_reason":"daemon_shutdown""#)
+            .count(),
+        0
+    );
+    let projected = project_agent_run([AgentRunRecordBatch::verified_hash_chain(
+        timeline_payloads(&durable),
+    )])
+    .expect("zero-scope close timeline must have a valid collector lifecycle");
+    validate_agent_observation_record_v1(&projected)
+        .expect("zero-scope closed Agent Observation Record must remain valid");
+    cleanup(&config);
+}
 
 #[tokio::test]
 async fn observer_runtime_processes_scope_commands_and_reports_final_counters() {
@@ -472,14 +1077,20 @@ async fn observer_shutdown_persists_file_gaps_to_the_owning_agent_runs() {
     assert!(timeline_a.contains(r#""outcome":"succeeded""#));
     assert!(timeline_a.contains(r#""kind":"missing_entry""#));
     assert!(timeline_a.contains(r#""count":2"#));
-    assert!(!timeline_a.contains("file_rename"));
+    assert!(!timeline_a.lines().any(|line| {
+        line.contains(r#""record_type":"observation_gap""#)
+            && line.contains(r#""operation":"file_rename""#)
+    }));
     assert!(!timeline_a.contains("agent-run-file-b"));
 
     let timeline_b = timeline(&config, "agent-run-file-b");
     assert!(timeline_b.contains(r#""operation":"file_rename""#));
     assert!(timeline_b.contains(r#""kind":"missing_exit""#));
     assert!(timeline_b.contains(r#""count":3"#));
-    assert!(!timeline_b.contains("file_open"));
+    assert!(!timeline_b.lines().any(|line| {
+        line.contains(r#""record_type":"observation_gap""#)
+            && line.contains(r#""operation":"file_open""#)
+    }));
     assert!(!timeline_b.contains("agent-run-file-a"));
 
     cleanup(&config);
@@ -821,7 +1432,18 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
     let lifecycle_terminal_index = timeline_after_close
         .find(r#""state":"stopped""#)
         .expect("collector terminal is durable before close returns");
-    assert!(timeline_after_close.contains(r#""stop_reason":"agent_run_closed""#));
+    assert_eq!(
+        timeline_after_close
+            .matches(r#""stop_reason":"agent_run_closed""#)
+            .count(),
+        1
+    );
+    assert_eq!(
+        timeline_after_close
+            .matches(r#""record_type":"session_closed""#)
+            .count(),
+        1
+    );
     assert!(outcome_index < lifecycle_terminal_index);
     assert!(process_index < lifecycle_terminal_index);
     assert!(gap_index < lifecycle_terminal_index);
@@ -843,6 +1465,12 @@ async fn closing_an_agent_run_persists_its_scoped_gap_without_deadlock() {
     let timeline = timeline(&config, "agent-run-close");
     assert!(timeline.contains(r#""record_type":"observation_gap""#));
     assert!(timeline.contains(r#""agent_run_id":"agent-run-close""#));
+    let projected = project_agent_run([AgentRunRecordBatch::verified_hash_chain(
+        timeline_payloads(&timeline),
+    )])
+    .expect("closed Agent Run timeline must have a valid collector lifecycle");
+    validate_agent_observation_record_v1(&projected)
+        .expect("closed Agent Observation Record must remain valid");
     assert!(timeline.contains(r#""operation":"file_open""#));
     assert!(timeline.contains(r#""kind":"missing_entry""#));
     assert!(timeline.contains(r#""count":1"#));
@@ -1230,6 +1858,11 @@ struct FakeBackend {
     scoped_counters: BTreeMap<u64, ScopeObservationGapCounters>,
 }
 
+struct ChannelBackend {
+    operations: Arc<Mutex<Vec<(ScopeOperation, u64)>>>,
+    batches: tokio::sync::mpsc::Receiver<DaemonObserverBatch>,
+}
+
 struct ReuseBackend {
     operations: Arc<Mutex<Vec<(ScopeOperation, u64)>>>,
     stale_batch: Option<DaemonObserverBatch>,
@@ -1240,6 +1873,14 @@ struct CheckpointFailureBackend {
 }
 
 impl ObserverRuntimeBackend for CheckpointFailureBackend {
+    fn capability_manifest(
+        &self,
+        agent_run_id: &str,
+        cgroup_id: u64,
+    ) -> CollectorCapabilityManifest {
+        test_capability_manifest(agent_run_id, cgroup_id)
+    }
+
     fn track_cgroup(&mut self, _cgroup_id: u64) -> Result<ScopeGeneration, String> {
         ScopeGeneration::new(1)
     }
@@ -1284,7 +1925,64 @@ impl ObserverRuntimeBackend for CheckpointFailureBackend {
     }
 }
 
+impl ObserverRuntimeBackend for ChannelBackend {
+    fn capability_manifest(
+        &self,
+        agent_run_id: &str,
+        cgroup_id: u64,
+    ) -> CollectorCapabilityManifest {
+        test_capability_manifest(agent_run_id, cgroup_id)
+    }
+
+    fn track_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeGeneration, String> {
+        self.operations
+            .lock()
+            .unwrap()
+            .push((ScopeOperation::Track, cgroup_id));
+        ScopeGeneration::new(1)
+    }
+
+    fn untrack_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
+        self.operations
+            .lock()
+            .unwrap()
+            .push((ScopeOperation::Untrack, cgroup_id));
+        Ok(ScopeObservationGapCounters::default())
+    }
+
+    fn scope_counters(&mut self, _cgroup_id: u64) -> Result<ScopeObservationGapCounters, String> {
+        Ok(ScopeObservationGapCounters::default())
+    }
+
+    fn drain_batch(&mut self) -> Result<DaemonObserverBatch, String> {
+        Ok(DaemonObserverBatch::default())
+    }
+
+    fn read_batch(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<DaemonObserverBatch, String>> + Send + '_>> {
+        Box::pin(async move {
+            self.batches
+                .recv()
+                .await
+                .ok_or_else(|| "test batch channel closed".to_string())
+        })
+    }
+
+    fn counters(&mut self) -> Result<DaemonObserverCounters, String> {
+        Ok(DaemonObserverCounters::default())
+    }
+}
+
 impl ObserverRuntimeBackend for ReuseBackend {
+    fn capability_manifest(
+        &self,
+        agent_run_id: &str,
+        cgroup_id: u64,
+    ) -> CollectorCapabilityManifest {
+        test_capability_manifest(agent_run_id, cgroup_id)
+    }
+
     fn track_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeGeneration, String> {
         let mut operations = self.operations.lock().unwrap();
         let generation = operations
@@ -1337,6 +2035,14 @@ impl ObserverRuntimeBackend for ReuseBackend {
 }
 
 impl ObserverRuntimeBackend for FakeBackend {
+    fn capability_manifest(
+        &self,
+        agent_run_id: &str,
+        cgroup_id: u64,
+    ) -> CollectorCapabilityManifest {
+        test_capability_manifest(agent_run_id, cgroup_id)
+    }
+
     fn track_cgroup(&mut self, cgroup_id: u64) -> Result<ScopeGeneration, String> {
         let mut operations = self.operations.lock().unwrap();
         let generation = operations
@@ -1396,6 +2102,44 @@ impl ObserverRuntimeBackend for FakeBackend {
             ..DaemonObserverCounters::default()
         })
     }
+}
+
+fn test_capability_manifest(agent_run_id: &str, cgroup_id: u64) -> CollectorCapabilityManifest {
+    audit_observer_capability_manifest(
+        agent_run_id,
+        &LiveScope::Cgroup(cgroup_id),
+        &AyaLoaderPlan::audit_observer_default("test-observer.o"),
+    )
+}
+
+fn runtime_binding(agent_run_id: &str, cgroup_id: u64) -> RuntimeBinding {
+    RuntimeBinding {
+        agent_run_id: agent_run_id.to_string(),
+        identity: RuntimeWorkloadIdentity {
+            adapter: AdapterKind::Docker,
+            workload_id: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                .to_string(),
+            start_marker: "2026-08-11T01:02:03Z".to_string(),
+            host_boot_id: "82b46386-b87a-4d86-93f6-232bb04c37fb".to_string(),
+            init_process_start_time_ticks: 42,
+            cgroup: CgroupIdentity {
+                device: 7,
+                inode: cgroup_id,
+            },
+        },
+        runtime_handler: Some("runc".to_string()),
+    }
+}
+
+fn timeline_payloads(timeline: &str) -> Vec<serde_json::Value> {
+    timeline
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<ChainRecord>(line)
+                .expect("decode durable hash-chain record")
+                .payload
+        })
+        .collect()
 }
 
 fn intent(agent_run_id: &str) -> SessionIntent {

@@ -10,6 +10,7 @@ use apolysis_core::{
     AUDIT_OBSERVER_COLLECTOR, CGROUP_OBSERVATION_SCOPE, CONTENT_OFF_PRIVACY_PROFILE,
     PROCESS_TREE_OBSERVATION_SCOPE,
 };
+use serde_json::json;
 
 #[test]
 fn shared_schema_vocabulary_keeps_public_strings_stable() {
@@ -33,6 +34,146 @@ fn shared_schema_vocabulary_keeps_public_strings_stable() {
         resources::AGENT_COMMAND_FINGERPRINT,
         "agent-command-fingerprint"
     );
+}
+
+#[test]
+fn runtime_binding_v1_wire_round_trips_the_exact_eleven_field_contract() {
+    use apolysis_core::{
+        RuntimeBindingRecordType, RuntimeBindingRuntimeHandler, RuntimeBindingWireV1,
+        RUNTIME_BINDING_SCHEMA_VERSION,
+    };
+
+    let wire = RuntimeBindingWireV1 {
+        record_type: RuntimeBindingRecordType::Observed,
+        schema_version: RUNTIME_BINDING_SCHEMA_VERSION,
+        agent_run_id: "agent-run-wire".to_string(),
+        adapter: "containerd".to_string(),
+        workload_id: format!("containerd/{}", "a".repeat(64)),
+        start_marker: "1780328100000000007".to_string(),
+        host_boot_id: "12345678-1234-1234-1234-123456789abc".to_string(),
+        init_process_start_time_ticks: 107,
+        cgroup_device: 41,
+        cgroup_id: 43,
+        runtime_handler: RuntimeBindingRuntimeHandler(Some("runc".to_string())),
+    };
+    let expected = json!({
+        "record_type": "runtime_binding_observed",
+        "schema_version": 1,
+        "agent_run_id": "agent-run-wire",
+        "adapter": "containerd",
+        "workload_id": format!("containerd/{}", "a".repeat(64)),
+        "start_marker": "1780328100000000007",
+        "host_boot_id": "12345678-1234-1234-1234-123456789abc",
+        "init_process_start_time_ticks": 107,
+        "cgroup_device": 41,
+        "cgroup_id": 43,
+        "runtime_handler": "runc",
+    });
+
+    assert_eq!(
+        serde_json::to_value(&wire).expect("serialize wire"),
+        expected
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeBindingWireV1>(expected).expect("deserialize wire"),
+        wire
+    );
+    assert_eq!(wire.validate(), Ok(()));
+}
+
+#[test]
+fn runtime_binding_v1_wire_requires_nullable_handler_and_rejects_unknown_fields() {
+    use apolysis_core::RuntimeBindingWireV1;
+
+    let valid = json!({
+        "record_type": "runtime_binding_observed",
+        "schema_version": 1,
+        "agent_run_id": "agent-run-wire",
+        "adapter": "docker",
+        "workload_id": "a".repeat(64),
+        "start_marker": "2026-06-01T12:00:00.000000007Z",
+        "host_boot_id": "12345678-1234-1234-1234-123456789abc",
+        "init_process_start_time_ticks": 107,
+        "cgroup_device": 41,
+        "cgroup_id": 43,
+        "runtime_handler": null,
+    });
+    let decoded: RuntimeBindingWireV1 =
+        serde_json::from_value(valid.clone()).expect("nullable handler is explicit and valid");
+    assert_eq!(decoded.runtime_handler.0, None);
+
+    let mut missing_handler = valid.clone();
+    missing_handler
+        .as_object_mut()
+        .expect("wire object")
+        .remove("runtime_handler");
+    assert!(serde_json::from_value::<RuntimeBindingWireV1>(missing_handler).is_err());
+
+    let mut unknown = valid;
+    unknown["private_process_command"] = json!("must-not-enter-the-wire-contract");
+    assert!(serde_json::from_value::<RuntimeBindingWireV1>(unknown).is_err());
+}
+
+#[test]
+fn runtime_binding_v1_wire_rejects_noncanonical_or_private_fields_without_echoing_values() {
+    use apolysis_core::RuntimeBindingWireV1;
+
+    let valid = json!({
+        "record_type": "runtime_binding_observed",
+        "schema_version": 1,
+        "agent_run_id": "agent-run-wire",
+        "adapter": "docker",
+        "workload_id": "a".repeat(64),
+        "start_marker": "2026-06-01T12:00:00.000000007Z",
+        "host_boot_id": "12345678-1234-1234-1234-123456789abc",
+        "init_process_start_time_ticks": 107,
+        "cgroup_device": 41,
+        "cgroup_id": 43,
+        "runtime_handler": "runc",
+    });
+    let cases = [
+        ("schema_version", json!(2), "schema_version"),
+        (
+            "agent_run_id",
+            json!("../private/tenant/run"),
+            "agent_run_id",
+        ),
+        ("adapter", json!("kubernetes"), "adapter"),
+        ("workload_id", json!("0".repeat(64)), "workload_id"),
+        (
+            "start_marker",
+            json!("2026-02-29T12:00:00Z"),
+            "start_marker",
+        ),
+        (
+            "host_boot_id",
+            json!("12345678-1234-1234-1234-123456789ABC"),
+            "host_boot_id",
+        ),
+        (
+            "init_process_start_time_ticks",
+            json!(0),
+            "init_process_start_time_ticks",
+        ),
+        ("cgroup_device", json!(0), "cgroup_device"),
+        ("cgroup_id", json!(0), "cgroup_id"),
+        (
+            "runtime_handler",
+            json!("io.containerd/runc:v2-private"),
+            "runtime_handler",
+        ),
+    ];
+
+    for (field, value, expected_field) in cases {
+        let hostile_value = value.to_string();
+        let mut candidate = valid.clone();
+        candidate[field] = value;
+        let wire: RuntimeBindingWireV1 =
+            serde_json::from_value(candidate).expect("invalid domain value still has wire shape");
+        let error = wire.validate().expect_err("invalid wire domain");
+        assert_eq!(error.field(), expected_field);
+        assert!(!error.to_string().contains(&hostile_value));
+    }
 }
 
 #[test]
@@ -255,6 +396,23 @@ fn late_attach_gap_records_one_unknown_history_boundary_without_counting_missing
     assert_eq!(
         gap.to_json_line(),
         r#"{"record_type":"observation_gap","schema_version":1,"timestamp_unix_ms":1780328100007,"agent_run_id":"agent-run-late-attach","operation":"collector_lifecycle","kind":"late_attach","count":1,"detail":"collection began after the existing process started; earlier activity is unknown"}"#
+    );
+}
+
+#[test]
+fn runtime_metadata_gap_records_one_bounded_source_outage() {
+    let gap = ObservationGap::new(
+        "agent-run-runtime-gap",
+        "runtime_metadata",
+        ObservationGapKind::RuntimeMetadataUnavailable,
+        1,
+        "source=docker,reason=socket_unavailable",
+    )
+    .with_timestamp(1_780_328_100_007);
+
+    assert_eq!(
+        gap.to_json_line(),
+        r#"{"record_type":"observation_gap","schema_version":1,"timestamp_unix_ms":1780328100007,"agent_run_id":"agent-run-runtime-gap","operation":"runtime_metadata","kind":"runtime_metadata_unavailable","count":1,"detail":"source=docker,reason=socket_unavailable"}"#
     );
 }
 

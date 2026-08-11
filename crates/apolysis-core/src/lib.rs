@@ -2,18 +2,24 @@
 
 //! Core domain types for Apolysis.
 //!
-//! This crate intentionally has no third-party dependencies. Its explicit
-//! records form the local JSONL v1 observation contract shared by the eBPF
-//! observer, CLI, daemon, store, and runtime-attribution crates. Keeping this
-//! crate small preserves compatibility across the collector and userspace
-//! pipeline.
+//! Its explicit records form the local JSONL v1 observation contract shared by
+//! the eBPF observer, CLI, daemon, store, and runtime-attribution crates.
+//! Keeping this crate small preserves compatibility across the collector and
+//! userspace pipeline.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod fields;
+mod runtime_binding;
 pub mod scalars;
 pub mod vocabulary;
 
+pub use runtime_binding::{
+    validate_runtime_container_id_v1, validate_runtime_cri_start_marker_v1,
+    validate_runtime_docker_start_marker_v1, validate_runtime_workload_identity_v1,
+    RuntimeBindingRecordType, RuntimeBindingRuntimeHandler, RuntimeBindingWireV1,
+    RuntimeBindingWireValidationError, RUNTIME_BINDING_SCHEMA_VERSION,
+};
 pub use vocabulary::{actions, actors, records, resources};
 
 /// Anything that can be written as one JSONL record.
@@ -471,6 +477,7 @@ pub enum ObservationGapKind {
     MissingExit,
     CollectorRestart,
     LateAttach,
+    RuntimeMetadataUnavailable,
 }
 
 impl ObservationGapKind {
@@ -480,6 +487,7 @@ impl ObservationGapKind {
             Self::MissingExit => "missing_exit",
             Self::CollectorRestart => "collector_restart",
             Self::LateAttach => "late_attach",
+            Self::RuntimeMetadataUnavailable => "runtime_metadata_unavailable",
         }
     }
 }

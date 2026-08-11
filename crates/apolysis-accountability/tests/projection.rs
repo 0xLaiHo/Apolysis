@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use apolysis_accountability::{project_agent_run, AgentRunRecordBatch, ProjectionError};
+use apolysis_accountability::{
+    project_agent_run, validate_agent_observation_record_v1, AgentRunRecordBatch, EvidenceState,
+    ProjectionError, ProjectionIssueCode,
+};
 use serde_json::{json, Value};
 
 #[test]
@@ -157,6 +160,137 @@ fn late_attach_is_unknown_history_boundary_not_a_missing_event_estimate() {
 }
 
 #[test]
+fn runtime_metadata_outage_is_an_incomplete_gap_without_collector_lifecycle() {
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability("run-runtime-gap", 1000),
+        runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-gap"),
+        json!({
+            "record_type": "observation_gap",
+            "schema_version": 1,
+            "timestamp_unix_ms": 1001,
+            "agent_run_id": "run-runtime-gap",
+            "operation": "runtime_metadata",
+            "kind": "runtime_metadata_unavailable",
+            "count": 1,
+            "detail": "source=docker,reason=socket_unavailable"
+        }),
+        runtime_binding_auxiliary("runtime_binding_suspended", "run-runtime-gap"),
+    ])])
+    .expect("runtime adapter outage remains queryable without collector lifecycle");
+
+    assert!(validate_agent_observation_record_v1(&record).is_ok());
+
+    let value = serde_json::to_value(record).expect("serialize projection");
+    assert_eq!(value["summary"]["evidence_state"], "incomplete");
+    assert_eq!(value["summary"]["collector_health"], "unknown");
+    assert_eq!(
+        value["observation_gaps"],
+        json!([{
+            "source_ordinal": 3,
+            "schema_version": 1,
+            "timestamp_unix_ms": 1001,
+            "operation": "runtime_metadata",
+            "kind": "runtime_metadata_unavailable",
+            "count": 1,
+            "detail": "runtime_source_unavailable",
+            "runtime_source": "docker",
+            "runtime_reason": "socket_unavailable"
+        }])
+    );
+    assert!(value["issues"].as_array().is_some_and(|issues| {
+        issues.iter().any(|issue| {
+            issue
+                == &json!({
+                    "code": "observation_gap",
+                    "source_ordinal": 3,
+                    "count": 1
+                })
+        })
+    }));
+}
+
+#[test]
+fn runtime_identity_transition_is_an_incomplete_bounded_gap() {
+    let observed = runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-transition");
+    let mut retired = observed.clone();
+    retired["record_type"] = json!("runtime_binding_retired");
+    let mut replacement = observed.clone();
+    replacement["start_marker"] = json!("2026-08-11T01:02:04.000000000Z");
+    replacement["init_process_start_time_ticks"] = json!(124);
+    replacement["cgroup_id"] = json!(910);
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability("run-runtime-transition", 1000),
+        observed,
+        runtime_metadata_gap(
+            "run-runtime-transition",
+            1001,
+            "docker",
+            "identity_transition",
+        ),
+        retired,
+        replacement,
+    ])])
+    .expect("runtime identity transition remains queryable");
+
+    assert!(validate_agent_observation_record_v1(&record).is_ok());
+    assert_eq!(record.summary.evidence_state, EvidenceState::Incomplete);
+    assert_eq!(
+        record.observation_gaps[0].detail,
+        "runtime_identity_transition"
+    );
+}
+
+#[test]
+fn runtime_metadata_outage_rejects_unbounded_detail_and_invalid_shape() {
+    for (operation, count, detail) in [
+        (
+            "runtime_metadata",
+            1,
+            "source=/run/docker.sock,reason=socket_unavailable",
+        ),
+        (
+            "runtime_metadata",
+            1,
+            "source=docker,reason=socket_unavailable,payload=private",
+        ),
+        ("runtime_metadata", 1, "source=docker,reason=timeout"),
+        (
+            "network_connect",
+            1,
+            "source=docker,reason=socket_unavailable",
+        ),
+        (
+            "runtime_metadata",
+            2,
+            "source=docker,reason=socket_unavailable",
+        ),
+    ] {
+        let error = project_agent_run([AgentRunRecordBatch::plain(vec![
+            capability("run-invalid-runtime-gap", 1000),
+            json!({
+                "record_type": "observation_gap",
+                "schema_version": 1,
+                "timestamp_unix_ms": 1001,
+                "agent_run_id": "run-invalid-runtime-gap",
+                "operation": operation,
+                "kind": "runtime_metadata_unavailable",
+                "count": count,
+                "detail": detail
+            }),
+        ])])
+        .expect_err("invalid runtime metadata gap must fail closed");
+
+        assert_eq!(
+            error,
+            ProjectionError::MalformedRecord {
+                ordinal: 2,
+                field: "runtime_metadata_unavailable"
+            }
+        );
+    }
+}
+
+#[test]
 fn quiet_unfinished_run_is_active_and_review_indeterminate_not_clean() {
     let record = project_agent_run([AgentRunRecordBatch::plain(vec![
         capability("run-active", 1000),
@@ -299,6 +433,596 @@ fn unknown_additive_record_is_bounded_and_makes_completeness_indeterminate() {
             }],
             "unknown_payload_persisted": false
         })
+    );
+}
+
+#[test]
+fn runtime_binding_observed_and_retired_records_are_known_auxiliary_evidence() {
+    let mut records = vec![
+        capability("run-runtime-binding", 1000),
+        lifecycle(
+            "run-runtime-binding",
+            1001,
+            "started",
+            "healthy",
+            Value::Null,
+        ),
+        network_observation("run-runtime-binding", 1002),
+    ];
+    for record_type in ["runtime_binding_observed", "runtime_binding_retired"] {
+        records.push(runtime_binding_auxiliary(
+            record_type,
+            "run-runtime-binding",
+        ));
+    }
+    records.push(lifecycle(
+        "run-runtime-binding",
+        1003,
+        "stopped",
+        "healthy",
+        json!("agent_exited"),
+    ));
+
+    let record = project_agent_run([AgentRunRecordBatch::plain(records)])
+        .expect("runtime binding records remain queryable");
+
+    assert_eq!(record.summary.evidence_state, EvidenceState::Complete);
+    assert!(record
+        .issues
+        .iter()
+        .all(|issue| issue.code != ProjectionIssueCode::UnknownRecordType));
+}
+
+#[test]
+fn validated_runtime_binding_observation_resolves_its_missing_intent_finding() {
+    let agent_run_id = "run-runtime-finding";
+    let workload_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1000),
+        lifecycle(agent_run_id, 1001, "started", "healthy", Value::Null),
+        network_observation(agent_run_id, 1002),
+        runtime_binding_auxiliary("runtime_binding_observed", agent_run_id),
+        runtime_binding_finding(
+            agent_run_id,
+            &format!("runtime_binding:{workload_id}"),
+            "docker",
+            workload_id,
+            909,
+        ),
+        lifecycle(
+            agent_run_id,
+            1003,
+            "stopped",
+            "healthy",
+            json!("agent_exited"),
+        ),
+    ])])
+    .expect("validated runtime binding evidence remains queryable");
+
+    assert_eq!(record.summary.evidence_state, EvidenceState::Complete);
+    assert!(record
+        .issues
+        .iter()
+        .all(|issue| issue.code != ProjectionIssueCode::UnresolvedFindingEvidence));
+    assert_eq!(record.findings.len(), 1);
+    assert_eq!(
+        record.findings[0].evidence_ref,
+        format!("runtime_binding:{workload_id}")
+    );
+    assert_eq!(record.runtime_bindings.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&record.runtime_bindings[0]).expect("serialize projected binding"),
+        json!({
+            "source_ordinal": 4,
+            "record_type": "runtime_binding_observed",
+            "schema_version": 1,
+            "agent_run_id": agent_run_id,
+            "adapter": "docker",
+            "workload_id": workload_id,
+            "start_marker": "2026-08-11T01:02:03.000000000Z",
+            "host_boot_id": "82b46386-b87a-4d86-93f6-232bb04c37fb",
+            "init_process_start_time_ticks": 123,
+            "cgroup_device": 7,
+            "cgroup_id": 909,
+            "runtime_handler": "runc",
+        })
+    );
+    assert!(validate_agent_observation_record_v1(&record).is_ok());
+}
+
+#[test]
+fn runtime_binding_finding_support_must_precede_and_match_the_observed_binding() {
+    let workload_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let other_workload_id = "b".repeat(64);
+    let cases = [
+        (
+            "run-runtime-finding-missing",
+            Vec::new(),
+            runtime_binding_finding(
+                "run-runtime-finding-missing",
+                &format!("runtime_binding:{workload_id}"),
+                "docker",
+                workload_id,
+                909,
+            ),
+            Vec::new(),
+        ),
+        (
+            "run-runtime-finding-late",
+            Vec::new(),
+            runtime_binding_finding(
+                "run-runtime-finding-late",
+                &format!("runtime_binding:{workload_id}"),
+                "docker",
+                workload_id,
+                909,
+            ),
+            vec![runtime_binding_auxiliary(
+                "runtime_binding_observed",
+                "run-runtime-finding-late",
+            )],
+        ),
+        (
+            "run-runtime-finding-adapter",
+            vec![runtime_binding_auxiliary(
+                "runtime_binding_observed",
+                "run-runtime-finding-adapter",
+            )],
+            runtime_binding_finding(
+                "run-runtime-finding-adapter",
+                &format!("runtime_binding:{workload_id}"),
+                "containerd",
+                workload_id,
+                909,
+            ),
+            Vec::new(),
+        ),
+        (
+            "run-runtime-finding-workload",
+            vec![runtime_binding_auxiliary(
+                "runtime_binding_observed",
+                "run-runtime-finding-workload",
+            )],
+            runtime_binding_finding(
+                "run-runtime-finding-workload",
+                &format!("runtime_binding:{workload_id}"),
+                "docker",
+                &other_workload_id,
+                909,
+            ),
+            Vec::new(),
+        ),
+        (
+            "run-runtime-finding-cgroup",
+            vec![runtime_binding_auxiliary(
+                "runtime_binding_observed",
+                "run-runtime-finding-cgroup",
+            )],
+            runtime_binding_finding(
+                "run-runtime-finding-cgroup",
+                &format!("runtime_binding:{workload_id}"),
+                "docker",
+                workload_id,
+                910,
+            ),
+            Vec::new(),
+        ),
+    ];
+
+    for (agent_run_id, before_finding, finding, after_finding) in cases {
+        let mut records = vec![
+            capability(agent_run_id, 1000),
+            lifecycle(agent_run_id, 1001, "started", "healthy", Value::Null),
+            network_observation(agent_run_id, 1002),
+        ];
+        records.extend(before_finding);
+        records.push(finding);
+        records.extend(after_finding);
+        records.push(lifecycle(
+            agent_run_id,
+            1003,
+            "stopped",
+            "healthy",
+            json!("agent_exited"),
+        ));
+
+        let record = project_agent_run([AgentRunRecordBatch::plain(records)])
+            .expect("unresolved runtime binding support remains reviewable");
+        assert_eq!(record.summary.evidence_state, EvidenceState::Incomplete);
+        assert!(record.issues.iter().any(|issue| {
+            issue.code == ProjectionIssueCode::UnresolvedFindingEvidence && issue.count == 1
+        }));
+        assert!(validate_agent_observation_record_v1(&record).is_ok());
+    }
+}
+
+#[test]
+fn runtime_binding_auxiliary_requires_its_exact_wire_shape() {
+    let mut missing_field =
+        runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-wire");
+    missing_field
+        .as_object_mut()
+        .expect("runtime binding fixture object")
+        .remove("cgroup_device");
+    let mut unknown_field =
+        runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-wire");
+    unknown_field["private_path"] = json!("/private/runtime.sock");
+    let mut payload_field =
+        runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-wire");
+    payload_field["payload"] = json!("APOLYSIS_PRIVATE_RUNTIME_PAYLOAD");
+    let mut namespace_field =
+        runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-wire");
+    namespace_field["namespace"] = json!("private-tenant-namespace");
+
+    for malformed in [missing_field, unknown_field, payload_field, namespace_field] {
+        let error = project_agent_run([AgentRunRecordBatch::plain(vec![
+            capability("run-runtime-wire", 1000),
+            malformed,
+        ])])
+        .expect_err("runtime binding wire must reject missing or unknown fields");
+
+        assert_eq!(
+            error,
+            ProjectionError::MalformedRecord {
+                ordinal: 2,
+                field: "record payload",
+            }
+        );
+    }
+}
+
+#[test]
+fn runtime_binding_auxiliary_rejects_invalid_or_private_identity_fields() {
+    let invalid_fields = [
+        ("schema_version", json!(2)),
+        ("adapter", json!("kubernetes")),
+        ("runtime_handler", json!("/private/runtime/runc")),
+        (
+            "host_boot_id",
+            json!("00000000-0000-0000-0000-000000000000"),
+        ),
+        ("init_process_start_time_ticks", json!(0)),
+        ("cgroup_device", json!(0)),
+        ("cgroup_id", json!(0)),
+    ];
+
+    for (field, invalid) in invalid_fields {
+        let mut malformed =
+            runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-identity");
+        malformed[field] = invalid;
+        let error = project_agent_run([AgentRunRecordBatch::plain(vec![
+            capability("run-runtime-identity", 1000),
+            malformed,
+        ])])
+        .expect_err("invalid runtime binding identity must fail closed");
+
+        assert_eq!(
+            error,
+            ProjectionError::MalformedRecord {
+                ordinal: 2,
+                field: "runtime_binding",
+            },
+            "field {field} must be validated"
+        );
+    }
+}
+
+#[test]
+fn runtime_binding_wire_matches_the_adapter_identity_vocabulary() {
+    let container_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let mut docker = runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-format");
+    docker["start_marker"] = json!("2024-02-29T23:59:59Z");
+    let mut containerd = docker.clone();
+    containerd["adapter"] = json!("containerd");
+    containerd["workload_id"] = json!(format!("containerd/{container_id}"));
+    containerd["start_marker"] = json!("18446744073709551615");
+    let mut k3s_containerd = containerd.clone();
+    k3s_containerd["adapter"] = json!("k3s_containerd");
+    k3s_containerd["workload_id"] = json!(format!("k3s_containerd/{container_id}"));
+
+    for valid in [docker, containerd, k3s_containerd] {
+        project_agent_run([AgentRunRecordBatch::plain(vec![
+            capability("run-runtime-format", 1000),
+            valid,
+        ])])
+        .expect("producer-canonical runtime identity must remain projectable");
+    }
+
+    let invalid_fields = [
+        (
+            "adapter",
+            json!("docker"),
+            "workload_id",
+            json!("0000000000000000000000000000000000000000000000000000000000000000"),
+        ),
+        (
+            "adapter",
+            json!("docker"),
+            "workload_id",
+            json!("0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"),
+        ),
+        (
+            "adapter",
+            json!("containerd"),
+            "workload_id",
+            json!(container_id),
+        ),
+        (
+            "adapter",
+            json!("docker"),
+            "start_marker",
+            json!("2026-02-29T01:02:03Z"),
+        ),
+        (
+            "adapter",
+            json!("docker"),
+            "start_marker",
+            json!("2026-08-11T01:02:03+00:00"),
+        ),
+        (
+            "adapter",
+            json!("docker"),
+            "start_marker",
+            json!("2026-08-11T01:02:03.1234567890Z"),
+        ),
+        (
+            "adapter",
+            json!("containerd"),
+            "start_marker",
+            json!("18446744073709551616"),
+        ),
+        (
+            "adapter",
+            json!("k3s_containerd"),
+            "start_marker",
+            json!("01"),
+        ),
+    ];
+
+    for (adapter_field, adapter, identity_field, invalid) in invalid_fields {
+        let mut malformed =
+            runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-format");
+        malformed[adapter_field] = adapter;
+        if malformed["adapter"] == json!("containerd") {
+            malformed["workload_id"] = json!(format!("containerd/{container_id}"));
+            malformed["start_marker"] = json!("1");
+        } else if malformed["adapter"] == json!("k3s_containerd") {
+            malformed["workload_id"] = json!(format!("k3s_containerd/{container_id}"));
+            malformed["start_marker"] = json!("1");
+        }
+        malformed[identity_field] = invalid;
+        let error = project_agent_run([AgentRunRecordBatch::plain(vec![
+            capability("run-runtime-format", 1000),
+            malformed,
+        ])])
+        .expect_err("non-canonical adapter identity must fail closed");
+        assert_eq!(
+            error,
+            ProjectionError::MalformedRecord {
+                ordinal: 2,
+                field: "runtime_binding",
+            }
+        );
+    }
+}
+
+#[test]
+fn runtime_binding_auxiliary_cannot_cross_agent_runs() {
+    let error = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability("run-runtime-owner", 1000),
+        runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-other"),
+    ])])
+    .expect_err("runtime binding must remain in its owning Agent Run");
+
+    assert_eq!(error, ProjectionError::MixedAgentRuns { ordinal: 2 });
+}
+
+#[test]
+fn runtime_binding_lifecycle_rejects_duplicate_observe_and_mismatched_retire() {
+    let observed = runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-state");
+    let duplicate = observed.clone();
+    let mut mismatched_retire =
+        runtime_binding_auxiliary("runtime_binding_retired", "run-runtime-state");
+    mismatched_retire["cgroup_id"] = json!(910);
+
+    for records in [
+        vec![
+            capability("run-runtime-state", 1000),
+            observed.clone(),
+            duplicate,
+        ],
+        vec![
+            capability("run-runtime-state", 1000),
+            observed.clone(),
+            mismatched_retire,
+        ],
+    ] {
+        let error = project_agent_run([AgentRunRecordBatch::plain(records)])
+            .expect_err("runtime binding state must reject duplicate or mismatched lifecycle");
+
+        assert_eq!(
+            error,
+            ProjectionError::MalformedRecord {
+                ordinal: 3,
+                field: "runtime_binding_sequence",
+            }
+        );
+    }
+}
+
+#[test]
+fn runtime_binding_complete_inventory_retire_allows_later_fresh_observation() {
+    let observed = runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-return");
+    let mut retired = observed.clone();
+    retired["record_type"] = json!("runtime_binding_retired");
+    let mut replacement = observed.clone();
+    replacement["start_marker"] = json!("2026-08-11T01:02:04.000000000Z");
+    replacement["init_process_start_time_ticks"] = json!(124);
+    replacement["cgroup_id"] = json!(910);
+
+    project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability("run-runtime-return", 1000),
+        observed,
+        retired,
+        replacement,
+    ])])
+    .expect("wire order cannot conflate absence retirement with an unmarked direct replacement");
+}
+
+#[test]
+fn runtime_binding_daemon_restart_retires_then_reobserves_the_same_identity() {
+    let observed = runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-restart");
+    let mut retired = observed.clone();
+    retired["record_type"] = json!("runtime_binding_retired");
+
+    project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability("run-runtime-restart", 1000),
+        observed.clone(),
+        runtime_metadata_gap("run-runtime-restart", 1001, "docker", "daemon_restart"),
+        retired,
+        observed,
+    ])])
+    .expect("daemon restart gap authorizes stable retire then fresh observe");
+}
+
+#[test]
+fn runtime_binding_recovery_accepts_freshly_requalified_changed_identity() {
+    for (reason, terminal_record_type) in [
+        ("socket_unavailable", "runtime_binding_suspended"),
+        ("daemon_restart", "runtime_binding_retired"),
+    ] {
+        let observed =
+            runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-recovery");
+        let mut terminal = observed.clone();
+        terminal["record_type"] = json!(terminal_record_type);
+        let mut replacement = observed.clone();
+        replacement["start_marker"] = json!("2026-08-11T01:02:04.000000000Z");
+        replacement["init_process_start_time_ticks"] = json!(124);
+        replacement["cgroup_id"] = json!(910);
+
+        project_agent_run([AgentRunRecordBatch::plain(vec![
+            capability("run-runtime-recovery", 1000),
+            observed,
+            runtime_metadata_gap("run-runtime-recovery", 1001, "docker", reason),
+            terminal,
+            replacement,
+        ])])
+        .expect("fresh complete inventory may requalify changed identity after an unknown window");
+    }
+}
+
+#[test]
+fn runtime_binding_gap_credit_is_source_matched_ordered_and_single_use() {
+    let observed = runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-credit");
+    let suspended = runtime_binding_auxiliary("runtime_binding_suspended", "run-runtime-credit");
+
+    let mismatched_source = vec![
+        capability("run-runtime-credit", 1000),
+        observed.clone(),
+        runtime_metadata_gap(
+            "run-runtime-credit",
+            1001,
+            "containerd",
+            "socket_unavailable",
+        ),
+        suspended.clone(),
+    ];
+
+    let mut observed_second = observed.clone();
+    observed_second["workload_id"] =
+        json!("1111111111111111111111111111111111111111111111111111111111111111");
+    observed_second["start_marker"] = json!("2026-08-11T01:02:04.000000000Z");
+    observed_second["init_process_start_time_ticks"] = json!(124);
+    observed_second["cgroup_id"] = json!(910);
+    let mut suspended_second = observed_second.clone();
+    suspended_second["record_type"] = json!("runtime_binding_suspended");
+    let reused_credit = vec![
+        capability("run-runtime-credit", 1000),
+        observed.clone(),
+        observed_second.clone(),
+        runtime_metadata_gap("run-runtime-credit", 1001, "docker", "socket_unavailable"),
+        suspended.clone(),
+        suspended_second.clone(),
+    ];
+
+    let interleaved_two_credits = vec![
+        capability("run-runtime-credit", 1000),
+        observed.clone(),
+        observed_second.clone(),
+        runtime_metadata_gap("run-runtime-credit", 1001, "docker", "socket_unavailable"),
+        runtime_metadata_gap("run-runtime-credit", 1002, "docker", "socket_unavailable"),
+        json!({
+            "record_type": "cgroup_discovered",
+            "agent_run_id": "run-runtime-credit",
+            "cgroup_id": 909
+        }),
+        suspended.clone(),
+        suspended_second.clone(),
+        observed.clone(),
+        observed_second.clone(),
+    ];
+
+    for (records, ordinal) in [(mismatched_source, 4), (reused_credit, 6)] {
+        let error = project_agent_run([AgentRunRecordBatch::plain(records)])
+            .expect_err("runtime gap credit must not authorize another source or be reused");
+        assert_eq!(
+            error,
+            ProjectionError::MalformedRecord {
+                ordinal,
+                field: "runtime_binding_sequence",
+            }
+        );
+    }
+
+    project_agent_run([AgentRunRecordBatch::plain(interleaved_two_credits)])
+        .expect("ordered source credits survive legal interleaving and cover two bindings");
+}
+
+#[test]
+fn dangling_runtime_gap_kind_does_not_block_a_later_matching_kind() {
+    let observed = runtime_binding_auxiliary("runtime_binding_observed", "run-runtime-kind");
+    let mut retired = observed.clone();
+    retired["record_type"] = json!("runtime_binding_retired");
+    let mut suspended = observed.clone();
+    suspended["record_type"] = json!("runtime_binding_suspended");
+
+    let restart_after_source_gap = vec![
+        capability("run-runtime-kind", 1000),
+        observed.clone(),
+        runtime_metadata_gap("run-runtime-kind", 1001, "docker", "socket_unavailable"),
+        runtime_metadata_gap("run-runtime-kind", 1002, "docker", "daemon_restart"),
+        retired,
+        observed.clone(),
+    ];
+    let source_gap_after_transition_gap = vec![
+        capability("run-runtime-kind", 1000),
+        observed,
+        runtime_metadata_gap("run-runtime-kind", 1001, "docker", "identity_transition"),
+        runtime_metadata_gap("run-runtime-kind", 1002, "docker", "socket_unavailable"),
+        suspended,
+    ];
+
+    for records in [restart_after_source_gap, source_gap_after_transition_gap] {
+        project_agent_run([AgentRunRecordBatch::plain(records)])
+            .expect("unconsumed gap credit stays incomplete without poisoning another kind");
+    }
+}
+
+#[test]
+fn runtime_binding_suspension_without_its_source_gap_fails_closed() {
+    let error = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability("run-unmarked-runtime-change", 1000),
+        runtime_binding_auxiliary("runtime_binding_observed", "run-unmarked-runtime-change"),
+        runtime_binding_auxiliary("runtime_binding_suspended", "run-unmarked-runtime-change"),
+    ])])
+    .expect_err("unmarked runtime binding suspension must fail closed");
+
+    assert_eq!(
+        error,
+        ProjectionError::MalformedRecord {
+            ordinal: 3,
+            field: "runtime_binding_sequence",
+        }
     );
 }
 
@@ -1130,6 +1854,65 @@ fn zero_counters() -> Value {
         "scope_missing_entries": 0,
         "scope_missing_exits": 0,
         "scope_pending": 0
+    })
+}
+
+fn runtime_binding_auxiliary(record_type: &'static str, agent_run_id: &str) -> Value {
+    json!({
+        "record_type": record_type,
+        "schema_version": 1,
+        "agent_run_id": agent_run_id,
+        "adapter": "docker",
+        "workload_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "start_marker": "2026-08-11T01:02:03.000000000Z",
+        "host_boot_id": "82b46386-b87a-4d86-93f6-232bb04c37fb",
+        "init_process_start_time_ticks": 123,
+        "cgroup_device": 7,
+        "cgroup_id": 909,
+        "runtime_handler": "runc"
+    })
+}
+
+fn runtime_binding_finding(
+    agent_run_id: &str,
+    evidence_ref: &str,
+    runtime: &str,
+    workload_id: &str,
+    cgroup_id: u64,
+) -> Value {
+    json!({
+        "record_type": "accountability_finding",
+        "schema_version": 1,
+        "session_id": agent_run_id,
+        "kind": "missing_intent",
+        "decision": "review",
+        "reason": "observed side effect has no matching declared intent",
+        "evidence_ref": evidence_ref,
+        "runtime": {
+            "runtime": runtime,
+            "container_id": workload_id,
+            "pod_uid": null,
+            "cgroup_id": cgroup_id,
+        },
+        "evidence_boundary": "host_boundary",
+    })
+}
+
+fn runtime_metadata_gap(
+    agent_run_id: &str,
+    timestamp_unix_ms: u64,
+    source: &str,
+    reason: &str,
+) -> Value {
+    json!({
+        "record_type": "observation_gap",
+        "schema_version": 1,
+        "timestamp_unix_ms": timestamp_unix_ms,
+        "agent_run_id": agent_run_id,
+        "operation": "runtime_metadata",
+        "kind": "runtime_metadata_unavailable",
+        "count": 1,
+        "detail": format!("source={source},reason={reason}")
     })
 }
 

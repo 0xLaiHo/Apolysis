@@ -25,10 +25,10 @@ pub use projection::{
     CollectorHealthProjection, CollectorLifecycleHealth, CollectorLifecycleState,
     CollectorStopReason, EvidenceState, ObservationRecordSourceIntegrity, ProjectedCapability,
     ProjectedCapabilityManifest, ProjectedCollectorLifecycle, ProjectedFinding,
-    ProjectedLifecycleCounters, ProjectedObservationGap, ProjectedRuntimeIdentity,
-    ProjectedRuntimeObservation, ProjectionError, ProjectionIssue, ProjectionIssueCode,
-    ReviewState, AGENT_OBSERVATION_RECORD_SCHEMA_V1, MAX_AGENT_RUN_PROJECTION_BATCHES,
-    MAX_AGENT_RUN_PROJECTION_RECORDS,
+    ProjectedLifecycleCounters, ProjectedObservationGap, ProjectedRuntimeBinding,
+    ProjectedRuntimeIdentity, ProjectedRuntimeObservation, ProjectionError, ProjectionIssue,
+    ProjectionIssueCode, ReviewState, AGENT_OBSERVATION_RECORD_SCHEMA_V1,
+    MAX_AGENT_RUN_PROJECTION_BATCHES, MAX_AGENT_RUN_PROJECTION_RECORDS,
 };
 pub use queue::{BoundedPriorityQueue, PushOutcome, QueuePriority, QueueStats};
 pub use session::{

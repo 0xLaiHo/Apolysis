@@ -24,9 +24,48 @@ static NEXT_QUARANTINE_ID: AtomicU64 = AtomicU64::new(1);
 type QuarantineTestHook = (PathBuf, Box<dyn FnOnce() + Send>);
 
 #[cfg(test)]
+type BatchWriteFailureTestHook = (PathBuf, usize);
+
+#[cfg(test)]
 fn quarantine_test_hook() -> &'static Mutex<Vec<QuarantineTestHook>> {
     static HOOK: OnceLock<Mutex<Vec<QuarantineTestHook>>> = OnceLock::new();
     HOOK.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+fn batch_write_failure_test_hook() -> &'static Mutex<Vec<BatchWriteFailureTestHook>> {
+    static HOOK: OnceLock<Mutex<Vec<BatchWriteFailureTestHook>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+fn install_batch_write_failure_test_hook(path: PathBuf, after_records: usize) {
+    let mut hooks = batch_write_failure_test_hook()
+        .lock()
+        .expect("lock batch write failure test hook");
+    assert!(
+        !hooks.iter().any(|(expected, _)| expected == &path),
+        "batch write failure test hook already installed for path"
+    );
+    hooks.push((path, after_records));
+}
+
+fn inject_batch_write_failure(path: &Path, written_records: usize) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        let mut hooks = batch_write_failure_test_hook()
+            .lock()
+            .expect("lock batch write failure test hook");
+        if let Some(index) = hooks.iter().position(|(expected, after_records)| {
+            expected == path && *after_records == written_records
+        }) {
+            hooks.remove(index);
+            return Err(std::io::Error::other("injected hash-chain batch failure"));
+        }
+    }
+    #[cfg(not(test))]
+    let _ = (path, written_records);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -264,6 +303,80 @@ impl HashChainStore {
         Ok(record)
     }
 
+    /// Append one Agent Run effect boundary as an all-or-nothing durable batch.
+    ///
+    /// Every payload uses the same schema version. Validation happens before
+    /// the timeline is touched; a write, synchronization, or identity failure
+    /// truncates the open file back to its pre-batch length and leaves the
+    /// in-memory sequence and previous hash unchanged.
+    pub fn append_json_batch_and_flush(
+        &mut self,
+        schema_version: u32,
+        payloads: &[String],
+    ) -> Result<Vec<ChainRecord>, StoreError> {
+        if payloads.is_empty() {
+            return Err(StoreError::InvalidPayload(
+                "hash-chain batch must not be empty".to_string(),
+            ));
+        }
+        self.ensure_path_identity()?;
+
+        let mut sequence = self.sequence;
+        let mut previous_hash = self.previous_hash.clone();
+        let mut records = Vec::with_capacity(payloads.len());
+        let mut lines = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            let payload: Value = serde_json::from_str(payload)
+                .map_err(|error| StoreError::InvalidPayload(error.to_string()))?;
+            let canonical_payload = serde_json::to_string(&payload)
+                .map_err(|error| StoreError::InvalidPayload(error.to_string()))?;
+            sequence = sequence.saturating_add(1);
+            let record_hash =
+                calculate_hash(schema_version, sequence, &previous_hash, &canonical_payload);
+            let record = ChainRecord {
+                schema_version,
+                sequence,
+                previous_hash,
+                record_hash,
+                payload,
+            };
+            let mut line = serde_json::to_vec(&record)
+                .map_err(|error| StoreError::InvalidPayload(error.to_string()))?;
+            line.push(b'\n');
+            previous_hash = record.record_hash.clone();
+            records.push(record);
+            lines.push(line);
+        }
+
+        self.writer.flush().map_err(io_error)?;
+        self.writer.get_ref().sync_data().map_err(io_error)?;
+        self.ensure_path_identity()?;
+        let starting_len = self.writer.get_ref().metadata().map_err(io_error)?.len();
+        let write_result = (|| -> Result<(), StoreError> {
+            for (index, line) in lines.iter().enumerate() {
+                self.writer.get_mut().write_all(line).map_err(io_error)?;
+                inject_batch_write_failure(&self.path, index.saturating_add(1))
+                    .map_err(io_error)?;
+            }
+            self.writer.get_mut().sync_data().map_err(io_error)?;
+            self.ensure_path_identity()
+        })();
+        if let Err(error) = write_result {
+            return match self.rollback_batch_write(starting_len) {
+                Ok(()) => Err(StoreError::Io(format!(
+                    "{error}; durable hash-chain batch rolled back"
+                ))),
+                Err(rollback) => Err(StoreError::Io(format!(
+                    "{error}; durable hash-chain batch rollback failed: {rollback}"
+                ))),
+            };
+        }
+
+        self.sequence = sequence;
+        self.previous_hash = previous_hash;
+        Ok(records)
+    }
+
     pub fn flush(&mut self) -> Result<(), StoreError> {
         self.ensure_path_identity()?;
         self.writer.flush().map_err(io_error)?;
@@ -297,6 +410,15 @@ impl HashChainStore {
             ));
         }
         ensure_path_matches_open_file(&self.path, &metadata)
+    }
+
+    fn rollback_batch_write(&mut self, starting_len: u64) -> Result<(), StoreError> {
+        self.writer.flush().map_err(io_error)?;
+        let file = self.writer.get_mut();
+        file.set_len(starting_len).map_err(io_error)?;
+        file.seek(SeekFrom::End(0)).map_err(io_error)?;
+        file.sync_data().map_err(io_error)?;
+        self.ensure_path_identity()
     }
 }
 
@@ -605,13 +727,59 @@ fn io_error(error: std::io::Error) -> StoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::{install_quarantine_test_hook, HashChainStore, StoreError};
+    use super::{
+        install_batch_write_failure_test_hook, install_quarantine_test_hook, HashChainStore,
+        StoreError,
+    };
     use std::collections::BTreeSet;
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn failed_hash_chain_batch_restores_file_sequence_and_previous_hash() {
+        let root = std::env::temp_dir().join(format!(
+            "apolysis-hash-chain-batch-rollback-{}-{}",
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let timeline = root.join("timeline.jsonl");
+        let mut store = HashChainStore::create_or_recover(&timeline)
+            .expect("create timeline")
+            .store;
+        let first = store
+            .append_json(1, r#"{"type":"first"}"#)
+            .expect("append prefix");
+        store.flush().expect("flush prefix");
+        let prefix = std::fs::read(&timeline).expect("read prefix");
+        install_batch_write_failure_test_hook(timeline.clone(), 1);
+
+        let error = store
+            .append_json_batch_and_flush(
+                1,
+                &[
+                    r#"{"type":"retired"}"#.to_string(),
+                    r#"{"type":"observed"}"#.to_string(),
+                ],
+            )
+            .expect_err("second batch record must fail");
+
+        assert!(matches!(error, StoreError::Io(_)), "{error:?}");
+        assert_eq!(std::fs::read(&timeline).expect("read rollback"), prefix);
+        let after = store
+            .append_json(1, r#"{"type":"after"}"#)
+            .expect("append after rollback");
+        assert_eq!(after.sequence, 2);
+        assert_eq!(after.previous_hash, first.record_hash);
+        store.flush().expect("flush after rollback");
+        let report = HashChainStore::verify(&timeline).expect("verify recovered chain");
+        assert!(report.passed, "{report:?}");
+        assert_eq!(report.record_count, 2);
+
+        std::fs::remove_dir_all(root).expect("remove batch rollback fixture");
+    }
 
     #[test]
     fn quarantine_never_uses_a_replaced_parent_path() {
