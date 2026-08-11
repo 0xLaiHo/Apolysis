@@ -33,5 +33,5 @@ pub use projection::{
 pub use queue::{BoundedPriorityQueue, PushOutcome, QueuePriority, QueueStats};
 pub use session::{
     AssociationOutcome, RegisterOutcome, RegistryError, RetentionPurgeReport, SessionRegistry,
-    SessionState, SessionStatus,
+    SessionState, SessionStatus, MAX_RETAINED_AGENT_RUNS,
 };

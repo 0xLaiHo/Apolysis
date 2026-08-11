@@ -145,7 +145,10 @@ enforcement。
 - credential path、workspace mutation、unexpected executable class、unapproved network
   target 与 degraded observation 的有界 finding；
 - 基于有界本地数据的非特权 saved-run viewer；
-- local daemon 的 install、health、stop、cleanup 与 retention 行为。
+- 基于 manifest 验证一个固定 artifact 集合的 install 与 inspect，包括 receipt-owned
+  replacement、interruption recovery 和保留 state 的 uninstall；
+- 复用 socket protocol 的 health、有界 systemd stop、针对明确 target 的 cleanup，以及面向
+  local daemon 单一 default context、带 crash recovery 的 identity-bound retention。
 
 可选 declared-intent correlation 可以保持 experimental。没有 Agent-specific log 或 provider
 API 时，run 仍必须有用。
@@ -166,6 +169,9 @@ API 时，run 仍必须有用。
 - Exact event identity 仅在 activation 后，由本次 collector run 内的 kernel start time、process
   generation 与 exec generation 建立；
 - privilege separation、本地文件权限、retention 与 redaction 通过有界测试；
+- local lifecycle change 只作用于文档化 artifact 集合，在 mutation 前拒绝 symlink、
+  non-regular、hard-linked、unmanaged、已变化或 stale 的输入，并默认保留 retained Agent Run
+  与无关文件；
 - 资格证据来自版本化 synthetic workload、同一 boot 上交替的 collector-off/on trial、
   monotonic 原始 latency 与隔离 collector-resource sample、配对 bootstrap summary，以及准确
   event-count reconciliation 和按 phase 归因的 burst loss；
@@ -243,7 +249,9 @@ API 时，run 仍必须有用。
 - policy denial、approval workflow、BPF-LSM blocking、kill 或 containment；
 - portable evidence receipt、external anchoring、HSM custody、SCITT 与 selective
   disclosure；
-- 公共 SaaS、billing、replication、failover、multi-region 与 fleet disaster recovery。
+- 公共 SaaS、billing、replication、failover、multi-region 与 fleet disaster recovery；
+- 发行版原生 package repository，以及通用 package-manager 或 service-manager abstraction；
+- 自动迁移或清除 local uninstall 所保留的 Agent Run。
 
 Deferred work 不会只因为未来可能有用就继续在活跃 workspace 中编译。它必须由新的、有用户
 需求支撑的范围决策重新引入。
@@ -273,7 +281,9 @@ Deferred work 不会只因为未来可能有用就继续在活跃 workspace 中�
 - viewer 需要 root、BPF access、host PID namespace、runtime socket 或 node credential；
 - 受支持 kernel、runtime、operation 与 performance envelope 没有文档和测试；
 - finding 被描述为 blocking 或 enforcement；
-- local uninstall、retention 或 cleanup 可能删除或修改无关 host data；
+- local install、managed replacement、uninstall、retention、recovery 或 cleanup 能逃逸固定
+  artifact/state 集合、跟随 link、仅以 pathname 证明 ownership、默认删除 retained Agent Run，
+  或删除、修改无关 host data；
 - Kubernetes test 打印、复制或提交 kubeconfig 或 workload secret。
 
 ## 成功与停止条件

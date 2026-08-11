@@ -88,6 +88,11 @@ an exact one.
 - Ordered JSONL output, rotation, optional local hash-chain envelopes, and
   typed diagnostics for drops, map pressure, ABI mismatches, decode failures,
   and truncation.
+- Manifest-v2-verified Linux daemon packaging and bounded `apolysis daemon
+  install`, `inspect`, and `uninstall` operations over a fixed managed path
+  set with receipt-owned replacement and removal. Staged-root operations never
+  activate systemd, interrupted managed changes recover fail closed on reopen,
+  and default uninstall preserves saved Agent Run state.
 - Deterministic, non-privileged projection of one saved Agent Run into a
   queryable Agent Observation Record with independent evidence, collector
   health, and review states. Plain/rotated JSONL and verified hash-chain input
@@ -138,18 +143,24 @@ deferred beyond the bounded beta.
 
 `v0.3.0` remains the latest public research release and demonstrates the live
 collector, managed Agent launch, JSONL timeline, privacy redaction, and release
-packaging. The active Cargo workspace is now limited to nine crates: core,
+packaging. The active Cargo workspace is now limited to ten crates: core,
 observer, accountability findings, local storage, daemon, CLI, saved-run
-viewer, Kubernetes metadata, and visibility assessment. Superseded contracts,
-central services, policy actuation, Agent feedback control, sandbox execution,
-and broad production-qualification prototypes have left active builds and
-default gates.
+viewer, Kubernetes metadata, visibility assessment, and release verification.
+Superseded contracts, central services, policy actuation, Agent feedback
+control, sandbox execution, and broad production-qualification prototypes have
+left active builds and default gates.
 
 The local `apolysis run project` path now writes one private, atomic JSON Agent
 Observation Record for a saved run. `apolysis run view` validates exactly one
 such v1 record and writes a private, self-contained offline HTML investigation.
 The local projection and viewer do not add live tailing, cross-run search, a
 central query service, or a change to the experimental support status.
+
+The local daemon operations direction now includes a manifest-verified Linux
+bundle and a bounded, state-preserving host lifecycle. Its detailed filesystem,
+recovery, and qualification contracts live in the design and beta
+qualification documents; this work does not change the experimental support
+status by itself.
 
 The scope reset is a roadmap decision, not a retroactive production claim.
 Apolysis remains experimental until the supported collector, attribution,
@@ -224,8 +235,8 @@ third-party workload behavior still require a documented threat model.
 1. Keep the active workspace bounded to eBPF collection, Observation Scope,
    attribution, local storage, daemon, CLI, and operator investigation.
 2. Qualify collector lifecycle, health/gap reporting, and the local Agent Run
-   investigation workflow while preserving outcome-aware semantics and stable
-   in-run runtime identity.
+   investigation workflow, including bounded local daemon operations, while
+   preserving outcome-aware semantics and stable in-run runtime identity.
 3. Qualify container attribution and then a bounded Kubernetes beta before
    considering any central platform expansion.
 

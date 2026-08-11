@@ -329,7 +329,84 @@ roster and reported PPID as stored facts without inferring parent edges. It
 also derives no hidden success verdict from an empty result and never combines
 the three summary axes into a clean verdict.
 
-### 5.5 Deferred central boundary
+### 5.5 Local daemon operations
+
+A Linux release bundle contains the `apolysis`, `apolysisd`, and
+`apolysisd-health` binaries, the CO-RE object, and the systemd unit. Release
+manifest schema v2 binds exactly those five installable artifacts to their
+kind, SHA-256 digest, byte length, and required mode. Manifest paths do not
+become arbitrary destinations: the installer maps the closed artifact set onto
+`/usr/local/bin/apolysis`, `/usr/local/bin/apolysisd`,
+`/usr/local/bin/apolysisd-health`,
+`/usr/local/lib/apolysis/apolysis_observer.bpf.o`, and
+`/etc/systemd/system/apolysisd.service`.
+
+The release verifier accepts one bounded, canonical gzip/tar stream, rejects
+duplicate or extended archive metadata and non-regular members, checks the
+closed manifest and systemd contracts, validates executable ELF structure, and
+requires `bpftool gen skeleton` to parse the packaged CO-RE object. Its package
+contract tests use the freshly built real object; there is no structural-fixture
+switch in the production verifier.
+
+`apolysis daemon install --bundle <dir> --root <root>`, `inspect`, and
+`uninstall` are adapters over `LocalDaemonOperations`. That deep module exposes
+inspect, plan, and apply while hiding bundle validation, complete-target
+preflight, filesystem snapshots, descriptor-anchored staging, synchronization,
+crash recovery, and receipt ownership. Root, bundle, parent, and mutation
+operations stay anchored to already-open directories with no-follow semantics.
+Receipt proofs bind owner, mode including special bits, digest, size, and file
+identity. The module rejects linked or non-regular sources and targets,
+hard-linked artifacts, malformed or changed bundles, unmanaged conflicts,
+changed managed files, and stale plans. A successful install publishes
+`/usr/local/lib/apolysis/install-receipt-v1.json`; reinstalling identical managed
+content is a no-op. Default uninstall removes only artifacts still proven by
+that receipt and always preserves `/var/lib/apolysis` and unrelated host files.
+
+Each mutating apply writes and synchronizes a fixed private mode-`0600`
+operation journal before publishing individual files. Reopening the module
+rolls a pre-commit transaction back or finishes committed cleanup and exposes
+`recovered_interrupted_operation` through inspection. Replacement and removal
+use identity-checked descriptor-relative operations; a changed or unknown
+journal or transaction sibling fails closed for manual repair. This is durable
+interruption recovery, not a claim that all five host paths change with one
+instantaneously visible filesystem transaction.
+
+A staged root exercises the same fixed-path filesystem contract without
+invoking systemd, group management, or eBPF. The product supports the shipped
+systemd unit as one concrete integration, not an abstract service-manager
+interface. On a live host, that unit requires an explicitly provisioned
+`apolysis` group; systemd owns activation, SIGTERM shutdown, and its bounded
+drain deadline, while qualification reuses the daemon's existing health
+protocol. Runtime and state directories are mode `0750`, daemon timelines are
+mode `0640`, private quarantine and retention journals are mode `0600`, and the
+explicitly managed local socket remains mode `0660`. Staged-root qualification
+cannot substitute for the opt-in privileged gate that loads the real bundle,
+waits for eBPF and storage readiness, stops the unit, and verifies
+state-preserving uninstall.
+
+Uninstall is not retention. Destructive retention obtains time from the daemon
+clock, qualifies each closed Agent Run against the directory identity and the
+already-open single-link timeline descriptor, blocks late writes, and stages
+the exact set under a private same-filesystem trash root. A synchronized typed
+journal distinguishes staging from committed cleanup. Startup rolls back an
+unfinished staging transaction and completes committed cleanup; unsafe target
+replacement, unknown content, journal corruption, or conflicting live state
+fails closed. A non-mutating preview may use an explicit time for deterministic
+tests, but a caller cannot supply the time for destructive apply. Destructive
+apply is limited to the local default context; a legacy non-default request is
+rejected without mutation, while multi-tenant deletion remains deferred. The
+terminal retention catalog has an independent 4,096-Agent-Run bound; saturation
+fails closed without evicting retained state or consuming active-run capacity.
+
+Hash-chain recovery opens the timeline once with no-follow semantics and uses
+that descriptor for validation, quarantine, truncation, and future append. It
+rejects symbolic links, multiply linked files, and path replacement. A
+recoverable corrupt tail is retained in a private create-new quarantine file;
+middle corruption remains a fail-closed error. Recovery and retention never
+turn the resulting integrity or Collector Restart limitation into complete
+evidence.
+
+### 5.6 Deferred central boundary
 
 Remote export, custody, organization authorization, object storage, cross-run
 search, and high availability are not part of the bounded beta. They return
@@ -467,7 +544,10 @@ blocking prototypes are not part of the active product.
 - Raw kernel payload exists only as a bounded implementation detail and may not
   cross the persistence seam without an explicit, reviewed profile.
 - Observation scopes prevent accidental host-wide collection.
-- Local files use restrictive permissions and bounded retention.
+- Local files use restrictive permissions and bounded retention. Daemon
+  lifecycle changes accept only the manifest/receipt-owned fixed artifact set,
+  refuse linked or unmanaged substitution before mutation, and preserve saved
+  Agent Runs during default uninstall.
 - The viewer is non-privileged and has no path to BPF maps, host PID namespace,
   container sockets, or node credentials.
 - The standalone viewer escapes all stored text and uses a restrictive Content
@@ -503,13 +583,15 @@ Implemented today:
 - `apolysis-cli`: fixture/live observation, managed Agent launch, protected
   existing-process attach through registration or discovery, non-privileged
   saved-run projection and Saved Run Viewer publication, optional Codex intent
-  correlation, visibility, and verification commands;
+  correlation, visibility, verification, and bounded daemon
+  install/inspect/uninstall commands;
 - `apolysis-core`: current JSONL vocabulary, record types, versioned Collector
   Capability manifest, and collector lifecycle schema, including the single
   authoritative lifecycle vocabulary and complete AuditObserver v1
   operation/source/outcome contract consumed by both producer and projection;
-- `apolysis-store`: rotation, optional local hash-chain envelopes, and bounded
-  stable-snapshot readers for plain/rotated or verified saved runs;
+- `apolysis-store`: rotation, optional local hash-chain envelopes, no-follow
+  descriptor-bound recovery, and bounded stable-snapshot readers for
+  plain/rotated or verified saved runs;
 - `apolysis-accountability`: the pure Agent Observation Record projection,
   independent summary axes, optional declared-intent comparison, and
   review-oriented findings;
@@ -518,8 +600,9 @@ Implemented today:
 - `apolysis-kubernetes` and `apolysis-visibility`: bounded runtime metadata and
   visibility-boundary assessment;
 - `apolysis-daemon`: long-lived observer, bounded queue, local socket, runtime
-  registration prototype, scoped lifecycle persistence, and idempotent
-  unfinished-instance recovery.
+  registration prototype, scoped lifecycle persistence, idempotent
+  unfinished-instance recovery, receipt-owned local operations, and
+  identity-bound journaled retention.
 
 The live collector synchronizes its capability manifest and lifecycle start to
 stable storage after successful attachment and before releasing a managed
@@ -530,8 +613,9 @@ their pairing gaps to the owning Agent Run at explicit scope removal and clean
 shutdown. Stable in-run scope/process generations, periodic cumulative
 lifecycle checkpoints, explicit terminal reasons, and restart-gap recovery are
 implemented together with the queryable saved-run projection and the
-non-privileged Saved Run Viewer. Local daemon operations and the bounded
-Kubernetes beta remain targets.
+non-privileged Saved Run Viewer. Bounded local daemon filesystem operations are
+implemented; a Supported live-host profile and the bounded Kubernetes beta
+remain targets.
 
 The central contracts, Gateway, PostgreSQL projection, evidence-object cluster,
 policy/feedback/control planes, sandbox runner, and broad qualification
@@ -540,6 +624,14 @@ them as historical implementation input; they do not define this architecture.
 
 ## 13. Limitations
 
+- Local daemon operations target the documented Linux/systemd layout and five
+  fixed runtime artifacts. They are not a distribution package manager or a
+  general arbitrary-prefix installer. Staged-root qualification proves the
+  bounded filesystem behavior, not privileged activation; a live claim
+  requires the explicit systemd/eBPF gate. Default uninstall intentionally does
+  not purge retained Agent Runs. The transaction profile requires procfs plus
+  Linux `O_TMPFILE` and `renameat2` support on the managed filesystem; an
+  unsupported host fails before publication.
 - L3 renders one bounded, local, frozen Agent Observation Record v1. It is not
   a live tail, cross-run search, remote query surface, or central query plane.
 - Agent Observation Record v1 lacks an authoritative parent Runtime Identity

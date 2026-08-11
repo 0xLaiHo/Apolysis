@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use apolysis_accountability::{
     decode_intent_frame, AdapterKind, ComponentState, HealthSnapshot, IntentError, IntentRequest,
-    RetentionTier, SessionState, MAX_INTENT_FRAME_BYTES,
+    RetentionTier, SessionState, DEFAULT_TENANT_ID, MAX_INTENT_FRAME_BYTES,
 };
 use apolysis_core::{new_collector_instance_id, CollectorFailureReason};
 use apolysis_observer::{DaemonObserver, DaemonObserverConfig};
@@ -21,7 +21,7 @@ use crate::{
     render_prometheus_metrics, run_observer_runtime, run_runtime_adapter, scope_channel,
     ContainerdCriRuntimeAdapter, CriRuntimeClient, DaemonConfig, DaemonState, DockerEngineClient,
     DockerEnginePollingRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
-    RuntimeAdapterSummary,
+    RetentionError, RuntimeAdapterSummary,
 };
 
 pub const DAEMON_SCHEMA_V1: u32 = 1;
@@ -612,21 +612,29 @@ async fn dispatch(request: IntentRequest, state: &DaemonState, now_unix_ms: u64)
             dry_run,
             now_unix_ms: requested_now_unix_ms,
         } => {
-            let effective_now_unix_ms = requested_now_unix_ms.unwrap_or(now_unix_ms);
-            match state
-                .apply_retention(&tenant_id, effective_now_unix_ms, dry_run)
-                .await
-            {
-                Ok(report) => DaemonResponse::RetentionPurge {
-                    schema_version: DAEMON_SCHEMA_V1,
-                    tenant_id: report.tenant_id,
-                    dry_run: report.dry_run,
-                    now_unix_ms: report.now_unix_ms,
-                    eligible_session_ids: report.eligible_session_ids,
-                    purged_session_ids: report.purged_session_ids,
-                    retained_session_ids: report.retained_session_ids,
-                },
-                Err(error) => error_response("state_error", error),
+            if dry_run {
+                let effective_now_unix_ms = requested_now_unix_ms.unwrap_or(now_unix_ms);
+                return retention_report_response(
+                    state
+                        .preview_retention_at(&tenant_id, effective_now_unix_ms)
+                        .await,
+                );
+            }
+            if tenant_id != DEFAULT_TENANT_ID {
+                error_response(
+                    "retention_tenant_unsupported",
+                    "destructive retention is limited to the local default context".to_string(),
+                )
+            } else if requested_now_unix_ms.is_some() {
+                error_response(
+                    "retention_clock_override_forbidden",
+                    "destructive retention uses the daemon clock".to_string(),
+                )
+            } else {
+                match state.apply_retention().await {
+                    Ok(report) => retention_report_response(report),
+                    Err(error) => retention_error_response(error),
+                }
             }
         }
         IntentRequest::Health => {
@@ -639,6 +647,24 @@ async fn dispatch(request: IntentRequest, state: &DaemonState, now_unix_ms: u64)
             }
         }
     }
+}
+
+fn retention_report_response(
+    report: apolysis_accountability::RetentionPurgeReport,
+) -> DaemonResponse {
+    DaemonResponse::RetentionPurge {
+        schema_version: DAEMON_SCHEMA_V1,
+        tenant_id: report.tenant_id,
+        dry_run: report.dry_run,
+        now_unix_ms: report.now_unix_ms,
+        eligible_session_ids: report.eligible_session_ids,
+        purged_session_ids: report.purged_session_ids,
+        retained_session_ids: report.retained_session_ids,
+    }
+}
+
+fn retention_error_response(error: RetentionError) -> DaemonResponse {
+    error_response(error.code(), "retention operation failed".to_string())
 }
 
 async fn write_response(stream: &mut UnixStream, response: &DaemonResponse) -> Result<(), String> {

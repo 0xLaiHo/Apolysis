@@ -23,7 +23,10 @@ jobs:
     env:
       APOLYSIS_RELEASE_TARGET: x86_64-unknown-linux-gnu
       APOLYSIS_RELEASE_BINARY: target/release/apolysis
+      APOLYSIS_RELEASE_DAEMON_BINARY: target/release/apolysisd
+      APOLYSIS_RELEASE_HEALTH_BINARY: target/release/apolysisd-health
       APOLYSIS_RELEASE_BPF_OBJECT: target/ebpf/apolysis_observer.bpf.o
+      APOLYSIS_RELEASE_SYSTEMD_UNIT: deploy/systemd/apolysisd.service
       APOLYSIS_RELEASE_OUTPUT_DIR: target/release-artifacts
     steps:
       - name: Checkout
@@ -41,24 +44,35 @@ jobs:
           fi
           bpftool version
 
-      - name: Build CLI binary
-        run: cargo build --release -p apolysis-cli --bin apolysis
+      - name: Build userspace binaries
+        run: |
+          cargo build --release -p apolysis-cli --bin apolysis
+          cargo build --release -p apolysis-daemon --bins
+          cargo build --release -p apolysis-release-verifier
 
       - name: Build CO-RE BPF object
         run: |
           APOLYSIS_REQUIRE_BPF=1 make build-ebpf
           test -s "$APOLYSIS_RELEASE_BPF_OBJECT"
 
+      - name: Test release packaging contract
+        run: make test-release-artifacts
+
       - name: Package release artifacts
+        env:
+          WORKFLOW_RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
             release_version="$GITHUB_REF_NAME"
           else
-            release_version="${{ inputs.version }}"
+            release_version="$WORKFLOW_RELEASE_VERSION"
           fi
           [[ -n "$release_version" ]]
           APOLYSIS_RELEASE_VERSION="$release_version" ./scripts/package-release-artifacts.sh
+
+      - name: Verify generated release artifacts
+        run: make verify-release-artifacts
 
       - name: Upload release artifact bundle
         uses: actions/upload-artifact@v4

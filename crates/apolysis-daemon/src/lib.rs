@@ -2,8 +2,10 @@
 
 mod adapter;
 mod config;
+mod local_operations;
 mod metrics;
 mod pipeline;
+mod retention;
 mod runtime;
 mod scope;
 mod server;
@@ -24,10 +26,15 @@ pub use adapter::{
     RuntimeAdapterSummary, RuntimeWorkload, APOLYSIS_SESSION_ANNOTATION, APOLYSIS_SESSION_LABEL,
 };
 pub use config::DaemonConfig;
+pub use local_operations::{
+    LocalDaemonChange, LocalDaemonError, LocalDaemonErrorCode, LocalDaemonInspection,
+    LocalDaemonOperationKind, LocalDaemonOperationReport, LocalDaemonOperations, LocalDaemonPlan,
+};
 pub use metrics::render_prometheus_metrics;
 pub use pipeline::{
     DaemonRecord, EventPipeline, RecordDeliveryMode, RecordWriteOutcome, SubmitError, WriterSummary,
 };
+pub use retention::RetentionError;
 pub use runtime::{
     ingest_observer_batch, run_observer_runtime, ObserverIngestSummary, ObserverRuntimeBackend,
     ObserverRuntimeSummary,

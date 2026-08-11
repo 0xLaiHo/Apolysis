@@ -1,22 +1,24 @@
 [Unit]
-Description=Apolysis node accountability agent
+Description=Apolysis local eBPF Agent observability daemon
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=root
 Group=apolysis
-UMask=0007
+UMask=0027
 RuntimeDirectory=apolysis
 RuntimeDirectoryMode=0750
 StateDirectory=apolysis
 StateDirectoryMode=0750
 ExecStart=/usr/local/bin/apolysisd --bpf-object /usr/local/lib/apolysis/apolysis_observer.bpf.o --queue-capacity 16384 --scope-command-capacity 1024 --shutdown-drain-ms 5000
+KillSignal=SIGTERM
+TimeoutStopSec=15s
 Restart=on-failure
 RestartSec=2s
-StartLimitIntervalSec=60s
-StartLimitBurst=5
 NoNewPrivileges=yes
 ProtectHome=yes
 ProtectSystem=strict

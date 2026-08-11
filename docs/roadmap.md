@@ -163,7 +163,12 @@ Deliverables:
 - bounded findings for credential paths, workspace mutations, unexpected
   executable classes, unapproved network targets, and degraded observation;
 - a non-privileged saved-run viewer over bounded local data;
-- install, health, stop, cleanup, and retention behavior for the local daemon.
+- manifest-verified install and inspect over one fixed artifact set, including
+  receipt-owned replacement, interruption recovery, and state-preserving
+  uninstall;
+- socket-protocol health, bounded systemd stop, target-specific cleanup, and
+  identity-bound retention with crash recovery for the local daemon's single
+  default context.
 
 Optional declared-intent correlation may remain experimental. A run must be
 useful without Agent-specific logs or provider APIs.
@@ -190,6 +195,9 @@ Exit conditions:
   process and exec generations within that collector run;
 - privilege separation, local file permissions, retention, and redaction pass
   their bounded tests;
+- local lifecycle changes are limited to the documented artifact set, reject
+  symlink, non-regular, hard-linked, unmanaged, changed, or stale inputs before
+  mutation, and preserve retained Agent Runs and unrelated files by default;
 - qualification evidence comes from versioned synthetic workloads, alternating
   same-boot collector-off/on trials, monotonic raw latency and isolated
   collector-resource samples, paired bootstrap summaries, phase-scoped burst
@@ -279,7 +287,10 @@ Unsupported:
 - portable evidence receipts, external anchoring, HSM custody, SCITT, and
   selective disclosure;
 - public SaaS, billing, replication, failover, multi-region, and fleet disaster
-  recovery.
+  recovery;
+- distribution-native package repositories and a general package-manager or
+  service-manager abstraction;
+- automatic migration or purge of Agent Runs retained by local uninstall.
 
 Deferred work is not kept compiled in the active workspace solely because it
 may be useful later. It returns only through a new scoped decision backed by
@@ -320,8 +331,10 @@ The beta cannot be released for a profile when any applicable condition holds:
 - the supported kernel, runtime, operation, and performance envelope is not
   documented and tested;
 - a finding is described as blocking or enforcement;
-- local uninstall, retention, or cleanup can delete or modify unrelated host
-  data;
+- local install, managed replacement, uninstall, retention, recovery, or
+  cleanup can escape the fixed artifact/state set, follow links, rely only on a
+  pathname as proof of ownership, delete retained Agent Runs by default, or
+  delete or modify unrelated host data;
 - a Kubernetes test prints, copies, or commits kubeconfig or workload secrets.
 
 ## Success and stop conditions

@@ -17,7 +17,8 @@ mod hash_chain;
 mod saved_run;
 
 pub use hash_chain::{
-    ChainRecord, HashChainStore, HashChainVerificationReport, Recovery, StoreError, ZERO_HASH,
+    ChainRecord, HashChainStore, HashChainVerificationReport, Recovery, StoreError,
+    StoreFileIdentity, ZERO_HASH,
 };
 pub use saved_run::{
     read_agent_run_records, LocalRecordBatch, LocalRecordFormat, LocalRecordReadError,

@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{IntentError, RetentionTier, SessionIntent};
+use crate::{IntentError, RetentionTier, SessionIntent, DEFAULT_TENANT_ID};
+
+pub const MAX_RETAINED_AGENT_RUNS: usize = 4_096;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +62,7 @@ pub struct RetentionPurgeReport {
 pub enum RegistryError {
     InvalidIntent(IntentError),
     SessionCapacityReached { capacity: usize },
+    ClosedAgentRunCapacityReached { capacity: usize },
     PendingCapacityReached { capacity: usize },
     SessionNotFound(String),
     SessionNotActive(String),
@@ -73,6 +76,10 @@ impl std::fmt::Display for RegistryError {
             Self::SessionCapacityReached { capacity } => {
                 write!(formatter, "session capacity reached: {capacity}")
             }
+            Self::ClosedAgentRunCapacityReached { capacity } => write!(
+                formatter,
+                "closed Agent Run retention catalog capacity reached: {capacity}"
+            ),
             Self::PendingCapacityReached { capacity } => {
                 write!(formatter, "pending workload capacity reached: {capacity}")
             }
@@ -100,6 +107,7 @@ pub struct SessionRegistry {
     max_sessions: usize,
     max_pending: usize,
     sessions: BTreeMap<String, SessionState>,
+    closed_agent_runs: BTreeMap<String, SessionState>,
     cgroup_index: BTreeMap<u64, String>,
     pending: BTreeMap<String, Vec<u64>>,
     pending_count: usize,
@@ -111,6 +119,7 @@ impl SessionRegistry {
             max_sessions,
             max_pending,
             sessions: BTreeMap::new(),
+            closed_agent_runs: BTreeMap::new(),
             cgroup_index: BTreeMap::new(),
             pending: BTreeMap::new(),
             pending_count: 0,
@@ -137,9 +146,14 @@ impl SessionRegistry {
                     capacity: self.max_sessions,
                 });
             }
+            let outcome = if self.closed_agent_runs.remove(&session_id).is_some() {
+                RegisterOutcome::Replaced
+            } else {
+                RegisterOutcome::Inserted
+            };
             self.sessions
                 .insert(session_id.clone(), SessionState::new(intent));
-            RegisterOutcome::Inserted
+            outcome
         };
 
         if let Some(cgroups) = self.pending.remove(&session_id) {
@@ -152,6 +166,40 @@ impl SessionRegistry {
         Ok(outcome)
     }
 
+    pub fn restore_closed_agent_run(
+        &mut self,
+        intent: SessionIntent,
+    ) -> Result<RegisterOutcome, RegistryError> {
+        let replay_time = intent
+            .expires_at_unix_ms
+            .checked_sub(1)
+            .ok_or(RegistryError::InvalidIntent(IntentError::Expired))?;
+        intent
+            .validate(replay_time)
+            .map_err(RegistryError::InvalidIntent)?;
+        let agent_run_id = intent.session_id.clone();
+        let replaces_closed = self.closed_agent_runs.contains_key(&agent_run_id);
+        if !replaces_closed && self.closed_agent_runs.len() >= MAX_RETAINED_AGENT_RUNS {
+            return Err(RegistryError::ClosedAgentRunCapacityReached {
+                capacity: MAX_RETAINED_AGENT_RUNS,
+            });
+        }
+        let outcome = if replaces_closed || self.sessions.contains_key(&agent_run_id) {
+            RegisterOutcome::Replaced
+        } else {
+            RegisterOutcome::Inserted
+        };
+        if let Some(previous) = self.sessions.remove(&agent_run_id) {
+            for cgroup_id in previous.cgroup_ids {
+                self.cgroup_index.remove(&cgroup_id);
+            }
+        }
+        let mut state = SessionState::new(intent);
+        state.status = SessionStatus::Closed;
+        self.closed_agent_runs.insert(agent_run_id, state);
+        Ok(outcome)
+    }
+
     pub fn renew(
         &mut self,
         session_id: &str,
@@ -161,10 +209,13 @@ impl SessionRegistry {
         if expires_at_unix_ms <= now_unix_ms {
             return Err(RegistryError::InvalidIntent(IntentError::Expired));
         }
-        let state = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| RegistryError::SessionNotFound(session_id.to_string()))?;
+        let Some(state) = self.sessions.get_mut(session_id) else {
+            return Err(if self.closed_agent_runs.contains_key(session_id) {
+                RegistryError::SessionNotActive(session_id.to_string())
+            } else {
+                RegistryError::SessionNotFound(session_id.to_string())
+            });
+        };
         if state.status == SessionStatus::Closed {
             return Err(RegistryError::SessionNotActive(session_id.to_string()));
         }
@@ -175,11 +226,28 @@ impl SessionRegistry {
     }
 
     pub fn close(&mut self, session_id: &str) -> Result<SessionState, RegistryError> {
-        self.deactivate(session_id, SessionStatus::Closed)?;
-        self.sessions
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| RegistryError::SessionNotFound(session_id.to_string()))
+        if let Some(state) = self.closed_agent_runs.get(session_id) {
+            return Ok(state.clone());
+        }
+        if !self.sessions.contains_key(session_id) {
+            return Err(RegistryError::SessionNotFound(session_id.to_string()));
+        }
+        if self.closed_agent_runs.len() >= MAX_RETAINED_AGENT_RUNS {
+            return Err(RegistryError::ClosedAgentRunCapacityReached {
+                capacity: MAX_RETAINED_AGENT_RUNS,
+            });
+        }
+        let mut state = self
+            .sessions
+            .remove(session_id)
+            .ok_or_else(|| RegistryError::SessionNotFound(session_id.to_string()))?;
+        for cgroup_id in &state.cgroup_ids {
+            self.cgroup_index.remove(cgroup_id);
+        }
+        state.status = SessionStatus::Closed;
+        self.closed_agent_runs
+            .insert(session_id.to_string(), state.clone());
+        Ok(state)
     }
 
     pub fn degrade(&mut self, session_id: &str) -> Result<SessionState, RegistryError> {
@@ -211,7 +279,6 @@ impl SessionRegistry {
         cgroup_id: u64,
     ) -> Result<(), RegistryError> {
         let state = self
-            .sessions
             .get(session_id)
             .ok_or_else(|| RegistryError::SessionNotFound(session_id.to_string()))?;
         if state.status != SessionStatus::Active {
@@ -225,7 +292,7 @@ impl SessionRegistry {
         session_id: &str,
         cgroup_id: u64,
     ) -> Result<AssociationOutcome, RegistryError> {
-        if self.sessions.contains_key(session_id) {
+        if self.get(session_id).is_some() {
             self.associate_cgroup(session_id, cgroup_id)?;
             return Ok(AssociationOutcome::Attached);
         }
@@ -246,12 +313,13 @@ impl SessionRegistry {
     }
 
     pub fn get(&self, session_id: &str) -> Option<&SessionState> {
-        self.sessions.get(session_id)
+        self.sessions
+            .get(session_id)
+            .or_else(|| self.closed_agent_runs.get(session_id))
     }
 
     pub fn get_for_tenant(&self, session_id: &str, tenant_id: &str) -> Option<&SessionState> {
-        self.sessions
-            .get(session_id)
+        self.get(session_id)
             .filter(|state| state.intent.tenant_id == tenant_id)
     }
 
@@ -260,8 +328,10 @@ impl SessionRegistry {
         tenant_id: &str,
         retention_tier: Option<RetentionTier>,
     ) -> Vec<SessionState> {
-        self.sessions
+        let mut agent_runs: Vec<_> = self
+            .sessions
             .values()
+            .chain(self.closed_agent_runs.values())
             .filter(|state| {
                 state.intent.tenant_id == tenant_id
                     && retention_tier
@@ -269,7 +339,9 @@ impl SessionRegistry {
                         .unwrap_or(true)
             })
             .cloned()
-            .collect()
+            .collect();
+        agent_runs.sort_by(|left, right| left.intent.session_id.cmp(&right.intent.session_id));
+        agent_runs
     }
 
     pub fn retention_purge_report_for_tenant(
@@ -280,7 +352,7 @@ impl SessionRegistry {
     ) -> RetentionPurgeReport {
         let mut eligible_session_ids = Vec::new();
         let mut retained_session_ids = Vec::new();
-        for (session_id, state) in &self.sessions {
+        for (session_id, state) in self.sessions.iter().chain(self.closed_agent_runs.iter()) {
             if state.intent.tenant_id != tenant_id {
                 continue;
             }
@@ -290,6 +362,8 @@ impl SessionRegistry {
                 retained_session_ids.push(session_id.clone());
             }
         }
+        eligible_session_ids.sort();
+        retained_session_ids.sort();
         RetentionPurgeReport {
             tenant_id: tenant_id.to_string(),
             now_unix_ms,
@@ -300,14 +374,11 @@ impl SessionRegistry {
         }
     }
 
-    pub fn apply_retention_for_tenant(
-        &mut self,
-        tenant_id: &str,
-        now_unix_ms: u64,
-    ) -> RetentionPurgeReport {
-        let mut report = self.retention_purge_report_for_tenant(tenant_id, now_unix_ms, false);
+    pub fn apply_retention(&mut self, now_unix_ms: u64) -> RetentionPurgeReport {
+        let mut report =
+            self.retention_purge_report_for_tenant(DEFAULT_TENANT_ID, now_unix_ms, false);
         for session_id in &report.eligible_session_ids {
-            if let Some(state) = self.sessions.remove(session_id) {
+            if let Some(state) = self.closed_agent_runs.remove(session_id) {
                 for cgroup_id in state.cgroup_ids {
                     self.cgroup_index.remove(&cgroup_id);
                 }
@@ -387,8 +458,7 @@ impl SessionRegistry {
 }
 
 fn retention_eligible(state: &SessionState, now_unix_ms: u64) -> bool {
-    let terminal = matches!(state.status, SessionStatus::Closed | SessionStatus::Expired)
-        || (state.status == SessionStatus::Active && state.expires_at_unix_ms <= now_unix_ms);
+    let terminal = state.status == SessionStatus::Closed;
     terminal
         && state
             .expires_at_unix_ms

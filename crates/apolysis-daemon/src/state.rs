@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::ErrorKind;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -21,20 +23,44 @@ use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
 
 use crate::{
+    retention::{
+        recover_retention_transactions, stage_agent_run_retention_targets,
+        validate_agent_run_retention_target, RetentionError,
+    },
     DaemonConfig, DaemonRecord, EventPipeline, RecordDeliveryMode, RecordWriteOutcome,
     RuntimeWorkload, ScopeController, WriterSummary,
 };
 
+// The on-disk directory name predates the Agent Run domain terminology.
+const LEGACY_AGENT_RUN_STORAGE_DIR: &str = "sessions";
+
 pub struct DaemonState {
     registry: RwLock<SessionRegistry>,
     health: RwLock<HealthSnapshot>,
-    stores: Mutex<BTreeMap<String, HashChainStore>>,
-    paused_sessions: RwLock<BTreeMap<String, String>>,
-    sessions_dir: PathBuf,
+    stores: Mutex<AgentRunStores>,
+    paused_agent_runs: RwLock<BTreeMap<String, String>>,
+    agent_runs_dir: PathBuf,
     storage_writable: AtomicBool,
     scope: Option<ScopeController>,
     pipeline: EventPipeline,
     collector_checkpoint_interval: Duration,
+}
+
+struct ManagedAgentRunStore {
+    store: HashChainStore,
+    identity: AgentRunStorageIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AgentRunStorageIdentity {
+    agent_run_device: u64,
+    agent_run_inode: u64,
+}
+
+#[derive(Default)]
+struct AgentRunStores {
+    active: BTreeMap<String, ManagedAgentRunStore>,
+    write_blocked: BTreeSet<String>,
 }
 
 impl DaemonState {
@@ -46,36 +72,48 @@ impl DaemonState {
         config: &DaemonConfig,
         scope: Option<ScopeController>,
     ) -> Result<Self, String> {
-        let sessions_dir = config.state_dir.join("sessions");
-        std::fs::create_dir_all(&sessions_dir)
+        let agent_runs_dir = config.state_dir.join(LEGACY_AGENT_RUN_STORAGE_DIR);
+        std::fs::create_dir_all(&agent_runs_dir)
             .map_err(|error| format!("failed to create daemon state directory: {error}"))?;
+        recover_retention_transactions(&agent_runs_dir)
+            .map_err(|error| format!("failed to recover retention state: {error}"))?;
         let mut registry = SessionRegistry::new(config.max_sessions, config.max_pending);
         let mut stores = BTreeMap::new();
         let now_unix_ms = current_unix_ms()?;
         let mut recovered_integrity_issue = false;
-        for entry in std::fs::read_dir(&sessions_dir)
-            .map_err(|error| format!("failed to scan daemon session state: {error}"))?
+        for entry in std::fs::read_dir(&agent_runs_dir)
+            .map_err(|error| format!("failed to scan daemon Agent Run state: {error}"))?
         {
             let entry = entry
-                .map_err(|error| format!("failed to inspect daemon session state: {error}"))?;
+                .map_err(|error| format!("failed to inspect daemon Agent Run state: {error}"))?;
             if !entry
                 .file_type()
-                .map_err(|error| format!("failed to inspect session state type: {error}"))?
+                .map_err(|error| format!("failed to inspect Agent Run state type: {error}"))?
                 .is_dir()
             {
                 continue;
             }
-            let session_id = entry.file_name().to_string_lossy().to_string();
+            let agent_run_id = entry.file_name().to_string_lossy().to_string();
             let timeline = entry.path().join("timeline.jsonl");
-            if !timeline.is_file() {
-                continue;
+            match std::fs::symlink_metadata(&timeline) {
+                Ok(metadata) if metadata.file_type().is_file() => {}
+                Ok(_) => {
+                    recovered_integrity_issue = true;
+                    continue;
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "failed to inspect daemon Agent Run timeline: {error}"
+                    ));
+                }
             }
             let mut recovery = HashChainStore::create_or_recover(&timeline)
-                .map_err(|error| format!("failed to recover session {session_id}: {error}"))?;
+                .map_err(|error| format!("failed to recover Agent Run {agent_run_id}: {error}"))?;
             if let Some(quarantine_path) = recovery.quarantined_path.as_deref() {
                 append_integrity_finding(
                     &mut recovery.store,
-                    &session_id,
+                    &agent_run_id,
                     &timeline,
                     quarantine_path,
                     recovery.records.len(),
@@ -84,24 +122,52 @@ impl DaemonState {
             }
             append_incomplete_collector_lifecycles(
                 &mut recovery.store,
-                &session_id,
+                &agent_run_id,
                 &recovery.records,
             )?;
-            if let Some(recovered) = replay_active_session(&recovery.records, now_unix_ms)? {
-                registry
-                    .register(recovered.intent, now_unix_ms)
-                    .map_err(|error| format!("failed to restore session {session_id}: {error}"))?;
-                for cgroup_id in recovered.cgroup_ids {
-                    registry
-                        .discover_cgroup(&session_id, cgroup_id)
-                        .map_err(|error| {
-                            format!(
-                                "failed to restore cgroup {cgroup_id} for session {session_id}: {error}"
-                            )
-                        })?;
+            if let Some(recovered) = replay_persisted_agent_run(&recovery.records, now_unix_ms)? {
+                if recovered.intent.session_id != agent_run_id {
+                    return Err(format!(
+                        "failed to restore Agent Run {agent_run_id}: durable Agent Run identity mismatch"
+                    ));
+                }
+                match recovered.status {
+                    RecoveredAgentRunStatus::Active => {
+                        registry
+                            .register(recovered.intent, now_unix_ms)
+                            .map_err(|error| {
+                                format!("failed to restore Agent Run {agent_run_id}: {error}")
+                            })?;
+                        for cgroup_id in recovered.cgroup_ids {
+                            registry
+                                .discover_cgroup(&agent_run_id, cgroup_id)
+                                .map_err(|error| {
+                                    format!(
+                                        "failed to restore cgroup {cgroup_id} for Agent Run {agent_run_id}: {error}"
+                                    )
+                                })?;
+                        }
+                    }
+                    RecoveredAgentRunStatus::Closed => {
+                        registry
+                            .restore_closed_agent_run(recovered.intent)
+                            .map_err(|error| {
+                                format!(
+                                    "failed to restore closed Agent Run {agent_run_id}: {error}"
+                                )
+                            })?;
+                    }
                 }
             }
-            stores.insert(session_id, recovery.store);
+            let identity = capture_agent_run_storage_identity(&entry.path(), &recovery.store)
+                .map_err(|_| "unsafe daemon Agent Run storage identity".to_string())?;
+            stores.insert(
+                agent_run_id,
+                ManagedAgentRunStore {
+                    store: recovery.store,
+                    identity,
+                },
+            );
         }
         let pipeline = EventPipeline::new(config.queue_capacity);
         let mut health = HealthSnapshot::new(QueueStats::new(config.queue_capacity));
@@ -114,9 +180,12 @@ impl DaemonState {
         Ok(Self {
             registry: RwLock::new(registry),
             health: RwLock::new(health),
-            stores: Mutex::new(stores),
-            paused_sessions: RwLock::new(BTreeMap::new()),
-            sessions_dir,
+            stores: Mutex::new(AgentRunStores {
+                active: stores,
+                write_blocked: BTreeSet::new(),
+            }),
+            paused_agent_runs: RwLock::new(BTreeMap::new()),
+            agent_runs_dir,
             storage_writable: AtomicBool::new(true),
             scope,
             pipeline,
@@ -238,46 +307,114 @@ impl DaemonState {
             .list_for_tenant(tenant_id, retention_tier)
     }
 
-    pub async fn apply_retention(
+    pub async fn preview_retention_at(
         &self,
         tenant_id: &str,
         now_unix_ms: u64,
-        dry_run: bool,
-    ) -> Result<RetentionPurgeReport, String> {
-        let mut registry = self.registry.write().await;
-        if dry_run {
-            return Ok(registry.retention_purge_report_for_tenant(tenant_id, now_unix_ms, true));
-        }
+    ) -> RetentionPurgeReport {
+        self.registry
+            .read()
+            .await
+            .retention_purge_report_for_tenant(tenant_id, now_unix_ms, true)
+    }
 
+    pub async fn apply_retention(&self) -> Result<RetentionPurgeReport, RetentionError> {
+        let now_unix_ms = current_unix_ms().map_err(|_| RetentionError::ClockUnavailable)?;
+        self.apply_retention_at(now_unix_ms).await
+    }
+
+    async fn apply_retention_at(
+        &self,
+        now_unix_ms: u64,
+    ) -> Result<RetentionPurgeReport, RetentionError> {
+        let mut registry = self.registry.write().await;
         let mut candidate = registry.clone();
-        let report = candidate.apply_retention_for_tenant(tenant_id, now_unix_ms);
-        let purged_session_ids = report.purged_session_ids.clone();
-        if !purged_session_ids.is_empty() {
-            {
-                let mut stores = self.stores.lock().await;
-                for session_id in &purged_session_ids {
-                    stores.remove(session_id);
+        let report = candidate.apply_retention(now_unix_ms);
+        let purged_agent_run_ids = report.purged_session_ids.clone();
+        if !purged_agent_run_ids.is_empty() {
+            let mut stores = self.stores.lock().await;
+            let mut targets = Vec::with_capacity(purged_agent_run_ids.len());
+            for agent_run_id in &purged_agent_run_ids {
+                let target =
+                    validate_agent_run_retention_target(&self.agent_runs_dir, agent_run_id)?;
+                let expected_timeline = target.agent_run_path().join("timeline.jsonl");
+                let Some(managed) = stores.active.get(agent_run_id) else {
+                    return Err(RetentionError::UnsafeTarget);
+                };
+                let opened_timeline = managed
+                    .store
+                    .file_identity()
+                    .map_err(|_| RetentionError::UnsafeTarget)?;
+                if managed.store.path() != expected_timeline
+                    || managed.identity.agent_run_device != target.directory_device()
+                    || managed.identity.agent_run_inode != target.directory_inode()
+                    || opened_timeline.device != target.timeline_device()
+                    || opened_timeline.inode != target.timeline_inode()
+                {
+                    return Err(RetentionError::UnsafeTarget);
                 }
+                targets.push(target);
             }
-            for session_id in &purged_session_ids {
-                let session_dir = self.sessions_dir.join(session_id);
-                match std::fs::remove_dir_all(&session_dir) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            for agent_run_id in &purged_agent_run_ids {
+                stores.write_blocked.insert(agent_run_id.clone());
+            }
+            let mut transaction =
+                match stage_agent_run_retention_targets(&self.agent_runs_dir, &targets) {
+                    Ok(transaction) => transaction,
                     Err(error) => {
-                        return Err(format!(
-                            "failed to remove retained session state {}: {error}",
-                            session_dir.display()
-                        ));
+                        if error != RetentionError::StageRollbackFailed {
+                            for agent_run_id in &purged_agent_run_ids {
+                                stores.write_blocked.remove(agent_run_id);
+                            }
+                        }
+                        drop(stores);
+                        if error == RetentionError::StageRollbackFailed {
+                            self.health
+                                .write()
+                                .await
+                                .set_storage(ComponentState::Degraded);
+                        }
+                        return Err(error);
+                    }
+                };
+            if transaction.commit().is_err() {
+                let rollback = transaction.rollback();
+                if rollback.is_ok() {
+                    for agent_run_id in &purged_agent_run_ids {
+                        stores.write_blocked.remove(agent_run_id);
                     }
                 }
+                drop(stores);
+                if rollback.is_err() {
+                    self.health
+                        .write()
+                        .await
+                        .set_storage(ComponentState::Degraded);
+                    return Err(RetentionError::StageRollbackFailed);
+                }
+                return Err(RetentionError::StageFailed);
             }
+            for agent_run_id in &purged_agent_run_ids {
+                stores.active.remove(agent_run_id);
+            }
+            drop(stores);
+
+            *registry = candidate;
             {
-                let mut paused = self.paused_sessions.write().await;
-                for session_id in &purged_session_ids {
-                    paused.remove(session_id);
+                let mut paused = self.paused_agent_runs.write().await;
+                for agent_run_id in &purged_agent_run_ids {
+                    paused.remove(agent_run_id);
                 }
             }
+
+            if let Err(error) = transaction.cleanup() {
+                self.health
+                    .write()
+                    .await
+                    .set_storage(ComponentState::Degraded);
+                return Err(error);
+            }
+            return Ok(report);
         }
         *registry = candidate;
         Ok(report)
@@ -504,11 +641,11 @@ impl DaemonState {
     ) -> Result<RecordWriteOutcome, String> {
         if !self.storage_writable.load(Ordering::Acquire) {
             return Err(
-                "session storage is unavailable; restart after repairing storage".to_string(),
+                "Agent Run storage is unavailable; restart after repairing storage".to_string(),
             );
         }
         if self
-            .paused_sessions
+            .paused_agent_runs
             .read()
             .await
             .contains_key(&record.session_id)
@@ -532,13 +669,13 @@ impl DaemonState {
     }
 
     pub(crate) async fn session_is_paused(&self, session_id: &str) -> bool {
-        self.paused_sessions.read().await.contains_key(session_id)
+        self.paused_agent_runs.read().await.contains_key(session_id)
     }
 
     async fn persist(&self, session_id: &str, payload: Value) -> Result<(), String> {
         if !self.storage_writable.load(Ordering::Acquire) {
             return Err(
-                "session storage is unavailable; restart after repairing storage".to_string(),
+                "Agent Run storage is unavailable; restart after repairing storage".to_string(),
             );
         }
         let result = self.persist_inner(session_id, payload).await;
@@ -578,7 +715,7 @@ impl DaemonState {
 
     async fn pause_session(&self, session_id: &str, reason: &str) -> bool {
         let first_failure = self
-            .paused_sessions
+            .paused_agent_runs
             .write()
             .await
             .insert(session_id.to_string(), reason.to_string())
@@ -621,23 +758,111 @@ impl DaemonState {
 
     async fn persist_inner(&self, session_id: &str, payload: Value) -> Result<(), String> {
         let mut stores = self.stores.lock().await;
-        if !stores.contains_key(session_id) {
-            let timeline = self.sessions_dir.join(session_id).join("timeline.jsonl");
-            let recovery = HashChainStore::create_or_recover(timeline)
-                .map_err(|error| format!("failed to recover session timeline: {error}"))?;
-            stores.insert(session_id.to_string(), recovery.store);
+        if stores.write_blocked.contains(session_id) {
+            return Err("Agent Run storage write is blocked".to_string());
+        }
+        if !stores.active.contains_key(session_id) {
+            let timeline = self.agent_runs_dir.join(session_id).join("timeline.jsonl");
+            refuse_unsafe_storage_path_before_open(&self.agent_runs_dir, session_id, &timeline)
+                .map_err(|_| "unsafe Agent Run storage target".to_string())?;
+            let recovery = HashChainStore::create_or_recover(&timeline)
+                .map_err(|error| format!("failed to recover Agent Run timeline: {error}"))?;
+            let agent_run_dir = self.agent_runs_dir.join(session_id);
+            let identity = capture_agent_run_storage_identity(&agent_run_dir, &recovery.store)
+                .map_err(|_| "unsafe Agent Run storage identity".to_string())?;
+            stores.active.insert(
+                session_id.to_string(),
+                ManagedAgentRunStore {
+                    store: recovery.store,
+                    identity,
+                },
+            );
         }
         let store = stores
+            .active
             .get_mut(session_id)
-            .ok_or_else(|| "session store was not initialized".to_string())?;
+            .ok_or_else(|| "Agent Run store was not initialized".to_string())?;
         let payload = serde_json::to_string(&payload)
-            .map_err(|error| format!("failed to serialize session record: {error}"))?;
+            .map_err(|error| format!("failed to serialize Agent Run record: {error}"))?;
         store
+            .store
             .append_json(1, &payload)
-            .map_err(|error| format!("failed to append session timeline: {error}"))?;
+            .map_err(|error| format!("failed to append Agent Run timeline: {error}"))?;
         store
+            .store
             .flush()
-            .map_err(|error| format!("failed to flush session timeline: {error}"))
+            .map_err(|error| format!("failed to flush Agent Run timeline: {error}"))
+    }
+}
+
+fn capture_agent_run_storage_identity(
+    agent_run_dir: &Path,
+    store: &HashChainStore,
+) -> Result<AgentRunStorageIdentity, RetentionError> {
+    let agent_run_metadata =
+        std::fs::symlink_metadata(agent_run_dir).map_err(|_| RetentionError::UnsafeTarget)?;
+    let timeline_metadata =
+        std::fs::symlink_metadata(store.path()).map_err(|_| RetentionError::UnsafeTarget)?;
+    let opened_timeline = store
+        .file_identity()
+        .map_err(|_| RetentionError::UnsafeTarget)?;
+    if !agent_run_metadata.file_type().is_dir()
+        || !timeline_metadata.file_type().is_file()
+        || timeline_metadata.nlink() != 1
+        || timeline_metadata.dev() != opened_timeline.device
+        || timeline_metadata.ino() != opened_timeline.inode
+    {
+        return Err(RetentionError::UnsafeTarget);
+    }
+    Ok(AgentRunStorageIdentity {
+        agent_run_device: agent_run_metadata.dev(),
+        agent_run_inode: agent_run_metadata.ino(),
+    })
+}
+
+fn refuse_unsafe_storage_path_before_open(
+    agent_runs_dir: &Path,
+    agent_run_id: &str,
+    timeline: &Path,
+) -> Result<(), RetentionError> {
+    let agent_run_path = Path::new(agent_run_id);
+    let mut components = agent_run_path.components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(RetentionError::UnsafeTarget);
+    }
+    let agent_runs_metadata =
+        std::fs::symlink_metadata(agent_runs_dir).map_err(|_| RetentionError::UnsafeTarget)?;
+    if !agent_runs_metadata.file_type().is_dir() {
+        return Err(RetentionError::UnsafeTarget);
+    }
+    let agent_run_dir = agent_runs_dir.join(agent_run_path);
+    let agent_run_metadata = match std::fs::symlink_metadata(&agent_run_dir) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(_) => return Err(RetentionError::UnsafeTarget),
+    };
+    if let Some(metadata) = agent_run_metadata.as_ref() {
+        if !metadata.file_type().is_dir()
+            || metadata.dev() != agent_runs_metadata.dev()
+            || metadata.uid() != agent_runs_metadata.uid()
+        {
+            return Err(RetentionError::UnsafeTarget);
+        }
+    }
+    match std::fs::symlink_metadata(timeline) {
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && metadata.nlink() == 1
+                && agent_run_metadata
+                    .as_ref()
+                    .is_some_and(|agent_run| metadata.dev() == agent_run.dev()) =>
+        {
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        _ => Err(RetentionError::UnsafeTarget),
     }
 }
 
@@ -827,15 +1052,22 @@ fn container_identity(workload: &RuntimeWorkload) -> Option<String> {
     }
 }
 
-struct RecoveredSession {
+struct RecoveredAgentRun {
     intent: SessionIntent,
     cgroup_ids: Vec<u64>,
+    status: RecoveredAgentRunStatus,
 }
 
-fn replay_active_session(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveredAgentRunStatus {
+    Active,
+    Closed,
+}
+
+fn replay_persisted_agent_run(
     records: &[apolysis_store::ChainRecord],
     now_unix_ms: u64,
-) -> Result<Option<RecoveredSession>, String> {
+) -> Result<Option<RecoveredAgentRun>, String> {
     let mut intent: Option<SessionIntent> = None;
     let mut cgroup_ids = Vec::new();
     let mut closed = false;
@@ -882,9 +1114,21 @@ fn replay_active_session(
         }
     }
     cgroup_ids.sort_unstable();
-    Ok(intent
-        .filter(|intent| !closed && intent.expires_at_unix_ms > now_unix_ms)
-        .map(|intent| RecoveredSession { intent, cgroup_ids }))
+    let Some(intent) = intent else {
+        return Ok(None);
+    };
+    let status = if closed {
+        RecoveredAgentRunStatus::Closed
+    } else if intent.expires_at_unix_ms > now_unix_ms {
+        RecoveredAgentRunStatus::Active
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(RecoveredAgentRun {
+        intent,
+        cgroup_ids,
+        status,
+    }))
 }
 
 fn current_unix_ms() -> Result<u64, String> {

@@ -2123,6 +2123,12 @@ fn spawn_managed_agent(
             if libc::dup2(gate_read, GATE_FD) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
+            // dup2(source, source) is a no-op, so when pipe2 allocated fd 3 it
+            // leaves O_CLOEXEC in place. Clear descriptor flags explicitly for
+            // both the same-fd and duplicated-fd paths before the shell exec.
+            if libc::fcntl(GATE_FD, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             if let Some(cgroup_fd) = managed_agent_cgroup_fd.as_ref() {
                 write_self_pid_to_cgroup(cgroup_fd.as_raw_fd())?;
             }
@@ -4560,6 +4566,64 @@ mod tests {
             "workload did not run after the gate was released"
         );
         let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn managed_agent_gate_survives_when_pipe_uses_wrapper_fd() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("live::tests::managed_agent_gate_same_fd_helper")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env("APOLYSIS_GATE_SAME_FD_HELPER", "1")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "same-fd managed-agent gate subprocess failed: status={:?}, stdout={}, stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "runs only in the isolated same-fd regression subprocess"]
+    fn managed_agent_gate_same_fd_helper() {
+        if std::env::var_os("APOLYSIS_GATE_SAME_FD_HELPER").is_none() {
+            return;
+        }
+
+        const GATE_FD: libc::c_int = 3;
+        // This helper runs in a dedicated test process, so releasing descriptor
+        // 3 deterministically makes pipe2 allocate it as the gate read end.
+        unsafe {
+            libc::close(GATE_FD);
+        }
+
+        let reserved = std::fs::File::open("/dev/null").unwrap();
+        assert_eq!(
+            reserved.as_raw_fd(),
+            GATE_FD,
+            "failed to reserve wrapper fd before building the Tokio runtime"
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        drop(reserved);
+
+        let request = AgentRunRequest::new("true", vec!["true".to_string()]).unwrap();
+        let status = runtime.block_on(async move {
+            let mut managed = spawn_managed_agent(&request, Path::new("."), None).unwrap();
+            managed.release_gate();
+            managed.child.wait().await.unwrap()
+        });
+        assert!(
+            status.success(),
+            "managed-agent workload exited unsuccessfully: {status:?}"
+        );
     }
 
     #[test]
