@@ -24,16 +24,13 @@ use apolysis_daemon::{
     containerd_workload_from_snapshot, crictl_marked_container_candidates_from_ps_and_pods,
     crictl_marked_container_ids_from_ps, docker_container_pid_from_engine_inspect,
     docker_snapshot_from_engine_inspect, docker_workload_from_snapshot,
-    kubernetes_marked_pod_snapshots_from_api_list, kubernetes_pod_snapshot_from_api_object,
-    kubernetes_workload_from_pod_snapshot, run_runtime_adapter_with_policy,
-    run_runtime_inventory_adapter_with_policy, serve, AdapterBackoffPolicy, CgroupIdentity,
-    ContainerdCriRuntimeAdapter, ContainerdTaskSnapshot, CriRuntimeClient, DaemonConfig,
-    DaemonResponse, DaemonState, DockerContainerSnapshot, DockerEngineClient,
-    DockerEnginePollingRuntimeAdapter, DockerEngineRuntimeAdapter, KubernetesCliClient,
-    KubernetesCliRuntimeAdapter, KubernetesPodSnapshot, RuntimeAdapterBackend, RuntimeBinding,
-    RuntimeInventory, RuntimeInventoryAdapter, RuntimeInventoryInvalidCategory,
-    RuntimeInventoryScanError, RuntimeSourceGapReason, RuntimeWorkload, RuntimeWorkloadIdentity,
-    APOLYSIS_SESSION_ANNOTATION,
+    run_runtime_adapter_with_policy, run_runtime_inventory_adapter_with_policy, serve,
+    AdapterBackoffPolicy, CgroupIdentity, ContainerdCriRuntimeAdapter, ContainerdTaskSnapshot,
+    CriRuntimeClient, DaemonConfig, DaemonResponse, DaemonState, DockerContainerSnapshot,
+    DockerEngineClient, DockerEnginePollingRuntimeAdapter, DockerEngineRuntimeAdapter,
+    RuntimeAdapterBackend, RuntimeBinding, RuntimeInventory, RuntimeInventoryAdapter,
+    RuntimeInventoryInvalidCategory, RuntimeInventoryScanError, RuntimeSourceGapReason,
+    RuntimeWorkload, RuntimeWorkloadIdentity,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -729,6 +726,217 @@ async fn docker_inventory_rejects_a_free_text_started_at_marker() {
     server.abort();
     let _ = server.await;
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn containerd_kubernetes_sandbox_metadata_mode_inherits_the_pod_session_annotation() {
+    let _fixture_lease = executable_fixture_test_lease().await;
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "apolysis-containerd-kubernetes-sandbox-metadata-{}-{id}",
+        std::process::id()
+    ));
+    let proc_root = root.join("proc");
+    let cgroup_root = root.join("sys/fs/cgroup");
+    let workload_cgroup = cgroup_root.join("kubepods/pod-workload/container");
+    let crictl = root.join("crictl-fixture");
+    let _ = std::fs::remove_dir_all(&root);
+    write_runtime_identity_fixture(&proc_root, 4444, 91, "/kubepods/pod-workload/container");
+    std::fs::create_dir_all(&workload_cgroup).expect("create Kubernetes workload cgroup");
+    write_executable_fixture(
+        &crictl,
+        r#"#!/bin/sh
+case " $* " in
+  *" ps -o json "*)
+    printf '%s\n' '{"containers":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","podSandboxId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metadata":{"name":"agent","attempt":0},"image":{"image":"registry.example.invalid/agent@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"imageRef":"registry.example.invalid/agent@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","state":"CONTAINER_RUNNING","createdAt":1786500000000000000,"labels":{"io.kubernetes.container.name":"agent"},"annotations":{"io.kubernetes.container.hash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}},{"id":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","podSandboxId":"1111111111111111111111111111111111111111111111111111111111111111","state":"CONTAINER_RUNNING","labels":{}},{"id":"2222222222222222222222222222222222222222222222222222222222222222","podSandboxId":"3333333333333333333333333333333333333333333333333333333333333333","state":"CONTAINER_RUNNING","labels":{}},{"id":"4444444444444444444444444444444444444444444444444444444444444444","podSandboxId":"5555555555555555555555555555555555555555555555555555555555555555","state":"CONTAINER_RUNNING","labels":{}}]}'
+    ;;
+  *" pods -o json "*)
+    printf '%s\n' '{"items":[{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metadata":{"attempt":0,"name":"agent-pod","namespace":"private-team","uid":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"},"state":"SANDBOX_READY","createdAt":1786499999000000000,"labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.name":"agent-pod","io.kubernetes.pod.namespace":"private-team","io.kubernetes.pod.uid":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"},"annotations":{"apolysis.dev/session-id":"agent-run-from-pod-annotation","kubernetes.io/config.source":"api"},"runtimeHandler":"runc"},{"id":"1111111111111111111111111111111111111111111111111111111111111111","state":"SANDBOX_READY","labels":{"apolysis.session_id":"private-unmarked-label"},"annotations":{"apolysis.dev/session-id":"private-unmarked-conflict"}},{"id":"3333333333333333333333333333333333333333333333333333333333333333","state":"SANDBOX_READY","labels":{},"annotations":{"apolysis.dev/session-id":{"private":"malformed-unmarked"}}},{"id":"5555555555555555555555555555555555555555555555555555555555555555","metadata":{"name":"cross-namespace-pod","namespace":"other-team"},"state":"SANDBOX_READY","labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.namespace":"other-team"},"annotations":{"apolysis.dev/session-id":"agent-run-from-pod-annotation"}}]}'
+    ;;
+  *" inspect -o json aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "*)
+    printf '%s\n' '{"status":{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"CONTAINER_RUNNING","startedAt":"1786500000000000001","labels":{"io.kubernetes.container.name":"agent"}},"info":{"pid":4444,"runtimeType":"io.containerd.runc.v2","runtimeSpec":{"linux":{"cgroupsPath":"/kubepods/pod-workload/container"}}}}'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    );
+    let client = || {
+        CriRuntimeClient::new(root.join("unused-containerd.sock"))
+            .with_crictl_path(&crictl)
+            .with_image_endpoint(None)
+    };
+    let standalone = ContainerdCriRuntimeAdapter::new(
+        AdapterKind::Containerd,
+        client(),
+        &proc_root,
+        &cgroup_root,
+        Duration::from_millis(1),
+        32,
+    )
+    .expect("standalone containerd adapter");
+
+    let standalone_inventory = standalone
+        .scan_inventory()
+        .await
+        .expect("standalone containerd inventory");
+    assert!(standalone_inventory.bindings.is_empty());
+
+    let kubernetes = ContainerdCriRuntimeAdapter::new(
+        AdapterKind::Containerd,
+        client(),
+        &proc_root,
+        &cgroup_root,
+        Duration::from_millis(1),
+        32,
+    )
+    .expect("Kubernetes containerd adapter")
+    .with_kubernetes_sandbox_metadata("private-team")
+    .expect("private-team Kubernetes sandbox namespace");
+    let kubernetes_inventory = kubernetes
+        .scan_inventory()
+        .await
+        .expect("Kubernetes containerd inventory");
+
+    assert_eq!(kubernetes_inventory.bindings.len(), 1);
+    assert_eq!(
+        kubernetes_inventory.bindings[0].agent_run_id,
+        "agent-run-from-pod-annotation"
+    );
+    assert_eq!(
+        kubernetes_inventory.bindings[0].identity.workload_id,
+        "containerd/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(
+        kubernetes_inventory.bindings[0].identity.cgroup.inode,
+        std::fs::metadata(&workload_cgroup).unwrap().ino()
+    );
+    let persisted = serde_json::to_string(&kubernetes_inventory.bindings)
+        .expect("serialize Kubernetes runtime binding");
+    assert!(!persisted.contains("private-team"));
+    assert!(!persisted.contains("agent-pod"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn containerd_kubernetes_sandbox_metadata_rejects_an_inspect_label_conflict() {
+    let _fixture_lease = executable_fixture_test_lease().await;
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "apolysis-containerd-kubernetes-inspect-conflict-{}-{id}",
+        std::process::id()
+    ));
+    let proc_root = root.join("proc");
+    let cgroup_root = root.join("sys/fs/cgroup");
+    let crictl = root.join("private-workload-crictl");
+    let _ = std::fs::remove_dir_all(&root);
+    write_runtime_identity_fixture(&proc_root, 4444, 91, "/kubepods/conflict");
+    std::fs::create_dir_all(cgroup_root.join("kubepods/conflict"))
+        .expect("create conflict fixture cgroup");
+    write_executable_fixture(
+        &crictl,
+        r#"#!/bin/sh
+case " $* " in
+  *" ps -o json "*)
+    printf '%s\n' '{"containers":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","podSandboxId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"CONTAINER_RUNNING","labels":{}}]}'
+    ;;
+  *" pods -o json "*)
+    printf '%s\n' '{"items":[{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metadata":{"namespace":"private-team"},"state":"SANDBOX_READY","labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.namespace":"private-team"},"annotations":{"apolysis.dev/session-id":"agent-run-inherited-private"}}]}'
+    ;;
+  *" inspect -o json aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "*)
+    printf '%s\n' '{"status":{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"CONTAINER_RUNNING","startedAt":"1786500000000000001","labels":{"apolysis.session_id":"agent-run-direct-private"}},"info":{"pid":4444,"runtimeSpec":{"linux":{"cgroupsPath":"/kubepods/conflict"}}}}'
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+    );
+    let adapter = ContainerdCriRuntimeAdapter::new(
+        AdapterKind::Containerd,
+        CriRuntimeClient::new(root.join("unused-containerd.sock"))
+            .with_crictl_path(&crictl)
+            .with_image_endpoint(None),
+        &proc_root,
+        &cgroup_root,
+        Duration::from_millis(1),
+        32,
+    )
+    .expect("Kubernetes containerd adapter")
+    .with_kubernetes_sandbox_metadata("private-team")
+    .expect("private-team Kubernetes sandbox namespace");
+
+    let error = adapter
+        .scan_inventory()
+        .await
+        .expect_err("direct and inherited session identities must conflict");
+
+    assert_eq!(error, "runtime inventory scan failed: inventory_invalid");
+    assert!(!error.contains("agent-run-inherited-private"));
+    assert!(!error.contains("agent-run-direct-private"));
+    assert!(!error.contains("private-workload-crictl"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn containerd_kubernetes_sandbox_metadata_fails_closed_on_marked_identity_ambiguity() {
+    let _fixture_lease = executable_fixture_test_lease().await;
+    let cases = [
+        (
+            "sandbox-label-annotation-conflict",
+            r#"{"containers":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","podSandboxId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"CONTAINER_RUNNING","labels":{}}]}"#,
+            r#"{"items":[{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metadata":{"namespace":"agents"},"state":"SANDBOX_READY","labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.namespace":"agents","apolysis.session_id":"private-sandbox-label"},"annotations":{"apolysis.dev/session-id":"private-sandbox-annotation"}}]}"#,
+        ),
+        (
+            "empty-sandbox-annotation",
+            r#"{"containers":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","podSandboxId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"CONTAINER_RUNNING","labels":{}}]}"#,
+            r#"{"items":[{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metadata":{"namespace":"agents"},"state":"SANDBOX_READY","labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.namespace":"agents"},"annotations":{"apolysis.dev/session-id":""}}]}"#,
+        ),
+        (
+            "invalid-sandbox-annotation",
+            r#"{"containers":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","podSandboxId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"CONTAINER_RUNNING","labels":{}}]}"#,
+            r#"{"items":[{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metadata":{"namespace":"agents"},"state":"SANDBOX_READY","labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.namespace":"agents"},"annotations":{"apolysis.dev/session-id":"private invalid session"}}]}"#,
+        ),
+        (
+            "duplicate-ready-sandbox",
+            r#"{"containers":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","podSandboxId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"CONTAINER_RUNNING","labels":{}}]}"#,
+            r#"{"items":[{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metadata":{"namespace":"agents"},"state":"SANDBOX_READY","labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.namespace":"agents"},"annotations":{"apolysis.dev/session-id":"private-duplicate-session"}},{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metadata":{"namespace":"agents"},"state":"SANDBOX_READY","labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.namespace":"agents"},"annotations":{"apolysis.dev/session-id":"private-duplicate-session"}}]}"#,
+        ),
+        (
+            "container-sandbox-conflict",
+            r#"{"containers":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","podSandboxId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"CONTAINER_RUNNING","labels":{"apolysis.session_id":"private-direct-session"}}]}"#,
+            r#"{"items":[{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metadata":{"namespace":"agents"},"state":"SANDBOX_READY","labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.namespace":"agents"},"annotations":{"apolysis.dev/session-id":"private-inherited-session"}}]}"#,
+        ),
+        (
+            "missing-target-namespace",
+            r#"{"containers":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","podSandboxId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"CONTAINER_RUNNING","labels":{}}]}"#,
+            r#"{"items":[{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"SANDBOX_READY","labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.namespace":"agents"},"annotations":{"apolysis.dev/session-id":"private-missing-namespace"}}]}"#,
+        ),
+        (
+            "conflicting-target-namespace",
+            r#"{"containers":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","podSandboxId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"CONTAINER_RUNNING","labels":{}}]}"#,
+            r#"{"items":[{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metadata":{"namespace":"agents"},"state":"SANDBOX_READY","labels":{"apolysis.dev/observe":"true","io.kubernetes.pod.namespace":"other-team"},"annotations":{"apolysis.dev/session-id":"private-conflicting-namespace"}}]}"#,
+        ),
+    ];
+
+    for (name, ps_json, pods_json) in cases {
+        let error = scan_kubernetes_containerd_list_fixture(name, ps_json, pods_json)
+            .await
+            .expect_err("ambiguous marked Kubernetes metadata must fail the complete inventory");
+        assert_eq!(error, "runtime inventory scan failed: inventory_invalid");
+        for private_value in [
+            "private-sandbox-label",
+            "private-sandbox-annotation",
+            "private invalid session",
+            "private-duplicate-session",
+            "private-direct-session",
+            "private-inherited-session",
+            "private-missing-namespace",
+            "private-conflicting-namespace",
+        ] {
+            assert!(!error.contains(private_value), "{name}: {error}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -1514,6 +1722,76 @@ esac
         error.to_string(),
         "runtime inventory scan failed: inventory_invalid"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn kubernetes_containerd_inventory_rechecks_the_sandbox_annotation_after_qualification() {
+    let _fixture_lease = executable_fixture_test_lease().await;
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "apolysis-kubernetes-containerd-annotation-churn-{}-{id}",
+        std::process::id()
+    ));
+    let proc_root = root.join("proc");
+    let cgroup_root = root.join("sys/fs/cgroup");
+    let crictl = root.join("crictl-fixture");
+    write_runtime_identity_fixture(&proc_root, 6060, 181, "/containerd/qualified");
+    std::fs::create_dir_all(cgroup_root.join("containerd/qualified"))
+        .expect("create fake Kubernetes containerd cgroup");
+    let script = r#"#!/bin/sh
+case " $* " in
+  *" ps -o json "*)
+    printf '%s\n' '{"containers":[{"id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","podSandboxId":"sandbox-kubernetes-inherited","state":"CONTAINER_RUNNING","labels":{}}]}'
+    ;;
+  *" pods -o json "*)
+    count_file="@PODS_COUNT@"
+    count=0
+    test ! -f "$count_file" || count=$(cat "$count_file")
+    count=$((count + 1))
+    printf '%s' "$count" > "$count_file"
+    if test "$count" -eq 1; then owner=agent-run-before; else owner=agent-run-after; fi
+    printf '%s\n' "{\"items\":[{\"id\":\"sandbox-kubernetes-inherited\",\"metadata\":{\"namespace\":\"agents\"},\"state\":\"SANDBOX_READY\",\"labels\":{\"apolysis.dev/observe\":\"true\",\"io.kubernetes.pod.namespace\":\"agents\"},\"annotations\":{\"apolysis.dev/session-id\":\"$owner\"}}]}"
+    ;;
+  *" inspect -o json cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc "*)
+    printf '%s\n' '{"status":{"id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","state":"CONTAINER_RUNNING","startedAt":1754874123000000000,"labels":{}},"info":{"pid":6060,"runtimeSpec":{"linux":{"cgroupsPath":"/containerd/qualified"}}}}'
+    ;;
+  *) exit 64 ;;
+esac
+"#
+    .replace(
+        "@PODS_COUNT@",
+        &root.join("pods-count").to_string_lossy(),
+    );
+    write_executable_fixture(&crictl, &script);
+    let adapter = ContainerdCriRuntimeAdapter::new(
+        AdapterKind::Containerd,
+        CriRuntimeClient::new(root.join("unused-containerd.sock"))
+            .with_crictl_path(&crictl)
+            .with_image_endpoint(None),
+        &proc_root,
+        &cgroup_root,
+        Duration::from_millis(1),
+        32,
+    )
+    .expect("Kubernetes containerd inventory adapter")
+    .with_kubernetes_sandbox_metadata("agents")
+    .expect("agents Kubernetes sandbox namespace");
+
+    let error = RuntimeInventoryAdapter::scan_inventory(&adapter)
+        .await
+        .expect_err("sandbox annotation churn must invalidate the complete inventory");
+
+    assert_eq!(
+        error.inventory_invalid_category(),
+        Some(RuntimeInventoryInvalidCategory::DoubleInspect)
+    );
+    assert_eq!(
+        error.to_string(),
+        "runtime inventory scan failed: inventory_invalid"
+    );
+    assert!(!error.to_string().contains("agent-run-before"));
+    assert!(!error.to_string().contains("agent-run-after"));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -2338,6 +2616,67 @@ fn write_executable_fixture(path: &Path, contents: &str) {
 
 async fn executable_fixture_test_lease() -> tokio::sync::MutexGuard<'static, ()> {
     EXECUTABLE_FIXTURE_TEST_LEASE.lock().await
+}
+
+async fn scan_kubernetes_containerd_list_fixture(
+    name: &str,
+    ps_json: &str,
+    pods_json: &str,
+) -> Result<RuntimeInventory, String> {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "apolysis-kubernetes-cri-{name}-{}-{id}",
+        std::process::id()
+    ));
+    let proc_root = root.join("proc");
+    let cgroup_root = root.join("sys/fs/cgroup");
+    let crictl = root.join("crictl");
+    let ps_path = root.join("ps.json");
+    let pods_path = root.join("pods.json");
+    let inspect_path = root.join("inspect.json");
+    let _ = std::fs::remove_dir_all(&root);
+    write_runtime_identity_fixture(&proc_root, 4444, 91, "/kubepods/marked");
+    std::fs::create_dir_all(cgroup_root.join("kubepods/marked"))
+        .expect("create marked fixture cgroup");
+    std::fs::write(&ps_path, ps_json).expect("write CRI ps fixture");
+    std::fs::write(&pods_path, pods_json).expect("write CRI pods fixture");
+    std::fs::write(
+        &inspect_path,
+        r#"{"status":{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"CONTAINER_RUNNING","startedAt":"1786500000000000001","labels":{}},"info":{"pid":4444,"runtimeSpec":{"linux":{"cgroupsPath":"/kubepods/marked"}}}}"#,
+    )
+    .expect("write CRI inspect fixture");
+    write_executable_fixture(
+        &crictl,
+        &format!(
+            r#"#!/bin/sh
+case " $* " in
+  *" ps -o json "*) exec /bin/cat '{}' ;;
+  *" pods -o json "*) exec /bin/cat '{}' ;;
+  *" inspect -o json aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "*) exec /bin/cat '{}' ;;
+  *) exit 64 ;;
+esac
+"#,
+            ps_path.display(),
+            pods_path.display(),
+            inspect_path.display()
+        ),
+    );
+    let adapter = ContainerdCriRuntimeAdapter::new(
+        AdapterKind::Containerd,
+        CriRuntimeClient::new(root.join("unused-containerd.sock"))
+            .with_crictl_path(&crictl)
+            .with_image_endpoint(None),
+        &proc_root,
+        &cgroup_root,
+        Duration::from_millis(1),
+        32,
+    )
+    .expect("Kubernetes containerd list fixture")
+    .with_kubernetes_sandbox_metadata("agents")
+    .expect("agents Kubernetes sandbox namespace");
+    let result = adapter.scan_inventory().await;
+    let _ = std::fs::remove_dir_all(&root);
+    result
 }
 
 fn write_runtime_identity_fixture(
@@ -4795,142 +5134,6 @@ async fn live_k3s_containerd_cri_adapter_recovers_after_socket_disconnect() {
     cleanup(&config);
 }
 
-#[tokio::test]
-#[ignore = "requires k3s/kubectl access, RuntimeClasses, and root access to k3s CRI socket"]
-async fn live_kubernetes_cli_adapter_discovers_annotated_pods() {
-    require_command("crictl");
-    let kubectl = std::env::var("APOLYSIS_KUBECTL").unwrap_or_else(|_| "kubectl".to_string());
-    require_kubectl(&kubectl);
-    let endpoint = std::env::var("APOLYSIS_K3S_CRI_ENDPOINT")
-        .unwrap_or_else(|_| "/run/k3s/containerd/containerd.sock".to_string());
-    let runtimes = live_kubernetes_runtimes();
-
-    for (name, runtime_handler) in runtimes {
-        let session_id = random_kubernetes_value(&format!("live-k8s-{name}"));
-        let namespace = random_kubernetes_value("apolysis-live");
-        let pod_name = format!("apolysis-{name}");
-        let runtime_class =
-            runtime_handler.map(|_| random_kubernetes_value(&format!("apolysis-{name}")));
-        let cleanup = create_kubernetes_pod(
-            &kubectl,
-            &namespace,
-            &pod_name,
-            &session_id,
-            runtime_class.as_deref(),
-            runtime_handler,
-        );
-        wait_for_kubernetes_container_id(&kubectl, &namespace, &pod_name);
-
-        let mut adapter = KubernetesCliRuntimeAdapter::new(
-            KubernetesCliClient::new(&kubectl),
-            CriRuntimeClient::new(&endpoint).with_image_endpoint(None),
-            "/proc",
-            "/sys/fs/cgroup",
-            Duration::from_millis(100),
-            1024,
-        );
-        let workload = tokio::time::timeout(
-            Duration::from_secs(20),
-            next_workload_for_session(&mut adapter, &session_id),
-        )
-        .await
-        .expect("Kubernetes adapter timeout")
-        .expect("target annotated Kubernetes workload");
-
-        assert_eq!(workload.adapter, AdapterKind::Kubernetes);
-        assert_eq!(workload.session_id, session_id);
-        assert!(workload.cgroup_id > 0);
-        assert_eq!(
-            workload.runtime_handler.as_deref(),
-            runtime_class.as_deref()
-        );
-        drop(cleanup);
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires k3s/kubectl access and root access to k3s CRI socket"]
-async fn live_kubernetes_cli_adapter_recovers_after_cri_socket_disconnect() {
-    require_command("crictl");
-    let kubectl = std::env::var("APOLYSIS_KUBECTL").unwrap_or_else(|_| "kubectl".to_string());
-    require_kubectl(&kubectl);
-    let endpoint = std::env::var("APOLYSIS_K3S_CRI_ENDPOINT")
-        .unwrap_or_else(|_| "/run/k3s/containerd/containerd.sock".to_string());
-    let session_id = random_kubernetes_value("live-k8s-cri-recovery");
-    let namespace = random_kubernetes_value("apolysis-live");
-    let pod_name = "apolysis-k8s-cri-recovery";
-    let workload_cleanup =
-        create_kubernetes_pod(&kubectl, &namespace, pod_name, &session_id, None, None);
-    wait_for_kubernetes_container_id(&kubectl, &namespace, pod_name);
-    let config = config("k8s-cri-recovery");
-    let state = Arc::new(DaemonState::new(&config).expect("daemon state"));
-    state
-        .register(intent(&session_id), 1_700_000_000_000)
-        .await
-        .expect("register intent");
-    let proxy_socket = config.state_dir.join("k8s-cri.sock");
-    let proxy = start_unix_socket_proxy_with_initial_disconnect(
-        &proxy_socket,
-        std::path::Path::new(&endpoint),
-    );
-    let adapter = KubernetesCliRuntimeAdapter::new(
-        KubernetesCliClient::new(&kubectl),
-        CriRuntimeClient::new(&proxy_socket).with_image_endpoint(None),
-        "/proc",
-        "/sys/fs/cgroup",
-        Duration::from_millis(100),
-        1024,
-    );
-    let (shutdown, receiver) = oneshot::channel();
-    let runner = tokio::spawn(run_runtime_adapter_with_policy(
-        adapter,
-        Arc::clone(&state),
-        receiver,
-        AdapterBackoffPolicy {
-            initial_delay_ms: 10,
-            max_delay_ms: 10,
-            jitter_ms: 0,
-        },
-    ));
-
-    let attach_result = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if state
-                .query(&session_id)
-                .await
-                .map(|session| !session.cgroup_ids.is_empty())
-                .unwrap_or(false)
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await;
-    if attach_result.is_err() {
-        shutdown
-            .send(())
-            .expect("stop Kubernetes adapter after timeout");
-        let summary = runner.await.expect("Kubernetes adapter task after timeout");
-        panic!("session {session_id} did not attach a cgroup; summary={summary:?}");
-    }
-    shutdown.send(()).expect("stop Kubernetes adapter");
-    let summary = runner.await.expect("Kubernetes adapter task");
-
-    assert_eq!(summary.backend_errors, 1);
-    assert_eq!(summary.backend_recoveries, 1);
-    assert_eq!(summary.discovered, 1);
-    assert_eq!(
-        state.health().await.adapter(AdapterKind::Kubernetes),
-        ComponentState::Ready
-    );
-
-    proxy.abort();
-    drop(workload_cleanup);
-    cleanup_cri_workloads_for_session(std::path::Path::new("crictl"), &endpoint, None, &session_id);
-    cleanup(&config);
-}
-
 async fn next_workload_for_session<B: RuntimeAdapterBackend>(
     adapter: &mut B,
     session_id: &str,
@@ -5168,132 +5371,6 @@ fn containerd_cri_inspect_json_becomes_task_snapshot() {
         snapshot.runtime_handler.as_deref(),
         Some("io.containerd.runsc.v1")
     );
-}
-
-#[test]
-fn kubernetes_pod_snapshot_uses_session_annotation_and_pod_uid() {
-    let mut annotations = BTreeMap::new();
-    annotations.insert(
-        APOLYSIS_SESSION_ANNOTATION.to_string(),
-        "session-kubernetes".to_string(),
-    );
-
-    let workload = kubernetes_workload_from_pod_snapshot(KubernetesPodSnapshot {
-        namespace: "agent-jobs".to_string(),
-        pod_name: "apolysis-worker".to_string(),
-        pod_uid: Some("pod-uid-123".to_string()),
-        annotations,
-        cgroup_id: 404,
-        runtime_class_name: Some("kata-qemu".to_string()),
-    })
-    .expect("kubernetes pod snapshot")
-    .expect("marked kubernetes workload");
-
-    assert_eq!(workload.adapter, AdapterKind::Kubernetes);
-    assert_eq!(workload.session_id, "session-kubernetes");
-    assert_eq!(workload.workload_id, "pod-uid-123");
-    assert_eq!(workload.cgroup_id, 404);
-    assert_eq!(workload.runtime_handler.as_deref(), Some("kata-qemu"));
-}
-
-#[test]
-fn kubernetes_api_pod_object_becomes_pod_snapshot() {
-    let snapshot = kubernetes_pod_snapshot_from_api_object(
-        &json!({
-            "metadata": {
-                "namespace": "agent-jobs",
-                "name": "apolysis-worker",
-                "uid": "pod-uid-123",
-                "annotations": {
-                    "apolysis.dev/session-id": "session-kubernetes",
-                    "owner": "ignored"
-                }
-            },
-            "spec": {
-                "runtimeClassName": "gvisor"
-            }
-        }),
-        505,
-    )
-    .expect("pod snapshot");
-
-    assert_eq!(snapshot.namespace, "agent-jobs");
-    assert_eq!(snapshot.pod_name, "apolysis-worker");
-    assert_eq!(snapshot.pod_uid.as_deref(), Some("pod-uid-123"));
-    assert_eq!(snapshot.cgroup_id, 505);
-    assert_eq!(
-        snapshot
-            .annotations
-            .get(APOLYSIS_SESSION_ANNOTATION)
-            .map(String::as_str),
-        Some("session-kubernetes")
-    );
-    assert_eq!(snapshot.runtime_class_name.as_deref(), Some("gvisor"));
-}
-
-#[test]
-fn kubernetes_pod_list_uses_annotation_and_container_cgroup_map() {
-    let snapshots = kubernetes_marked_pod_snapshots_from_api_list(
-        &json!({
-            "items": [
-                {
-                    "metadata": {
-                        "namespace": "agent-jobs",
-                        "name": "apolysis-worker",
-                        "uid": "pod-uid-123",
-                        "resourceVersion": "2001",
-                        "annotations": {
-                            "apolysis.dev/session-id": "session-kubernetes"
-                        }
-                    },
-                    "spec": {
-                        "nodeName": "mactavish",
-                        "serviceAccountName": "agent-runner",
-                        "runtimeClassName": "gvisor"
-                    },
-                    "status": {
-                        "phase": "Running",
-                        "containerStatuses": [
-                            {
-                                "name": "worker",
-                                "containerID": "containerd://containerd-task-1"
-                            }
-                        ]
-                    }
-                },
-                {
-                    "metadata": {
-                        "namespace": "kube-system",
-                        "name": "unmarked",
-                        "uid": "pod-uid-ignored"
-                    },
-                    "status": {
-                        "phase": "Running",
-                        "containerStatuses": [
-                            {
-                                "containerID": "containerd://containerd-task-ignored"
-                            }
-                        ]
-                    }
-                }
-            ]
-        }),
-        &BTreeMap::from([("containerd-task-1".to_string(), 808)]),
-    )
-    .expect("marked pod snapshots");
-
-    assert_eq!(snapshots.len(), 1);
-    assert_eq!(snapshots[0].namespace, "agent-jobs");
-    assert_eq!(snapshots[0].pod_name, "apolysis-worker");
-    assert_eq!(snapshots[0].pod_uid.as_deref(), Some("pod-uid-123"));
-    assert_eq!(snapshots[0].cgroup_id, 808);
-    assert_eq!(snapshots[0].runtime_class_name.as_deref(), Some("gvisor"));
-
-    let workload = kubernetes_workload_from_pod_snapshot(snapshots[0].clone())
-        .expect("kubernetes workload")
-        .expect("marked workload");
-    assert_eq!(workload.session_id, "session-kubernetes");
-    assert_eq!(workload.workload_id, "pod-uid-123");
 }
 
 #[test]
@@ -9661,6 +9738,7 @@ fn intent(session_id: &str) -> SessionIntent {
             value: "/workspace".to_string(),
         }],
         workload_selectors: Vec::new(),
+        kubernetes_claims: Vec::new(),
     }
 }
 

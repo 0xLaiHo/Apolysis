@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 apolysis-accountability = { path = "../apolysis-accountability" }
 apolysis-core = { path = "../apolysis-core" }
+apolysis-kubernetes = { path = "../apolysis-kubernetes" }
+apolysis-kubernetes-source = { path = "../apolysis-kubernetes-source" }
 apolysis-observer = { path = "../apolysis-observer" }
 apolysis-store = { path = "../apolysis-store" }
 libc.workspace = true
@@ -32,3 +34,7 @@ path = "src/main.rs"
 [[bin]]
 name = "apolysisd-health"
 path = "src/bin/apolysisd-health.rs"
+
+[[bin]]
+name = "apolysisd-control"
+path = "src/bin/apolysisd-control.rs"

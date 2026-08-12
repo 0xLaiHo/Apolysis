@@ -207,5 +207,6 @@ fn intent(
         declared_actions,
         allowed_resources,
         workload_selectors: Vec::new(),
+        kubernetes_claims: Vec::new(),
     }
 }

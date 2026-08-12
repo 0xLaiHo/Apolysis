@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use apolysis_observer::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use crate::scope::PreparedAgentRunClose;
 use crate::{DaemonRecord, DaemonState, EventPipeline, ScopeOperation, ScopeRequest};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -155,6 +157,8 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
     let mut terminal_scope_counters = BTreeMap::new();
     let mut lifecycle_counters = BTreeMap::new();
     let mut started_agent_runs = BTreeSet::new();
+    let mut prepared_agent_run_closes = BTreeMap::<String, PreparedAgentRunClose>::new();
+    let mut next_agent_run_close_token = 1_u64;
     let pipeline = state.pipeline();
     let mut summary = ObserverIngestSummary::default();
     for cgroup_id in initial_cgroups {
@@ -352,8 +356,9 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                         let runtime_container_id =
                             request.runtime_container_id().map(str::to_owned);
                         let failure_reason = request.failure_reason();
+                        let close_token = request.close_token();
                         let operation = request.operation();
-                        let mut agent_run_close_persisted = false;
+                        let mut prepared_agent_run_close = None;
                         let result = match operation {
                             ScopeOperation::Track => match backend.track_cgroup(cgroup_id) {
                                 Ok(generation) => {
@@ -544,53 +549,118 @@ pub async fn run_observer_runtime<B: ObserverRuntimeBackend>(
                                                 .to_string(),
                                         );
                                     }
-                                    let stopped = if started_agent_runs.contains(agent_run_id) {
-                                        let global = backend.counters()?;
-                                        let counters = terminal_scope_counters
-                                            .get(agent_run_id)
-                                            .copied()
-                                            .unwrap_or_default();
-                                        Some(
-                                            collector_stopped_record(
-                                                &state,
-                                                agent_run_id,
-                                                &collector_instance_id,
-                                                CollectorNormalStopReason::AgentRunClosed,
-                                                global,
-                                                summary,
-                                                counters,
-                                            )
-                                            .await?,
-                                        )
+                                    let prepared = if let Some(prepared) =
+                                        prepared_agent_run_closes.get(agent_run_id)
+                                    {
+                                        prepared.clone()
                                     } else {
-                                        None
-                                    };
-                                    state
-                                        .persist_collector_agent_run_close_boundary(
-                                            agent_run_id,
-                                            stopped,
-                                        )
-                                        .await
-                                        .map_err(|error| {
-                                            format!(
-                                                "failed to persist collector Agent Run close boundary: {error}"
+                                        let stopped = if started_agent_runs.contains(agent_run_id) {
+                                            let global = backend.counters()?;
+                                            let counters = terminal_scope_counters
+                                                .get(agent_run_id)
+                                                .copied()
+                                                .unwrap_or_default();
+                                            Some(
+                                                collector_stopped_record(
+                                                    &state,
+                                                    agent_run_id,
+                                                    &collector_instance_id,
+                                                    CollectorNormalStopReason::AgentRunClosed,
+                                                    global,
+                                                    summary,
+                                                    counters,
+                                                )
+                                                .await?,
                                             )
+                                        } else {
+                                            None
+                                        };
+                                        let token = NonZeroU64::new(next_agent_run_close_token)
+                                            .ok_or_else(|| {
+                                                "scope Agent Run close token exhausted".to_string()
+                                            })?;
+                                        next_agent_run_close_token = next_agent_run_close_token
+                                            .checked_add(1)
+                                            .ok_or_else(|| {
+                                                "scope Agent Run close token exhausted".to_string()
+                                            })?;
+                                        let prepared = PreparedAgentRunClose::new(
+                                            agent_run_id,
+                                            token,
+                                            stopped,
+                                        );
+                                        prepared_agent_run_closes
+                                            .insert(agent_run_id.clone(), prepared.clone());
+                                        prepared
+                                    };
+                                    prepared_agent_run_close = Some(prepared);
+                                    Ok(())
+                                }
+                                .await;
+                                result
+                            }
+                            ScopeOperation::FinalizeAgentRunClose => {
+                                let result: Result<(), String> = (|| {
+                                    let agent_run_id = agent_run_id.as_ref().ok_or_else(|| {
+                                        "scope Agent Run close finalization requires an Agent Run"
+                                            .to_string()
+                                    })?;
+                                    let close_token = close_token.ok_or_else(|| {
+                                        "scope Agent Run close finalization requires a token"
+                                            .to_string()
+                                    })?;
+                                    let prepared = prepared_agent_run_closes
+                                        .get(agent_run_id)
+                                        .ok_or_else(|| {
+                                            "scope Agent Run close is not prepared".to_string()
                                         })?;
+                                    if prepared.token() != Some(close_token) {
+                                        return Err(
+                                            "scope Agent Run close token mismatch".to_string()
+                                        );
+                                    }
+                                    prepared_agent_run_closes.remove(agent_run_id);
                                     started_agent_runs.remove(agent_run_id);
                                     terminal_scope_counters.remove(agent_run_id);
                                     lifecycle_counters.remove(agent_run_id);
                                     Ok(())
-                                }
-                                .await;
-                                agent_run_close_persisted = result.is_ok();
+                                })();
+                                result
+                            }
+                            ScopeOperation::CancelAgentRunClose => {
+                                let result: Result<(), String> = (|| {
+                                    let agent_run_id = agent_run_id.as_ref().ok_or_else(|| {
+                                        "scope Agent Run close cancellation requires an Agent Run"
+                                            .to_string()
+                                    })?;
+                                    let close_token = close_token.ok_or_else(|| {
+                                        "scope Agent Run close cancellation requires a token"
+                                            .to_string()
+                                    })?;
+                                    let prepared = prepared_agent_run_closes
+                                        .get(agent_run_id)
+                                        .ok_or_else(|| {
+                                            "scope Agent Run close is not prepared".to_string()
+                                        })?;
+                                    if prepared.token() != Some(close_token) {
+                                        return Err(
+                                            "scope Agent Run close token mismatch".to_string()
+                                        );
+                                    }
+                                    prepared_agent_run_closes.remove(agent_run_id);
+                                    Ok(())
+                                })();
                                 result
                             }
                         };
                         match result {
-                            Ok(()) if agent_run_close_persisted => {
-                                request.complete_agent_run_close(Ok(()));
+                            Ok(()) => {
+                                if let Some(prepared) = prepared_agent_run_close {
+                                    request.complete_agent_run_close(Ok(prepared));
+                                } else {
+                                    request.complete(Ok(()));
+                                }
                             }
-                            Ok(()) => request.complete(Ok(())),
                             Err(error) => {
                                 let reason = failure_reason
                                     .unwrap_or_else(|| collector_failure_reason(&error));

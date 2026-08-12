@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
+
+use apolysis_core::KubernetesWorkloadClaimV1;
 use serde::{Deserialize, Serialize};
 
 pub const INTENT_SCHEMA_V1: u32 = 1;
 pub const MAX_INTENT_FRAME_BYTES: usize = 64 * 1024;
+pub const MAX_KUBERNETES_CLAIMS_PER_INTENT: usize = 256;
 pub const DEFAULT_TENANT_ID: &str = "default";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -100,6 +104,8 @@ pub struct SessionIntent {
     pub declared_actions: Vec<ActionClass>,
     pub allowed_resources: Vec<ResourceSelector>,
     pub workload_selectors: Vec<WorkloadSelector>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kubernetes_claims: Vec<KubernetesWorkloadClaimV1>,
 }
 
 impl SessionIntent {
@@ -111,6 +117,29 @@ impl SessionIntent {
         validate_session_id(&self.session_id)?;
         if self.expires_at_unix_ms <= now_unix_ms {
             return Err(IntentError::Expired);
+        }
+        if self.kubernetes_claims.len() > MAX_KUBERNETES_CLAIMS_PER_INTENT {
+            return Err(IntentError::InvalidKubernetesClaim);
+        }
+        let mut claim_revision = None;
+        let mut claim_slots = BTreeSet::new();
+        for claim in &self.kubernetes_claims {
+            claim
+                .validate()
+                .map_err(|_| IntentError::InvalidKubernetesClaim)?;
+            if claim_revision.is_some_and(|revision| revision != claim.claim_revision) {
+                return Err(IntentError::InvalidKubernetesClaim);
+            }
+            claim_revision = Some(claim.claim_revision);
+            if !claim_slots.insert((
+                claim.cluster_id.as_str(),
+                claim.namespace_ref.as_str(),
+                claim.pod_uid.as_str(),
+                claim.container_kind,
+                claim.container_ref.as_str(),
+            )) {
+                return Err(IntentError::InvalidKubernetesClaim);
+            }
         }
         Ok(())
     }
@@ -170,6 +199,7 @@ pub enum IntentError {
     InvalidTenantId,
     EmptySessionId,
     InvalidSessionId,
+    InvalidKubernetesClaim,
     Expired,
 }
 
@@ -189,6 +219,7 @@ impl std::fmt::Display for IntentError {
             Self::InvalidSessionId => formatter.write_str(
                 "session id must be 1-128 ASCII letters, digits, dots, underscores, or hyphens",
             ),
+            Self::InvalidKubernetesClaim => formatter.write_str("invalid Kubernetes claim"),
             Self::Expired => formatter.write_str("intent is expired"),
         }
     }

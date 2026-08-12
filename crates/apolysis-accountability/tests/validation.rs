@@ -160,6 +160,35 @@ fn validator_rebuilds_runtime_binding_support_and_accepts_old_records_without_th
 }
 
 #[test]
+fn validator_rejects_runtime_retirement_before_kubernetes_attribution_retirement() {
+    let agent_run_id = "run-kubernetes-frozen-order";
+    let observed = containerd_runtime_binding(agent_run_id, "runtime_binding_observed");
+    let retired = containerd_runtime_binding(agent_run_id, "runtime_binding_retired");
+    let record = project_agent_run([AgentRunRecordBatch::plain(vec![
+        capability(agent_run_id, 1_000),
+        observed.clone(),
+        kubernetes_attribution(
+            agent_run_id,
+            "kubernetes_attribution_observed",
+            observed.clone(),
+        ),
+        kubernetes_attribution(agent_run_id, "kubernetes_attribution_retired", observed),
+        retired,
+    ])])
+    .expect("project legal Kubernetes retirement order");
+    let mut value = serde_json::to_value(record).expect("serialize Kubernetes AOR");
+    value["runtime_bindings"][1]["source_ordinal"] = json!(4);
+    value["kubernetes_attributions"][1]["source_ordinal"] = json!(5);
+    let reordered: AgentObservationRecord =
+        serde_json::from_value(value).expect("deserialize reordered Kubernetes AOR");
+
+    assert_eq!(
+        validate_agent_observation_record_v1(&reordered),
+        Err(AgentObservationRecordValidationError::InvalidKubernetesAttribution)
+    );
+}
+
+#[test]
 fn validator_rejects_runtime_binding_suspension_without_a_source_gap() {
     let mut record = runtime_suspension_record("docker");
     record.observation_gaps.clear();
@@ -905,6 +934,38 @@ fn runtime_binding(agent_run_id: &str, adapter: &str, record_type: &str) -> Valu
         "cgroup_device": 7,
         "cgroup_id": 909,
         "runtime_handler": "runc",
+    })
+}
+
+fn containerd_runtime_binding(agent_run_id: &str, record_type: &str) -> Value {
+    json!({
+        "record_type": record_type,
+        "schema_version": 1,
+        "agent_run_id": agent_run_id,
+        "adapter": "containerd",
+        "workload_id": format!("containerd/{}", "e".repeat(64)),
+        "start_marker": "1786410123123456789",
+        "host_boot_id": "82b46386-b87a-4d86-93f6-232bb04c37fb",
+        "init_process_start_time_ticks": 123,
+        "cgroup_device": 7,
+        "cgroup_id": 909,
+        "runtime_handler": "runc",
+    })
+}
+
+fn kubernetes_attribution(agent_run_id: &str, record_type: &str, runtime_binding: Value) -> Value {
+    json!({
+        "record_type": record_type,
+        "schema_version": 1,
+        "agent_run_id": agent_run_id,
+        "cluster_id": "11111111-1111-1111-1111-111111111111",
+        "namespace_ref": "a".repeat(64),
+        "pod_uid": "22222222-2222-2222-2222-222222222222",
+        "node_ref": "b".repeat(64),
+        "runtime_class_ref": null,
+        "container_kind": "application",
+        "container_ref": "d".repeat(64),
+        "runtime_binding": runtime_binding,
     })
 }
 

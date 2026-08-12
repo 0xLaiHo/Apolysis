@@ -390,6 +390,41 @@ impl RuntimeBindingCoordinator {
         reconcile_result(effects, 0, self.active.len())
     }
 
+    pub(crate) fn retire_agent_run_adapters(
+        &mut self,
+        agent_run_id: &str,
+        adapters: &[AdapterKind],
+    ) -> RuntimeBindingReconcile {
+        let active_keys = self
+            .active
+            .iter()
+            .filter(|(_, binding)| {
+                binding.agent_run_id == agent_run_id && adapters.contains(&binding.identity.adapter)
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let dormant_keys = self
+            .dormant
+            .iter()
+            .filter(|(_, binding)| {
+                binding.agent_run_id == agent_run_id && adapters.contains(&binding.identity.adapter)
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut effects = Vec::with_capacity(active_keys.len() + dormant_keys.len());
+        for key in active_keys {
+            if let Some(binding) = self.active.remove(&key) {
+                effects.push(RuntimeBindingEffect::Retire { binding });
+            }
+        }
+        for key in dormant_keys {
+            if let Some(binding) = self.dormant.remove(&key) {
+                effects.push(RuntimeBindingEffect::RetireDormant { binding });
+            }
+        }
+        reconcile_result(effects, 0, self.active.len())
+    }
+
     pub fn bindings_for_agent_run(&self, agent_run_id: &str) -> Vec<RuntimeBinding> {
         self.active
             .values()
@@ -1192,6 +1227,67 @@ mod tests {
         );
         assert!(coordinator
             .retire_agent_run("agent-run-1")
+            .effects
+            .is_empty());
+    }
+
+    #[test]
+    fn kubernetes_claim_revocation_retires_only_k1_runtime_domains() {
+        let docker = qualified_binding(AdapterKind::Docker, 'a', 100);
+        let containerd = qualified_binding(AdapterKind::Containerd, 'b', 200);
+        let mut coordinator = RuntimeBindingCoordinator::new();
+        coordinator
+            .reconcile(RuntimeInventory::new(
+                AdapterKind::Docker,
+                vec![docker.clone()],
+            ))
+            .unwrap();
+        coordinator
+            .reconcile(RuntimeInventory::new(
+                AdapterKind::Containerd,
+                vec![containerd.clone()],
+            ))
+            .unwrap();
+
+        let result = coordinator.retire_agent_run_adapters(
+            "agent-run-1",
+            &[AdapterKind::Containerd, AdapterKind::K3sContainerd],
+        );
+
+        assert_eq!(
+            result.effects,
+            vec![RuntimeBindingEffect::Retire {
+                binding: containerd
+            }]
+        );
+        assert_eq!(
+            coordinator.bindings_for_agent_run("agent-run-1"),
+            vec![docker]
+        );
+    }
+
+    #[test]
+    fn kubernetes_claim_revocation_retires_dormant_k1_runtime_bindings() {
+        let containerd = qualified_binding(AdapterKind::Containerd, 'b', 200);
+        let mut coordinator =
+            RuntimeBindingCoordinator::recover_dormant(vec![containerd.clone()]).unwrap();
+
+        let result = coordinator.retire_agent_run_adapters(
+            "agent-run-1",
+            &[AdapterKind::Containerd, AdapterKind::K3sContainerd],
+        );
+
+        assert_eq!(
+            result.effects,
+            vec![RuntimeBindingEffect::RetireDormant {
+                binding: containerd
+            }]
+        );
+        assert!(coordinator
+            .retire_agent_run_adapters(
+                "agent-run-1",
+                &[AdapterKind::Containerd, AdapterKind::K3sContainerd],
+            )
             .effects
             .is_empty());
     }

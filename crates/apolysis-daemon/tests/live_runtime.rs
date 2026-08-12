@@ -148,6 +148,7 @@ fn intent(session_id: &str) -> SessionIntent {
         declared_actions: vec![ActionClass::Execute],
         allowed_resources: Vec::new(),
         workload_selectors: Vec::new(),
+        kubernetes_claims: Vec::new(),
     }
 }
 

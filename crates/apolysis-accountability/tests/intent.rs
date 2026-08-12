@@ -50,6 +50,81 @@ fn parses_a_v1_register_intent_request() {
         intent.workload_selectors[0].runtime,
         RuntimeSelector::Docker
     );
+    assert!(intent.kubernetes_claims.is_empty());
+}
+
+#[test]
+fn parses_a_typed_kubernetes_workload_claim_from_registration() {
+    let frame = br#"{
+        "type":"register",
+        "intent":{
+            "schema_version":1,
+            "tenant_id":"tenant-a",
+            "session_id":"session-kubernetes",
+            "expires_at_unix_ms":1780000060000,
+            "declared_actions":["test"],
+            "allowed_resources":[],
+            "workload_selectors":[],
+            "kubernetes_claims":[{
+                "schema_version":1,
+                "claim_revision":7,
+                "cluster_id":"11111111-1111-1111-1111-111111111111",
+                "namespace_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pod_uid":"22222222-2222-2222-2222-222222222222",
+                "container_kind":"application",
+                "container_ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }]
+        }
+    }"#;
+
+    let request = decode_intent_frame(frame, NOW_MS).expect("valid Kubernetes claim");
+    let IntentRequest::Register { intent } = request else {
+        panic!("expected register request");
+    };
+
+    assert_eq!(intent.kubernetes_claims.len(), 1);
+    assert_eq!(intent.kubernetes_claims[0].claim_revision, 7);
+    assert_eq!(
+        intent.kubernetes_claims[0].pod_uid,
+        "22222222-2222-2222-2222-222222222222"
+    );
+}
+
+#[test]
+fn rejects_kubernetes_claim_sets_with_mixed_revisions_or_duplicate_slots() {
+    let claim = r#"{
+        "schema_version":1,
+        "claim_revision":7,
+        "cluster_id":"11111111-1111-1111-1111-111111111111",
+        "namespace_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "pod_uid":"22222222-2222-2222-2222-222222222222",
+        "container_kind":"application",
+        "container_ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }"#;
+    let mixed_revision = claim.replacen("\"claim_revision\":7", "\"claim_revision\":8", 1);
+    for claims in [
+        format!("[{claim},{mixed_revision}]"),
+        format!("[{claim},{claim}]"),
+    ] {
+        let frame = format!(
+            r#"{{
+                "type":"register",
+                "intent":{{
+                    "schema_version":1,
+                    "session_id":"session-kubernetes",
+                    "expires_at_unix_ms":1780000060000,
+                    "declared_actions":["test"],
+                    "allowed_resources":[],
+                    "workload_selectors":[],
+                    "kubernetes_claims":{claims}
+                }}
+            }}"#
+        );
+        assert_eq!(
+            decode_intent_frame(frame.as_bytes(), NOW_MS),
+            Err(IntentError::InvalidKubernetesClaim)
+        );
+    }
 }
 
 #[test]

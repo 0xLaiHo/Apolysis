@@ -204,6 +204,14 @@ fn shared_lifecycle_vocabulary_round_trips_wire_values() {
 }
 
 #[test]
+fn kubernetes_metadata_outage_has_an_exact_shared_gap_kind() {
+    assert_eq!(
+        ObservationGapKind::KubernetesMetadataUnavailable.as_str(),
+        "kubernetes_metadata_unavailable"
+    );
+}
+
+#[test]
 fn audit_observer_capability_contract_v1_is_shared_and_complete() {
     let contracts = audit_observer_capability_contract_v1();
 

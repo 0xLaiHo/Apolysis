@@ -2,6 +2,7 @@
 
 mod adapter;
 mod config;
+mod kubernetes_attribution;
 mod local_operations;
 mod metrics;
 mod pipeline;
@@ -17,18 +18,17 @@ pub use adapter::{
     containerd_task_snapshot_from_cri_inspect, containerd_task_snapshot_from_metadata,
     containerd_workload_from_snapshot, crictl_marked_container_candidates_from_ps_and_pods,
     crictl_marked_container_ids_from_ps, docker_container_pid_from_engine_inspect,
-    docker_snapshot_from_engine_inspect, docker_workload_from_snapshot,
-    kubernetes_marked_pod_snapshots_from_api_list, kubernetes_pod_snapshot_from_api_object,
-    kubernetes_workload_from_pod_snapshot, run_runtime_adapter, run_runtime_adapter_with_policy,
-    run_runtime_inventory_adapter, run_runtime_inventory_adapter_with_policy, AdapterBackoffPolicy,
-    ContainerdCriRuntimeAdapter, ContainerdTaskSnapshot, CriContainerCandidate, CriRuntimeClient,
-    DockerContainerSnapshot, DockerEngineClient, DockerEnginePollingRuntimeAdapter,
-    DockerEngineRuntimeAdapter, KubernetesCliClient, KubernetesCliRuntimeAdapter,
-    KubernetesPodSnapshot, RuntimeAdapterBackend, RuntimeAdapterSummary, RuntimeInventoryAdapter,
+    docker_snapshot_from_engine_inspect, docker_workload_from_snapshot, run_runtime_adapter,
+    run_runtime_adapter_with_policy, run_runtime_inventory_adapter,
+    run_runtime_inventory_adapter_with_policy, AdapterBackoffPolicy, ContainerdCriRuntimeAdapter,
+    ContainerdTaskSnapshot, CriContainerCandidate, CriRuntimeClient, DockerContainerSnapshot,
+    DockerEngineClient, DockerEnginePollingRuntimeAdapter, DockerEngineRuntimeAdapter,
+    RuntimeAdapterBackend, RuntimeAdapterSummary, RuntimeInventoryAdapter,
     RuntimeInventoryInvalidCategory, RuntimeInventoryScanError, RuntimeWorkload,
     APOLYSIS_SESSION_ANNOTATION, APOLYSIS_SESSION_LABEL,
 };
 pub use config::DaemonConfig;
+pub use kubernetes_attribution::{KubernetesNodeAttributionSummary, KubernetesNodeAttributionTask};
 pub use local_operations::{
     LocalDaemonChange, LocalDaemonError, LocalDaemonErrorCode, LocalDaemonInspection,
     LocalDaemonOperationKind, LocalDaemonOperationReport, LocalDaemonOperations, LocalDaemonPlan,

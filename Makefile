@@ -1,6 +1,7 @@
 .PHONY: build test lint clean build-ebpf build-release-verifier test-live quickstart test-quickstart \
 	test-local-agent-command-attribution test-qualification \
 	test-release-artifacts verify-release-artifacts test-local-daemon-live-gate-contract \
+	test-k1-deployment-contract test-k1-vke-contract qualify-k1-vke-live \
 	qualify-runtime-binding-live qualify-private-containerd-live qualify-local-daemon-systemd \
 	qualify-local-daemon-install qualify-live
 
@@ -61,6 +62,18 @@ verify-release-artifacts: build-release-verifier
 # Zero-privilege safety contract for the two opt-in local daemon live gates.
 test-local-daemon-live-gate-contract:
 	bash ./scripts/test-local-daemon-live-gate-contract.sh
+
+# Zero-privilege static and disabled-path safety contract for the opt-in K1 VKE gate.
+test-k1-deployment-contract:
+	./scripts/test-k1-deployment-contract.sh
+
+test-k1-vke-contract: test-k1-deployment-contract
+	./scripts/test-k1-vke-contract.sh
+
+# Explicit, privileged and non-CI. The gate additionally requires two
+# operator-provided, digest-pinned product image trust inputs before cluster access.
+qualify-k1-vke-live: test-k1-vke-contract
+	APOLYSIS_K1_VKE_LIVE=1 ./scripts/qualify-k1-vke.sh
 
 # Explicit, privileged and non-CI. Builds as the checkout owner, publishes a
 # verified root-owned test-binary copy, and runs one exact Docker/eBPF gate.

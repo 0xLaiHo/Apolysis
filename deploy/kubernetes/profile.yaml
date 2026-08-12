@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: apolysis-k1-profile
+data:
+  # Replace before applying with an operator-managed, immutable UUID that is
+  # unique to this cluster. The source validates the UUID shape and rejects
+  # zero, but cannot discover or prove cross-cluster uniqueness by itself.
+  cluster-id: REPLACE-WITH-NONZERO-CLUSTER-UUID
