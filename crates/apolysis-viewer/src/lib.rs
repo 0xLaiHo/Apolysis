@@ -265,6 +265,112 @@ mod tests {
     }
 
     #[test]
+    fn kubernetes_attribution_links_to_its_exact_runtime_binding_without_raw_names() {
+        let mut record = reviewable_record();
+        let container_id = "e".repeat(64);
+        let workload_id = format!("containerd/{container_id}");
+        let runtime_binding = json!({
+            "record_type": "runtime_binding_observed",
+            "schema_version": 1,
+            "agent_run_id": "run-viewer-unit",
+            "adapter": "containerd",
+            "workload_id": workload_id,
+            "start_marker": "1786410123123456789",
+            "host_boot_id": "82b46386-b87a-4d86-93f6-232bb04c37fb",
+            "init_process_start_time_ticks": 123,
+            "cgroup_device": 7,
+            "cgroup_id": 909,
+            "runtime_handler": "runc",
+        });
+        record["runtime_bindings"] = json!([{
+            "source_ordinal": 3,
+            "record_type": runtime_binding["record_type"],
+            "schema_version": runtime_binding["schema_version"],
+            "agent_run_id": runtime_binding["agent_run_id"],
+            "adapter": runtime_binding["adapter"],
+            "workload_id": runtime_binding["workload_id"],
+            "start_marker": runtime_binding["start_marker"],
+            "host_boot_id": runtime_binding["host_boot_id"],
+            "init_process_start_time_ticks": runtime_binding["init_process_start_time_ticks"],
+            "cgroup_device": runtime_binding["cgroup_device"],
+            "cgroup_id": runtime_binding["cgroup_id"],
+            "runtime_handler": runtime_binding["runtime_handler"],
+        }]);
+        record["kubernetes_attributions"] = json!([{
+            "source_ordinal": 4,
+            "record_type": "kubernetes_attribution_observed",
+            "schema_version": 1,
+            "agent_run_id": "run-viewer-unit",
+            "cluster_id": "11111111-1111-1111-1111-111111111111",
+            "namespace_ref": "a".repeat(64),
+            "pod_uid": "22222222-2222-2222-2222-222222222222",
+            "node_ref": "b".repeat(64),
+            "runtime_class_ref": null,
+            "container_kind": "application",
+            "container_ref": "d".repeat(64),
+            "runtime_binding": runtime_binding,
+        }]);
+        record["collector_lifecycle"][1]["source_ordinal"] = json!(6);
+        record["findings"][0]["source_ordinal"] = json!(7);
+
+        let html = render_agent_observation_record_v1(
+            &serde_json::to_vec(&record).expect("serialize Kubernetes attribution record"),
+        )
+        .expect("render Kubernetes attribution evidence");
+        let html = std::str::from_utf8(html.as_ref()).expect("viewer output is utf-8");
+
+        assert!(html.contains("data-panel=\"kubernetes-attributions\""));
+        assert!(html.contains("id=\"kubernetes-attribution-4\""));
+        assert!(html.contains("22222222-2222-2222-2222-222222222222"));
+        assert!(html.contains("data-evidence-target=\"runtime-binding-3\""));
+        assert!(html.contains("data-evidence-panel=\"runtime-bindings\""));
+        assert!(!html.contains("pod-name"));
+        assert!(!html.contains("namespace-name"));
+    }
+
+    #[test]
+    fn kubernetes_gap_renders_only_its_canonical_cluster_and_reason_metadata() {
+        let mut record = reviewable_record();
+        record["observation_gaps"] = json!([{
+            "source_ordinal": 3,
+            "schema_version": 1,
+            "timestamp_unix_ms": 1003,
+            "operation": "kubernetes_metadata",
+            "kind": "kubernetes_metadata_unavailable",
+            "count": 1,
+            "detail": "kubernetes_source_unavailable",
+            "kubernetes_cluster_id": "11111111-1111-1111-1111-111111111111",
+            "kubernetes_reason": "kubernetes_api_unavailable"
+        }]);
+        record["collector_lifecycle"][1]["source_ordinal"] = json!(4);
+        record["findings"][0]["source_ordinal"] = json!(5);
+        record["summary"]["observation_gap_record_count"] = json!(1);
+        record["summary"]["gap_kind_counts"] = json!({"kubernetes_metadata_unavailable": 1});
+        record["issues"] = json!([{
+            "code": "missing_capability",
+            "source_ordinal": null,
+            "count": 1
+        }, {
+            "code": "observation_gap",
+            "source_ordinal": 3,
+            "count": 1
+        }]);
+
+        let html = render_agent_observation_record_v1(
+            &serde_json::to_vec(&record).expect("serialize Kubernetes gap record"),
+        )
+        .expect("render Kubernetes source gap");
+        let html = std::str::from_utf8(html.as_ref()).expect("viewer output is utf-8");
+
+        assert!(html.contains("Kubernetes cluster"));
+        assert!(html.contains("11111111-1111-1111-1111-111111111111"));
+        assert!(html.contains("Kubernetes reason"));
+        assert!(html.contains("kubernetes_api_unavailable"));
+        assert!(!html.contains("kubeconfig"));
+        assert!(!html.contains("service-account-token"));
+    }
+
+    #[test]
     fn renderer_rejects_non_v1_and_trailing_payloads_with_payload_free_errors() {
         let mut record = reviewable_record();
         record["record_type"] = json!("APOLYSIS_SECRET_OTHER_RECORD");

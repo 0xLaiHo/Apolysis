@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use apolysis_core::{kubernetes_reference_v1, KubernetesReferenceKind};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonConfig {
     pub socket_path: PathBuf,
@@ -12,8 +14,10 @@ pub struct DaemonConfig {
     pub docker_socket: Option<PathBuf>,
     pub containerd_socket: Option<PathBuf>,
     pub k3s_containerd_socket: Option<PathBuf>,
-    pub kubernetes_kubectl: Option<PathBuf>,
-    pub kubernetes_cri_socket: Option<PathBuf>,
+    pub kubernetes_source_socket: Option<PathBuf>,
+    pub kubernetes_cluster_id: Option<String>,
+    pub kubernetes_namespace: Option<String>,
+    pub kubernetes_node_name: Option<String>,
     pub proc_root: PathBuf,
     pub cgroup_root: PathBuf,
     pub runtime_adapter_scan_interval: Duration,
@@ -38,8 +42,10 @@ impl Default for DaemonConfig {
             docker_socket: None,
             containerd_socket: None,
             k3s_containerd_socket: None,
-            kubernetes_kubectl: None,
-            kubernetes_cri_socket: None,
+            kubernetes_source_socket: None,
+            kubernetes_cluster_id: None,
+            kubernetes_namespace: None,
+            kubernetes_node_name: None,
             proc_root: PathBuf::from("/proc"),
             cgroup_root: PathBuf::from("/sys/fs/cgroup"),
             runtime_adapter_scan_interval: Duration::from_secs(5),
@@ -75,8 +81,12 @@ impl DaemonConfig {
                 "--docker-socket" => config.docker_socket = Some(value.into()),
                 "--containerd-socket" => config.containerd_socket = Some(value.into()),
                 "--k3s-containerd-socket" => config.k3s_containerd_socket = Some(value.into()),
-                "--kubernetes-kubectl" => config.kubernetes_kubectl = Some(value.into()),
-                "--kubernetes-cri-socket" => config.kubernetes_cri_socket = Some(value.into()),
+                "--kubernetes-source-socket" => {
+                    config.kubernetes_source_socket = Some(value.into())
+                }
+                "--kubernetes-cluster-id" => config.kubernetes_cluster_id = Some(value.clone()),
+                "--kubernetes-namespace" => config.kubernetes_namespace = Some(value.clone()),
+                "--kubernetes-node-name" => config.kubernetes_node_name = Some(value.clone()),
                 "--proc-root" => config.proc_root = value.into(),
                 "--cgroup-root" => config.cgroup_root = value.into(),
                 "--runtime-adapter-scan-ms" => {
@@ -138,7 +148,60 @@ impl DaemonConfig {
         if config.collector_checkpoint_interval.is_zero() {
             return Err("--collector-checkpoint-ms must be greater than zero".to_string());
         }
+        config.validate_kubernetes_node_profile()?;
         Ok(config)
+    }
+
+    fn validate_kubernetes_node_profile(&self) -> Result<(), String> {
+        let configured = [
+            self.kubernetes_source_socket.is_some(),
+            self.kubernetes_cluster_id.is_some(),
+            self.kubernetes_namespace.is_some(),
+            self.kubernetes_node_name.is_some(),
+        ];
+        if configured.iter().all(|configured| !configured) {
+            return Ok(());
+        }
+        if !configured.iter().all(|configured| *configured) {
+            return Err(
+                "Kubernetes node profile requires source socket, cluster ID, namespace, and node name"
+                    .to_string(),
+            );
+        }
+        let source_socket = self
+            .kubernetes_source_socket
+            .as_ref()
+            .ok_or_else(|| "Kubernetes node profile is incomplete".to_string())?;
+        if !source_socket.is_absolute() {
+            return Err("Kubernetes node profile source socket must be absolute".to_string());
+        }
+        let cluster_id = self
+            .kubernetes_cluster_id
+            .as_deref()
+            .ok_or_else(|| "Kubernetes node profile is incomplete".to_string())?;
+        if apolysis_kubernetes_source::KubernetesClusterId::parse(cluster_id).is_err() {
+            return Err(
+                "Kubernetes node profile cluster ID must be a canonical lowercase non-zero UUID"
+                    .to_string(),
+            );
+        }
+        let namespace = self.kubernetes_namespace.as_deref().unwrap_or_default();
+        kubernetes_reference_v1(KubernetesReferenceKind::Namespace, namespace).map_err(|_| {
+            "Kubernetes node profile namespace must be a canonical Kubernetes identifier"
+                .to_string()
+        })?;
+        let node_name = self.kubernetes_node_name.as_deref().unwrap_or_default();
+        kubernetes_reference_v1(KubernetesReferenceKind::Node, node_name).map_err(|_| {
+            "Kubernetes node profile node name must be a canonical Kubernetes identifier"
+                .to_string()
+        })?;
+        if self.containerd_socket.is_some() == self.k3s_containerd_socket.is_some() {
+            return Err(
+                "Kubernetes node profile requires exactly one containerd runtime socket"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 }
 

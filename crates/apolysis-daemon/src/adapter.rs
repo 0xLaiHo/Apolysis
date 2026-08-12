@@ -7,7 +7,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,10 +27,14 @@ use crate::{DaemonState, RuntimeSourceGapReason};
 
 pub const APOLYSIS_SESSION_LABEL: &str = "apolysis.session_id";
 pub const APOLYSIS_SESSION_ANNOTATION: &str = "apolysis.dev/session-id";
+const APOLYSIS_KUBERNETES_OBSERVE_LABEL: &str = "apolysis.dev/observe";
 const MAX_RUNTIME_ADAPTER_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_RUNTIME_ADAPTER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CRICTL_EXECUTABLE_CONFIGURATION_ERROR: &str =
     "APOLYSIS_CRICTL must be an absolute secure executable file";
+const MAX_CRI_METADATA_MAP_ENTRIES: usize = 512;
+const MAX_CRI_METADATA_MAP_BYTES: usize = 512 * 1024;
+const MAX_CRI_METADATA_STRING_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeWorkload {
@@ -68,14 +72,11 @@ pub struct CriContainerCandidate {
     pub inherited_labels: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KubernetesPodSnapshot {
-    pub namespace: String,
-    pub pod_name: String,
-    pub pod_uid: Option<String>,
-    pub annotations: BTreeMap<String, String>,
-    pub cgroup_id: u64,
-    pub runtime_class_name: Option<String>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CriSandboxMetadataMode {
+    Disabled,
+    LabelsOnly,
+    Kubernetes,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -967,6 +968,153 @@ pub fn crictl_marked_container_candidates_from_ps_and_pods(
     Ok(candidates)
 }
 
+fn crictl_kubernetes_container_candidates_from_ps_and_pods(
+    ps_value: Value,
+    pods_value: Value,
+    expected_kubernetes_namespace: &str,
+) -> Result<Vec<CriContainerCandidate>, String> {
+    let mut ready_pod_labels = BTreeMap::new();
+    let pods = pods_value
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "crictl pods JSON must contain items array".to_string())?;
+    for pod in pods {
+        if string_field(pod, &["state"]).as_deref() != Some("SANDBOX_READY") {
+            continue;
+        }
+        if pod
+            .get("labels")
+            .and_then(Value::as_object)
+            .and_then(|labels| labels.get(APOLYSIS_KUBERNETES_OBSERVE_LABEL))
+            .and_then(Value::as_str)
+            != Some("true")
+        {
+            continue;
+        }
+        let namespace = pod
+            .get("metadata")
+            .and_then(|metadata| metadata.get("namespace"))
+            .and_then(Value::as_str)
+            .filter(|namespace| !namespace.is_empty())
+            .ok_or_else(|| {
+                "CRI pod sandbox namespace metadata is missing or invalid".to_string()
+            })?;
+        if namespace != expected_kubernetes_namespace {
+            continue;
+        }
+        let id = string_field(pod, &["id"])
+            .ok_or_else(|| "ready CRI pod sandbox id must be non-empty".to_string())?;
+        let mut labels = bounded_cri_string_map_field(pod, &["labels"], "CRI pod sandbox labels")?;
+        if labels
+            .get("io.kubernetes.pod.namespace")
+            .map(String::as_str)
+            != Some(expected_kubernetes_namespace)
+        {
+            return Err("CRI pod sandbox namespace metadata conflicts".to_string());
+        }
+        let label_session = validated_cri_session_metadata(
+            labels.get(APOLYSIS_SESSION_LABEL),
+            "CRI pod sandbox session metadata is invalid",
+        )?;
+        let annotations =
+            bounded_cri_string_map_field(pod, &["annotations"], "CRI pod sandbox annotations")?;
+        let annotation_session = validated_cri_session_metadata(
+            annotations.get(APOLYSIS_SESSION_ANNOTATION),
+            "CRI pod sandbox session metadata is invalid",
+        )?;
+        if label_session.is_some()
+            && annotation_session.is_some()
+            && label_session != annotation_session
+        {
+            return Err("CRI pod sandbox session metadata conflicts".to_string());
+        }
+        let session_id = label_session.or(annotation_session);
+        labels.clear();
+        if let Some(session_id) = session_id {
+            labels.insert(APOLYSIS_SESSION_LABEL.to_string(), session_id);
+        }
+        if ready_pod_labels.insert(id, labels).is_some() {
+            return Err("CRI pod sandbox inventory contains a duplicate id".to_string());
+        }
+    }
+
+    let containers = ps_value
+        .get("containers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "crictl ps JSON must contain containers array".to_string())?;
+    let mut candidates = Vec::new();
+    for container in containers {
+        if string_field(container, &["state"]).as_deref() != Some("CONTAINER_RUNNING") {
+            continue;
+        }
+        let inherited_labels = string_field(container, &["podSandboxId"])
+            .and_then(|pod_sandbox_id| ready_pod_labels.get(&pod_sandbox_id));
+        if inherited_labels.is_none() {
+            continue;
+        }
+        let labels = bounded_cri_string_map_field(container, &["labels"], "CRI container labels")?;
+        let id = string_field(container, &["id"])
+            .ok_or_else(|| "marked CRI container id must be non-empty".to_string())?;
+        let direct_session = validated_cri_session_metadata(
+            labels.get(APOLYSIS_SESSION_LABEL),
+            "CRI container session metadata is invalid",
+        )?;
+        let inherited_session = inherited_labels
+            .and_then(|labels| labels.get(APOLYSIS_SESSION_LABEL))
+            .cloned();
+        let has_inherited_session = inherited_session.is_some();
+        if direct_session.is_some()
+            && inherited_session.is_some()
+            && direct_session != inherited_session
+        {
+            return Err(
+                "CRI container session metadata conflicts with its pod sandbox".to_string(),
+            );
+        }
+        if direct_session.is_none() && inherited_session.is_none() {
+            continue;
+        }
+        candidates.push(CriContainerCandidate {
+            container_id: id,
+            inherited_labels: if has_inherited_session {
+                inherited_labels.cloned().unwrap_or_default()
+            } else {
+                BTreeMap::new()
+            },
+        });
+    }
+    Ok(candidates)
+}
+
+fn validated_cri_session_metadata(
+    value: Option<&String>,
+    error: &'static str,
+) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(error.to_string());
+    }
+    Ok(Some(value.clone()))
+}
+
+fn valid_kubernetes_namespace(namespace: &str) -> bool {
+    let bytes = namespace.as_bytes();
+    if bytes.is_empty() || bytes.len() > 63 {
+        return false;
+    }
+    let valid_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    valid_edge(bytes[0])
+        && valid_edge(bytes[bytes.len() - 1])
+        && bytes.iter().all(|byte| valid_edge(*byte) || *byte == b'-')
+}
+
 pub fn containerd_task_snapshot_from_cri_inspect(
     adapter: AdapterKind,
     inspect: &Value,
@@ -1108,112 +1256,6 @@ pub fn containerd_task_snapshot_from_metadata(
         runtime_handler: string_field(metadata, &["runtime", "name"])
             .or_else(|| string_field(metadata, &["runtime", "runtime_type"])),
     })
-}
-
-pub fn kubernetes_workload_from_pod_snapshot(
-    snapshot: KubernetesPodSnapshot,
-) -> Result<Option<RuntimeWorkload>, String> {
-    let Some(session_id) = snapshot.annotations.get(APOLYSIS_SESSION_ANNOTATION) else {
-        return Ok(None);
-    };
-    let session_id = session_id.trim();
-    if session_id.is_empty() {
-        return Err(format!("{APOLYSIS_SESSION_ANNOTATION} must not be empty"));
-    }
-    let namespace = snapshot.namespace.trim();
-    if namespace.is_empty() {
-        return Err("Kubernetes namespace must not be empty".to_string());
-    }
-    let pod_name = snapshot.pod_name.trim();
-    if pod_name.is_empty() {
-        return Err("Kubernetes pod name must not be empty".to_string());
-    }
-    if snapshot.cgroup_id == 0 {
-        return Err("Kubernetes cgroup id must be non-zero".to_string());
-    }
-    let workload_id = snapshot
-        .pod_uid
-        .as_deref()
-        .map(str::trim)
-        .filter(|uid| !uid.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("{namespace}/{pod_name}"));
-
-    Ok(Some(RuntimeWorkload {
-        adapter: AdapterKind::Kubernetes,
-        session_id: session_id.to_string(),
-        workload_id,
-        cgroup_id: snapshot.cgroup_id,
-        image: None,
-        runtime_handler: snapshot.runtime_class_name,
-    }))
-}
-
-pub fn kubernetes_pod_snapshot_from_api_object(
-    pod: &Value,
-    cgroup_id: u64,
-) -> Result<KubernetesPodSnapshot, String> {
-    if cgroup_id == 0 {
-        return Err("Kubernetes cgroup id must be non-zero".to_string());
-    }
-    let namespace = string_field(pod, &["metadata", "namespace"]).ok_or_else(|| {
-        "Kubernetes Pod metadata.namespace must be a non-empty string".to_string()
-    })?;
-    let pod_name = string_field(pod, &["metadata", "name"])
-        .ok_or_else(|| "Kubernetes Pod metadata.name must be a non-empty string".to_string())?;
-    Ok(KubernetesPodSnapshot {
-        namespace,
-        pod_name,
-        pod_uid: string_field(pod, &["metadata", "uid"]),
-        annotations: string_map_field(
-            pod,
-            &["metadata", "annotations"],
-            "Kubernetes Pod metadata.annotations",
-        )?,
-        cgroup_id,
-        runtime_class_name: string_field(pod, &["spec", "runtimeClassName"]),
-    })
-}
-
-pub fn kubernetes_marked_pod_snapshots_from_api_list(
-    pod_list: &Value,
-    container_cgroups: &BTreeMap<String, u64>,
-) -> Result<Vec<KubernetesPodSnapshot>, String> {
-    let pods = pod_list
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Kubernetes PodList must contain items array".to_string())?;
-    let mut snapshots = Vec::new();
-    for pod in pods {
-        let annotations = string_map_field(
-            pod,
-            &["metadata", "annotations"],
-            "Kubernetes Pod metadata.annotations",
-        )?;
-        let marked = annotations
-            .get(APOLYSIS_SESSION_ANNOTATION)
-            .map(String::as_str)
-            .map(str::trim)
-            .map(|session_id| !session_id.is_empty())
-            .unwrap_or(false);
-        if !marked {
-            continue;
-        }
-        if string_field(pod, &["status", "phase"]).as_deref() != Some("Running") {
-            continue;
-        }
-        let Some(cgroup_id) = kubernetes_container_ids(pod)
-            .into_iter()
-            .find_map(|container_id| container_cgroups.get(&container_id).copied())
-        else {
-            return Err(format!(
-                "Kubernetes marked Pod {} has no known running container cgroup",
-                string_field(pod, &["metadata", "name"]).unwrap_or_else(|| "<unknown>".to_string())
-            ));
-        };
-        snapshots.push(kubernetes_pod_snapshot_from_api_object(pod, cgroup_id)?);
-    }
-    Ok(snapshots)
 }
 
 pub fn docker_snapshot_from_engine_inspect(
@@ -1647,8 +1689,22 @@ impl CriRuntimeClient {
         &self,
         include_pod_sandbox_labels: bool,
     ) -> Result<Vec<CriContainerCandidate>, String> {
+        let mode = if include_pod_sandbox_labels {
+            CriSandboxMetadataMode::LabelsOnly
+        } else {
+            CriSandboxMetadataMode::Disabled
+        };
+        self.list_marked_running_container_candidates_with_mode(mode, None)
+            .await
+    }
+
+    async fn list_marked_running_container_candidates_with_mode(
+        &self,
+        mode: CriSandboxMetadataMode,
+        expected_kubernetes_namespace: Option<&str>,
+    ) -> Result<Vec<CriContainerCandidate>, String> {
         let ps = self.crictl_json(&["ps", "-o", "json"]).await?;
-        if !include_pod_sandbox_labels {
+        if mode == CriSandboxMetadataMode::Disabled {
             return crictl_marked_container_ids_from_ps(ps).map(|ids| {
                 ids.into_iter()
                     .map(|container_id| CriContainerCandidate {
@@ -1659,7 +1715,23 @@ impl CriRuntimeClient {
             });
         }
         let pods = self.crictl_json(&["pods", "-o", "json"]).await?;
-        crictl_marked_container_candidates_from_ps_and_pods(ps, pods)
+        match mode {
+            CriSandboxMetadataMode::LabelsOnly => {
+                crictl_marked_container_candidates_from_ps_and_pods(ps, pods)
+            }
+            CriSandboxMetadataMode::Kubernetes => {
+                let expected_namespace = expected_kubernetes_namespace
+                    .ok_or_else(|| "CRI Kubernetes namespace is not configured".to_string())?;
+                crictl_kubernetes_container_candidates_from_ps_and_pods(
+                    ps,
+                    pods,
+                    expected_namespace,
+                )
+            }
+            CriSandboxMetadataMode::Disabled => {
+                Err("CRI sandbox metadata mode is inconsistent".to_string())
+            }
+        }
     }
 
     pub async fn inspect_container(&self, container_id: &str) -> Result<Value, String> {
@@ -1965,6 +2037,7 @@ fn open_validated_crictl_override(path: &Path) -> Result<OpenCriExecutable, Stri
 pub struct ContainerdCriRuntimeAdapter {
     adapter: AdapterKind,
     client: CriRuntimeClient,
+    kubernetes_sandbox_namespace: Option<String>,
     proc_root: PathBuf,
     cgroup_root: PathBuf,
     pending_containers: VecDeque<CriContainerCandidate>,
@@ -1991,6 +2064,7 @@ impl ContainerdCriRuntimeAdapter {
         Ok(Self {
             adapter,
             client,
+            kubernetes_sandbox_namespace: None,
             proc_root: proc_root.into(),
             cgroup_root: cgroup_root.into(),
             pending_containers: VecDeque::new(),
@@ -1998,6 +2072,28 @@ impl ContainerdCriRuntimeAdapter {
             seen_capacity,
             scan_interval,
         })
+    }
+
+    pub fn with_kubernetes_sandbox_metadata(
+        mut self,
+        expected_namespace: impl Into<String>,
+    ) -> Result<Self, String> {
+        let expected_namespace = expected_namespace.into();
+        if !valid_kubernetes_namespace(&expected_namespace) {
+            return Err("Kubernetes sandbox namespace is invalid".to_string());
+        }
+        self.kubernetes_sandbox_namespace = Some(expected_namespace);
+        Ok(self)
+    }
+
+    fn sandbox_metadata_mode(&self) -> CriSandboxMetadataMode {
+        if self.kubernetes_sandbox_namespace.is_some() {
+            CriSandboxMetadataMode::Kubernetes
+        } else if self.adapter == AdapterKind::K3sContainerd {
+            CriSandboxMetadataMode::LabelsOnly
+        } else {
+            CriSandboxMetadataMode::Disabled
+        }
     }
 
     pub async fn scan_inventory(&self) -> Result<RuntimeInventory, String> {
@@ -2012,10 +2108,13 @@ impl ContainerdCriRuntimeAdapter {
                 RuntimeInventoryInvalidCategory::HostBoot,
             )
         })?;
-        let include_pod_sandbox_labels = self.adapter == AdapterKind::K3sContainerd;
+        let sandbox_metadata_mode = self.sandbox_metadata_mode();
         let candidates = self
             .client
-            .list_marked_running_container_candidates(include_pod_sandbox_labels)
+            .list_marked_running_container_candidates_with_mode(
+                sandbox_metadata_mode,
+                self.kubernetes_sandbox_namespace.as_deref(),
+            )
             .await
             .map_err(|error| {
                 runtime_inventory_scan_error_with_category(
@@ -2046,13 +2145,17 @@ impl ContainerdCriRuntimeAdapter {
                     &self.cgroup_root,
                     &host_boot_id,
                     candidate,
+                    self.kubernetes_sandbox_namespace.is_some(),
                 )
                 .await?,
             );
         }
         let fresh_candidates = self
             .client
-            .list_marked_running_container_candidates(include_pod_sandbox_labels)
+            .list_marked_running_container_candidates_with_mode(
+                sandbox_metadata_mode,
+                self.kubernetes_sandbox_namespace.as_deref(),
+            )
             .await
             .map_err(|error| {
                 runtime_inventory_scan_error_with_category(
@@ -2109,17 +2212,21 @@ impl ContainerdCriRuntimeAdapter {
                 };
                 let mut snapshot =
                     containerd_task_snapshot_from_cri_inspect(self.adapter, &inspect, cgroup_id)?;
-                for (key, value) in candidate.inherited_labels {
-                    snapshot.labels.entry(key).or_insert(value);
-                }
+                merge_cri_inherited_labels(
+                    &mut snapshot.labels,
+                    &candidate.inherited_labels,
+                    self.kubernetes_sandbox_namespace.is_some(),
+                )
+                .map_err(|_| "CRI container session metadata conflicts with its pod sandbox")?;
                 if let Some(workload) = containerd_workload_from_snapshot(snapshot)? {
                     return Ok(Some(workload));
                 }
             }
             self.pending_containers = self
                 .client
-                .list_marked_running_container_candidates(
-                    self.adapter == AdapterKind::K3sContainerd,
+                .list_marked_running_container_candidates_with_mode(
+                    self.sandbox_metadata_mode(),
+                    self.kubernetes_sandbox_namespace.as_deref(),
                 )
                 .await?
                 .into_iter()
@@ -2174,6 +2281,7 @@ async fn cri_runtime_binding_from_client(
     cgroup_root: &Path,
     host_boot_id: &str,
     candidate: CriContainerCandidate,
+    strict_inherited_session: bool,
 ) -> Result<RuntimeBinding, RuntimeInventoryScanError> {
     let first_inspect = client
         .inspect_container(&candidate.container_id)
@@ -2184,8 +2292,12 @@ async fn cri_runtime_binding_from_client(
                 RuntimeInventoryInvalidCategory::InspectShape,
             )
         })?;
-    let first = cri_inspect_identity(&first_inspect, &candidate.inherited_labels)
-        .map_err(RuntimeInventoryScanError::inventory_invalid_with_category)?;
+    let first = cri_inspect_identity(
+        &first_inspect,
+        &candidate.inherited_labels,
+        strict_inherited_session,
+    )
+    .map_err(RuntimeInventoryScanError::inventory_invalid_with_category)?;
     if first.container_id != candidate.container_id {
         return Err(RuntimeInventoryScanError::inventory_invalid_with_category(
             RuntimeInventoryInvalidCategory::Id,
@@ -2209,8 +2321,12 @@ async fn cri_runtime_binding_from_client(
                 RuntimeInventoryInvalidCategory::InspectShape,
             )
         })?;
-    let second = cri_inspect_identity(&second_inspect, &candidate.inherited_labels)
-        .map_err(RuntimeInventoryScanError::inventory_invalid_with_category)?;
+    let second = cri_inspect_identity(
+        &second_inspect,
+        &candidate.inherited_labels,
+        strict_inherited_session,
+    )
+    .map_err(RuntimeInventoryScanError::inventory_invalid_with_category)?;
     let second_start_time = process_start_time_ticks(proc_root, second.pid).map_err(|_| {
         RuntimeInventoryScanError::inventory_invalid_with_category(
             RuntimeInventoryInvalidCategory::ProcStart,
@@ -2252,6 +2368,7 @@ async fn cri_runtime_binding_from_client(
 fn cri_inspect_identity(
     inspect: &Value,
     inherited_labels: &BTreeMap<String, String>,
+    strict_inherited_session: bool,
 ) -> Result<CriInspectIdentity, RuntimeInventoryInvalidCategory> {
     let state = string_field(inspect, &["status", "state"])
         .ok_or(RuntimeInventoryInvalidCategory::InspectShape)?;
@@ -2260,9 +2377,8 @@ fn cri_inspect_identity(
     }
     let mut labels = string_map_field(inspect, &["status", "labels"], "CRI status.labels")
         .map_err(|_| RuntimeInventoryInvalidCategory::InspectLabel)?;
-    for (key, value) in inherited_labels {
-        labels.entry(key.clone()).or_insert_with(|| value.clone());
-    }
+    merge_cri_inherited_labels(&mut labels, inherited_labels, strict_inherited_session)
+        .map_err(|_| RuntimeInventoryInvalidCategory::InspectLabel)?;
     let agent_run_id = labels
         .get(APOLYSIS_SESSION_LABEL)
         .map(String::as_str)
@@ -2280,6 +2396,42 @@ fn cri_inspect_identity(
         runtime_handler: string_field(inspect, &["info", "runtimeType"])
             .or_else(|| string_field(inspect, &["status", "image", "runtimeHandler"])),
     })
+}
+
+fn merge_cri_inherited_labels(
+    labels: &mut BTreeMap<String, String>,
+    inherited_labels: &BTreeMap<String, String>,
+    strict_inherited_session: bool,
+) -> Result<(), ()> {
+    if !strict_inherited_session {
+        for (key, value) in inherited_labels {
+            labels.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+        return Ok(());
+    }
+    if inherited_labels.is_empty() {
+        return Ok(());
+    }
+    let direct_session = validated_cri_session_metadata(
+        labels.get(APOLYSIS_SESSION_LABEL),
+        "CRI container session metadata is invalid",
+    )
+    .map_err(|_| ())?;
+    let inherited_session = validated_cri_session_metadata(
+        inherited_labels.get(APOLYSIS_SESSION_LABEL),
+        "CRI pod sandbox session metadata is invalid",
+    )
+    .map_err(|_| ())?;
+    if direct_session.is_some()
+        && inherited_session.is_some()
+        && direct_session != inherited_session
+    {
+        return Err(());
+    }
+    for (key, value) in inherited_labels {
+        labels.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+    Ok(())
 }
 
 fn container_runtime_identity_domain(adapter: AdapterKind) -> &'static str {
@@ -2397,125 +2549,6 @@ impl RuntimeInventoryAdapter for ContainerdCriRuntimeAdapter {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KubernetesCliClient {
-    kubectl_path: PathBuf,
-}
-
-impl KubernetesCliClient {
-    pub fn new(kubectl_path: impl Into<PathBuf>) -> Self {
-        Self {
-            kubectl_path: kubectl_path.into(),
-        }
-    }
-
-    pub async fn list_pods(&self) -> Result<Value, String> {
-        let output = Command::new(&self.kubectl_path)
-            .args(["get", "pods", "--all-namespaces", "-o", "json"])
-            .output()
-            .map_err(|error| {
-                format!(
-                    "failed to run {}: {error}",
-                    self.kubectl_path.as_path().display()
-                )
-            })?;
-        if !output.status.success() {
-            return Err(format!(
-                "kubectl get pods failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|error| format!("failed to decode Kubernetes PodList JSON: {error}"))
-    }
-}
-
-pub struct KubernetesCliRuntimeAdapter {
-    kubernetes: KubernetesCliClient,
-    cri: CriRuntimeClient,
-    proc_root: PathBuf,
-    cgroup_root: PathBuf,
-    seen_pod_uids: BTreeSet<String>,
-    seen_capacity: usize,
-    pending_snapshots: VecDeque<KubernetesPodSnapshot>,
-    scan_interval: Duration,
-}
-
-impl KubernetesCliRuntimeAdapter {
-    pub fn new(
-        kubernetes: KubernetesCliClient,
-        cri: CriRuntimeClient,
-        proc_root: impl Into<PathBuf>,
-        cgroup_root: impl Into<PathBuf>,
-        scan_interval: Duration,
-        seen_capacity: usize,
-    ) -> Self {
-        Self {
-            kubernetes,
-            cri,
-            proc_root: proc_root.into(),
-            cgroup_root: cgroup_root.into(),
-            seen_pod_uids: BTreeSet::new(),
-            seen_capacity,
-            pending_snapshots: VecDeque::new(),
-            scan_interval,
-        }
-    }
-
-    async fn next_kubernetes_workload(&mut self) -> Result<Option<RuntimeWorkload>, String> {
-        loop {
-            while let Some(snapshot) = self.pending_snapshots.pop_front() {
-                if let Some(workload) = kubernetes_workload_from_pod_snapshot(snapshot)? {
-                    return Ok(Some(workload));
-                }
-            }
-            let pod_list = self.kubernetes.list_pods().await?;
-            let cgroups = self.container_cgroups_from_pod_list(&pod_list).await?;
-            self.pending_snapshots =
-                kubernetes_marked_pod_snapshots_from_api_list(&pod_list, &cgroups)?
-                    .into_iter()
-                    .filter(|snapshot| {
-                        let key = snapshot
-                            .pod_uid
-                            .as_deref()
-                            .unwrap_or(&snapshot.pod_name)
-                            .to_string();
-                        remember_seen(&mut self.seen_pod_uids, self.seen_capacity, &key)
-                    })
-                    .collect();
-            if self.pending_snapshots.is_empty() {
-                tokio::time::sleep(self.scan_interval).await;
-            }
-        }
-    }
-
-    async fn container_cgroups_from_pod_list(
-        &self,
-        pod_list: &Value,
-    ) -> Result<BTreeMap<String, u64>, String> {
-        let mut cgroups = BTreeMap::new();
-        for container_id in kubernetes_marked_running_container_ids_from_list(pod_list)? {
-            let inspect = self.cri.inspect_container(&container_id).await?;
-            let pid = containerd_pid_from_cri_inspect(&inspect)?;
-            let cgroup_id = cgroup_id_from_pid(pid, &self.proc_root, &self.cgroup_root)?;
-            cgroups.insert(container_id, cgroup_id);
-        }
-        Ok(cgroups)
-    }
-}
-
-impl RuntimeAdapterBackend for KubernetesCliRuntimeAdapter {
-    fn kind(&self) -> AdapterKind {
-        AdapterKind::Kubernetes
-    }
-
-    fn next_workload(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<RuntimeWorkload>, String>> + Send + '_>> {
-        Box::pin(self.next_kubernetes_workload())
-    }
-}
-
 fn string_field(value: &Value, path: &[&str]) -> Option<String> {
     let mut current = value;
     for segment in path {
@@ -2560,57 +2593,32 @@ fn string_map_field(
     Ok(labels)
 }
 
-fn kubernetes_marked_running_container_ids_from_list(
-    pod_list: &Value,
-) -> Result<BTreeSet<String>, String> {
-    let pods = pod_list
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Kubernetes PodList must contain items array".to_string())?;
-    let mut ids = BTreeSet::new();
-    for pod in pods {
-        let annotations = string_map_field(
-            pod,
-            &["metadata", "annotations"],
-            "Kubernetes Pod metadata.annotations",
-        )?;
-        let marked = annotations
-            .get(APOLYSIS_SESSION_ANNOTATION)
-            .map(String::as_str)
-            .map(str::trim)
-            .map(|session_id| !session_id.is_empty())
-            .unwrap_or(false);
-        if !marked || string_field(pod, &["status", "phase"]).as_deref() != Some("Running") {
-            continue;
-        }
-        ids.extend(kubernetes_container_ids(pod));
+fn bounded_cri_string_map_field(
+    value: &Value,
+    path: &[&str],
+    field_name: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let values = string_map_field(value, path, field_name).map_err(|_| {
+        format!("{field_name} must be a bounded object containing only string entries")
+    })?;
+    if values.len() > MAX_CRI_METADATA_MAP_ENTRIES {
+        return Err(format!("{field_name} exceeds the metadata entry limit"));
     }
-    Ok(ids)
-}
-
-fn kubernetes_container_ids(pod: &Value) -> Vec<String> {
-    pod.get("status")
-        .and_then(|status| status.get("containerStatuses"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|status| {
-            status
-                .get("containerID")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .and_then(|container_id| {
-                    container_id
-                        .strip_prefix("containerd://")
-                        .or_else(|| container_id.strip_prefix("cri-containerd://"))
-                        .or_else(|| container_id.strip_prefix("docker://"))
-                        .or(Some(container_id))
-                })
-                .map(str::trim)
-                .filter(|container_id| !container_id.is_empty())
-                .map(ToOwned::to_owned)
-        })
-        .collect()
+    let mut bytes = 0_usize;
+    for (key, value) in &values {
+        if key.len() > MAX_CRI_METADATA_STRING_BYTES || value.len() > MAX_CRI_METADATA_STRING_BYTES
+        {
+            return Err(format!("{field_name} contains an oversized metadata entry"));
+        }
+        bytes = bytes
+            .checked_add(key.len())
+            .and_then(|bytes| bytes.checked_add(value.len()))
+            .ok_or_else(|| format!("{field_name} exceeds the metadata byte limit"))?;
+        if bytes > MAX_CRI_METADATA_MAP_BYTES {
+            return Err(format!("{field_name} exceeds the metadata byte limit"));
+        }
+    }
+    Ok(values)
 }
 
 fn remember_seen(seen: &mut BTreeSet<String>, seen_capacity: usize, id: &str) -> bool {

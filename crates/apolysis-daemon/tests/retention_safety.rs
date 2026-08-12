@@ -797,6 +797,7 @@ fn agent_run_intent_for(agent_run_id: &str, expires_at_unix_ms: u64) -> SessionI
         declared_actions: vec![ActionClass::Test],
         allowed_resources: Vec::new(),
         workload_selectors: Vec::new(),
+        kubernetes_claims: Vec::new(),
     }
 }
 

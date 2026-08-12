@@ -73,6 +73,7 @@ pub(crate) fn render_record(
         &identity_indexes,
     );
     render_runtime_bindings(&mut output, record);
+    render_kubernetes_attributions(&mut output, record);
     render_identities(&mut output, record, &identity_indexes);
     render_capabilities(&mut output, record);
     output.push_str("</main></div><footer><span>Apolysis saved-run viewer</span><span>No live observer · no runtime socket · no network access</span></footer></div><script>");
@@ -135,15 +136,22 @@ fn render_navigation(output: &mut String, record: &AgentObservationRecord) {
     );
     nav_button(
         output,
-        "identities",
+        "kubernetes-attributions",
         "06",
+        "Kubernetes attributions",
+        Some(record.kubernetes_attributions.len()),
+    );
+    nav_button(
+        output,
+        "identities",
+        "07",
         "Runtime identities",
         Some(record.runtime_identities.len()),
     );
     nav_button(
         output,
         "capabilities",
-        "07",
+        "08",
         "Capabilities",
         Some(record.capability_manifests.len()),
     );
@@ -403,7 +411,18 @@ fn render_collection(output: &mut String, record: &AgentObservationRecord) {
             push_escaped(output, &gap.detail);
             output.push_str("</bdi></p><dl class=\"fact-grid detail-grid\"><div><dt>Operation</dt><dd><bdi class=\"fact-text\">");
             push_escaped(output, &gap.operation);
-            output.push_str("</bdi></dd></div></dl>");
+            output.push_str("</bdi></dd></div>");
+            if let Some(cluster_id) = gap.kubernetes_cluster_id.as_deref() {
+                output.push_str("<div><dt>Kubernetes cluster</dt><dd><bdi class=\"fact-text\">");
+                push_escaped(output, cluster_id);
+                output.push_str("</bdi></dd></div>");
+            }
+            if let Some(reason) = gap.kubernetes_reason.as_deref() {
+                output.push_str("<div><dt>Kubernetes reason</dt><dd><bdi class=\"fact-text\">");
+                push_escaped(output, reason);
+                output.push_str("</bdi></dd></div>");
+            }
+            output.push_str("</dl>");
             if gap.kind == "late_attach" {
                 output.push_str("<p class=\"boundary-note\">Unknown-history Collection Boundary; this count is not a missing-event count.</p>");
             }
@@ -683,6 +702,83 @@ fn render_runtime_bindings(output: &mut String, record: &AgentObservationRecord)
             );
             optional_text(output, wire.runtime_handler.0.as_deref());
             output.push_str("</bdi></dd></div></dl></article>");
+        }
+        output.push_str("</div>");
+    }
+    panel_end(output);
+}
+
+fn render_kubernetes_attributions(output: &mut String, record: &AgentObservationRecord) {
+    panel_start(
+        output,
+        "kubernetes-attributions",
+        "Kubernetes attributions",
+        "Qualified Pod and container-slot links to exact node runtime bindings. Names, labels, annotations, and API payloads are not retained.",
+    );
+    if record.kubernetes_attributions.is_empty() {
+        output
+            .push_str("<p class=\"empty-state\">No Kubernetes attribution lifecycle records.</p>");
+    } else {
+        output.push_str("<div class=\"stack\">");
+        for (index, attribution) in record.kubernetes_attributions.iter().enumerate() {
+            let wire = &attribution.wire;
+            push_formatted(
+                output,
+                format_args!(
+                    "<article id=\"kubernetes-attribution-{}\" class=\"evidence-card runtime-binding-card searchable\">",
+                    attribution.source_ordinal
+                ),
+            );
+            source_header(
+                output,
+                attribution.source_ordinal,
+                &format!("/kubernetes_attributions/{index}"),
+            );
+            output.push_str("<div class=\"finding-title\"><div><span class=\"severity-label\">Kubernetes lifecycle</span><h3>");
+            output.push_str(wire.record_type.as_str());
+            output.push_str("</h3></div><span class=\"decision\">");
+            output.push_str(wire.container_kind.as_str());
+            output.push_str("</span></div><dl class=\"fact-grid\"><div><dt>Cluster ID</dt><dd><bdi class=\"fact-text\">");
+            push_escaped(output, &wire.cluster_id);
+            output.push_str(
+                "</bdi></dd></div><div><dt>Namespace ref</dt><dd><bdi class=\"fact-text\">",
+            );
+            push_escaped(output, &wire.namespace_ref);
+            output.push_str("</bdi></dd></div><div><dt>Pod UID</dt><dd><bdi class=\"fact-text\">");
+            push_escaped(output, &wire.pod_uid);
+            output.push_str("</bdi></dd></div><div><dt>Node ref</dt><dd><bdi class=\"fact-text\">");
+            push_escaped(output, &wire.node_ref);
+            output.push_str(
+                "</bdi></dd></div><div><dt>Container ref</dt><dd><bdi class=\"fact-text\">",
+            );
+            push_escaped(output, &wire.container_ref);
+            output.push_str(
+                "</bdi></dd></div><div><dt>RuntimeClass ref</dt><dd><bdi class=\"fact-text\">",
+            );
+            optional_text(output, wire.runtime_class_ref.0.as_deref());
+            output.push_str(
+                "</bdi></dd></div><div><dt>Runtime adapter</dt><dd><bdi class=\"fact-text\">",
+            );
+            push_escaped(output, &wire.runtime_binding.adapter);
+            output.push_str(
+                "</bdi></dd></div><div><dt>Runtime workload</dt><dd><bdi class=\"fact-text\">",
+            );
+            push_escaped(output, &wire.runtime_binding.workload_id);
+            output.push_str("</bdi></dd></div></dl>");
+            if let Some(binding) = record.runtime_bindings.iter().rev().find(|binding| {
+                binding.source_ordinal < attribution.source_ordinal
+                    && binding.wire.record_type.as_str() == "runtime_binding_observed"
+                    && binding.wire.has_same_identity(&wire.runtime_binding)
+            }) {
+                push_formatted(
+                    output,
+                    format_args!(
+                        "<button type=\"button\" class=\"trace-button\" data-evidence-target=\"runtime-binding-{}\" data-evidence-panel=\"runtime-bindings\">Open exact runtime binding <span>source ordinal {}</span></button>",
+                        binding.source_ordinal, binding.source_ordinal
+                    ),
+                );
+            }
+            output.push_str("</article>");
         }
         output.push_str("</div>");
     }

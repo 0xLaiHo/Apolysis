@@ -392,6 +392,7 @@ fn intent(session_id: &str) -> SessionIntent {
             value: "/workspace".to_string(),
         }],
         workload_selectors: Vec::new(),
+        kubernetes_claims: Vec::new(),
     }
 }
 

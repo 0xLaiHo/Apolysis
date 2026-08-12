@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use apolysis_core::{
-    audit_observer_capability_contract_v1, AuditObserverCapabilityContract, OperationOutcome,
+    audit_observer_capability_contract_v1, AuditObserverCapabilityContract,
+    KubernetesAttributionRecordType, KubernetesAttributionWireV1, OperationOutcome,
     RuntimeBindingRecordType, RuntimeBindingWireV1, AUDIT_OBSERVER_COLLECTOR,
     CGROUP_OBSERVATION_SCOPE, CONTENT_OFF_PRIVACY_PROFILE, PROCESS_TREE_OBSERVATION_SCOPE,
 };
@@ -93,6 +94,8 @@ pub struct AgentObservationRecord {
     pub runtime_observations: Vec<ProjectedRuntimeObservation>,
     #[serde(default)]
     pub runtime_bindings: Vec<ProjectedRuntimeBinding>,
+    #[serde(default)]
+    pub kubernetes_attributions: Vec<ProjectedKubernetesAttribution>,
     pub collector_lifecycle: Vec<ProjectedCollectorLifecycle>,
     pub findings: Vec<ProjectedFinding>,
     pub observation_gaps: Vec<ProjectedObservationGap>,
@@ -305,6 +308,13 @@ pub struct ProjectedRuntimeBinding {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectedKubernetesAttribution {
+    pub source_ordinal: u64,
+    #[serde(flatten)]
+    pub wire: KubernetesAttributionWireV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectedFinding {
     pub source_ordinal: u64,
     pub schema_version: u32,
@@ -329,6 +339,10 @@ pub struct ProjectedObservationGap {
     pub runtime_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubernetes_cluster_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubernetes_reason: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -376,6 +390,7 @@ pub enum AgentObservationRecordValidationError {
     InvalidCapabilityManifest,
     InvalidRuntimeObservation,
     InvalidRuntimeBinding,
+    InvalidKubernetesAttribution,
     InvalidSourceOrder,
     InvalidObservationGap,
 }
@@ -490,6 +505,13 @@ pub fn validate_agent_observation_record_v1(
     )?;
     validate_source_ordinal_sequence(
         record
+            .kubernetes_attributions
+            .iter()
+            .map(|attribution| attribution.source_ordinal),
+        &mut source_ordinals,
+    )?;
+    validate_source_ordinal_sequence(
+        record
             .collector_lifecycle
             .iter()
             .map(|lifecycle| lifecycle.source_ordinal),
@@ -510,6 +532,7 @@ pub fn validate_agent_observation_record_v1(
     validate_projected_capabilities(record)?;
     validate_projected_observations(record)?;
     validate_projected_runtime_bindings(record)?;
+    validate_projected_kubernetes_attributions(record)?;
     validate_gaps_and_loss(record)?;
     validate_finding_references(record)?;
     validate_summary_states(record)?;
@@ -629,7 +652,11 @@ fn validate_projected_source_order(
                 }
                 late_attach_seen = true;
             }
-            ProjectedSourceFact::Gap(gap) if gap.kind == "runtime_metadata_unavailable" => {}
+            ProjectedSourceFact::Gap(gap)
+                if matches!(
+                    gap.kind.as_str(),
+                    "runtime_metadata_unavailable" | "kubernetes_metadata_unavailable"
+                ) => {}
             ProjectedSourceFact::Gap(_) => {
                 active_collector_instance(&lifecycle_progress, *ordinal)
                     .map_err(|_| AgentObservationRecordValidationError::InvalidSourceOrder)?;
@@ -1009,14 +1036,27 @@ fn validate_gaps_and_loss(
 ) -> Result<(), AgentObservationRecordValidationError> {
     let mut expected_gap_issues = Vec::new();
     for gap in &record.observation_gaps {
-        let runtime_metadata_valid = if gap.kind == "runtime_metadata_unavailable" {
-            valid_projected_runtime_gap_metadata(gap)
-        } else {
-            gap.runtime_source.is_none() && gap.runtime_reason.is_none()
+        let metadata_valid = match gap.kind.as_str() {
+            "runtime_metadata_unavailable" => {
+                valid_projected_runtime_gap_metadata(gap)
+                    && gap.kubernetes_cluster_id.is_none()
+                    && gap.kubernetes_reason.is_none()
+            }
+            "kubernetes_metadata_unavailable" => {
+                gap.runtime_source.is_none()
+                    && gap.runtime_reason.is_none()
+                    && valid_projected_kubernetes_gap_metadata(gap)
+            }
+            _ => {
+                gap.runtime_source.is_none()
+                    && gap.runtime_reason.is_none()
+                    && gap.kubernetes_cluster_id.is_none()
+                    && gap.kubernetes_reason.is_none()
+            }
         };
         let valid = gap.schema_version == AGENT_OBSERVATION_RECORD_SCHEMA_V1
             && gap.count > 0
-            && runtime_metadata_valid
+            && metadata_valid
             && match gap.kind.as_str() {
                 "late_attach" => {
                     gap.operation == "collector_lifecycle"
@@ -1033,6 +1073,18 @@ fn validate_gaps_and_loss(
                         && matches!(
                             gap.detail.as_str(),
                             "runtime_source_unavailable" | "runtime_identity_transition"
+                        )
+                }
+                "kubernetes_metadata_unavailable" => {
+                    valid_kubernetes_metadata_gap_shape(&gap.operation, gap.count)
+                        && matches!(
+                            gap.detail.as_str(),
+                            "kubernetes_source_unavailable"
+                                | "kubernetes_runtime_unavailable"
+                                | "kubernetes_snapshot_invalid"
+                                | "kubernetes_daemon_restart"
+                                | "kubernetes_identity_transition"
+                                | "kubernetes_late_attach"
                         )
                 }
                 _ => false,
@@ -1198,6 +1250,107 @@ fn validate_projected_runtime_bindings(
                 }
                 apply_runtime_binding_state(&mut active, &mut source_gap_credits, wire, ordinal)
                     .map_err(invalid)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ProjectedWorkloadFact<'a> {
+    Gap(&'a ProjectedObservationGap),
+    Runtime(&'a ProjectedRuntimeBinding),
+    Kubernetes(&'a ProjectedKubernetesAttribution),
+}
+
+fn validate_projected_kubernetes_attributions(
+    record: &AgentObservationRecord,
+) -> Result<(), AgentObservationRecordValidationError> {
+    let invalid = |_| AgentObservationRecordValidationError::InvalidKubernetesAttribution;
+    let mut facts = BTreeMap::new();
+    for gap in &record.observation_gaps {
+        if gap.kind == "kubernetes_metadata_unavailable" {
+            facts.insert(gap.source_ordinal, ProjectedWorkloadFact::Gap(gap));
+        }
+    }
+    for binding in &record.runtime_bindings {
+        facts.insert(
+            binding.source_ordinal,
+            ProjectedWorkloadFact::Runtime(binding),
+        );
+    }
+    for attribution in &record.kubernetes_attributions {
+        facts.insert(
+            attribution.source_ordinal,
+            ProjectedWorkloadFact::Kubernetes(attribution),
+        );
+    }
+
+    let mut active_runtime = BTreeMap::<(String, String), RuntimeBindingWireV1>::new();
+    let mut active_kubernetes = BTreeMap::new();
+    let mut suspend_credits = BTreeSet::new();
+    for (ordinal, fact) in facts {
+        match fact {
+            ProjectedWorkloadFact::Gap(gap) => {
+                if valid_projected_kubernetes_gap_metadata(gap)
+                    && gap
+                        .kubernetes_reason
+                        .as_deref()
+                        .is_some_and(kubernetes_reason_authorizes_suspension)
+                {
+                    grant_kubernetes_suspend_credits(
+                        &active_kubernetes,
+                        &mut suspend_credits,
+                        gap.kubernetes_cluster_id.as_deref().unwrap_or_default(),
+                    );
+                }
+            }
+            ProjectedWorkloadFact::Runtime(binding) => {
+                let wire = &binding.wire;
+                let key = (wire.adapter.clone(), wire.workload_id.clone());
+                match wire.record_type {
+                    RuntimeBindingRecordType::Observed => {
+                        if active_runtime.insert(key, wire.clone()).is_some() {
+                            return Err(invalid(ordinal));
+                        }
+                    }
+                    RuntimeBindingRecordType::Retired | RuntimeBindingRecordType::Suspended => {
+                        if active_kubernetes.values().any(
+                            |attribution: &KubernetesAttributionWireV1| {
+                                attribution.runtime_binding.has_same_identity(wire)
+                            },
+                        ) || active_runtime
+                            .get(&key)
+                            .is_none_or(|active| !active.has_same_identity(wire))
+                        {
+                            return Err(invalid(ordinal));
+                        }
+                        active_runtime.remove(&key);
+                    }
+                }
+            }
+            ProjectedWorkloadFact::Kubernetes(attribution) => {
+                let wire = &attribution.wire;
+                if wire.validate().is_err() || wire.agent_run_id != record.agent_run_id {
+                    return Err(invalid(ordinal));
+                }
+                if wire.record_type == KubernetesAttributionRecordType::Observed
+                    && active_runtime
+                        .get(&(
+                            wire.runtime_binding.adapter.clone(),
+                            wire.runtime_binding.workload_id.clone(),
+                        ))
+                        .is_none_or(|active| !active.has_same_identity(&wire.runtime_binding))
+                {
+                    return Err(invalid(ordinal));
+                }
+                apply_kubernetes_attribution_state(
+                    &mut active_kubernetes,
+                    &mut suspend_credits,
+                    wire,
+                    ordinal,
+                )
+                .map_err(|_| AgentObservationRecordValidationError::InvalidKubernetesAttribution)?;
             }
         }
     }
@@ -1562,6 +1715,7 @@ pub fn project_agent_run(
     let mut identity_index = HashMap::<ExactIdentityKey, usize>::new();
     let mut runtime_observations = Vec::new();
     let mut runtime_bindings = Vec::new();
+    let mut kubernetes_attributions = Vec::new();
     let mut collector_lifecycle = Vec::new();
     let mut lifecycle_progress = BTreeMap::<String, LifecycleProgress>::new();
     let mut late_attach_progress = None;
@@ -1575,7 +1729,12 @@ pub fn project_agent_run(
     let mut finding_kind_counts = BTreeMap::new();
     let mut raw_event_ids = BTreeSet::new();
     let mut active_runtime_bindings = BTreeMap::new();
+    let mut active_kubernetes_attributions: BTreeMap<
+        (String, String, String, String),
+        KubernetesAttributionWireV1,
+    > = BTreeMap::new();
     let mut runtime_source_gap_credits = BTreeMap::<String, u64>::new();
+    let mut kubernetes_suspend_credits = BTreeSet::new();
     let mut known_missing_observation_count = 0_u64;
     let mut unknown_history_boundary_count = 0_u64;
     let mut has_unknown_records = false;
@@ -1802,6 +1961,14 @@ pub fn project_agent_run(
                             field: "runtime_metadata_unavailable",
                         });
                     }
+                    if wire.kind == "kubernetes_metadata_unavailable"
+                        && !valid_kubernetes_metadata_gap_shape(&wire.operation, wire.count)
+                    {
+                        return Err(ProjectionError::MalformedRecord {
+                            ordinal,
+                            field: "kubernetes_metadata_unavailable",
+                        });
+                    }
                     if wire.kind == "late_attach" {
                         if wire.operation != "collector_lifecycle" || wire.count != 1 {
                             return Err(ProjectionError::MalformedRecord {
@@ -1819,7 +1986,10 @@ pub fn project_agent_run(
                             .checked_add(1)
                             .ok_or(ProjectionError::ArithmeticOverflow)?;
                         late_attach_progress = Some(LateAttachProgress::AwaitingCapability);
-                    } else if wire.kind != "runtime_metadata_unavailable" {
+                    } else if !matches!(
+                        wire.kind.as_str(),
+                        "runtime_metadata_unavailable" | "kubernetes_metadata_unavailable"
+                    ) {
                         if !lifecycle_progress
                             .values()
                             .any(|progress| *progress == LifecycleProgress::Started)
@@ -1848,6 +2018,21 @@ pub fn project_agent_run(
                         } else {
                             (None, None)
                         };
+                    let (kubernetes_cluster_id, kubernetes_reason) = if wire.kind
+                        == "kubernetes_metadata_unavailable"
+                    {
+                        let (cluster_id, reason, kind) = kubernetes_gap_metadata(&wire, ordinal)?;
+                        if kind == KubernetesGapCreditKind::SourceUnavailable {
+                            grant_kubernetes_suspend_credits(
+                                &active_kubernetes_attributions,
+                                &mut kubernetes_suspend_credits,
+                                cluster_id,
+                            );
+                        }
+                        (Some(cluster_id.to_string()), Some(reason.to_string()))
+                    } else {
+                        (None, None)
+                    };
                     increment(&mut gap_kind_counts, &wire.kind)?;
                     issues.push(ProjectionIssue {
                         code: ProjectionIssueCode::ObservationGap,
@@ -1864,6 +2049,8 @@ pub fn project_agent_run(
                         detail,
                         runtime_source,
                         runtime_reason,
+                        kubernetes_cluster_id,
+                        kubernetes_reason,
                     });
                 }
                 "accountability_finding" => {
@@ -1936,6 +2123,16 @@ pub fn project_agent_run(
                     let wire: RuntimeBindingWireV1 = decode(value, ordinal)?;
                     bind_agent_run(&mut agent_run_id, &wire.agent_run_id, ordinal)?;
                     validate_runtime_binding_wire(&wire, ordinal)?;
+                    if wire.record_type != RuntimeBindingRecordType::Observed
+                        && active_kubernetes_attributions
+                            .values()
+                            .any(|attribution| attribution.runtime_binding.has_same_identity(&wire))
+                    {
+                        return Err(ProjectionError::MalformedRecord {
+                            ordinal,
+                            field: "kubernetes_attribution_sequence",
+                        });
+                    }
                     apply_runtime_binding_state(
                         &mut active_runtime_bindings,
                         &mut runtime_source_gap_credits,
@@ -1943,6 +2140,38 @@ pub fn project_agent_run(
                         ordinal,
                     )?;
                     runtime_bindings.push(ProjectedRuntimeBinding {
+                        source_ordinal: ordinal,
+                        wire,
+                    });
+                }
+                "kubernetes_attribution_observed"
+                | "kubernetes_attribution_retired"
+                | "kubernetes_attribution_suspended" => {
+                    let wire: KubernetesAttributionWireV1 = decode(value, ordinal)?;
+                    bind_agent_run(&mut agent_run_id, &wire.agent_run_id, ordinal)?;
+                    if wire.validate().is_err()
+                        || (wire.record_type == KubernetesAttributionRecordType::Observed
+                            && active_runtime_bindings
+                                .get(&(
+                                    wire.runtime_binding.adapter.clone(),
+                                    wire.runtime_binding.workload_id.clone(),
+                                ))
+                                .is_none_or(|active| {
+                                    !active.has_same_identity(&wire.runtime_binding)
+                                }))
+                    {
+                        return Err(ProjectionError::MalformedRecord {
+                            ordinal,
+                            field: "kubernetes_attribution",
+                        });
+                    }
+                    apply_kubernetes_attribution_state(
+                        &mut active_kubernetes_attributions,
+                        &mut kubernetes_suspend_credits,
+                        &wire,
+                        ordinal,
+                    )?;
+                    kubernetes_attributions.push(ProjectedKubernetesAttribution {
                         source_ordinal: ordinal,
                         wire,
                     });
@@ -2110,6 +2339,7 @@ pub fn project_agent_run(
         runtime_identities,
         runtime_observations,
         runtime_bindings,
+        kubernetes_attributions,
         collector_lifecycle,
         findings,
         observation_gaps,
@@ -2424,6 +2654,10 @@ fn valid_runtime_metadata_gap_shape(operation: &str, count: u64) -> bool {
     operation == "runtime_metadata" && count == 1
 }
 
+fn valid_kubernetes_metadata_gap_shape(operation: &str, count: u64) -> bool {
+    operation == "kubernetes_metadata" && count == 1
+}
+
 fn valid_runtime_source(source: &str) -> bool {
     matches!(source, "docker" | "containerd" | "k3s_containerd")
 }
@@ -2445,6 +2679,53 @@ fn valid_projected_runtime_gap_metadata(gap: &ProjectedObservationGap) -> bool {
                     "identity_transition" => gap.detail == "runtime_identity_transition",
                     _ => gap.detail == "runtime_source_unavailable",
                 }
+        }
+        _ => false,
+    }
+}
+
+fn valid_kubernetes_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "kubernetes_api_unavailable"
+            | "kubernetes_runtime_unavailable"
+            | "kubernetes_snapshot_invalid"
+            | "kubernetes_daemon_restart"
+            | "kubernetes_identity_transition"
+            | "kubernetes_late_attach"
+    )
+}
+
+fn kubernetes_reason_authorizes_suspension(reason: &str) -> bool {
+    matches!(
+        reason,
+        "kubernetes_api_unavailable"
+            | "kubernetes_runtime_unavailable"
+            | "kubernetes_snapshot_invalid"
+    )
+}
+
+fn normalized_kubernetes_gap_detail(reason: &str) -> Option<&'static str> {
+    match reason {
+        "kubernetes_api_unavailable" => Some("kubernetes_source_unavailable"),
+        "kubernetes_runtime_unavailable" => Some("kubernetes_runtime_unavailable"),
+        "kubernetes_snapshot_invalid" => Some("kubernetes_snapshot_invalid"),
+        "kubernetes_daemon_restart" => Some("kubernetes_daemon_restart"),
+        "kubernetes_identity_transition" => Some("kubernetes_identity_transition"),
+        "kubernetes_late_attach" => Some("kubernetes_late_attach"),
+        _ => None,
+    }
+}
+
+fn valid_projected_kubernetes_gap_metadata(gap: &ProjectedObservationGap) -> bool {
+    match (
+        gap.kubernetes_cluster_id.as_deref(),
+        gap.kubernetes_reason.as_deref(),
+    ) {
+        (Some(cluster_id), Some(reason)) => {
+            is_canonical_nonzero_uuid(cluster_id)
+                && valid_kubernetes_reason(reason)
+                && normalized_kubernetes_gap_detail(reason) == Some(gap.detail.as_str())
         }
         _ => false,
     }
@@ -2504,11 +2785,63 @@ fn normalized_gap_detail(
                 Ok("runtime_source_unavailable".to_string())
             }
         }
+        "kubernetes_metadata_unavailable" => {
+            let (_, reason, _) = kubernetes_gap_metadata(wire, ordinal)?;
+            normalized_kubernetes_gap_detail(reason)
+                .map(str::to_string)
+                .ok_or(ProjectionError::MalformedRecord {
+                    ordinal,
+                    field: "kubernetes_metadata_unavailable",
+                })
+        }
         _ => Err(ProjectionError::MalformedRecord {
             ordinal,
             field: "observation_gap",
         }),
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KubernetesGapCreditKind {
+    SourceUnavailable,
+    DaemonRestart,
+    IdentityTransition,
+    LateAttach,
+}
+
+fn kubernetes_gap_metadata(
+    wire: &ObservationGapWire,
+    ordinal: u64,
+) -> Result<(&str, &str, KubernetesGapCreditKind), ProjectionError> {
+    let mut parts = wire.detail.split(',');
+    let cluster_id = parts.next().and_then(|part| part.strip_prefix("cluster="));
+    let reason = parts.next().and_then(|part| part.strip_prefix("reason="));
+    if parts.next().is_some() {
+        return Err(ProjectionError::MalformedRecord {
+            ordinal,
+            field: "kubernetes_metadata_unavailable",
+        });
+    }
+    let cluster_id = cluster_id.filter(|value| is_canonical_nonzero_uuid(value));
+    let kind = match reason {
+        Some(
+            "kubernetes_api_unavailable"
+            | "kubernetes_runtime_unavailable"
+            | "kubernetes_snapshot_invalid",
+        ) => Some(KubernetesGapCreditKind::SourceUnavailable),
+        Some("kubernetes_daemon_restart") => Some(KubernetesGapCreditKind::DaemonRestart),
+        Some("kubernetes_identity_transition") => Some(KubernetesGapCreditKind::IdentityTransition),
+        Some("kubernetes_late_attach") => Some(KubernetesGapCreditKind::LateAttach),
+        _ => None,
+    };
+    cluster_id
+        .zip(reason)
+        .zip(kind)
+        .map(|((cluster_id, reason), kind)| (cluster_id, reason, kind))
+        .ok_or(ProjectionError::MalformedRecord {
+            ordinal,
+            field: "kubernetes_metadata_unavailable",
+        })
 }
 
 fn runtime_gap_credit(
@@ -2616,6 +2949,64 @@ fn apply_runtime_binding_state(
         }
     }
     Ok(())
+}
+
+fn apply_kubernetes_attribution_state(
+    active: &mut BTreeMap<(String, String, String, String), KubernetesAttributionWireV1>,
+    suspend_credits: &mut BTreeSet<(String, String, String, String)>,
+    wire: &KubernetesAttributionWireV1,
+    ordinal: u64,
+) -> Result<(), ProjectionError> {
+    let key = kubernetes_attribution_key(wire);
+    match wire.record_type {
+        KubernetesAttributionRecordType::Observed => {
+            if active.insert(key, wire.clone()).is_some() {
+                return Err(kubernetes_attribution_sequence_error(ordinal));
+            }
+        }
+        KubernetesAttributionRecordType::Retired | KubernetesAttributionRecordType::Suspended => {
+            if active
+                .get(&key)
+                .is_none_or(|current| !current.has_same_identity(wire))
+            {
+                return Err(kubernetes_attribution_sequence_error(ordinal));
+            }
+            if wire.record_type == KubernetesAttributionRecordType::Suspended
+                && !suspend_credits.remove(&key)
+            {
+                return Err(kubernetes_attribution_sequence_error(ordinal));
+            }
+            active.remove(&key);
+        }
+    }
+    Ok(())
+}
+
+fn kubernetes_attribution_key(
+    wire: &KubernetesAttributionWireV1,
+) -> (String, String, String, String) {
+    (
+        wire.cluster_id.clone(),
+        wire.pod_uid.clone(),
+        wire.container_kind.as_str().to_string(),
+        wire.container_ref.clone(),
+    )
+}
+
+fn grant_kubernetes_suspend_credits(
+    active: &BTreeMap<(String, String, String, String), KubernetesAttributionWireV1>,
+    credits: &mut BTreeSet<(String, String, String, String)>,
+    cluster_id: &str,
+) {
+    credits.retain(|key| key.0 != cluster_id);
+    credits.extend(active.keys().filter(|key| key.0 == cluster_id).cloned());
+}
+
+fn kubernetes_attribution_sequence_error(ordinal: u64) -> ProjectionError {
+    ProjectionError::MalformedRecord {
+        ordinal,
+        field: "kubernetes_attribution_sequence",
+    }
 }
 
 fn consume_runtime_source_gap_credit(
@@ -2952,6 +3343,22 @@ fn is_uuid(value: &str) -> bool {
             8 | 13 | 18 | 23 => byte == b'-',
             _ => byte.is_ascii_hexdigit(),
         })
+}
+
+fn is_canonical_nonzero_uuid(value: &str) -> bool {
+    let mut non_zero = false;
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                if byte != b'0' {
+                    non_zero = true;
+                }
+                byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
+            }
+        })
+        && non_zero
 }
 
 fn to_u64(value: usize) -> Result<u64, ProjectionError> {

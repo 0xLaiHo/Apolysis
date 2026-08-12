@@ -282,6 +282,7 @@ fn intent(agent_run_id: &str) -> SessionIntent {
         declared_actions: vec![ActionClass::Test],
         allowed_resources: Vec::new(),
         workload_selectors: Vec::new(),
+        kubernetes_claims: Vec::new(),
     }
 }
 

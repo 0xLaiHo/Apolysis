@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::num::NonZeroU64;
+
 use apolysis_accountability::SessionIntent;
-use apolysis_core::CollectorFailureReason;
+use apolysis_core::{CollectorFailureReason, CollectorLifecycleRecord};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -10,12 +12,55 @@ pub enum ScopeOperation {
     RefreshContext,
     Untrack,
     CloseAgentRun,
+    FinalizeAgentRunClose,
+    CancelAgentRunClose,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ScopeCompletion {
     Applied,
-    AgentRunClosePersisted,
+    AgentRunClosePrepared(PreparedAgentRunClose),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PreparedAgentRunClose {
+    agent_run_id: String,
+    token: Option<NonZeroU64>,
+    stopped: Option<CollectorLifecycleRecord>,
+}
+
+impl PreparedAgentRunClose {
+    pub(crate) fn new(
+        agent_run_id: impl Into<String>,
+        token: NonZeroU64,
+        stopped: Option<CollectorLifecycleRecord>,
+    ) -> Self {
+        Self {
+            agent_run_id: agent_run_id.into(),
+            token: Some(token),
+            stopped,
+        }
+    }
+
+    fn external(agent_run_id: impl Into<String>) -> Self {
+        Self {
+            agent_run_id: agent_run_id.into(),
+            token: None,
+            stopped: None,
+        }
+    }
+
+    pub(crate) fn agent_run_id(&self) -> &str {
+        &self.agent_run_id
+    }
+
+    pub(crate) const fn token(&self) -> Option<NonZeroU64> {
+        self.token
+    }
+
+    pub(crate) fn stopped(&self) -> Option<&CollectorLifecycleRecord> {
+        self.stopped.as_ref()
+    }
 }
 
 pub struct ScopeRequest {
@@ -25,6 +70,7 @@ pub struct ScopeRequest {
     agent_intent: Option<SessionIntent>,
     runtime_container_id: Option<String>,
     failure_reason: Option<CollectorFailureReason>,
+    close_token: Option<NonZeroU64>,
     response: oneshot::Sender<Result<ScopeCompletion, String>>,
 }
 
@@ -53,16 +99,20 @@ impl ScopeRequest {
         self.failure_reason
     }
 
+    pub(crate) const fn close_token(&self) -> Option<NonZeroU64> {
+        self.close_token
+    }
+
     pub fn complete(self, result: Result<(), String>) {
         let _ = self
             .response
             .send(result.map(|()| ScopeCompletion::Applied));
     }
 
-    pub(crate) fn complete_agent_run_close(self, result: Result<(), String>) {
+    pub(crate) fn complete_agent_run_close(self, result: Result<PreparedAgentRunClose, String>) {
         let _ = self
             .response
-            .send(result.map(|()| ScopeCompletion::AgentRunClosePersisted));
+            .send(result.map(ScopeCompletion::AgentRunClosePrepared));
     }
 }
 
@@ -186,6 +236,7 @@ impl ScopeController {
                 agent_intent: intent.cloned(),
                 runtime_container_id: None,
                 failure_reason: Some(reason),
+                close_token: None,
                 response,
             })
             .await
@@ -196,7 +247,10 @@ impl ScopeController {
             .map(|_| ())
     }
 
-    pub(crate) async fn close_agent_run(&self, agent_run_id: &str) -> Result<bool, String> {
+    pub(crate) async fn prepare_agent_run_close(
+        &self,
+        agent_run_id: &str,
+    ) -> Result<PreparedAgentRunClose, String> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .try_send(ScopeRequest {
@@ -206,13 +260,60 @@ impl ScopeController {
                 agent_intent: None,
                 runtime_container_id: None,
                 failure_reason: None,
+                close_token: None,
                 response,
             })
             .map_err(|error| format!("observer scope command queue unavailable: {error}"))?;
         receiver
             .await
             .map_err(|_| "observer scope worker stopped before responding".to_string())?
-            .map(|completion| completion == ScopeCompletion::AgentRunClosePersisted)
+            .map(|completion| match completion {
+                ScopeCompletion::AgentRunClosePrepared(prepared) => prepared,
+                ScopeCompletion::Applied => PreparedAgentRunClose::external(agent_run_id),
+            })
+    }
+
+    pub(crate) async fn finalize_agent_run_close(
+        &self,
+        prepared: &PreparedAgentRunClose,
+    ) -> Result<(), String> {
+        self.complete_agent_run_close(ScopeOperation::FinalizeAgentRunClose, prepared)
+            .await
+    }
+
+    pub(crate) async fn cancel_agent_run_close(
+        &self,
+        prepared: &PreparedAgentRunClose,
+    ) -> Result<(), String> {
+        self.complete_agent_run_close(ScopeOperation::CancelAgentRunClose, prepared)
+            .await
+    }
+
+    async fn complete_agent_run_close(
+        &self,
+        operation: ScopeOperation,
+        prepared: &PreparedAgentRunClose,
+    ) -> Result<(), String> {
+        let Some(close_token) = prepared.token() else {
+            return Ok(());
+        };
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .try_send(ScopeRequest {
+                operation,
+                cgroup_id: 0,
+                agent_run_id: Some(prepared.agent_run_id().to_string()),
+                agent_intent: None,
+                runtime_container_id: None,
+                failure_reason: None,
+                close_token: Some(close_token),
+                response,
+            })
+            .map_err(|error| format!("observer scope command queue unavailable: {error}"))?;
+        receiver
+            .await
+            .map_err(|_| "observer scope worker stopped before responding".to_string())?
+            .map(|_| ())
     }
 
     async fn apply(
@@ -233,6 +334,7 @@ impl ScopeController {
                 agent_intent: agent_intent.cloned(),
                 runtime_container_id: runtime_container_id.map(str::to_owned),
                 failure_reason,
+                close_token: None,
                 response,
             })
             .map_err(|error| format!("observer scope command queue unavailable: {error}"))?;
