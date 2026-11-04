@@ -45,6 +45,8 @@ pub(crate) mod values {
     pub(crate) const CLAUDE_JSONL: &str = "claude-jsonl";
     /// Cursor hook payload and transcript JSONL adapter.
     pub(crate) const CURSOR_JSONL: &str = "cursor-jsonl";
+    /// Pi session JSONL adapter.
+    pub(crate) const PI_JSONL: &str = "pi-jsonl";
 }
 
 /// Shared CLI option names.

@@ -3,6 +3,7 @@
 mod claude;
 mod codex;
 mod cursor;
+mod pi;
 
 use std::path::Path;
 
@@ -45,6 +46,7 @@ pub fn ingest(
         "codex-jsonl" => codex::records(input, session_id, workspace_root),
         "claude-jsonl" => claude::records(input, session_id, workspace_root),
         "cursor-jsonl" => cursor::records(input, session_id, workspace_root),
+        "pi-jsonl" => pi::records(input, session_id, workspace_root),
         other => Err(format!("unsupported intent adapter '{other}'")),
     }
 }
@@ -64,6 +66,7 @@ pub fn hook(
         "codex" => pre_tool_use_hook("codex", input, workspace_root),
         "claude" => pre_tool_use_hook("claude", input, workspace_root),
         "cursor" => cursor_hook(input, workspace_root),
+        "pi" => command_stamp_hook("pi", input, workspace_root),
         other => Err(format!("unsupported intent hook harness '{other}'")),
     }
 }
@@ -103,6 +106,39 @@ fn pre_tool_use_hook(
         response["hookSpecificOutput"]["updatedInput"] =
             serde_json::json!({ "command": format!("APOLYSIS_INTENT_ID={intent_id} {original}") });
     }
+    Ok(HookOutput { record, response })
+}
+
+fn command_stamp_hook(
+    source: &str,
+    input: &serde_json::Value,
+    workspace_root: &Path,
+) -> Result<HookOutput, String> {
+    let session_id = required_str(input, "session_id")?;
+    let tool_name = required_str(input, "tool_name")?;
+    let call_id = required_str(input, "tool_use_id")?;
+    let intent_id = format!("{source}:{call_id}");
+    validate_stamp(&intent_id)?;
+    let command = input
+        .pointer("/tool_input/command")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let record = stamped_record(
+        session_id,
+        source,
+        &intent_id,
+        call_id,
+        tool_name,
+        command.as_deref(),
+        workspace_root,
+    )?;
+    let response = if declared_action(tool_name) == "shell.command" {
+        let original =
+            command.ok_or(format!("{source} shell hook is missing tool_input.command"))?;
+        serde_json::json!({ "command": format!("APOLYSIS_INTENT_ID={intent_id} {original}") })
+    } else {
+        serde_json::json!({})
+    };
     Ok(HookOutput { record, response })
 }
 

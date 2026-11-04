@@ -161,6 +161,43 @@ fn cursor_pre_tool_use_rewrites_shell_and_shell_event_does_not() {
     assert_eq!(before, serde_json::json!({"permission": "allow"}));
 }
 
+#[test]
+fn pi_jsonl_ingests_assistant_tool_calls() {
+    let input = temp_jsonl("pi-in");
+    let output = temp_jsonl("pi-out");
+    std::fs::write(
+        &input,
+        concat!(
+            r#"{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/work"}"#,
+            "\n",
+            r#"{"type":"message","id":"c3","parentId":"b2","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_123","name":"bash","arguments":{"command":"cargo test"}}],"timestamp":1733234403000}}"#,
+            "\n",
+            r#"{"type":"message","id":"c4","parentId":"c3","timestamp":"2024-12-03T14:00:04.000Z","message":{"role":"toolResult","toolCallId":"call_123","toolName":"bash","content":[{"type":"text","text":"ok"}],"isError":false,"timestamp":1733234404000}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    assert!(ingest("pi-jsonl", &input, &output).success());
+    let body = std::fs::read_to_string(output).unwrap();
+    assert!(body.contains(r#""intent_source":"pi""#));
+    assert!(body.contains(r#""intent_id":"pi:call_123""#));
+    assert!(body.contains(r#""tool_name":"bash""#));
+    assert_eq!(body.matches(r#""record_type":"intent""#).count(), 1);
+    assert!(!body.contains("cargo test"));
+}
+
+#[test]
+fn pi_hook_stamps_bash_command() {
+    let response = hook_stdout(
+        "pi",
+        r#"{"session_id":"uuid","hook_event_name":"tool_call","tool_name":"bash","tool_use_id":"call_123","tool_input":{"command":"cargo test"}}"#,
+    );
+    assert_eq!(
+        response["command"],
+        "APOLYSIS_INTENT_ID=pi:call_123 cargo test"
+    );
+}
+
 fn ingest(
     adapter: &str,
     input: &std::path::Path,
