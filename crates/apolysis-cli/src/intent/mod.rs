@@ -3,6 +3,7 @@
 mod claude;
 mod codex;
 mod cursor;
+mod opencode;
 mod pi;
 
 use std::path::Path;
@@ -47,6 +48,7 @@ pub fn ingest(
         "claude-jsonl" => claude::records(input, session_id, workspace_root),
         "cursor-jsonl" => cursor::records(input, session_id, workspace_root),
         "pi-jsonl" => pi::records(input, session_id, workspace_root),
+        "opencode-jsonl" => opencode::records(input, session_id, workspace_root),
         other => Err(format!("unsupported intent adapter '{other}'")),
     }
 }
@@ -67,6 +69,7 @@ pub fn hook(
         "claude" => pre_tool_use_hook("claude", input, workspace_root),
         "cursor" => cursor_hook(input, workspace_root),
         "pi" => command_stamp_hook("pi", input, workspace_root),
+        "opencode" => command_stamp_hook("opencode", input, workspace_root),
         other => Err(format!("unsupported intent hook harness '{other}'")),
     }
 }

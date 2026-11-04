@@ -198,6 +198,37 @@ fn pi_hook_stamps_bash_command() {
     );
 }
 
+#[test]
+fn opencode_jsonl_ingests_tool_parts_and_skips_text() {
+    let input = temp_jsonl("opencode-in");
+    let output = temp_jsonl("opencode-out");
+    std::fs::write(
+        &input,
+        concat!(
+            r#"{"data":{"role":"assistant","parts":[{"type":"text","text":"secret prompt"},{"type":"tool","tool":"bash","callID":"call-1","state":{"input":{"command":"ls"}}},{"type":"tool","tool":"read","callID":"call-2","state":{"input":{"filePath":"/work/Cargo.toml"}}}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    assert!(ingest("opencode-jsonl", &input, &output).success());
+    let body = std::fs::read_to_string(output).unwrap();
+    assert!(body.contains(r#""intent_id":"opencode:call-1""#));
+    assert!(body.contains(r#""declared_action":"shell.command""#));
+    assert!(body.contains(r#""intent_id":"opencode:call-2""#));
+    assert!(body.contains(r#""declared_action":"file.read""#));
+    assert!(!body.contains("secret prompt"));
+    assert!(!body.contains("Cargo.toml"));
+}
+
+#[test]
+fn opencode_hook_stamps_bash_command() {
+    let response = hook_stdout(
+        "opencode",
+        r#"{"session_id":"ses_1","hook_event_name":"tool.execute.before","tool_name":"bash","tool_use_id":"call-1","tool_input":{"command":"ls"}}"#,
+    );
+    assert_eq!(response["command"], "APOLYSIS_INTENT_ID=opencode:call-1 ls");
+}
+
 fn ingest(
     adapter: &str,
     input: &std::path::Path,

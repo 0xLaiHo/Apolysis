@@ -346,7 +346,11 @@ impl IntentIngestRequest {
             adapter.ok_or_else(|| format!("missing {}\n{}", options::ADAPTER, usage()))?;
         if !matches!(
             adapter.as_str(),
-            values::CODEX_JSONL | values::CLAUDE_JSONL | values::CURSOR_JSONL | values::PI_JSONL
+            values::CODEX_JSONL
+                | values::CLAUDE_JSONL
+                | values::CURSOR_JSONL
+                | values::PI_JSONL
+                | values::OPENCODE_JSONL
         ) {
             return Err(format!("unsupported intent adapter '{adapter}'"));
         }

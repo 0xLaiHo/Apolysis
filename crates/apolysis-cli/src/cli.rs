@@ -47,6 +47,8 @@ pub(crate) mod values {
     pub(crate) const CURSOR_JSONL: &str = "cursor-jsonl";
     /// Pi session JSONL adapter.
     pub(crate) const PI_JSONL: &str = "pi-jsonl";
+    /// OpenCode session-message export adapter.
+    pub(crate) const OPENCODE_JSONL: &str = "opencode-jsonl";
 }
 
 /// Shared CLI option names.
@@ -115,7 +117,7 @@ pub(crate) const DEFAULT_TIMELINE_PATH: &str = ".apolysis/timeline.jsonl";
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
     format!(
-        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {hook} {harness} codex|claude|cursor|pi|opencode {output} <path> {workspace_root} <path>\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
+        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} codex-jsonl|claude-jsonl|cursor-jsonl|pi-jsonl|opencode-jsonl {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {hook} {harness} codex|claude|cursor|pi|opencode {output} <path> {workspace_root} <path>\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
         run = commands::RUN,
         observe = commands::OBSERVE,
         intent = commands::INTENT,
@@ -141,7 +143,6 @@ pub(crate) fn usage() -> String {
         intent_input = options::INTENT_INPUT,
         timeline_input = options::TIMELINE_INPUT,
         summary = options::SUMMARY,
-        codex_jsonl = values::CODEX_JSONL,
         fixture = values::FIXTURE,
         live = values::LIVE,
         input = options::INPUT,
