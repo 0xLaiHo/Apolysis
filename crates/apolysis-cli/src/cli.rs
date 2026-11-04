@@ -41,6 +41,8 @@ pub(crate) mod values {
     pub(crate) const LIVE: &str = "live";
     /// Codex JSONL response-item log adapter.
     pub(crate) const CODEX_JSONL: &str = "codex-jsonl";
+    /// Claude Code transcript JSONL adapter.
+    pub(crate) const CLAUDE_JSONL: &str = "claude-jsonl";
 }
 
 /// Shared CLI option names.

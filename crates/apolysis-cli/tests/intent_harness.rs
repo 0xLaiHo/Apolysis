@@ -81,6 +81,102 @@ fn codex_hook_stamps_shell_command_and_redacts_intent() {
     assert!(!body.contains("cargo test"));
 }
 
+#[test]
+fn claude_jsonl_ingests_tool_use_blocks() {
+    let input = temp_jsonl("claude-in");
+    let output = temp_jsonl("claude-out");
+    std::fs::write(
+        &input,
+        concat!(
+            r#"{"type":"assistant","sessionId":"sess","message":{"content":[{"type":"text","text":"looking"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo test"}},{"type":"tool_use","id":"toolu_2","name":"WebSearch","input":{"query":"secret query"}}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    assert!(ingest("claude-jsonl", &input, &output).success());
+    let body = std::fs::read_to_string(output).unwrap();
+    assert!(body.contains(r#""intent_source":"claude""#));
+    assert!(body.contains(r#""intent_id":"claude:toolu_1""#));
+    assert!(body.contains(r#""declared_action":"shell.command""#));
+    assert!(body.contains(r#""intent_id":"claude:toolu_2""#));
+    assert!(body.contains(r#""declared_action":"web.search""#));
+    assert!(!body.contains("secret query"));
+    assert!(!body.contains("cargo test"));
+}
+
+#[test]
+fn claude_hook_rewrites_bash_and_leaves_web_search_unchanged() {
+    let response = hook_stdout(
+        "claude",
+        r#"{"session_id":"sess","hook_event_name":"PreToolUse","tool_name":"WebSearch","tool_use_id":"toolu_2","tool_input":{"query":"docs"}}"#,
+    );
+    assert!(response["hookSpecificOutput"].get("updatedInput").is_none());
+    let response = hook_stdout(
+        "claude",
+        r#"{"session_id":"sess","hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"ls"}}"#,
+    );
+    assert_eq!(
+        response["hookSpecificOutput"]["updatedInput"]["command"],
+        "APOLYSIS_INTENT_ID=claude:toolu_1 ls"
+    );
+}
+
+fn ingest(
+    adapter: &str,
+    input: &std::path::Path,
+    output: &std::path::Path,
+) -> std::process::ExitStatus {
+    apolysis_command()
+        .args([
+            "intent",
+            "ingest",
+            "--adapter",
+            adapter,
+            "--input",
+            input.to_str().unwrap(),
+            "--session",
+            "s",
+            "--output",
+            output.to_str().unwrap(),
+            "--workspace-root",
+            std::env::temp_dir().to_str().unwrap(),
+        ])
+        .status()
+        .unwrap()
+}
+
+fn hook_stdout(harness: &str, body: &str) -> serde_json::Value {
+    let output = temp_jsonl(&format!("hook-{harness}"));
+    let mut child = apolysis_command()
+        .args([
+            "intent",
+            "hook",
+            "--harness",
+            harness,
+            "--output",
+            output.to_str().unwrap(),
+            "--workspace-root",
+            std::env::temp_dir().to_str().unwrap(),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(
+        &mut std::io::BufWriter::new(child.stdin.take().unwrap()),
+        body.as_bytes(),
+    )
+    .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    serde_json::from_slice(&result.stdout).unwrap()
+}
+
 fn apolysis_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_apolysis"));
     command.current_dir(workspace_root());

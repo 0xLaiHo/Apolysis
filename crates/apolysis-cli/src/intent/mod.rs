@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod claude;
 mod codex;
 
 use std::path::Path;
@@ -41,6 +42,7 @@ pub fn ingest(
 ) -> Result<Vec<SessionIntentRecord>, String> {
     match adapter {
         "codex-jsonl" => codex::records(input, session_id, workspace_root),
+        "claude-jsonl" => claude::records(input, session_id, workspace_root),
         other => Err(format!("unsupported intent adapter '{other}'")),
     }
 }
@@ -57,16 +59,21 @@ pub fn hook(
     workspace_root: &Path,
 ) -> Result<HookOutput, String> {
     match harness {
-        "codex" => codex_hook(input, workspace_root),
+        "codex" => pre_tool_use_hook("codex", input, workspace_root),
+        "claude" => pre_tool_use_hook("claude", input, workspace_root),
         other => Err(format!("unsupported intent hook harness '{other}'")),
     }
 }
 
-fn codex_hook(input: &serde_json::Value, workspace_root: &Path) -> Result<HookOutput, String> {
+fn pre_tool_use_hook(
+    source: &str,
+    input: &serde_json::Value,
+    workspace_root: &Path,
+) -> Result<HookOutput, String> {
     let session_id = required_str(input, "session_id")?;
     let tool_name = required_str(input, "tool_name")?;
     let call_id = required_str(input, "tool_use_id")?;
-    let intent_id = format!("codex:{call_id}");
+    let intent_id = format!("{source}:{call_id}");
     validate_stamp(&intent_id)?;
     let command = input
         .pointer("/tool_input/command")
@@ -74,7 +81,7 @@ fn codex_hook(input: &serde_json::Value, workspace_root: &Path) -> Result<HookOu
         .map(str::to_string);
     let record = stamped_record(
         session_id,
-        "codex",
+        source,
         &intent_id,
         call_id,
         tool_name,
@@ -88,7 +95,8 @@ fn codex_hook(input: &serde_json::Value, workspace_root: &Path) -> Result<HookOu
         }
     });
     if declared_action(tool_name) == "shell.command" {
-        let original = command.ok_or("codex shell hook is missing tool_input.command")?;
+        let original =
+            command.ok_or(format!("{source} shell hook is missing tool_input.command"))?;
         response["hookSpecificOutput"]["updatedInput"] =
             serde_json::json!({ "command": format!("APOLYSIS_INTENT_ID={intent_id} {original}") });
     }
@@ -116,7 +124,7 @@ fn validate_stamp(intent_id: &str) -> Result<(), String> {
     }
 }
 
-fn stamped_record(
+pub(crate) fn stamped_record(
     session_id: &str,
     source: &str,
     intent_id: &str,
