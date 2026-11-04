@@ -76,8 +76,11 @@ fn codex_tool_call(value: &serde_json::Value, line_number: usize) -> Option<Code
         .get("type")
         .and_then(serde_json::Value::as_str)
         .or_else(|| value.get("type").and_then(serde_json::Value::as_str))?;
-    if !matches!(item_type, "function_call" | "tool_call") {
-        return None;
+    match item_type {
+        "local_shell_call" => return local_shell_call(payload, line_number),
+        "web_search_call" => return web_search_call(payload, line_number),
+        "function_call" | "tool_call" => {}
+        _ => return None,
     }
 
     let tool_name = payload
@@ -105,6 +108,61 @@ fn codex_tool_call(value: &serde_json::Value, line_number: usize) -> Option<Code
         target: command.as_ref().map(|_| "workspace".to_string()),
         command,
     })
+}
+
+fn local_shell_call(payload: &serde_json::Value, line_number: usize) -> Option<CodexToolCall> {
+    let (intent_id, source_event_id) = codex_ids(payload, line_number, &["call_id", "id"]);
+    let command = payload
+        .get("action")
+        .and_then(|action| action.get("command"))
+        .and_then(command_text);
+    Some(CodexToolCall {
+        intent_id,
+        source_event_id,
+        tool_name: "local_shell".to_string(),
+        target: command.as_ref().map(|_| "workspace".to_string()),
+        command,
+    })
+}
+
+fn web_search_call(payload: &serde_json::Value, line_number: usize) -> Option<CodexToolCall> {
+    let (intent_id, source_event_id) = codex_ids(payload, line_number, &["id", "call_id"]);
+    Some(CodexToolCall {
+        intent_id,
+        source_event_id,
+        tool_name: "web_search".to_string(),
+        target: None,
+        command: None,
+    })
+}
+
+fn codex_ids(
+    payload: &serde_json::Value,
+    line_number: usize,
+    keys: &[&str],
+) -> (String, Option<String>) {
+    let source_event_id = keys.iter().find_map(|key| {
+        payload
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+    });
+    let intent_id = source_event_id
+        .as_ref()
+        .map(|id| format!("codex:{id}"))
+        .unwrap_or_else(|| format!("codex:line:{line_number}"));
+    (intent_id, source_event_id)
+}
+
+fn command_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(command) => Some(command.clone()),
+        serde_json::Value::Array(parts) => {
+            let parts: Vec<&str> = parts.iter().filter_map(serde_json::Value::as_str).collect();
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        _ => None,
+    }
 }
 
 fn command_from_arguments(value: &serde_json::Value) -> Option<String> {

@@ -44,3 +44,101 @@ pub fn ingest(
         other => Err(format!("unsupported intent adapter '{other}'")),
     }
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HookOutput {
+    pub record: SessionIntentRecord,
+    pub response: serde_json::Value,
+}
+
+pub fn hook(
+    harness: &str,
+    input: &serde_json::Value,
+    workspace_root: &Path,
+) -> Result<HookOutput, String> {
+    match harness {
+        "codex" => codex_hook(input, workspace_root),
+        other => Err(format!("unsupported intent hook harness '{other}'")),
+    }
+}
+
+fn codex_hook(input: &serde_json::Value, workspace_root: &Path) -> Result<HookOutput, String> {
+    let session_id = required_str(input, "session_id")?;
+    let tool_name = required_str(input, "tool_name")?;
+    let call_id = required_str(input, "tool_use_id")?;
+    let intent_id = format!("codex:{call_id}");
+    validate_stamp(&intent_id)?;
+    let command = input
+        .pointer("/tool_input/command")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let record = stamped_record(
+        session_id,
+        "codex",
+        &intent_id,
+        call_id,
+        tool_name,
+        command.as_deref(),
+        workspace_root,
+    )?;
+    let mut response = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow"
+        }
+    });
+    if declared_action(tool_name) == "shell.command" {
+        let original = command.ok_or("codex shell hook is missing tool_input.command")?;
+        response["hookSpecificOutput"]["updatedInput"] =
+            serde_json::json!({ "command": format!("APOLYSIS_INTENT_ID={intent_id} {original}") });
+    }
+    Ok(HookOutput { record, response })
+}
+
+fn required_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str, String> {
+    input
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("hook input missing {field}"))
+}
+
+fn validate_stamp(intent_id: &str) -> Result<(), String> {
+    let valid = !intent_id.is_empty()
+        && intent_id.len() <= 128
+        && intent_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '-' | '.'));
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("intent id {intent_id} cannot be stamped"))
+    }
+}
+
+fn stamped_record(
+    session_id: &str,
+    source: &str,
+    intent_id: &str,
+    source_event_id: &str,
+    tool_name: &str,
+    command: Option<&str>,
+    workspace_root: &Path,
+) -> Result<SessionIntentRecord, String> {
+    let mut record =
+        SessionIntentRecord::new(session_id, source, intent_id, "tool_call", tool_name)
+            .with_source_event_id(source_event_id)
+            .with_declared_action(declared_action(tool_name));
+    if let Some(command) = command {
+        record = record.with_command(
+            apolysis_observer::redact_command_text_for_persistence(
+                session_id,
+                workspace_root,
+                command,
+            )
+            .value,
+        );
+        record = record.with_target("workspace");
+    }
+    Ok(record)
+}

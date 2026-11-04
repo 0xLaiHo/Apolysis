@@ -72,6 +72,7 @@ fn run_command(args: Vec<String>) -> Result<i32, String> {
 async fn intent_command(args: Vec<String>) -> Result<i32, String> {
     match args.get(1).map(String::as_str) {
         Some(commands::INGEST) => intent_ingest_command(args).await,
+        Some(commands::HOOK) => intent_hook_command(args).await,
         Some(commands::CORRELATE) => intent_correlate_command(args).await,
         _ => Err(usage()),
     }
@@ -101,6 +102,31 @@ async fn intent_ingest_command(args: Vec<String>) -> Result<i32, String> {
         .flush()
         .await
         .map_err(|error| format!("failed to flush intent output: {error}"))?;
+    Ok(0)
+}
+
+async fn intent_hook_command(args: Vec<String>) -> Result<i32, String> {
+    let request = IntentHookRequest::parse(args)?;
+    let mut input = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
+        .map_err(|error| format!("failed to read hook input: {error}"))?;
+    let value = serde_json::from_slice::<serde_json::Value>(&input)
+        .map_err(|error| format!("failed to parse hook input: {error}"))?;
+    let output = intent::hook(&request.harness, &value, &request.workspace_root)?;
+    let mut store = apolysis_store::AsyncJsonlStore::create(&request.output_path)
+        .await
+        .map_err(|error| format!("failed to create intent output: {error}"))?;
+    store
+        .append(&output.record)
+        .await
+        .map_err(|error| format!("failed to write intent record: {error}"))?;
+    store
+        .flush()
+        .await
+        .map_err(|error| format!("failed to flush intent output: {error}"))?;
+    let response = serde_json::to_string(&output.response)
+        .map_err(|error| format!("failed to serialize hook response: {error}"))?;
+    println!("{response}");
     Ok(0)
 }
 
@@ -251,6 +277,13 @@ struct IntentIngestRequest {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+struct IntentHookRequest {
+    harness: String,
+    output_path: String,
+    workspace_root: PathBuf,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 struct IntentCorrelateRequest {
     intent_input_path: String,
     timeline_input_path: String,
@@ -324,6 +357,50 @@ impl IntentIngestRequest {
             session_id: session_id
                 .ok_or_else(|| format!("missing {}\n{}", options::SESSION, usage()))?,
             workspace_root,
+        })
+    }
+}
+
+impl IntentHookRequest {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        if args.first().map(String::as_str) != Some(commands::INTENT)
+            || args.get(1).map(String::as_str) != Some(commands::HOOK)
+        {
+            return Err(usage());
+        }
+
+        let mut harness = None;
+        let mut output_path = None;
+        let mut workspace_root = None;
+        let mut i = 2;
+
+        while i < args.len() {
+            match args[i].as_str() {
+                options::HARNESS => {
+                    i += 1;
+                    harness = args.get(i).cloned();
+                }
+                options::OUTPUT => {
+                    i += 1;
+                    output_path = args.get(i).cloned();
+                }
+                options::WORKSPACE_ROOT => {
+                    i += 1;
+                    workspace_root = args.get(i).cloned();
+                }
+                unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
+            }
+            i += 1;
+        }
+
+        Ok(Self {
+            harness: harness.ok_or_else(|| format!("missing {}\n{}", options::HARNESS, usage()))?,
+            output_path: output_path
+                .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
+            workspace_root: PathBuf::from(
+                workspace_root
+                    .ok_or_else(|| format!("missing {}\n{}", options::WORKSPACE_ROOT, usage()))?,
+            ),
         })
     }
 }

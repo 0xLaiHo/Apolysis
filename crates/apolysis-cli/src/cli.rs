@@ -23,6 +23,8 @@ pub(crate) mod commands {
     pub(crate) const INGEST: &str = "ingest";
     /// Correlate intent records with observed host-side timeline events.
     pub(crate) const CORRELATE: &str = "correlate";
+    /// Record one live harness tool call and print the hook response.
+    pub(crate) const HOOK: &str = "hook";
     /// Verify a hash-chain timeline file.
     pub(crate) const HASH_CHAIN: &str = "hash-chain";
 }
@@ -65,6 +67,8 @@ pub(crate) mod options {
     pub(crate) const INPUT: &str = "--input";
     /// Intent harness adapter selector.
     pub(crate) const ADAPTER: &str = "--adapter";
+    /// Live harness name for `apolysis intent hook`.
+    pub(crate) const HARNESS: &str = "--harness";
     /// Intent JSONL input path.
     pub(crate) const INTENT_INPUT: &str = "--intent-input";
     /// Observed timeline JSONL input path.
@@ -105,12 +109,13 @@ pub(crate) const DEFAULT_TIMELINE_PATH: &str = ".apolysis/timeline.jsonl";
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
     format!(
-        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
+        "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {hook} {harness} codex|claude|cursor|pi|opencode {output} <path> {workspace_root} <path>\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
         run = commands::RUN,
         observe = commands::OBSERVE,
         intent = commands::INTENT,
         verify = commands::VERIFY,
         ingest = commands::INGEST,
+        hook = commands::HOOK,
         correlate = commands::CORRELATE,
         hash_chain = commands::HASH_CHAIN,
         visibility = commands::VISIBILITY,
@@ -126,6 +131,7 @@ pub(crate) fn usage() -> String {
         separator = options::COMMAND_SEPARATOR,
         backend = options::BACKEND,
         adapter = options::ADAPTER,
+        harness = options::HARNESS,
         intent_input = options::INTENT_INPUT,
         timeline_input = options::TIMELINE_INPUT,
         summary = options::SUMMARY,
