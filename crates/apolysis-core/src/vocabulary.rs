@@ -179,6 +179,8 @@ pub mod env {
     pub const BPF_LSM_AVAILABLE: &str = "APOLYSIS_BPF_LSM_AVAILABLE";
     /// Docker binary override for tests and non-standard installations.
     pub const DOCKER_BIN: &str = "APOLYSIS_DOCKER_BIN";
+    /// Tool-call id stamped by a harness hook and read from transient exec argv.
+    pub const INTENT_ID: &str = "APOLYSIS_INTENT_ID";
 }
 
 /// Agent feedback file vocabulary.

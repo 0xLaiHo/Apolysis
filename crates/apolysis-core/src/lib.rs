@@ -217,6 +217,7 @@ pub struct CanonicalEvent {
     pub process_command: Option<String>,
     pub process_executable: Option<String>,
     pub process_started_at_unix_ms: Option<u128>,
+    pub intent_id: Option<String>,
 }
 
 impl CanonicalEvent {
@@ -248,6 +249,7 @@ impl CanonicalEvent {
             process_command: None,
             process_executable: None,
             process_started_at_unix_ms: None,
+            intent_id: None,
         }
     }
 
@@ -287,6 +289,12 @@ impl CanonicalEvent {
         self
     }
 
+    /// Attach the harness intent id observed in transient exec argv.
+    pub fn with_intent_id(mut self, intent_id: impl Into<String>) -> Self {
+        self.intent_id = Some(intent_id.into());
+        self
+    }
+
     /// Render this event as a JSONL record.
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
@@ -306,7 +314,7 @@ impl JsonLine for CanonicalEvent {
             .map(|value| json_string(value))
             .unwrap_or_else(|| "null".to_string());
 
-        format!(
+        let mut line = format!(
             "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"raw_event_id\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"container_id\":{},\"cgroup_id\":{},\"process_command\":{},\"process_executable\":{},\"process_started_at_unix_ms\":{}}}",
             json_string(records::EVENT),
             self.timestamp_unix_ms,
@@ -326,7 +334,12 @@ impl JsonLine for CanonicalEvent {
             self.process_started_at_unix_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "null".to_string())
-        )
+        );
+        if let Some(intent_id) = &self.intent_id {
+            line.pop();
+            line.push_str(&format!(",\"intent_id\":{}}}", json_string(intent_id)));
+        }
+        line
     }
 }
 

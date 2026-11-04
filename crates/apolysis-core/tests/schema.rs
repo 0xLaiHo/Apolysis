@@ -287,3 +287,23 @@ fn policy_violation_json_line_records_decision_and_backend() {
     assert!(line.contains(r#""rule_id":"deny-credentials""#));
     assert!(line.contains(r#""observed_event_id":null"#));
 }
+
+#[test]
+fn canonical_event_emits_intent_id_only_when_stamped() {
+    let event = CanonicalEvent::new(
+        "session-intent",
+        EventSource::KernelTracepoint,
+        EventType::Exec,
+        10,
+        9,
+        "bash",
+        "/bin/bash",
+        "exec",
+    );
+    assert!(!event.to_json_line().contains("intent_id"));
+    let stamped = event.with_intent_id("claude:toolu_1");
+    assert!(stamped
+        .to_json_line()
+        .contains(r#""intent_id":"claude:toolu_1""#));
+    assert_eq!(env::INTENT_ID, "APOLYSIS_INTENT_ID");
+}
