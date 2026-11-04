@@ -121,6 +121,46 @@ fn claude_hook_rewrites_bash_and_leaves_web_search_unchanged() {
     );
 }
 
+#[test]
+fn cursor_jsonl_ingests_hook_payloads_and_tool_use_blocks() {
+    let input = temp_jsonl("cursor-in");
+    let output = temp_jsonl("cursor-out");
+    std::fs::write(
+        &input,
+        concat!(
+            r#"{"hook_event_name":"preToolUse","conversation_id":"conv","tool_name":"Shell","tool_use_id":"tool-1","tool_input":{"command":"pwd"}}"#,
+            "\n",
+            r#"{"role":"assistant","content":[{"type":"tool_use","id":"tool-2","name":"WebSearch","input":{"query":"hidden"}}]}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    assert!(ingest("cursor-jsonl", &input, &output).success());
+    let body = std::fs::read_to_string(output).unwrap();
+    assert!(body.contains(r#""intent_id":"cursor:tool-1""#));
+    assert!(body.contains(r#""intent_id":"cursor:tool-2""#));
+    assert!(body.contains(r#""declared_action":"web.search""#));
+    assert!(!body.contains("hidden"));
+}
+
+#[test]
+fn cursor_pre_tool_use_rewrites_shell_and_shell_event_does_not() {
+    let pre = hook_stdout(
+        "cursor",
+        r#"{"conversation_id":"conv","hook_event_name":"preToolUse","tool_name":"Shell","tool_use_id":"tool-1","tool_input":{"command":"pwd"}}"#,
+    );
+    assert_eq!(pre["permission"], "allow");
+    assert_eq!(
+        pre["updated_input"]["command"],
+        "APOLYSIS_INTENT_ID=cursor:tool-1 pwd"
+    );
+    let before = hook_stdout(
+        "cursor",
+        r#"{"conversation_id":"conv","hook_event_name":"beforeShellExecution","command":"pwd","cwd":"/work","sandbox":false,"tool_use_id":"tool-9"}"#,
+    );
+    assert_eq!(before, serde_json::json!({"permission": "allow"}));
+}
+
 fn ingest(
     adapter: &str,
     input: &std::path::Path,

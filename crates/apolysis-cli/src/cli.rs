@@ -43,6 +43,8 @@ pub(crate) mod values {
     pub(crate) const CODEX_JSONL: &str = "codex-jsonl";
     /// Claude Code transcript JSONL adapter.
     pub(crate) const CLAUDE_JSONL: &str = "claude-jsonl";
+    /// Cursor hook payload and transcript JSONL adapter.
+    pub(crate) const CURSOR_JSONL: &str = "cursor-jsonl";
 }
 
 /// Shared CLI option names.

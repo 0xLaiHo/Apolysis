@@ -2,6 +2,7 @@
 
 mod claude;
 mod codex;
+mod cursor;
 
 use std::path::Path;
 
@@ -43,6 +44,7 @@ pub fn ingest(
     match adapter {
         "codex-jsonl" => codex::records(input, session_id, workspace_root),
         "claude-jsonl" => claude::records(input, session_id, workspace_root),
+        "cursor-jsonl" => cursor::records(input, session_id, workspace_root),
         other => Err(format!("unsupported intent adapter '{other}'")),
     }
 }
@@ -61,6 +63,7 @@ pub fn hook(
     match harness {
         "codex" => pre_tool_use_hook("codex", input, workspace_root),
         "claude" => pre_tool_use_hook("claude", input, workspace_root),
+        "cursor" => cursor_hook(input, workspace_root),
         other => Err(format!("unsupported intent hook harness '{other}'")),
     }
 }
@@ -98,6 +101,45 @@ fn pre_tool_use_hook(
         let original =
             command.ok_or(format!("{source} shell hook is missing tool_input.command"))?;
         response["hookSpecificOutput"]["updatedInput"] =
+            serde_json::json!({ "command": format!("APOLYSIS_INTENT_ID={intent_id} {original}") });
+    }
+    Ok(HookOutput { record, response })
+}
+
+fn cursor_hook(input: &serde_json::Value, workspace_root: &Path) -> Result<HookOutput, String> {
+    let session_id =
+        required_str(input, "session_id").or_else(|_| required_str(input, "conversation_id"))?;
+    let event_name = required_str(input, "hook_event_name")?;
+    let call_id = required_str(input, "tool_use_id")?;
+    let tool_name = required_str(input, "tool_name")
+        .or_else(|_| {
+            if event_name == "beforeShellExecution" {
+                Ok("Shell")
+            } else {
+                Err("hook input missing tool_name".to_string())
+            }
+        })?
+        .to_string();
+    let intent_id = format!("cursor:{call_id}");
+    validate_stamp(&intent_id)?;
+    let command = input
+        .pointer("/tool_input/command")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| input.get("command").and_then(serde_json::Value::as_str))
+        .map(str::to_string);
+    let record = stamped_record(
+        session_id,
+        "cursor",
+        &intent_id,
+        call_id,
+        &tool_name,
+        command.as_deref(),
+        workspace_root,
+    )?;
+    let mut response = serde_json::json!({ "permission": "allow" });
+    if event_name == "preToolUse" && declared_action(&tool_name) == "shell.command" {
+        let original = command.ok_or("cursor shell hook is missing tool_input.command")?;
+        response["updated_input"] =
             serde_json::json!({ "command": format!("APOLYSIS_INTENT_ID={intent_id} {original}") });
     }
     Ok(HookOutput { record, response })
