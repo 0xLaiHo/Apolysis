@@ -297,6 +297,47 @@ fn intent_correlate_links_truncated_live_exec_by_executable_path() {
     let _ = std::fs::remove_file(&output);
 }
 
+#[test]
+fn correlate_prefers_intent_id_over_executable_name() {
+    let intent = temp_jsonl("apolysis-intent-id-intent");
+    let timeline = temp_jsonl("apolysis-intent-id-timeline");
+    let output = temp_jsonl("apolysis-intent-id-output");
+    std::fs::write(
+        &intent,
+        concat!(
+            r#"{"record_type":"intent","timestamp_unix_ms":1,"session_id":"s","intent_source":"claude","intent_id":"claude:toolu_1","source_event_id":"toolu_1","intent_type":"tool_call","tool_name":"Bash","declared_action":"shell.command","target":"workspace","command":"executable_ref:bash argv_redacted:true","raw_event_id":null}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &timeline,
+        concat!(
+            r#"{"record_type":"event","timestamp_unix_ms":2,"session_id":"s","event_source":"kernel_tracepoint","event_type":"exec","raw_event_id":"raw-1","pid":41,"ppid":40,"actor":"cargo","resource":"/usr/bin/cargo","action":"exec","container_id":null,"cgroup_id":null,"process_command":null,"process_executable":"cargo","process_started_at_unix_ms":2,"intent_id":"claude:toolu_1"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let status = apolysis_command()
+        .args([
+            "intent",
+            "correlate",
+            "--intent-input",
+            intent.to_str().unwrap(),
+            "--timeline-input",
+            timeline.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--summary",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let body = std::fs::read_to_string(output).unwrap();
+    assert!(body.contains(r#""match_basis":"intent_id""#));
+    assert!(body.contains(r#""tool_name":"Bash""#));
+}
+
 fn apolysis_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_apolysis"));
     command.current_dir(workspace_root());

@@ -558,6 +558,7 @@ struct IntentForCorrelation {
     session_id: String,
     intent_source: String,
     intent_id: String,
+    tool_name: String,
     command: Option<String>,
     raw_event_id: Option<String>,
 }
@@ -571,6 +572,7 @@ struct ObservedEventForCorrelation {
     resource: String,
     process_command: Option<String>,
     process_executable: Option<String>,
+    intent_id: Option<String>,
     report_missing_intent: bool,
     runtime: RuntimeForCorrelation,
 }
@@ -648,9 +650,13 @@ fn render_correlation_summary(
     for record in &matched {
         let resource = string_field(record, "resource").unwrap_or("");
         let command = string_field(record, "command").unwrap_or("");
+        let tool_name = string_field(record, "tool_name").unwrap_or("");
         let basis = string_field(record, "match_basis").unwrap_or("");
         let _ = writeln!(out, "  \u{2713} matched   {resource}");
-        let _ = writeln!(out, "            declared as: {command}  [{basis}]");
+        let _ = writeln!(
+            out,
+            "            declared as: {tool_name} {command}  [{basis}]"
+        );
     }
 
     for record in &findings {
@@ -701,6 +707,18 @@ fn correlate_intents(
                     && intent.raw_event_id.as_deref() == Some(event.raw_event_id.as_str())
             })
             .map(|(index, intent)| (index, intent, "raw_event_id"))
+            .or_else(|| {
+                event.intent_id.as_ref().and_then(|event_intent_id| {
+                    intents
+                        .iter()
+                        .enumerate()
+                        .find(|(_, intent)| {
+                            intent.session_id == event.session_id
+                                && intent.intent_id == *event_intent_id
+                        })
+                        .map(|(index, intent)| (index, intent, "intent_id"))
+                })
+            })
             .or_else(|| {
                 event.process_command.as_ref().and_then(|command| {
                     intents
@@ -775,6 +793,7 @@ fn parse_intent_records(input: &str) -> Result<Vec<IntentForCorrelation>, String
                 session_id: required_string_field(&value, "session_id")?.to_string(),
                 intent_source: required_string_field(&value, "intent_source")?.to_string(),
                 intent_id: required_string_field(&value, "intent_id")?.to_string(),
+                tool_name: required_string_field(&value, "tool_name")?.to_string(),
                 command: string_field(&value, "command").map(ToString::to_string),
                 raw_event_id: string_field(&value, "raw_event_id").map(ToString::to_string),
             })
@@ -807,6 +826,7 @@ fn parse_observed_events(input: &str) -> Result<Vec<ObservedEventForCorrelation>
                 process_command: string_field(&value, "process_command").map(ToString::to_string),
                 process_executable: string_field(&value, "process_executable")
                     .map(ToString::to_string),
+                intent_id: string_field(&value, "intent_id").map(ToString::to_string),
                 runtime: RuntimeForCorrelation {
                     runtime: string_field(&value, "runtime")
                         .unwrap_or("local")
@@ -914,6 +934,7 @@ fn intent_correlation_record(
         "session_id": event.session_id,
         "intent_source": intent.intent_source,
         "intent_id": intent.intent_id,
+        "tool_name": intent.tool_name,
         "match_basis": match_basis,
         "raw_event_id": event.raw_event_id,
         "event_type": event.event_type,
