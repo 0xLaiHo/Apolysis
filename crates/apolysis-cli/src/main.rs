@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod cli;
+mod intent;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use apolysis_accountability::{
     AccountabilityFinding, EvidenceBoundary, FindingDecision, FindingKind, RuntimeIdentity,
     FINDING_SCHEMA_V1,
 };
-use apolysis_core::{now_unix_ms, JsonLine, SessionIntentRecord};
+use apolysis_core::{now_unix_ms, JsonLine};
 use apolysis_observer::{
-    observe_fixture, observe_live, redact_command_text_for_persistence, AgentDiscoveryRequest,
-    AgentRunRequest, FixtureObserveRequest, LiveObserveRequest, LiveScope,
+    observe_fixture, observe_live, AgentDiscoveryRequest, AgentRunRequest, FixtureObserveRequest,
+    LiveObserveRequest, LiveScope,
 };
 use apolysis_runtime::{run_docker, run_local, DockerRunRequest, LocalRunRequest};
 use apolysis_store::{HashChainStore, JsonlRotationPolicy};
@@ -81,13 +82,12 @@ async fn intent_ingest_command(args: Vec<String>) -> Result<i32, String> {
     let input = tokio::fs::read_to_string(&request.input_path)
         .await
         .map_err(|error| format!("failed to read intent input: {error}"))?;
-    let records = match request.adapter {
-        IntentAdapterSelection::CodexJsonl => codex_intent_records(
-            &input,
-            &request.session_id,
-            request.workspace_root.as_deref(),
-        )?,
-    };
+    let records = intent::ingest(
+        &request.adapter,
+        &input,
+        &request.session_id,
+        request.workspace_root.as_deref(),
+    )?;
     let mut store = apolysis_store::AsyncJsonlStore::create(&request.output_path)
         .await
         .map_err(|error| format!("failed to create intent output: {error}"))?;
@@ -243,7 +243,7 @@ async fn observe_command(args: Vec<String>) -> Result<i32, String> {
 
 #[derive(Debug, Eq, PartialEq)]
 struct IntentIngestRequest {
-    adapter: IntentAdapterSelection,
+    adapter: String,
     input_path: String,
     output_path: String,
     session_id: String,
@@ -262,11 +262,6 @@ struct IntentCorrelateRequest {
 struct VerifyHashChainRequest {
     input_path: PathBuf,
     output_path: PathBuf,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum IntentAdapterSelection {
-    CodexJsonl,
 }
 
 impl IntentIngestRequest {
@@ -314,13 +309,11 @@ impl IntentIngestRequest {
             i += 1;
         }
 
-        let adapter = match adapter
-            .ok_or_else(|| format!("missing {}\n{}", options::ADAPTER, usage()))?
-            .as_str()
-        {
-            values::CODEX_JSONL => IntentAdapterSelection::CodexJsonl,
-            unknown => return Err(format!("unsupported intent adapter '{unknown}'")),
-        };
+        let adapter =
+            adapter.ok_or_else(|| format!("missing {}\n{}", options::ADAPTER, usage()))?;
+        if adapter != values::CODEX_JSONL {
+            return Err(format!("unsupported intent adapter '{adapter}'"));
+        }
 
         Ok(Self {
             adapter,
@@ -416,140 +409,6 @@ impl VerifyHashChainRequest {
                 .map(PathBuf::from)
                 .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
         })
-    }
-}
-
-fn codex_intent_records(
-    input: &str,
-    session_id: &str,
-    workspace_root: Option<&Path>,
-) -> Result<Vec<SessionIntentRecord>, String> {
-    let workspace_root = match workspace_root {
-        Some(path) => path.to_path_buf(),
-        None => std::env::current_dir()
-            .map_err(|error| format!("failed to resolve current workspace root: {error}"))?,
-    };
-    let mut records = Vec::new();
-
-    for (index, line) in input.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let value = serde_json::from_str::<serde_json::Value>(line).map_err(|error| {
-            format!(
-                "failed to parse codex-jsonl intent line {}: {error}",
-                index + 1
-            )
-        })?;
-        let Some(tool_call) = codex_tool_call(&value, index + 1) else {
-            continue;
-        };
-        let command = tool_call.command.map(|command| {
-            redact_command_text_for_persistence(session_id, &workspace_root, &command).value
-        });
-        let mut record = SessionIntentRecord::new(
-            session_id,
-            "codex",
-            tool_call.intent_id,
-            "tool_call",
-            tool_call.tool_name.clone(),
-        )
-        .with_declared_action(declared_action_for_tool(&tool_call.tool_name));
-
-        if let Some(source_event_id) = tool_call.source_event_id {
-            record = record.with_source_event_id(source_event_id);
-        }
-        if let Some(target) = tool_call.target {
-            record = record.with_target(target);
-        }
-        if let Some(command) = command {
-            record = record.with_command(command);
-        }
-        records.push(record);
-    }
-
-    Ok(records)
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct CodexToolCall {
-    intent_id: String,
-    source_event_id: Option<String>,
-    tool_name: String,
-    target: Option<String>,
-    command: Option<String>,
-}
-
-fn codex_tool_call(value: &serde_json::Value, line_number: usize) -> Option<CodexToolCall> {
-    let payload = value
-        .get("payload")
-        .or_else(|| value.get("item"))
-        .unwrap_or(value);
-    let item_type = payload
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| value.get("type").and_then(serde_json::Value::as_str))?;
-    if !matches!(item_type, "function_call" | "tool_call") {
-        return None;
-    }
-
-    let tool_name = payload
-        .get("name")
-        .or_else(|| payload.get("tool_name"))
-        .and_then(serde_json::Value::as_str)?
-        .to_string();
-    let source_event_id = payload
-        .get("id")
-        .or_else(|| payload.get("call_id"))
-        .or_else(|| value.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .map(ToString::to_string);
-    let intent_id = source_event_id
-        .as_ref()
-        .map(|id| format!("codex:{id}"))
-        .unwrap_or_else(|| format!("codex:line:{line_number}"));
-    let arguments = payload.get("arguments").or_else(|| payload.get("args"));
-    let command = arguments.and_then(command_from_arguments);
-
-    Some(CodexToolCall {
-        intent_id,
-        source_event_id,
-        tool_name,
-        target: command.as_ref().map(|_| "workspace".to_string()),
-        command,
-    })
-}
-
-fn command_from_arguments(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(raw) => serde_json::from_str::<serde_json::Value>(raw)
-            .ok()
-            .and_then(|parsed| command_from_arguments(&parsed))
-            .or_else(|| Some(raw.clone())),
-        serde_json::Value::Object(map) => ["cmd", "command", "command_line", "shell"]
-            .iter()
-            .find_map(|key| {
-                map.get(*key)
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string)
-            })
-            .or_else(|| {
-                serde_json::to_string(value)
-                    .ok()
-                    .filter(|serialized| serialized != "{}")
-            }),
-        _ => None,
-    }
-}
-
-fn declared_action_for_tool(tool_name: &str) -> &'static str {
-    let normalized = tool_name.to_ascii_lowercase();
-    if normalized.contains("exec") || normalized.contains("shell") || normalized.contains("command")
-    {
-        "shell.command"
-    } else {
-        "tool.call"
     }
 }
 
