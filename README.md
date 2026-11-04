@@ -311,6 +311,7 @@ Keep generated timelines, Codex logs, and reports under `.apolysis/` or
 - [Quickstart](docs/quickstart.md)
 - [GitHub Action](docs/github-action.md)
 - [JSONL schema](docs/jsonl-schema-v1.md)
+- [Harness intent](docs/harness-intent.md)
 - [Threat model](docs/threat-model.md)
 - [Hash-chain verification](docs/hash-chain-verification.md)
 - [Timeline shipping](docs/timeline-shipping.md)

@@ -279,6 +279,7 @@ sudo -E ./target/debug/apolysis observe \
 - [Quickstart](docs/quickstart.md)
 - [GitHub Action](docs/github-action.md)
 - [JSONL 模式](docs/jsonl-schema-v1.md)
+- [Harness 意图](docs/harness-intent.md)
 - [威胁模型](docs/threat-model.md)
 - [哈希链校验](docs/hash-chain-verification.md)
 - [时间线外运](docs/timeline-shipping.md)

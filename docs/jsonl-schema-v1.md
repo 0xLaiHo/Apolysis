@@ -84,6 +84,9 @@ Fields:
 - `process_executable`: allowlisted `executable_ref:<basename>` known for the
   PID, or `null`; paths and small-space executable hashes are not persisted
 - `process_started_at_unix_ms`: command-context start timestamp, or `null`
+- `intent_id`: harness intent id copied from a transient `APOLYSIS_INTENT_ID`
+  token, or omitted when the exec argv did not carry one. Persistence still
+  leaves `process_command` null.
 
 Runtime metadata records are canonical `event` records with
 `event_type:"runtime_metadata"`. Agent supervisor metadata uses resources such
@@ -146,10 +149,10 @@ Fields:
   `null`
 - `raw_event_id`: observed raw kernel event ID after correlation, or `null`
 
-The first adapter is `codex-jsonl`. It consumes Codex JSONL `response_item`
-function/tool-call records and writes `intent` records with source
-`intent_source:"codex"`. Content-off persistence retains an executable
-reference but omits the supplied command, arguments, and tool payload.
+Adapters are `codex-jsonl`, `claude-jsonl`, `cursor-jsonl`, `pi-jsonl`, and
+`opencode-jsonl`. They write `intent` records with `intent_source` `codex`,
+`claude`, `cursor`, `pi`, or `opencode`. Content-off persistence retains an
+executable reference but omits prompts, tool results, raw argv, and secrets.
 
 Example ingestion:
 
@@ -165,12 +168,12 @@ apolysis intent ingest \
 ### `intent_correlation`
 
 Intent correlation records link declared harness intent to observed host-side
-timeline evidence. Correlation prefers stable `raw_event_id` matches when an
-intent record already carries one. If no event ID is available, the first
-implementation can fall back to exact redacted command-context matching through
-`process_command_exact`. For live eBPF traces where argv can be truncated,
-`exec` events may also match a declared command by the observed
-`process_executable` or exec `resource` path.
+timeline evidence. Correlation matches in this order: `raw_event_id`, then
+`intent_id`, then `process_command_exact`, then `process_executable` for
+`exec` events. `intent_id` matches the optional event field copied from a
+transient `APOLYSIS_INTENT_ID` token. `process_command_exact` matches a redacted
+command context. `process_executable` matches a declared command's executable
+against the observed `process_executable` or exec `resource`.
 
 Fields:
 
@@ -179,7 +182,8 @@ Fields:
 - `session_id`: session identifier
 - `intent_source`: harness or adapter name, for example `codex`
 - `intent_id`: declared intent identifier
-- `match_basis`: `raw_event_id`, `process_command_exact`, or
+- `tool_name`: source tool or function name
+- `match_basis`: `raw_event_id`, `intent_id`, `process_command_exact`, or
   `process_executable`
 - `raw_event_id`: observed raw kernel event ID linked to the canonical event
 - `event_type`: observed canonical event type
@@ -314,6 +318,8 @@ Use these fields for deterministic joins:
 - `intent.raw_event_id` is `null` at ingestion time and may later link declared
   intent to an observed raw kernel event when a correlation pass has enough
   evidence.
+- `event.intent_id`, when present, joins an observed exec to
+  `intent.intent_id` ahead of command and executable fallbacks.
 - `intent_correlation.raw_event_id` links a declared intent to the canonical
   event and raw kernel event that proved the observed side effect.
 - `accountability_finding.evidence_ref` links a mismatch finding to either an
