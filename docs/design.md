@@ -103,6 +103,21 @@ not automatic interpretation of ordinary descriptions or a default native
 reason capability across the five products. The gate adds no production
 reason-extraction logic; default summaries remain absent.
 
+The experimental [conversation runner](reason-chat.md) applies that explicit
+protocol to user-entered tasks in a separate workspace. One Claude process
+accepts successive stream-JSON user turns with session persistence disabled;
+only Bash is available. Each real call passes through the existing hook with
+summary retention and the `/bin/bash` bridge enabled. A conversation-only turn
+creates no intent. The runner displays assistant text and per-call exact
+relation counts, then preserves task files and content-off observation records.
+Prompts, full tool inputs, and raw provider streams are not written to logs;
+declared summaries and observed paths are retained data. A privacy-filtered
+`[redacted]` summary does not invalidate an otherwise valid reason code or
+intent-ID relation. This is an observation experiment: the host is mounted
+read-only, but the control, workspace, and evidence directories are writable.
+It provides neither a hostile-agent boundary nor tamper-resistant evidence,
+and does not change global settings.
+
 Reason records append independently, deduplicate retries, and diagnose
 conflicting identities. A correction uses a new reason ID and
 `supersedes_reason_id` pointing to an existing reason for that same call;

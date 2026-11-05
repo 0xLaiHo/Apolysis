@@ -51,6 +51,13 @@ backends, with documented loss of outer-shell state propagation. Default
 comment delivery and opt-in bridge delivery require separate qualification;
 neither mode establishes generic compatibility with long-lived shell workers.
 
+The experimental conversation runner opens the controlled Claude path to
+manual tasks and follow-up turns. Its qualification must distinguish task
+completion, exact attribution, and capture health, including normal exit,
+interruption, timeout, and conversation-only turns. A bounded create/read/chat
+run does not qualify arbitrary tasks, other tools or products, hostile-agent
+isolation, or tamper resistance. See the [conversation guide](reason-chat.md).
+
 ## Deferred scope
 
 - Operator-origin annotations, authenticated reason authorship, and external

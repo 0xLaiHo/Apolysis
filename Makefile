@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-bpf-relocation test-live test-live-harness-intent test-live-reason-products test-live-reason-summary test-reason-summary-adapter test-harness-hooks quickstart test-quickstart \
+.PHONY: build test lint clean build-ebpf test-bpf-relocation test-live test-live-harness-intent test-live-reason-products test-live-reason-summary test-reason-summary-adapter test-reason-chat test-harness-hooks quickstart test-quickstart \
 	test-evidence-objects-real \
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
@@ -22,6 +22,7 @@ test:
 	cargo test --workspace
 	$(MAKE) test-harness-hooks
 	$(MAKE) test-reason-summary-adapter
+	$(MAKE) test-reason-chat
 
 test-harness-hooks:
 	node --test hooks/tests/intent-bridges.test.mjs
@@ -58,6 +59,10 @@ test-live-reason-summary:
 
 test-reason-summary-adapter:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_live_reason_summary.py'
+
+test-reason-chat:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_reason_chat.py'
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_reason_chat_cleanup.py'
 
 # Zero-privilege trial: run the intent/side-effect accountability flow on the
 # bundled Codex mismatch fixture (no root, no eBPF). See docs/quickstart.md.
