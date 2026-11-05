@@ -125,13 +125,16 @@ shell 状态限制。
 独立的声明原因记录可以为同一次 Tool Call 补充目的代码；自由文本摘要需要显式启用，
 声明的目的不代表已验证动机。
 有界合成标记门禁与通用观测器回归已在一个本地 Linux 内核上通过。显式 shell bridge
-模式下，Claude Code、Pi 和 OpenCode 的有界原生运行已通过；Codex 和 Cursor 分别
-受网络与认证前提条件阻断。
+模式下，较早脚本门禁的 Claude Code、Pi 和 OpenCode 有界运行已通过。原生入口
+现已在文档规定的测试配置下完成 Claude、Pi、Codex 与 OpenCode 的有界验证；
+Cursor 仍需要可用认证。
 另一项受控 Claude 测试已将模型自行撰写、显式允许保留的原因摘要关联到实际登录回归
 文件尝试；这不代表产品默认具备原生原因能力。
-实验性 Rust [`apolysis chat`](docs/reason-chat.zh-CN.md) 命令支持在独立工作目录中
-输入自己的任务，逐轮查看声明原因与执行观测，在同一个 Claude 内存会话中保留上下文，
-运行时不依赖 Python。
+Rust [`apolysis observe --agent <product>`](docs/native-observe.zh-CN.md) 入口直接打开
+所选原生应用，将 `--` 后的参数交给该应用，并在退出后生成本地 JSON、Markdown 和
+HTML 证据报告。界面、工具和权限交互仍由原生应用负责。原有
+[`apolysis chat`](docs/reason-chat.zh-CN.md) 继续作为仅限 Claude 的受控协议实验，
+不是原生应用入口。
 更广的产品版本、多内核及压力资格验证仍待完成。范围与限制见[实时验证](docs/harness-intent-live-validation.zh-CN.md)、
 [设计](docs/design.zh-CN.md)、
 [路线图](docs/roadmap.zh-CN.md)和[Harness 接入](docs/harness-intent.zh-CN.md)。

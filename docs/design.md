@@ -75,6 +75,55 @@ whether it tested this mode or the default comment mode.
 not establish that the command ran, the product honored the rewrite, or the
 observer captured it.
 
+## Native application entry
+
+The Rust `apolysis observe --agent <product> -- <native arguments>` entry
+requires an explicit choice of Codex, Claude Code, Pi, OpenCode or Cursor Agent.
+The application retains its terminal, stdio, credentials, configuration, tools,
+MCP servers and permission workflow. Arguments after `--` remain an unchanged
+argument vector; Apolysis adds only product-specific runtime hook/plugin
+configuration. Hook-disabling or out-of-process execution modes that contradict
+this capture are rejected with an explicit explanation rather than rewritten.
+Informational help/version invocations do not request privilege or capture.
+
+The native child's cwd and `PWD` agree on the canonical launch directory;
+product-specific directory/worktree arguments retain their native semantics.
+The normal-user controller handles native launch, ephemeral hook configuration,
+correlation and report publication. A separate sudo collector receives a private
+control channel and writes the source capture into a root-only temporary
+directory. Application arguments and prompts are not placed in sudo command-line
+metadata or a persisted launch manifest. Only the collector is privileged;
+Apolysis messages use stderr and native stdout remains available for piping.
+The default observation policy has no directory/network allow-list rules; it
+retains credential-path diagnostics in audit mode. A supplied policy still does
+not turn this observation entry into an isolation boundary.
+
+The controlled native capture loader overrides ring-buffer capacity to 8 MiB
+for startup/hook bursts. This leaves the event ABI, object default and legacy
+observer/daemon defaults unchanged; capture loss is still an explicit failure.
+
+After native exit, content-off JSONL remains the underlying evidence and
+`result.json`, `report.md` and standalone `report.html` provide a call-oriented
+view. The report checks raw/canonical event identity, the unique intent, the
+existing correlation result and validated reason bindings before counting an
+Exact Relation. It separates semantic-only calls, candidates, conflicts,
+unattributed evidence and policy notices. Application exit, capture health and
+Outcome Coverage remain independent; even exit zero plus a complete capture
+leaves task outcome unverified. Truncation is visible separately from loss.
+Malformed, foreign-session, missing or oversized report inputs remain explicit
+incompleteness. The renderer reads at most 64 MiB per source artifact and never
+copies full argv, prompts, tool results or provider streams into its reports.
+
+No reason-generation prompt is injected into a native session. Ordinary tool
+descriptions remain `tool_description`/`unknown`; summary retention and the
+shell bridge require separate explicit options. Marker-only mode preserves the
+existing shell boundary but does not repair a product's later `eval` wrapping.
+Global native hooks remain active and can change or prevent the added hook.
+The native application may retain its own conversations; Apolysis's content-off
+rule does not reconfigure that history. User-owned exports are not tamper-proof.
+See the [native observation guide](native-observe.md) for arguments, product
+integration differences, execution limits and report interpretation.
+
 ## Declared reasons
 
 An optional `intent_reason` record describes the producer's stated purpose for
@@ -214,10 +263,12 @@ qualification is limited to the tested mode: native Claude Code 2.1.295,
 Pi 1.5.0, and OpenCode 1.18.31 have passed a single synthetic command with the
 explicit `/bin/bash` bridge, connecting its declared reason to an exact
 fixture-file attempt and keeping its prompt-only sentinel out of persisted
-records. Codex is blocked by provider-network connectivity in the validation
-environment despite valid authentication; Cursor is blocked by expired access
-and refresh credentials. Neither blocked run is a pass or a claim that the
-product itself is unsupported. Default comment delivery,
+records. The newer native entry has separate bounded Claude, Pi, Codex and
+OpenCode passes; Codex uses explicitly selected test sandbox/hook-trust options,
+and OpenCode uses an explicitly selected available model. Codex provider access
+now works in that configuration. Cursor still requires usable authentication.
+A missing prerequisite is neither a pass nor proof that the product itself is
+unsupported. Default comment delivery,
 broader product versions, other kernels, and stress/loss qualification remain open.
 Privileged validation stays explicit, and prerequisite skips never count as
 successful live qualification.

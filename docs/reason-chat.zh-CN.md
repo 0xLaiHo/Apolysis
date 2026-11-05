@@ -186,6 +186,6 @@ sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,ht
 计数制品及普通对话证据。
 
 即使有界运行通过，也不证明任意任务、产品版本、内核或负载均已通过资格验证。
-既有 Codex 网络及 Cursor
-认证阻断保持不变；见[实时验证](harness-intent-live-validation.zh-CN.md)、
+这个 Claude 专用实验不决定其他应用当前的原生入口资格；见注明日期的
+[实时验证](harness-intent-live-validation.zh-CN.md)、
 [设计](design.zh-CN.md)和[路线图](roadmap.zh-CN.md)。

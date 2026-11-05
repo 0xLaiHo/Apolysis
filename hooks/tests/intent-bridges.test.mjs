@@ -78,6 +78,18 @@ test("OpenCode uses before-execution output args and native call identity", asyn
   assert.equal(calls[0].payload.tool_use_id, "real-call");
   assert.deepEqual(output.args, { command: "# marker\nls", description: "retained" });
   assert.equal(calls[0].args.includes("--session"), false);
+  assert.equal(calls[0].args[calls[0].args.indexOf("--workspace-root") + 1], process.cwd());
+});
+
+test("OpenCode uses its native project context when it differs from launcher cwd", async () => {
+  const nativeDirectory = "/workspace/native project";
+  const output = { args: { command: "ls", description: "retained" } };
+  await installOpenCode({ directory: nativeDirectory })["tool.execute.before"](
+    { tool: "bash", sessionID: "native-opencode", callID: "real-call" }, output,
+  );
+  assert.equal(calls[0].args[calls[0].args.indexOf("--workspace-root") + 1], nativeDirectory);
+  assert.deepEqual(output.args, { command: "# marker\nls", description: "retained" });
+  assert.equal(warnings.length, 0);
 });
 
 test("missing product identity produces a diagnostic without an invented id", async () => {

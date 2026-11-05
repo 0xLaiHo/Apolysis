@@ -232,6 +232,7 @@ above. Raw traces were removed on exit; only the filename/count artifact was
 retained alongside the ordinary chat evidence.
 
 Even a successful bounded run does not qualify arbitrary tasks, product
-versions, kernels, or loads. The existing Codex network and Cursor
-authentication blockers remain unchanged; see [live validation](harness-intent-live-validation.md),
+versions, kernels, or loads. This Claude-specific experiment does not determine
+other applications' current native-entry status; see the dated
+[live validation](harness-intent-live-validation.md),
 [design](design.md), and [roadmap](roadmap.md).

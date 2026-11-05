@@ -361,10 +361,13 @@ Product output and captures stay private and are deleted by default.
 `--keep-failed-private` explicitly retains a failed temporary directory for
 local diagnosis; remove that reported directory after review and never commit
 its contents. The gate makes real provider requests and may incur charges.
-The bounded native bridge run has passed for Claude Code 2.1.295, Pi 1.5.0,
-and OpenCode 1.18.31. Codex is blocked by provider-network connectivity despite
-valid stored authentication; Cursor has expired access and refresh credentials.
-These prerequisites must be restored before those runs can qualify. The three passed results
+The 2026-11-05 script-based native bridge run passed for Claude Code 2.1.295,
+Pi 1.5.0 and OpenCode 1.18.31. At that time Codex provider connectivity failed
+despite stored authentication, and Cursor credentials had expired. The newer
+[native entry validation](harness-intent-live-validation.md#native-entry-validation)
+now has a Codex pass under explicit test permission options; it does not erase
+the earlier failed run or qualify the still-pending Cursor path. The three
+earlier passed results
 cover the single synthetic reason/comment, explicit `/bin/bash` bridge,
 exact fixture-file attempt, and prompt-sentinel privacy assertions; they do
 not qualify default comment transport or arbitrary native tool calls.

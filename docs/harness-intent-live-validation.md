@@ -7,14 +7,17 @@ observer regression passed on **x86_64 Linux 6.18.55-2-cachyos-lts** after the
 managed-gate descriptor fix and final bridge changes described below. The
 expanded fixture gate completed seven captures.
 Native Claude Code, Pi, and OpenCode runs have now passed with the explicit
-shell bridge. Codex remains blocked by provider connectivity and Cursor by
-expired authentication; neither is qualified by this report.
+shell bridge. In those 2026-11-05 runs, Codex was blocked by provider
+connectivity and Cursor by expired authentication; neither passed that gate.
+The newer Codex native-entry pass is recorded separately below.
 A separate Claude run also passed the controlled model-written summary gate
 described below, including actual login-regression execution and exact
 kernel-event attribution.
 These results qualify only the listed local paths, product versions, and
 provider configurations. Other kernels and stress/loss qualification remain open. Work is
 tracked in [PR #87](https://github.com/0xLaiHo/Apolysis/pull/87).
+The newer Rust native-launch entry has separate [validation results](#native-entry-validation)
+below; the earlier script-based runs do not qualify that entry automatically.
 
 ## What changed
 
@@ -58,7 +61,7 @@ privileges. Both regressions and the original gate-release test pass.
 | General live observer regression | Post-fix run: 1 passed, 0 ignored; 3.84 seconds; zero dropped events and 1 truncation. |
 | Managed-gate descriptor regressions | Descriptor-3 launch and spawn-error cleanup both reproduced failures before their respective fixes and passed afterward. |
 | Local gates | `cargo test`: 541 passed, 91 ignored. Observer crate: 59 passed, 1 ignored. CLI `observe`: 20 passed, 1 ignored. Node bridge tests: 14 passed. Formatting, Clippy, quickstart, and diff checks passed. Opt-in BTF and live results are reported separately above. |
-| Native-product gate | Claude Code, Pi, and OpenCode passed with the explicit `/bin/bash` bridge; counts and versions appear below. Codex connectivity and Cursor authentication remain unresolved. |
+| Native-product gate | Claude Code, Pi, and OpenCode passed with the explicit `/bin/bash` bridge; counts and versions appear below. Codex connectivity and Cursor authentication blocked that dated script run. |
 | Expanded synthetic gate | The real `eval`-wrapped bridge case passed, including three file-attempt process identities and network-attempt attribution. It is included in the seven-capture total. |
 | Model-written summary gate | Claude Code 2.1.295: 4 login regressions passed, 2,800 raw kernel events, 12 truncations, zero loss/failures. A real native call's declared summary reached an exact `verify_login.py` file-attempt relation. This is a separate capture from the gates above. |
 | Summary-protocol parser | 8 non-provider regressions passed; ordinary descriptions, malformed JSON, duplicate/unknown fields, invalid codes, and invalid summaries are rejected without manufacturing a declaration. |
@@ -114,7 +117,7 @@ were removed after diagnosis; successful fixtures were removed automatically. Th
 restored to the invoking user's ownership and mode `0644`. Raw captures,
 verifier addresses, and temporary reproduction files are not committed.
 
-## Native-product gate: three passes, two pending
+## Earlier script gate: three passes, two blocked
 
 All three completed runs explicitly selected `--shell-bridge /bin/bash`
 (`APOLYSIS_SHELL_BRIDGE=/bin/bash` for the script integrations). Each passed
@@ -131,8 +134,8 @@ they did not demonstrate model-written free-text summaries.
 | Claude Code | 2.1.295, tested installed Claude configuration | 2593 | 12 | Passed with explicit bridge |
 | Pi | 1.5.0, DeepSeek flash | 551 | 6 | Passed with explicit bridge |
 | OpenCode | 1.18.31, DeepSeek v4 flash | 690 | 5 | Passed with explicit bridge |
-| Codex | 0.162.0, existing ChatGPT authentication | — | — | Blocked by provider connectivity; rerun pending |
-| Cursor | 2026.07.20, expired access and refresh authentication | — | — | Authentication renewal and rerun pending |
+| Codex | 0.162.0, existing ChatGPT authentication | — | — | Provider connectivity failed in this dated script run |
+| Cursor | 2026.07.20, expired access and refresh authentication | — | — | Authentication failed in this dated script run |
 
 Codex's isolated authentication binding refers to the same underlying file as
 the native installation, and its token was not expired. This does not prove a
@@ -144,8 +147,9 @@ established as an Apolysis hook failure. No proxy addresses, environment values,
 or authentication contents are included here.
 
 Cursor's access and refresh tokens were both expired. Its cached `logged_in`
-status does not establish current API authentication. Neither a working Codex
-provider path nor a renewed Cursor session has yet been validated by this gate.
+status did not establish usable API authentication. Neither product passed
+this earlier script gate; the subsequent native-entry Codex pass below replaces
+the blanket connectivity-blocked status for its tested configuration.
 
 These are partial native-product results for the tested versions and provider
 configurations, not a five-product qualification. The bridge is non-default
@@ -180,8 +184,8 @@ from that reason to the fixture file attempt. It prints counts and fixed error
 categories, not raw product output or credentials. Temporary captures and
 private product logs are removed on normal and error exits by default;
 `--keep-failed-private` explicitly retains failed fixtures for local diagnosis.
-The remaining Codex and Cursor results must pass before claiming five-product
-qualification.
+This dated script gate cannot claim five-product qualification. Subsequent
+native-entry results are a separate qualification surface.
 
 ## Model-written summary: controlled Claude protocol
 
@@ -266,11 +270,138 @@ parser regressions also run in `make test` and make no provider calls.
 This addition changes validation tooling only. It proves a bounded,
 explicitly prompted declaration protocol with a test adapter and the opt-in
 bridge, not that unmodified Claude or all five products automatically expose
-why they act. The three code-only native results and the two blocked products
-above keep their existing limits; default summary retention remains off.
+why they act. The three code-only native results and the two failed runs
+above retain their historical scope; current native-entry status is listed
+separately below. Default summary retention remains off.
 
 Passing this bounded gate does not qualify all process shapes, kernels, load,
 event loss, or product versions, and does not resolve integration conflicts
 with the protected `pre-release` branch. CI and review remain required before
 merge. See [design](design.md), [roadmap](roadmap.md), and
 [harness integration](harness-intent.md).
+
+## Native entry validation
+
+On **2026-11-06 (Asia/Kuala_Lumpur)**, the Rust
+[`apolysis observe --agent`](native-observe.md) entry was exercised with real
+native applications, existing provider configuration and live eBPF on the same
+Linux host. The application ran as the ordinary user with its real terminal,
+original configuration and native permission workflow; only the separate
+collector requested sudo. These runs did not use the custom `apolysis chat`
+conversation interface. The shell bridge was explicitly selected for local
+attribution.
+
+| Native path | Raw events | Truncations | Loss/failures | Observed result |
+| --- | ---: | ---: | ---: | --- |
+| Claude Code **2.1.318**, actual TUI with a native “Yes, once” tool approval | 18,317 | 106 | 0 | Application exit 0; capture, correlation and report checks complete. Three Bash declarations; the explicit `verify_change` call has 67 Exact Relations and creates the expected synthetic file. |
+| Pi, actual TUI, earlier 1 MiB ring configuration | 21,952 | 32 | 0 | Application exit 0; complete capture/correlation/report; one actual bash call and 67 Exact Relations. |
+| Checked-in Claude native noninteractive gate, final 8 MiB configuration | 9,024 | 83 | 0 | One actual Tool Call, 67 Exact Relations; exact output-file bytes, raw/canonical/intent/file chain, report generation and absent prompt canary all pass. |
+| Checked-in Pi native noninteractive gate, final 8 MiB configuration | 4,891 | 16 | 0 | One actual Tool Call, 67 Exact Relations; the same file, identity-chain, report and privacy checks pass using the existing DeepSeek configuration. |
+| Checked-in Codex native noninteractive gate, final 8 MiB configuration | 10,045 | 98 | 0 | One actual Tool Call, 67 Exact Relations; file bytes, raw/canonical/exact identity chain, report and prompt-canary checks pass with explicitly selected test sandbox/hook-trust flags. |
+| Checked-in OpenCode native noninteractive gate, final 8 MiB configuration | 2,352 | 8 | 0 | One actual Tool Call, 67 Exact Relations; file, identity-chain, report and privacy checks pass with an explicitly selected available DeepSeek model. |
+| Current Cursor native-entry attempt | 809 | 8 | 0 | Application exit 1: authentication required. Zero calls/relations; capture checks complete but product qualification fails. |
+
+The final Claude TUI capture also retains **two unobserved declarations** and
+**85 inferred candidates**; they are not added to the 67 Exact Relations.
+Its one explicit reason is `verify_change` / `agent_declared`, with no retained
+summary. The other two reasons are ordinary `tool_description` records with
+code `unknown` and no exact execution attribution. The report labels those
+sources separately; three bound reason records do not mean three verified
+motives. The target file's separately checked content is `native-ui-final-ok`.
+That outcome check is independent of the file syscall attempt; the generic
+report still leaves arbitrary task outcome `not_verified`.
+
+An earlier Claude TUI attempt had **18,542 events, 109 truncations and two
+reserve failures**. Its application exited normally, but capture and report
+remain **incomplete**; it is not counted as a passed live capture. Startup and
+hook bursts motivated an 8 MiB userspace ring-capacity override only for the
+controlled native collector. The event ABI, object default, legacy live
+observer and daemon defaults are unchanged. The final Claude TUI and the successful
+checked-in gate runs above used that override. A zero-loss bounded rerun does
+not qualify sustained load or eliminate the reported truncations.
+
+The checked-in [`test-live-native-observe.sh`](../scripts/test-live-native-observe.sh)
+deliberately selects each application's own noninteractive mode. Claude's
+`-p --allowedTools Bash --output-format json` and Pi's `-p` plus provider/model
+arguments reach the original applications; they are not silently imposed by
+the daily launcher. The gate records `interactive_tui_verified:false`, so it
+does not substitute for the separate terminal interactions above. Build as the
+ordinary user, then explicitly run a real-provider gate:
+
+```bash
+cargo build -p apolysis-cli
+APOLYSIS_REQUIRE_BPF=1 make build-ebpf
+./scripts/test-live-native-observe.sh --agent claude --require-all
+./scripts/test-live-native-observe.sh --agent pi --require-all -- --provider deepseek --model deepseek-flash
+./scripts/test-live-native-observe.sh --agent opencode --require-all -- --model deepseek/deepseek-flash
+```
+
+The Codex pass additionally required **explicit test-only** writable-workspace
+and hook-trust choices for this trusted, temporary, noninteractive fixture:
+
+```bash
+APOLYSIS_NATIVE_TEST_TIMEOUT=90 ./scripts/test-live-native-observe.sh --agent codex --require-all -- --sandbox workspace-write --dangerously-bypass-hook-trust
+```
+
+The daily native entry does not add either of these options. Its interactive
+session retains Codex's own sandbox and hook-trust decisions. An earlier Codex
+default-config attempt reached the real model and exited 0, but read-only
+execution and untrusted hooks left no output file, zero declarations and zero
+Exact Relations; that validation failed. Native MCP authentication warnings did
+not prevent the separately verified model/tool path from passing in the final
+test. OpenCode's earlier immediate `UnknownError` was diagnosed as
+`ProviderModelNotFoundError` for the configured `deepseek-v4-flash`, reproduced
+outside Apolysis. Its successful rerun selected the natively listed
+`deepseek/deepseek-flash`; no adapter bypass or global configuration masking was
+used to manufacture a pass.
+
+Existing usable authentication, provider access, sudo capability and installed
+product CLIs remain prerequisites. The script runs as the ordinary user;
+Apolysis elevates its collector. Missing prerequisites under `--require-all`,
+provider failures and timeouts are failures, not passes. It checks exact bytes
+in a synthetic workspace and verifies an actual native-root exec plus the
+target file's unique declaration and matching raw, canonical and exact records.
+It discards native stdout instead of saving a transcript and checks a
+prompt-only canary is absent from exported JSONL. Native application history
+and other existing hooks retain their own behavior.
+
+The final Pi rerun used the final binary and gate, deliberately gave the native
+application umask `022`, and still verified that every exported evidence file
+was owned by the invoking user with mode `0600`, under a mode-`0700` evidence
+directory. Its 4,891-event result above replaces the earlier 4,890-event pass
+as the final Pi gate result; both runs were real provider/eBPF executions.
+Final cleanup found no remaining Apolysis BPF programs/maps or native capture/
+control temporary directories; the final native root process had exited.
+Temporary sudo authorization was invalidated after the check.
+
+Local source gates for this native-entry implementation completed separately:
+
+| Gate | Final result |
+| --- | --- |
+| `cargo test` | 635 passed, 91 ignored, zero failures. Ignored opt-in tests are not counted as passes. |
+| `make test-native-observe` | 32 module tests, 5 public-CLI tests and 9 local-process tests passed: 46 total. |
+| `cargo test -p apolysis-cli --test observe` | 20 passed, 1 opt-in ignored. |
+| `cargo test -p apolysis-observer` | 65 passed, 1 opt-in ignored. |
+| Native bridge and independent summary-parser regressions | 15 Node bridge tests and 8 Python parser tests passed; neither is a provider test. |
+| `cargo fmt --all -- --check`, `make lint`, `git diff --check` | Passed; lint includes workspace Clippy with warnings denied. |
+| `APOLYSIS_REQUIRE_BPF=1 make build-ebpf` | Matching BPF artifacts rebuilt successfully. |
+
+Every run automatically produced `result.json`, `report.md` and offline
+`report.html`. A real generated HTML report was rendered locally with Firefox
+headless in an isolated profile with external resource loading disabled; the
+call card, reason source, counts, truncation and unknown task result remained
+readable. The report folds background/unattributed evidence and policy notices
+separately, rather than presenting every JSONL line as a syscall or attack.
+Source captures and generated evidence are not committed. Canonical cwd
+and `PWD` now agree for native launch, preventing an inherited shell directory
+from redirecting the application's workspace interpretation.
+
+These are four product passes for the listed native-entry configurations only.
+Codex reached the real provider and tool successfully in the explicit test
+configuration, so the earlier connectivity blocker must not be presented as
+its current status. OpenCode passed after selecting an available model; its
+earlier failed attempt remains failed. Cursor still requires usable
+authentication. No default
+marker-only, five-product, hostile-workload or all-version qualification is
+claimed. Native arguments that disable hooks or relocate execution beyond the
+local process tree remain explicit unsupported modes.

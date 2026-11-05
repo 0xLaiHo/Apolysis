@@ -4,6 +4,8 @@
 mod chat;
 mod cli;
 mod intent;
+#[cfg(target_os = "linux")]
+mod native;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -35,6 +37,10 @@ async fn main() {
 }
 
 async fn run(args: Vec<String>) -> Result<i32, String> {
+    #[cfg(target_os = "linux")]
+    if native::handles(&args) {
+        return native::run(&args).await;
+    }
     match args.first().map(String::as_str) {
         #[cfg(target_os = "linux")]
         Some("chat") => chat::run(&args[1..]).await,

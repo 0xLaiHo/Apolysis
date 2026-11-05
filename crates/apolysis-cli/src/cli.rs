@@ -160,5 +160,5 @@ pub(crate) fn usage() -> String {
         workspace_root = options::WORKSPACE_ROOT,
         scenario = options::SCENARIO,
     );
-    format!("{legacy}\n       apolysis chat [--smoke] [--turn-timeout <seconds>] [--output-dir <parent>] [--policy <path>] [--bpf-object <path>] (Linux)")
+    format!("{legacy}\n       apolysis observe --agent codex|claude|cursor|pi|opencode [--workspace <directory>] [--output-dir <parent>] [--allow-reason-summary] [--shell-bridge <shell>] -- [native arguments] (Linux)\n       apolysis chat [--smoke] [--turn-timeout <seconds>] [--output-dir <parent>] [--policy <path>] [--bpf-object <path>] (Linux)")
 }

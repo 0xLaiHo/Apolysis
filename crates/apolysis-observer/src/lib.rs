@@ -17,10 +17,10 @@ mod scope;
 
 pub use live::{
     discover_agent_registration, discover_process_tree_scope_pids, enable_multi_cgroup_scope,
-    observe_live, raw_event_from_record, update_tracked_cgroup, AgentDiscoveryRequest,
-    AgentRegistration, AgentRunRequest, DaemonKernelEvent, DaemonObserver, DaemonObserverBatch,
-    DaemonObserverConfig, DaemonObserverCounters, LiveObserveRequest, LiveScope,
-    ObserverBatchDecoder,
+    observe_live, observe_live_controlled, raw_event_from_record, update_tracked_cgroup,
+    AgentDiscoveryRequest, AgentRegistration, AgentRunRequest, DaemonKernelEvent, DaemonObserver,
+    DaemonObserverBatch, DaemonObserverConfig, DaemonObserverCounters, LiveObserveControl,
+    LiveObserveRequest, LiveScope, ObserverBatchDecoder,
 };
 pub use redaction::{
     redact_command_text_for_persistence, RedactedValue, Redactor, RuntimeEvidencePersistence,

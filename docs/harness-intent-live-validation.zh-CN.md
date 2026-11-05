@@ -5,13 +5,15 @@
 2026-11-05，合成 harness 标记/理由门禁与通用实时观测器回归在 **x86_64 Linux
 6.18.55-2-cachyos-lts** 上通过，使用了下述受管门控描述符修复和最终 bridge 变更。
 扩展后的 fixture 门禁已完成七次采集。原生 Claude Code、Pi、OpenCode 已在显式
-shell bridge 下通过；Codex 仍受 provider 连通性阻断，Cursor 仍受认证过期阻断，
-本报告不认定这两项通过。
+shell bridge 下通过；在这些 2026-11-05 的运行中，Codex 受 provider 连通性阻断，
+Cursor 认证过期，两者没有通过当时的门禁。较新的 Codex 原生入口通过结果在下方单列。
 下文另列的受控模型摘要门禁也已在 Claude 中通过，包括实际登录回归执行和准确内核
 事件归属。这些结果只验证
 列出的本地路径、产品版本和 provider 配置。其他内核及压力/丢失资格验证仍待完成。
 工作由
 [PR #87](https://github.com/0xLaiHo/Apolysis/pull/87) 跟踪。
+较新的 Rust 原生启动入口在下方单列[验证结果](#原生入口验证)；此前脚本运行不会自动
+使新入口通过资格验证。
 
 ## 变更原因
 
@@ -50,7 +52,7 @@ shell bridge 下通过；Codex 仍受 provider 连通性阻断，Cursor 仍受�
 | 通用实时观测器回归 | 修复后运行：1 passed、0 ignored；3.84 秒；丢失事件为零，截断为 1。 |
 | 受管门控描述符回归 | 描述符 3 启动与 spawn 错误清理均在各自修复前复现失败，修复后通过。 |
 | 本地门禁 | `cargo test`：541 passed、91 ignored。observer crate：59 passed、1 ignored。CLI `observe`：20 passed、1 ignored。Node 桥接测试：14 passed。格式、Clippy、quickstart 与差异检查通过。显式 BTF 与实时结果在上方单列。 |
-| 原生产品门禁 | Claude Code、Pi、OpenCode 在显式 `/bin/bash` bridge 下通过，计数和版本见下文；Codex 连通性与 Cursor 认证问题尚未解决。 |
+| 原生产品门禁 | Claude Code、Pi、OpenCode 在显式 `/bin/bash` bridge 下通过，计数和版本见下文；Codex 连通性与 Cursor 认证阻断了当时的脚本运行。 |
 | 扩展合成门禁 | 真实执行的 `eval` 包装 bridge 用例已通过，覆盖三个文件尝试进程身份及网络尝试归属，计入七次采集总数。 |
 | 模型撰写摘要门禁 | Claude Code 2.1.295：4 项登录回归通过，2,800 条 raw kernel event，12 次截断，零丢失/失败。真实原生调用的声明摘要关联到准确的 `verify_login.py` 文件尝试；这是独立于上方门禁的一次采集。 |
 | 摘要协议解析器 | 8 项无 provider 回归通过；普通描述、错误 JSON、重复或未知字段、非法代码与非法摘要均被拒绝，不补造声明。 |
@@ -95,7 +97,7 @@ sudo env APOLYSIS_REQUIRE_BPF=1 systemd-run --scope --quiet \
 失败 fixture 已删除；成功 fixture 由脚本自动删除。由 root 构建的两个 BPF 对象已恢复为
 调用用户所有、权限 `0644`。不提交原始采集、验证器地址或临时复现文件。
 
-## 原生产品门禁：三项通过，两项待完成
+## 较早脚本门禁：三项通过，两项阻断
 
 三项已完成运行均显式选择 `--shell-bridge /bin/bash`（脚本接入使用
 `APOLYSIS_SHELL_BRIDGE=/bin/bash`）。每项均通过零丢失/失败诊断检查，将原生声明
@@ -111,8 +113,8 @@ sudo env APOLYSIS_REQUIRE_BPF=1 systemd-run --scope --quiet \
 | Claude Code | 2.1.295，本次安装环境的 Claude 配置 | 2593 | 12 | 显式 bridge 下通过 |
 | Pi | 1.5.0，DeepSeek flash | 551 | 6 | 显式 bridge 下通过 |
 | OpenCode | 1.18.31，DeepSeek v4 flash | 690 | 5 | 显式 bridge 下通过 |
-| Codex | 0.162.0，既有 ChatGPT 认证 | — | — | Provider 连通性阻断，待复跑 |
-| Cursor | 2026.07.20，access 与 refresh 认证均已过期 | — | — | 待更新认证并复跑 |
+| Codex | 0.162.0，既有 ChatGPT 认证 | — | — | 该日期的脚本运行中 provider 连通性失败 |
+| Cursor | 2026.07.20，access 与 refresh 认证均已过期 | — | — | 该日期的脚本运行中认证失败 |
 
 Codex 隔离认证绑定与原生安装指向同一个底层文件，token 尚未过期，但这不证明
 provider 请求能够成功：在 harness 外以普通用户进行的 HTTP HEAD 探测同样失败。
@@ -121,7 +123,8 @@ provider 请求能够成功：在 harness 外以普通用户进行的 HTTP HEAD 
 Apolysis hook 故障。本报告不包含代理地址、环境变量值或认证内容。
 
 Cursor 的 access token 和 refresh token 均已过期。缓存的 `logged_in` 状态不代表
-当前 API 认证有效。门禁尚未验证可用的 Codex provider 通路或更新后的 Cursor 会话。
+API 认证可用。两者都没有通过这个较早的脚本门禁；下方较新的 Codex 原生入口通过
+结果已取代其在对应测试配置下的一概“网络阻断”状态。
 
 这些是对应测试版本和 provider 配置的部分原生产品结果，不是五产品整体资格验证。
 Bridge 不是默认行为，它创建子 shell，cwd、环境和函数变化不会传回产品的外层 shell。
@@ -146,7 +149,7 @@ Claude 默认注释模式虽持久化了声明和理由，但由于命令被嵌�
 理由，以及该理由到 fixture 文件尝试的 Exact Relation。输出仅含计数和固定错误
 类别，不打印原始产品输出或凭证。正常退出和错误退出默认均清理临时采集与私有产品
 日志；仅显式使用 `--keep-failed-private` 才保留失败 fixture 供本地诊断。
-只有 Codex 和 Cursor 的剩余验证也通过后，才能宣称五产品验证全部通过。
+这个有明确日期的脚本门禁不能宣称五产品全部通过；后续原生入口属于独立的资格接入面。
 
 ## 模型撰写摘要：受控 Claude 协议
 
@@ -211,8 +214,108 @@ home，复用原生门禁的临时 hook 与 shell profile 遮蔽，不修改全�
 
 本次只增加验证工具，不改变生产逻辑。结果证明了显式提示、测试适配器和可选 bridge
 组成的有界声明协议，不代表未改动的 Claude 或全部五个产品会自动提供“为什么”。
-前述三产品仅代码验证与两项阻断的边界保持不变；默认仍关闭摘要保留。
+前述三产品仅代码验证及两项失败运行保留其历史范围；当前原生入口状态在下方单列。
+默认仍关闭摘要保留。
 
 该有界门禁通过不代表所有进程形式、内核、负载、事件丢失或产品版本均已验证，也不
 解决与受保护 `pre-release` 分支的集成冲突。合并前仍须 CI 和 review。见
 [设计](design.zh-CN.md)、[路线图](roadmap.zh-CN.md)和[Harness 接入](harness-intent.zh-CN.md)。
+
+## 原生入口验证
+
+**2026-11-06（Asia/Kuala_Lumpur）**，Rust
+[`apolysis observe --agent`](native-observe.zh-CN.md) 入口在同一 Linux 主机上使用
+真实原生应用、既有 provider 配置与实时 eBPF 运行。应用使用普通用户身份、真实终端、
+原有配置和原生权限流程，只有独立采集器请求 sudo。这些运行没有使用自建的
+`apolysis chat` 对话界面；为了本地归属，显式选择了 shell bridge。
+
+| 原生路径 | 原始事件 | 截断 | 丢失/失败 | 实际结果 |
+| --- | ---: | ---: | ---: | --- |
+| Claude Code **2.1.318**，实际 TUI，工具通过原生“Yes, once”批准 | 18,317 | 106 | 0 | 应用退出 0；采集、关联和报告检查 complete。三次 Bash 声明；显式 `verify_change` 调用有 67 条 Exact Relation，并创建预期合成文件。 |
+| Pi，实际 TUI，较早的 1 MiB ring 配置 | 21,952 | 32 | 0 | 应用退出 0；采集/关联/报告 complete；一次实际 bash 调用、67 条 Exact Relation。 |
+| 纳入版本控制的 Claude 原生非交互门禁，最终 8 MiB 配置 | 9,024 | 83 | 0 | 一次实际 Tool Call、67 条 Exact Relation；文件字节、raw/canonical/intent/文件证据链、报告生成及提示词 canary 不落盘检查通过。 |
+| 纳入版本控制的 Pi 原生非交互门禁，最终 8 MiB 配置 | 4,891 | 16 | 0 | 一次实际 Tool Call、67 条 Exact Relation；使用既有 DeepSeek 配置，同样通过文件、身份链、报告与隐私检查。 |
+| 纳入版本控制的 Codex 原生非交互门禁，最终 8 MiB 配置 | 10,045 | 98 | 0 | 一次实际 Tool Call、67 条 Exact Relation；显式选择测试用 sandbox/hook-trust 参数，文件字节、raw/canonical/exact 身份链、报告及提示词 canary 检查通过。 |
+| 纳入版本控制的 OpenCode 原生非交互门禁，最终 8 MiB 配置 | 2,352 | 8 | 0 | 一次实际 Tool Call、67 条 Exact Relation；显式选择可用 DeepSeek 模型，文件、身份链、报告及隐私检查通过。 |
+| 当前 Cursor 原生入口尝试 | 809 | 8 | 0 | 应用退出 1，要求认证。零调用/关联；采集检查 complete，但产品资格失败。 |
+
+最终 Claude TUI 采集还保留了 **2 条未观测声明**和 **85 条推断候选**，没有将它们
+加进 67 条 Exact Relation。一个显式原因是 `verify_change` / `agent_declared`，
+未保留摘要；另两个原因是普通 `tool_description`，代码为 `unknown`，没有精确
+执行归属。报告分别标明来源：三条有效原因绑定不代表三个已验证动机。目标文件另行
+核对的内容为 `native-ui-final-ok`；这个结果检查独立于文件系统调用尝试，通用报告
+仍将任意任务结果保持为 `not_verified`。
+
+较早一次 Claude TUI 尝试有 **18,542 条事件、109 次截断和 2 次 reserve failure**。
+应用正常退出，但采集与报告保持 **incomplete**，没有计为实时采集通过。启动与 hook
+突发事件促成了仅针对受控原生采集器的 8 MiB 用户态 ring 容量覆盖，不改变事件 ABI、
+对象默认值、旧实时观测入口或 daemon 默认值。上表最终 Claude TUI 与已通过的版本控制
+门禁使用了该覆盖；有界复跑零丢失不代表持续负载已验证，也不会消除截断记录。
+
+纳入版本控制的 [`test-live-native-observe.sh`](../scripts/test-live-native-observe.sh)
+明确选择各应用自己的非交互模式。Claude 的 `-p --allowedTools Bash --output-format json`
+及 Pi 的 `-p` 和 provider/model 参数传给原始应用，不由日常启动器暗中添加。门禁
+记录 `interactive_tui_verified:false`，不能替代上方独立的终端交互验证。先以普通
+用户构建，再显式执行真实 provider 门禁：
+
+```bash
+cargo build -p apolysis-cli
+APOLYSIS_REQUIRE_BPF=1 make build-ebpf
+./scripts/test-live-native-observe.sh --agent claude --require-all
+./scripts/test-live-native-observe.sh --agent pi --require-all -- --provider deepseek --model deepseek-flash
+./scripts/test-live-native-observe.sh --agent opencode --require-all -- --model deepseek/deepseek-flash
+```
+
+Codex 通过结果另外为这次可信、临时、非交互 fixture **显式选择了测试专用**的工作区
+写入与 hook 信任选项：
+
+```bash
+APOLYSIS_NATIVE_TEST_TIMEOUT=90 ./scripts/test-live-native-observe.sh --agent codex --require-all -- --sandbox workspace-write --dangerously-bypass-hook-trust
+```
+
+日常原生入口不添加这两个选项；交互会话仍遵循 Codex 自己的 sandbox 和 hook 信任
+决定。较早的 Codex 默认配置尝试已经调用真实模型并退出 0，但只读执行和未受信任
+hook 导致没有目标文件、零声明和零 Exact Relation，因此验证失败。原生 MCP 的
+认证提醒没有阻止最终测试中另行验证的模型/工具路径通过。OpenCode 较早的立即
+`UnknownError` 被诊断为配置模型 `deepseek-v4-flash` 的 `ProviderModelNotFoundError`，
+并在 Apolysis 外复现；通过的复跑显式选择原生列表中的 `deepseek/deepseek-flash`，
+没有通过适配器绕过或遮蔽全局配置来制造通过。
+
+仍要求既有可用认证、provider 通路、sudo 能力和已安装的产品 CLI。脚本以普通用户
+运行，由 Apolysis 给采集器提权。`--require-all` 下缺少前提条件、provider 失败或
+超时都算失败，不算通过。门禁核对合成工作目录中的文件精确字节、实际原生根进程
+exec，以及目标文件的唯一声明和匹配的 raw、canonical、exact 记录。原生 stdout
+被丢弃，不保存成 transcript；提示词专用 canary 必须不出现在导出 JSONL 中。
+原生应用历史与其他既有 hook 维持它们自己的行为。
+
+最终 Pi 复跑使用最终二进制和门禁，明确将原生应用的 umask 设为 `022`，仍确认所有
+导出证据文件均属于调用用户、权限为 `0600`，证据目录为 `0700`。上表 4,891 条事件
+的结果取代较早 4,890 条事件通过项，作为最终 Pi 门禁结果；两次均是真实 provider/eBPF
+运行。
+最终清理核验未发现残留 Apolysis BPF program/map 或原生采集/控制临时目录，最终
+原生根进程已退出；检查后已撤销临时 sudo 授权。
+
+这项原生入口实现的本地源码检查单独完成：
+
+| 检查 | 最终结果 |
+| --- | --- |
+| `cargo test` | 635 passed、91 ignored、零失败；忽略的显式测试不算通过。 |
+| `make test-native-observe` | 32 项模块、5 项公开 CLI、9 项本地进程测试通过，共 46 项。 |
+| `cargo test -p apolysis-cli --test observe` | 20 passed、1 项显式测试 ignored。 |
+| `cargo test -p apolysis-observer` | 65 passed、1 项显式测试 ignored。 |
+| 原生桥接与独立摘要解析回归 | 15 项 Node 桥接、8 项 Python 解析测试通过；均不是 provider 测试。 |
+| `cargo fmt --all -- --check`、`make lint`、`git diff --check` | 通过；lint 包含 workspace Clippy 并拒绝 warnings。 |
+| `APOLYSIS_REQUIRE_BPF=1 make build-ebpf` | 匹配的 BPF 制品重新构建通过。 |
+
+每次运行自动生成 `result.json`、`report.md` 和离线 `report.html`。一份真实生成
+的 HTML 已通过 Firefox headless 在独立 profile、禁用外部资源加载的环境中本地
+渲染：调用卡、原因来源、计数、截断和未知任务结果可读。报告把后台/未归属证据及
+策略提醒分别折叠，不把每行 JSONL 都呈现为一次系统调用或攻击。源码之外的证据
+文件只在本地保留，不提交。原生启动的规范化 cwd 与 `PWD` 现在一致，避免继承的
+shell 目录让应用误认工作区。
+
+这是四个产品在列出的原生入口配置下通过，不能推广到其他模式。Codex 在显式测试
+配置下已成功调用真实 provider 并执行工具，不能再把此前连通性阻断当作它当前的状态。
+OpenCode 在选择可用模型后通过，此前失败尝试仍保持失败。Cursor 仍需要可用认证。
+没有声称默认注释模式、五产品、恶意工作负载或所有版本均已验证。
+禁用 hook 或把执行移出本地进程树的原生参数仍属于明确不支持的模式。

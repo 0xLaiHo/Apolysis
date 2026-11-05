@@ -26,10 +26,12 @@ checks carry attribution across fork and exec. Correlation keeps explicit
 identifier relations, conflicts, and inferred or ambiguous candidates distinct;
 semantic-only declarations do not imply expected local execution evidence.
 A bounded synthetic live regression now establishes the local marker path on
-one Linux kernel. Bounded native bridge runs cover Claude Code, Pi, and
-OpenCode; Codex is blocked on provider-network connectivity and Cursor on
-renewed authentication. These are open qualification gates, not product
-support conclusions. The next boundary includes default
+one Linux kernel. Earlier script-based native bridge runs cover Claude Code,
+Pi and OpenCode. The native entry has bounded Claude, Pi, Codex and OpenCode
+passes under the documented test settings; Codex provider access now works in
+that configuration, and OpenCode uses an available explicitly selected model.
+Cursor still needs usable authentication. These are configuration-specific
+qualification boundaries, not universal product support conclusions. The next boundary includes default
 comment delivery, broader versioned product-hook qualification, multiple
 kernels, and stress/loss or longer-running workloads.
 The local gate does not close those broader qualification gaps; its evidence
@@ -44,8 +46,10 @@ explicit corrections, and bounded opt-in summaries extend the local Tool Call
 context; they do not expand kernel coverage or qualify product-native delivery.
 A controlled Claude protocol has qualified a model-written summary through
 actual login-test execution and an exact file-attempt relation. Its test-only
-adapter, opt-in retention, and shell bridge bound that result; ordinary native
-descriptions and the other products' free-text reason delivery remain unqualified.
+adapter, opt-in retention, and shell bridge bound that result. Ordinary native
+descriptions remain a distinct source, even when their delivery is observed;
+they are not qualified as agent-declared motives. Other products' free-text
+reason protocols still require their own qualification.
 An explicit shell bridge supplies a recognizable exec boundary for wrapping
 backends, with documented loss of outer-shell state propagation. Default
 comment delivery and opt-in bridge delivery require separate qualification;
@@ -60,6 +64,17 @@ completion, exact attribution, and capture health, including normal exit,
 interruption, timeout, and conversation-only turns. A bounded create/read/chat
 run does not qualify arbitrary tasks, other tools or products, hostile-agent
 isolation, or tamper resistance. See the [conversation guide](reason-chat.md).
+
+The native application entry, `apolysis observe --agent`, is the daily-launch
+integration surface. Qualification must preserve each application's UI, native
+argument values, permission workflow and original configuration, and exercise
+normal exit, interruption and stdout piping. Product-specific runtime hook
+loading and unsupported remote/background modes require separate checks; a
+mocked argv test or an application help page is not a provider execution pass.
+Generated reports must keep Semantic, Execution and Outcome Coverage distinct,
+including missing reasons, semantic-only tools and unverifiable task outcomes.
+See the [native observation guide](native-observe.md). The controlled `chat`
+experiment does not substitute for this interface's native-product validation.
 
 ## Deferred scope
 

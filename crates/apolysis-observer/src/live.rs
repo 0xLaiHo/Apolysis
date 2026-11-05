@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,13 +17,14 @@ use apolysis_feedback::FeedbackWriter;
 use apolysis_policy::PolicyRuntimeCapabilities;
 use apolysis_store::JsonlRotationPolicy;
 use apolysis_store::JsonlStore;
-use aya::maps::{Array, HashMap, MapData, RingBuf};
+use aya::maps::{Array, HashMap, Map, MapData, RingBuf};
 use aya::programs::{RawTracePoint, TracePoint};
 use aya::{Ebpf, EbpfLoader, Pod};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
+use tokio::sync::oneshot;
 
 use crate::abi::{
     KernelEventKind, KernelEventRecord, FLAG_ARGV_TRUNCATED, FLAG_INTENT_INCOMPLETE,
@@ -35,6 +37,15 @@ use crate::{
     EventIdSequence, ObserveResult, ObserverBackend, ObserverMode, ObserverRunnerPlan, Redactor,
     RuntimeEvidencePersistence,
 };
+
+// Native hooks and provider startup can burst beyond the object's 1 MiB ring.
+// This userspace override is bounded and applies only to controlled captures;
+// the ABI, object, legacy live observer and daemon retain their defaults.
+const CONTROLLED_RING_BYTES: u32 = 8 * 1024 * 1024;
+
+fn live_ring_capacity_override(controlled: bool) -> Option<u32> {
+    controlled.then_some(CONTROLLED_RING_BYTES)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LiveScope {
@@ -228,6 +239,17 @@ pub struct LiveObserveRequest {
     pub duration: Option<Duration>,
     pub workspace_root: PathBuf,
     pub output_rotation: Option<JsonlRotationPolicy>,
+}
+
+/// Coordinate capture with an unprivileged native application's supervisor.
+///
+/// The supervisor keeps its child gated until `ready` arrives, then reports the
+/// actual child exit status through `stop`. Arguments, environment, terminal
+/// input and output never pass through this control channel.
+pub struct LiveObserveControl {
+    pub ready: oneshot::Sender<()>,
+    pub stop: oneshot::Receiver<i32>,
+    pub agent_kind: String,
 }
 
 impl LiveObserveRequest {
@@ -469,7 +491,87 @@ struct ObserverCounters {
 unsafe impl Pod for ObserverCounters {}
 
 pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveResult, String> {
+    observe_live_inner(request, None).await
+}
+
+/// Capture an externally supervised native child without taking over its TTY.
+/// A missing supervisor exit notification is an incomplete capture, never an
+/// implicit successful application exit.
+pub async fn observe_live_controlled(
+    request: LiveObserveRequest,
+    control: LiveObserveControl,
+) -> Result<crate::ObserveResult, String> {
+    observe_live_inner(request, Some(control)).await
+}
+
+fn controlled_agent_metadata(
+    request: &LiveObserveRequest,
+    kind: &str,
+) -> Result<AgentScopeMetadata, String> {
+    if kind.len() > 64
+        || !kind
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !kind
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("controlled observer requires a valid agent kind".into());
+    }
+    if request.agent_run.is_some()
+        || request.agent_registration_path.is_some()
+        || request.agent_discovery.is_some()
+    {
+        return Err("controlled observer requires an external process-tree scope".into());
+    }
+    let Some(LiveScope::ProcessTree(pid)) = request.scope else {
+        return Err("controlled observer requires an external process-tree scope".into());
+    };
+    if pid == 0 {
+        return Err("controlled observer requires a non-zero process identity".into());
+    }
+    let start = read_process_start_time_ticks(pid)
+        .ok_or("controlled native process identity is unavailable")?;
+    let executable = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .map_err(|_| "controlled native executable identity is unavailable")?;
+    Ok(AgentScopeMetadata {
+        supervisor_mode: "external_native_launch".into(),
+        kind: kind.to_owned(),
+        root_pid: pid,
+        executable: executable.to_string_lossy().into_owned(),
+        workspace_root: request.workspace_root.display().to_string(),
+        start_time_ticks: Some(start),
+    })
+}
+
+async fn controlled_exit(
+    receiver: &mut Option<oneshot::Receiver<i32>>,
+) -> Result<i32, &'static str> {
+    let Some(receiver) = receiver else {
+        return std::future::pending().await;
+    };
+    match receiver.await {
+        Ok(code) if (0..=255).contains(&code) => Ok(code),
+        Ok(_) => Err("native supervisor reported an invalid exit code"),
+        Err(_) => Err("native supervisor disconnected before reporting application exit"),
+    }
+}
+
+async fn observe_live_inner(
+    request: LiveObserveRequest,
+    control: Option<LiveObserveControl>,
+) -> Result<crate::ObserveResult, String> {
     request.validate()?;
+    let external_metadata = control
+        .as_ref()
+        .map(|control| controlled_agent_metadata(&request, &control.agent_kind))
+        .transpose()?;
+    let controlled_mode = control.is_some();
+    let (mut ready, mut controlled_stop) = match control {
+        Some(control) => (Some(control.ready), Some(control.stop)),
+        None => (None, None),
+    };
     let policy = load_policy(&request.policy_path)?;
     let capabilities = PolicyRuntimeCapabilities::detect();
     let feedback = request.feedback_dir.clone().map(FeedbackWriter::new);
@@ -537,6 +639,9 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     if let Some(agent) = registered_agent.as_ref() {
         write_agent_supervisor_metadata(&request.session_id, agent, &mut store)?;
     }
+    if let Some(agent) = external_metadata.as_ref() {
+        write_agent_supervisor_metadata(&request.session_id, agent, &mut store)?;
+    }
     let scope = managed_agent
         .as_ref()
         .map(|agent| LiveScope::ProcessTree(agent.metadata.root_pid))
@@ -549,7 +654,12 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         .expect("live request validation requires a scope or managed agent");
     write_scope_metadata(&request.session_id, &scope, &mut store)?;
 
-    let mut ebpf = match EbpfLoader::new().load_file(&loader_plan.object_path) {
+    let mut loader = EbpfLoader::new();
+    let ring_capacity_override = live_ring_capacity_override(controlled_mode);
+    if let Some(bytes) = ring_capacity_override {
+        loader.set_max_entries(&loader_plan.ring_buffer_map, bytes);
+    }
+    let mut ebpf = match loader.load_file(&loader_plan.object_path) {
         Ok(ebpf) => ebpf,
         Err(error) => {
             terminate_managed_agent(managed_agent.as_mut()).await;
@@ -594,25 +704,67 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         return Err(error);
     }
 
-    // Tracepoints are attached and the pid tree is registered; release the
-    // gated workload so every side effect from here on is captured.
-    if let Some(agent) = managed_agent.as_mut() {
-        agent.release_gate();
-    }
-
     let ring_map = ebpf
         .take_map(&loader_plan.ring_buffer_map)
         .ok_or_else(|| format!("missing BPF map: {}", loader_plan.ring_buffer_map))?;
+    if let Some(expected) = ring_capacity_override {
+        let Map::RingBuf(data) = &ring_map else {
+            return Err("controlled native event map is not a ring buffer".into());
+        };
+        let actual = data
+            .info()
+            .map_err(|_| "cannot verify controlled native ring capacity")?
+            .max_entries();
+        if actual != expected {
+            return Err("controlled native ring capacity override was not applied".into());
+        }
+        write_runtime_metadata_event(
+            &request.session_id,
+            actors::OBSERVER,
+            "observer-ring-buffer-bytes",
+            actual.to_string(),
+            &mut store,
+        )?;
+    }
     let ring_buffer = RingBuf::try_from(ring_map)
         .map_err(|error| format!("failed to open observer ring buffer: {error}"))?;
     let mut async_ring = AsyncFd::new(ring_buffer)
         .map_err(|error| format!("failed to poll observer ring buffer: {error}"))?;
     let calibration = ObserverBatchDecoder::capture()?;
+    // Register cancellation before releasing a gate. All tracepoints, ring
+    // polling and timestamp decoding are ready before any workload may run.
+    let shutdown = shutdown_signal(controlled_mode)?;
+    tokio::pin!(shutdown);
+    if let Some(agent) = external_metadata.as_ref() {
+        if read_process_start_time_ticks(agent.root_pid) != agent.start_time_ticks {
+            return Err(
+                "controlled native process identity changed before capture was ready".into(),
+            );
+        }
+    }
+    if let Some(stop) = controlled_stop.as_mut() {
+        match stop.try_recv() {
+            Err(oneshot::error::TryRecvError::Empty) => {}
+            Ok(_) => return Err("native application exited before capture was ready".into()),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                return Err("native supervisor disconnected before capture was ready".into());
+            }
+        }
+    }
+    if let Some(ready) = ready.take() {
+        if ready.send(()).is_err() {
+            store
+                .flush()
+                .map_err(|_| "failed to flush abandoned native capture")?;
+            return Err("native supervisor disconnected before capture was ready".into());
+        }
+    }
+    if let Some(agent) = managed_agent.as_mut() {
+        agent.release_gate();
+    }
     let deadline = request
         .duration
         .map(|duration| tokio::time::Instant::now() + duration);
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
     let mut raw_count = 0;
     let mut canonical_count = 0;
     let mut decode_failures = 0_u64;
@@ -621,6 +773,8 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
     let mut process_context = ProcessContextTable::default();
     let redactor = Redactor::new(&request.session_id, &request.workspace_root);
     let mut agent_exit_status: Option<ExitStatus> = None;
+    let mut controlled_exit_code = None;
+    let mut controlled_failure = None;
     let mut agent_drain_deadline: Option<tokio::time::Instant> = None;
 
     loop {
@@ -644,19 +798,58 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
                 result = read_ring_batch(&mut async_ring) => Some(result?),
                 result = &mut shutdown => {
                     result?;
+                    if controlled_mode {
+                        controlled_failure = Some("native capture interrupted before final drain completed");
+                    }
                     None
+                },
+                result = controlled_exit(&mut controlled_stop), if controlled_stop.is_some() => {
+                    controlled_stop = None;
+                    match result {
+                        Ok(code) => {
+                            controlled_exit_code = Some(code);
+                            agent_drain_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(300));
+                            Some(Vec::new())
+                        }
+                        Err(error) => {
+                            controlled_failure = Some(error);
+                            None
+                        }
+                    }
                 },
                 _ = tokio::time::sleep(Duration::from_millis(100)), if managed_agent.is_some() && agent_exit_status.is_none() => {
                     Some(Vec::new())
                 },
-                _ = tokio::time::sleep_until(deadline) => None,
+                _ = tokio::time::sleep_until(deadline) => {
+                    if controlled_mode && (controlled_exit_code.is_none() || Some(deadline) != agent_drain_deadline) {
+                        controlled_failure = Some("native capture duration ended before application exit and final drain");
+                    }
+                    None
+                },
             }
         } else {
             tokio::select! {
                 result = read_ring_batch(&mut async_ring) => Some(result?),
                 result = &mut shutdown => {
                     result?;
+                    if controlled_mode {
+                        controlled_failure = Some("native capture interrupted before application exit");
+                    }
                     None
+                },
+                result = controlled_exit(&mut controlled_stop), if controlled_stop.is_some() => {
+                    controlled_stop = None;
+                    match result {
+                        Ok(code) => {
+                            controlled_exit_code = Some(code);
+                            agent_drain_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(300));
+                            Some(Vec::new())
+                        }
+                        Err(error) => {
+                            controlled_failure = Some(error);
+                            None
+                        }
+                    }
                 },
                 _ = tokio::time::sleep(Duration::from_millis(100)), if managed_agent.is_some() && agent_exit_status.is_none() => {
                     Some(Vec::new())
@@ -708,6 +901,9 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
 
     if let Some(status) = agent_exit_status {
         write_agent_exit_metadata(&request.session_id, status_exit_code(status), &mut store)?;
+    }
+    if let Some(code) = controlled_exit_code {
+        write_agent_exit_metadata(&request.session_id, code, &mut store)?;
     }
 
     let counters = read_observer_counters(&mut ebpf)?;
@@ -772,12 +968,19 @@ pub async fn observe_live(request: LiveObserveRequest) -> Result<crate::ObserveR
         .flush()
         .map_err(|error| format!("failed to flush live observer timeline: {error}"))?;
 
+    if let Some(error) = controlled_failure {
+        return Err(error.into());
+    }
+    if controlled_mode && controlled_exit_code.is_none() {
+        return Err("native capture ended without an application exit notification".into());
+    }
+
     Ok(ObserveResult {
         raw_events: raw_count,
         canonical_events: canonical_count,
         backend: ObserverBackend::AyaRingBuffer,
         mode: ObserverMode::AuditOnly,
-        agent_exit_code: agent_exit_status.map(status_exit_code),
+        agent_exit_code: controlled_exit_code.or_else(|| agent_exit_status.map(status_exit_code)),
     })
 }
 
@@ -1050,7 +1253,9 @@ fn earliest_deadline(
 }
 
 fn status_exit_code(status: ExitStatus) -> i32 {
-    status.code().unwrap_or(1)
+    status
+        .code()
+        .unwrap_or_else(|| status.signal().map_or(1, |signal| 128 + signal))
 }
 
 fn read_process_start_time_ticks(pid: u32) -> Option<u64> {
@@ -1380,15 +1585,27 @@ fn shell_display_arg(value: &str) -> String {
     }
 }
 
-async fn shutdown_signal() -> Result<(), String> {
+fn shutdown_signal(
+    ignore_interrupt: bool,
+) -> Result<impl std::future::Future<Output = Result<(), String>>, String> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|error| format!("failed to install SIGTERM handler: {error}"))?;
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            result.map_err(|error| format!("failed to install SIGINT handler: {error}"))
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|error| format!("failed to install SIGINT handler: {error}"))?;
+    Ok(async move {
+        if ignore_interrupt {
+            // The native supervisor owns Ctrl+C and foreground process-group
+            // behavior. Keep our handler installed while awaiting termination.
+            let _interrupt = interrupt;
+            terminate.recv().await;
+        } else {
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+            }
         }
-        _ = terminate.recv() => Ok(()),
-    }
+        Ok(())
+    })
 }
 
 fn configure_scope(ebpf: &mut Ebpf, scope: &LiveScope) -> Result<(), String> {
@@ -1797,6 +2014,134 @@ mod tests {
     use super::*;
     use apolysis_core::{CanonicalEvent, EventType};
     use std::os::unix::fs::symlink;
+
+    fn controlled_request() -> LiveObserveRequest {
+        LiveObserveRequest {
+            object_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+            output_path: PathBuf::from("unused-controlled-output.jsonl"),
+            policy_path: PathBuf::from("unused-controlled-policy.json"),
+            session_id: "controlled-test".into(),
+            feedback_dir: None,
+            scope: Some(LiveScope::ProcessTree(std::process::id())),
+            agent_run: None,
+            agent_registration_path: None,
+            agent_discovery: None,
+            duration: None,
+            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            output_rotation: None,
+        }
+    }
+
+    #[test]
+    fn controlled_scope_requires_a_live_external_process_and_bounded_kind() {
+        let mut request = controlled_request();
+        let metadata = controlled_agent_metadata(&request, "claude").unwrap();
+        assert_eq!(metadata.root_pid, std::process::id());
+        assert_eq!(metadata.supervisor_mode, "external_native_launch");
+        assert!(metadata.start_time_ticks.is_some());
+        for kind in ["", "claude\nsecret", "--kind", "claude value"] {
+            assert!(controlled_agent_metadata(&request, kind).is_err());
+        }
+        request.scope = Some(LiveScope::Cgroup(1));
+        assert!(controlled_agent_metadata(&request, "claude").is_err());
+        request.scope = Some(LiveScope::ProcessTree(0));
+        assert!(controlled_agent_metadata(&request, "claude").is_err());
+        request.scope = Some(LiveScope::ProcessTree(std::process::id()));
+        request.agent_run = Some(AgentRunRequest::new("claude", vec!["claude".into()]).unwrap());
+        assert!(controlled_agent_metadata(&request, "claude").is_err());
+    }
+
+    #[test]
+    fn controlled_ring_budget_is_kernel_aligned_and_legacy_has_no_override() {
+        assert_eq!(live_ring_capacity_override(false), None);
+        let bytes = live_ring_capacity_override(true).unwrap();
+        assert_eq!(bytes, 8 * 1024 * 1024);
+        // BPF ring capacity is a power-of-two multiple of the host page size.
+        // Cover the standard page sizes supported by the Linux target.
+        for page_size in [4096, 16384, 65536] {
+            assert_eq!(bytes % page_size, 0);
+            assert!((bytes / page_size).is_power_of_two());
+        }
+        // Include the kernel's eight-byte ring record header and alignment.
+        let payload = std::mem::size_of::<KernelEventRecord>() as u32;
+        let aligned_record = (payload + 8).next_multiple_of(8);
+        assert!(bytes / aligned_record >= 12_000);
+    }
+
+    #[tokio::test]
+    async fn controlled_exit_retains_notification_after_a_cancelled_poll() {
+        let (sender, receiver) = oneshot::channel();
+        let mut receiver = Some(receiver);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), controlled_exit(&mut receiver))
+                .await
+                .is_err()
+        );
+        sender.send(23).unwrap();
+        assert_eq!(controlled_exit(&mut receiver).await, Ok(23));
+    }
+
+    #[tokio::test]
+    async fn controlled_exit_rejects_disconnection_and_invalid_status() {
+        let (sender, receiver) = oneshot::channel();
+        drop(sender);
+        assert!(controlled_exit(&mut Some(receiver)).await.is_err());
+        for code in [-1, 256, i32::MAX] {
+            let (sender, receiver) = oneshot::channel();
+            sender.send(code).unwrap();
+            assert!(controlled_exit(&mut Some(receiver)).await.is_err());
+        }
+        for code in [0, 7, 130, 143, 255] {
+            let (sender, receiver) = oneshot::channel();
+            sender.send(code).unwrap();
+            assert_eq!(controlled_exit(&mut Some(receiver)).await, Ok(code));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_capture_initialization_never_releases_external_workload() {
+        let directory = temp_proc_root("controlled-init-failure");
+        fs::create_dir_all(&directory).unwrap();
+        let mut request = controlled_request();
+        request.output_path = directory.join("timeline.jsonl");
+        request.policy_path = directory.join("policy.json");
+        fs::write(&request.policy_path, "{}").unwrap();
+        // A source file is deliberately not a BPF object. This test must fail
+        // before readiness regardless of host capabilities, without any fake
+        // successful capture or provider invocation.
+        let (ready, ready_receiver) = oneshot::channel();
+        let (_stop_sender, stop) = oneshot::channel();
+        assert!(observe_live_controlled(
+            request.clone(),
+            LiveObserveControl {
+                ready,
+                stop,
+                agent_kind: "claude".into(),
+            },
+        )
+        .await
+        .is_err());
+        assert!(ready_receiver.await.is_err());
+        let data = fs::read_to_string(request.output_path).unwrap();
+        assert!(!data.contains("agent-exit-status"));
+        // A requested capacity is not reported as a successfully created map.
+        assert!(!data.contains("observer-ring-buffer-bytes"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn actual_process_exit_status_preserves_nonzero_and_termination_signal() {
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 23"])
+            .status()
+            .unwrap();
+        assert_eq!(status_exit_code(status), 23);
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", "kill -TERM $$"])
+            .status()
+            .unwrap();
+        assert_eq!(status_exit_code(status), 128 + libc::SIGTERM);
+    }
 
     #[test]
     fn agent_command_metadata_redacts_credential_paths_in_shell_scripts() {

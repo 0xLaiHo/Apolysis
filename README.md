@@ -155,15 +155,18 @@ summaries require explicit opt-in, and a declared purpose is not a verified
 motive. A bounded synthetic
 marker gate and the general observer regression passed on one local Linux
 kernel. Bounded native runs with the explicit shell bridge passed for Claude
-Code, Pi, and OpenCode. Codex and Cursor runs are blocked by network and
-authentication prerequisites, respectively. A separate controlled Claude test
+Code, Pi, and OpenCode in the earlier script gate. The native entry now has
+bounded Claude, Pi, Codex and OpenCode passes under the documented test
+configurations; Cursor still requires usable authentication. A separate controlled Claude test
 linked a model-written, explicitly opted-in reason summary to an actual login
 regression file attempt; this is not a default native reason capability. Broader
 product-version, multi-kernel, and stress qualification remains open.
-The experimental Rust [`apolysis chat`](docs/reason-chat.md) command accepts your own
-tasks in a separate workspace and shows declared reasons alongside observed
-execution, keeping the same in-memory Claude conversation across turns without
-a Python runtime dependency.
+The Rust [`apolysis observe --agent <product>`](docs/native-observe.md) entry opens
+the selected native application, forwards its arguments after `--`, and publishes
+local JSON, Markdown and HTML evidence reports after exit. It keeps application
+UI, tools and permission interaction native. The older
+[`apolysis chat`](docs/reason-chat.md) command remains a separate, Claude-only
+controlled-protocol experiment; it is not the native application interface.
 See [live validation](docs/harness-intent-live-validation.md),
 [design](docs/design.md), [roadmap](docs/roadmap.md), and
 [harness integration](docs/harness-intent.md) for scope and limits.

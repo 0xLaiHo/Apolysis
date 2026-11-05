@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 type ToolInput = { tool: string; sessionID: string; callID: string };
 type ToolOutput = { args: { command?: string } & Record<string, unknown> };
 
-export default function apolysisIntent() {
+export default function apolysisIntent(context?: { directory?: string }) {
   return {
     "tool.execute.before": async (input: ToolInput, output: ToolOutput) => {
       try {
@@ -18,7 +18,7 @@ export default function apolysisIntent() {
           "--output",
           process.env.APOLYSIS_INTENT_OUTPUT ?? ".apolysis/intent.opencode.jsonl",
           "--workspace-root",
-          process.cwd(),
+          context?.directory || process.cwd(),
         ];
         if (process.env.APOLYSIS_SESSION_ID) {
           args.push("--session", process.env.APOLYSIS_SESSION_ID);

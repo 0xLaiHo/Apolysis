@@ -23,6 +23,7 @@ test:
 	$(MAKE) test-harness-hooks
 	$(MAKE) test-reason-summary-adapter
 	$(MAKE) test-reason-chat
+	$(MAKE) test-native-observe
 
 test-harness-hooks:
 	node --test hooks/tests/intent-bridges.test.mjs
@@ -63,6 +64,11 @@ test-reason-summary-adapter:
 test-reason-chat:
 	cargo test -p apolysis-cli chat:: --bin apolysis
 	cargo test -p apolysis-cli --test chat
+
+.PHONY: test-native-observe
+test-native-observe:
+	cargo test -p apolysis-cli native:: --bin apolysis
+	cargo test -p apolysis-cli --test native --test native_process
 
 # Explicit sudo/provider validation of the Rust runtime and all descendant execs.
 test-live-reason-chat:

@@ -307,9 +307,11 @@ mount namespace 中屏蔽全局 hook 与用户 shell 启动文件。原认证保
 就已通过。产品输出和采集保存在私有目录，默认删除。
 `--keep-failed-private` 显式保留失败的临时目录供本地诊断；检查后删除报告的目录，
 不要提交其中内容。该门禁会发起真实 provider 请求，可能产生费用。
-有界原生 bridge 运行已在 Claude Code 2.1.295、Pi 1.5.0 和 OpenCode 1.18.31 通过，
-Codex 存有有效认证，但 provider 网络连通性阻断运行；Cursor 的访问与刷新凭证均过期。
-恢复这些前提条件后才能完成对应资格运行。三项通过结果仅覆盖单条合成原因注释、显式 `/bin/bash` bridge、
+2026-11-05 的脚本原生 bridge 门禁已在 Claude Code 2.1.295、Pi 1.5.0 和
+OpenCode 1.18.31 通过。当时 Codex 虽存有认证但 provider 连通性失败，Cursor
+凭证过期。较新的[原生入口验证](harness-intent-live-validation.zh-CN.md#原生入口验证)
+现已在显式测试权限参数下完成 Codex 验证；这不抹去此前失败，也不证明仍待完成的
+Cursor 路径通过。前述三项结果仅覆盖单条合成原因注释、显式 `/bin/bash` bridge、
 准确的 fixture 文件尝试，以及提示词 sentinel 隐私断言，不代表默认注释传递或任意
 原生工具调用均已验证。
 

@@ -16,7 +16,7 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "process", "rt", "signal", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "process", "rt", "signal", "sync", "time"] }
 
 [lib]
 path = "src/lib.rs"
