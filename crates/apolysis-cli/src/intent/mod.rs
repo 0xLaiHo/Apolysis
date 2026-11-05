@@ -55,133 +55,181 @@ pub fn ingest(
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HookOutput {
-    pub record: SessionIntentRecord,
+    pub record: Option<SessionIntentRecord>,
     pub response: serde_json::Value,
+    pub diagnostic: Option<&'static str>,
 }
+
+const STAMP_PREFIX: &str = "# APOLYSIS_INTENT_ID=";
 
 pub fn hook(
     harness: &str,
     input: &serde_json::Value,
     workspace_root: &Path,
+    capture_session: Option<&str>,
 ) -> Result<HookOutput, String> {
-    match harness {
-        "codex" => pre_tool_use_hook("codex", input, workspace_root),
-        "claude" => pre_tool_use_hook("claude", input, workspace_root),
-        "cursor" => cursor_hook(input, workspace_root),
-        "pi" => command_stamp_hook("pi", input, workspace_root),
-        "opencode" => command_stamp_hook("opencode", input, workspace_root),
-        other => Err(format!("unsupported intent hook harness '{other}'")),
+    if !matches!(harness, "codex" | "claude" | "cursor" | "pi" | "opencode") {
+        return Err("unsupported intent hook harness".to_string());
     }
-}
-
-fn pre_tool_use_hook(
-    source: &str,
-    input: &serde_json::Value,
-    workspace_root: &Path,
-) -> Result<HookOutput, String> {
-    let session_id = required_str(input, "session_id")?;
-    let tool_name = required_str(input, "tool_name")?;
-    let call_id = required_str(input, "tool_use_id")?;
-    let intent_id = format!("{source}:{call_id}");
-    validate_stamp(&intent_id)?;
-    let command = input
-        .pointer("/tool_input/command")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let record = stamped_record(
-        session_id,
-        source,
-        &intent_id,
-        call_id,
-        tool_name,
-        command.as_deref(),
-        workspace_root,
-    )?;
-    let mut response = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow"
-        }
-    });
-    if declared_action(tool_name) == "shell.command" {
-        let original =
-            command.ok_or(format!("{source} shell hook is missing tool_input.command"))?;
-        response["hookSpecificOutput"]["updatedInput"] =
-            serde_json::json!({ "command": format!("APOLYSIS_INTENT_ID={intent_id} {original}") });
+    if harness == "cursor" && required_str(input, "hook_event_name")? == "beforeShellExecution" {
+        // This event has no native tool-call id. The preceding preToolUse hook owns
+        // the declaration; never invent an identity or append a duplicate here.
+        let stamped = input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|command| leading_stamp(command).ok().flatten())
+            .is_some();
+        return Ok(HookOutput {
+            record: None,
+            response: serde_json::json!({ "permission": "allow" }),
+            diagnostic: (!stamped).then_some(
+                "Cursor shell event has no complete intent marker; no tool-call association was recorded",
+            ),
+        });
     }
-    Ok(HookOutput { record, response })
-}
 
-fn command_stamp_hook(
-    source: &str,
-    input: &serde_json::Value,
-    workspace_root: &Path,
-) -> Result<HookOutput, String> {
-    let session_id = required_str(input, "session_id")?;
-    let tool_name = required_str(input, "tool_name")?;
-    let call_id = required_str(input, "tool_use_id")?;
-    let intent_id = format!("{source}:{call_id}");
-    validate_stamp(&intent_id)?;
-    let command = input
-        .pointer("/tool_input/command")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let record = stamped_record(
-        session_id,
-        source,
-        &intent_id,
-        call_id,
-        tool_name,
-        command.as_deref(),
-        workspace_root,
-    )?;
-    let response = if declared_action(tool_name) == "shell.command" {
-        let original =
-            command.ok_or(format!("{source} shell hook is missing tool_input.command"))?;
-        serde_json::json!({ "command": format!("APOLYSIS_INTENT_ID={intent_id} {original}") })
+    if harness == "cursor" && required_str(input, "hook_event_name")? != "preToolUse" {
+        return Err("unsupported Cursor intent hook event".to_string());
+    }
+
+    let native_session = if harness == "cursor" {
+        required_str(input, "session_id").or_else(|_| required_str(input, "conversation_id"))?
     } else {
-        serde_json::json!({})
+        required_str(input, "session_id")?
     };
-    Ok(HookOutput { record, response })
-}
-
-fn cursor_hook(input: &serde_json::Value, workspace_root: &Path) -> Result<HookOutput, String> {
-    let session_id =
-        required_str(input, "session_id").or_else(|_| required_str(input, "conversation_id"))?;
-    let event_name = required_str(input, "hook_event_name")?;
+    let session_id = capture_session.unwrap_or(native_session);
+    if session_id.is_empty() {
+        return Err("capture session must not be empty".to_string());
+    }
+    let tool_name = required_str(input, "tool_name")?;
     let call_id = required_str(input, "tool_use_id")?;
-    let tool_name = required_str(input, "tool_name")
-        .or_else(|_| {
-            if event_name == "beforeShellExecution" {
-                Ok("Shell")
-            } else {
-                Err("hook input missing tool_name".to_string())
-            }
-        })?
-        .to_string();
-    let intent_id = format!("cursor:{call_id}");
-    validate_stamp(&intent_id)?;
-    let command = input
-        .pointer("/tool_input/command")
+    let intent_id = live_intent_id(harness, session_id, native_session, call_id);
+    let tool_input = input.get("tool_input");
+    let command_field = shell_command_field(harness, tool_name, tool_input);
+    let command = command_field
+        .and_then(|key| tool_input.and_then(|value| value.get(key)))
         .and_then(serde_json::Value::as_str)
-        .or_else(|| input.get("command").and_then(serde_json::Value::as_str))
-        .map(str::to_string);
-    let record = stamped_record(
+        .map(|command| unstamped_command(command, &intent_id))
+        .transpose()?;
+    let mut record = stamped_record(
         session_id,
-        "cursor",
+        harness,
         &intent_id,
         call_id,
-        &tool_name,
-        command.as_deref(),
+        tool_name,
+        command,
         workspace_root,
-    )?;
-    let mut response = serde_json::json!({ "permission": "allow" });
-    if event_name == "preToolUse" && declared_action(&tool_name) == "shell.command" {
-        let original = command.ok_or("cursor shell hook is missing tool_input.command")?;
-        response["updated_input"] =
-            serde_json::json!({ "command": format!("APOLYSIS_INTENT_ID={intent_id} {original}") });
+    )?
+    .with_harness_session_id(native_session)
+    .with_observation_mode(if command.is_some() {
+        "local_shell"
+    } else {
+        "semantic_only"
+    });
+    if command.is_some() {
+        record = record.with_declared_action("shell.command");
     }
-    Ok(HookOutput { record, response })
+
+    let mut response = match harness {
+        "codex" | "claude" => serde_json::json!({
+            "hookSpecificOutput": { "hookEventName": "PreToolUse" }
+        }),
+        "cursor" => serde_json::json!({ "permission": "allow" }),
+        _ => serde_json::json!({}),
+    };
+    if let (Some(field), Some(original)) = (command_field, command) {
+        let stamped = format!("{STAMP_PREFIX}{intent_id}\n{original}");
+        if matches!(harness, "codex" | "claude" | "cursor") {
+            // updatedInput replaces the entire object in Claude Code. Preserve
+            // timeouts, cwd, descriptions, background options, and future fields.
+            let mut updated = tool_input.cloned().unwrap_or_default();
+            updated[field] = serde_json::Value::String(stamped);
+            if harness == "cursor" {
+                response["updated_input"] = updated;
+            } else {
+                response["hookSpecificOutput"]["updatedInput"] = updated;
+                // Codex requires allow alongside a PreToolUse input rewrite.
+                // Claude accepts a rewrite without making a permission decision.
+                if harness == "codex" {
+                    response["hookSpecificOutput"]["permissionDecision"] = "allow".into();
+                }
+            }
+        } else {
+            response["command"] = serde_json::Value::String(stamped);
+        }
+    }
+    Ok(HookOutput {
+        record: Some(record),
+        response,
+        diagnostic: None,
+    })
+}
+
+// Tool names with words such as "exec" are not enough to establish a local
+// shell execution contract (for example, an HTTP MCP tool can use that name).
+fn shell_command_field(
+    harness: &str,
+    tool_name: &str,
+    input: Option<&serde_json::Value>,
+) -> Option<&'static str> {
+    let key = match (harness, tool_name) {
+        ("codex" | "claude", "Bash") | ("cursor", "Shell") => "command",
+        ("codex", "exec_command") => "cmd",
+        ("codex", "shell_command") => "command",
+        ("pi" | "opencode", "bash") => "command",
+        _ => return None,
+    };
+    let input = input?;
+    if let Some(shell) = input.get("shell") {
+        let shell = shell.as_str()?;
+        if !matches!(
+            Path::new(shell).file_name()?.to_str()?,
+            "sh" | "bash" | "zsh" | "dash"
+        ) {
+            return None;
+        }
+    }
+    input.get(key)?.as_str()?;
+    Some(key)
+}
+
+fn live_intent_id(source: &str, session: &str, native_session: &str, call_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    for field in [source, session, native_session, call_id] {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field.as_bytes());
+    }
+    digest.finalize()[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn leading_stamp(command: &str) -> Result<Option<(&str, &str)>, String> {
+    let Some(rest) = command.strip_prefix(STAMP_PREFIX) else {
+        return Ok(None);
+    };
+    let (id, original) = rest
+        .split_once('\n')
+        .ok_or("intent marker header is incomplete")?;
+    if id.len() != 32
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("intent marker header is invalid".to_string());
+    }
+    Ok(Some((id, original)))
+}
+
+fn unstamped_command<'a>(command: &'a str, expected_id: &str) -> Result<&'a str, String> {
+    match leading_stamp(command)? {
+        None => Ok(command),
+        Some((id, original)) if id == expected_id => Ok(original),
+        Some(_) => Err("intent marker belongs to a different tool call or session".to_string()),
+    }
 }
 
 fn required_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str, String> {
@@ -190,19 +238,6 @@ fn required_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("hook input missing {field}"))
-}
-
-fn validate_stamp(intent_id: &str) -> Result<(), String> {
-    let valid = !intent_id.is_empty()
-        && intent_id.len() <= 128
-        && intent_id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '-' | '.'));
-    if valid {
-        Ok(())
-    } else {
-        Err(format!("intent id {intent_id} cannot be stamped"))
-    }
 }
 
 pub(crate) fn stamped_record(
@@ -217,7 +252,12 @@ pub(crate) fn stamped_record(
     let mut record =
         SessionIntentRecord::new(session_id, source, intent_id, "tool_call", tool_name)
             .with_source_event_id(source_event_id)
-            .with_declared_action(declared_action(tool_name));
+            .with_declared_action(declared_action(tool_name))
+            .with_observation_mode(if declared_action(tool_name) == "shell.command" {
+                "historical"
+            } else {
+                "semantic_only"
+            });
     if let Some(command) = command {
         record = record.with_command(
             apolysis_observer::redact_command_text_for_persistence(

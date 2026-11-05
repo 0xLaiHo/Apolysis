@@ -276,7 +276,7 @@ pub(crate) fn decode_replay_key(value: &str) -> Result<[u8; 32], GatewayServerEr
         ));
     }
     let mut decoded = [0_u8; 32];
-    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+    for (index, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
         decoded[index] = decode_hex_nibble(pair[0])?
             .checked_mul(16)
             .and_then(|high| high.checked_add(decode_hex_nibble(pair[1]).ok()?))

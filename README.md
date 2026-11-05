@@ -8,9 +8,9 @@
 
 Apolysis is currently an experimental Linux runtime audit-telemetry and
 accountability layer for AI agent workloads. It records a scoped subset of host
-observations and syscall attempts, then heuristically correlates process, file,
-network, credential, runtime, policy, and declared-intent records into an
-ordered audit timeline.
+observations and syscall attempts, then relates process, file, network,
+credential, runtime, policy, and declared Tool Call records in an ordered audit
+timeline. Explicit identifier relations and heuristic candidates remain distinct.
 
 The project is evolving toward an Agent Runtime Evidence & Policy Plane that
 joins hook, SDK, OTLP, MCP, A2A, provider-outcome, and optional eBPF runtime
@@ -143,6 +143,14 @@ Action exception above ends only when that source is published as an immutable
 bundle. Kernel-side capture is still a transient implementation detail until
 the later capture-off control is added.
 
+The harness-intent adapter slice adds content-off declarations for Codex,
+Claude Code, Cursor, Pi, and OpenCode, with append/deduplication, separate
+native and capture session identities, and safe shell-comment markers. The
+observer carries bounded markers across fork and exec, and correlation keeps
+identifier conflicts and heuristic candidates explicit. Live kernel and
+product-version qualification remain separate gates. See [design](docs/design.md), [roadmap](docs/roadmap.md), and
+[harness integration](docs/harness-intent.md) for scope and limits.
+
 ## Core Capabilities
 
 - Live and fixture observation for process, file, network, and credential-path
@@ -150,8 +158,8 @@ the later capture-off control is added.
   attempt/outcome limitations.
 - Managed local agent launch with process-tree attribution for Codex and other
   command-line agents.
-- Intent ingestion and heuristic correlation for declared tool calls versus
-  observed host-side events.
+- Tool Call ingestion and explicit identifier relations to observed host-side
+  events, with weaker command/executable candidates reported separately.
 - Runtime metadata correlation for local processes, Docker/containerd, and
   Kubernetes workloads.
 - Ordered JSONL timelines, output rotation, daemon-local hash-chain
@@ -299,15 +307,19 @@ Output:
 
 ```jsonl
 {"record_type":"intent","intent_source":"codex","declared_action":"shell.command"}
-{"record_type":"intent_correlation","match_basis":"process_executable"}
+{"record_type":"intent_correlation_candidate","match_basis":"process_executable","relation_status":"inferred"}
 {"record_type":"accountability_finding","kind":"missing_intent","decision":"review"}
 ```
 
 Keep generated timelines, Codex logs, and reports under `.apolysis/` or
 `target/`. Do not commit captured workload data or credentials.
+Historical executable candidates do not establish an Exact Relation or satisfy
+an otherwise unmatched declaration.
 
 ## Key Documents
 
+- [Design](docs/design.md)
+- [Roadmap](docs/roadmap.md)
 - [Quickstart](docs/quickstart.md)
 - [GitHub Action](docs/github-action.md)
 - [JSONL schema](docs/jsonl-schema-v1.md)

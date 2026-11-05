@@ -1,5 +1,12 @@
 # Codex Intent Mismatch Demo
 
+This historical launch fixture predates marker-based relations. Current
+content-off ingestion produces no Exact Relation for this fixture; it reports
+both a missing event relation and an unobserved historical declaration. See
+[Quickstart](quickstart.md) for current output. A live marker can relate all
+observed descendant attempts to a Tool Call, including credential-path access;
+that relation alone does not decide whether an action was authorized.
+
 This demo is the first P1 launch asset starter. It shows the public story
 Apolysis should make easy to reproduce:
 
@@ -14,14 +21,15 @@ this fixture with a real `apolysis observe --agent-run -- codex ...` run.
 ## What The Fixture Shows
 
 - Codex declares a shell command intent: `cargo test -p apolysis-cli --test intent`.
-- The observed timeline contains a matching file-open event from that test
-  command.
+- The observed timeline contains a file-open event with legacy test-command
+  context, without an explicit marker or raw-event link to the declaration.
 - The same observed timeline also contains an unexpected `credential_read`
   event for `/tmp/apolysis-demo-home/.aws/credentials`.
 - `apolysis intent correlate` emits:
-  - one `intent_correlation` record for the declared test command;
   - one `accountability_finding` with `kind:"missing_intent"` for the
-    credential read.
+    credential-path attempt;
+  - one `accountability_finding` with `kind:"unobserved_intent"` for the
+    historical declaration, and no Exact Relation.
 
 Fixtures live under `tests/fixtures/codex-mismatch/`:
 
@@ -58,10 +66,10 @@ cargo run -q -p apolysis-cli -- intent correlate \
 Inspect the relevant records:
 
 ```bash
-grep -F '"record_type":"intent_correlation"' \
+rg -F '"kind":"unobserved_intent"' \
   target/codex-mismatch-demo/intent-correlation.jsonl
 
-grep -F '"kind":"missing_intent"' \
+rg -F '"kind":"missing_intent"' \
   target/codex-mismatch-demo/intent-correlation.jsonl
 ```
 

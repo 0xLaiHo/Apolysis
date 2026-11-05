@@ -18,7 +18,8 @@ they are not timeline JSONL records covered by this schema.
 - Every object has a `record_type` string.
 - Timestamps are Unix milliseconds unless a field name states another unit.
 - Numeric process identifiers are decimal JSON numbers.
-- Optional fields are emitted as `null`, not omitted.
+- Optional base fields are emitted as `null`; optional extension fields may
+  be omitted by older or inapplicable producers.
 - Consumers must ignore unknown fields.
 - Producers must not write raw secret material. Path, argv, socket, payload, and
   command fields may contain redacted tokens.
@@ -84,9 +85,11 @@ Fields:
 - `process_executable`: allowlisted `executable_ref:<basename>` known for the
   PID, or `null`; paths and small-space executable hashes are not persisted
 - `process_started_at_unix_ms`: command-context start timestamp, or `null`
-- `intent_id`: harness intent id copied from a transient `APOLYSIS_INTENT_ID`
-  token, or omitted when the exec argv did not carry one. Persistence still
-  leaves `process_command` null.
+- `intent_id`: valid 32-character lowercase hexadecimal marker from dedicated
+  kernel attribution, or omitted when attribution is unavailable. A leading
+  `# APOLYSIS_INTENT_ID=<id>` shell-command comment supplies the marker;
+  in-scope fork/exec descendants can inherit it. Persistence still leaves
+  `process_command` null.
 
 Runtime metadata records are canonical `event` records with
 `event_type:"runtime_metadata"`. Agent supervisor metadata uses resources such
@@ -119,11 +122,21 @@ Fields:
 - `container_id`: container identifier or `null`
 - `cgroup_id`: cgroup identifier or `null`
 - `raw_payload`: bounded raw payload after persistence-time redaction
+- `intent_id`: optional dedicated marker, with the same validity rules as the
+  canonical event field; this is not extracted from persisted argv
+- `process_start_time_ns`: optional thread-group leader start time in boot-relative
+  nanoseconds, used with PID to distinguish process generations
+- `parent_start_time_ns`: optional parent thread-group leader start time in the same
+  clock domain; these are not Unix timestamps
 
 Persisted exec payloads never contain argv. They contain
 `argv_redacted:true`, `redacted:payload`, and applicable truncation markers such
 as `argv_truncated:true`, `payload_truncated:true`, and
 `resource_truncated:true`.
+`intent_capture_incomplete:true` reports uncertain marker capture. It is
+retained after content-off redaction and also contributes to truncation
+diagnostics; prior attribution is cleared rather than guessed at successful
+exec.
 
 ### `intent`
 
@@ -137,8 +150,14 @@ Fields:
 - `record_type`: always `intent`
 - `timestamp_unix_ms`: intent ingestion timestamp
 - `session_id`: session identifier
+- `harness_session_id`: native product session identifier, or `null` for
+  historical records whose native session is unavailable; `session_id` is the
+  Apolysis capture-session identifier used for correlation
 - `intent_source`: harness or adapter name, for example `codex`
-- `intent_id`: stable intent identifier assigned by the adapter
+- `intent_id`: stable intent identifier assigned by the adapter; live hooks use
+  32 lowercase hexadecimal characters derived from SHA-256 over length-framed
+  source, capture session, native session, and call ID; file adapters retain
+  their historical source-prefixed identifiers
 - `source_event_id`: source harness event ID or `null`
 - `intent_type`: normalized intent category, for example `tool_call`
 - `tool_name`: source tool/function name
@@ -148,11 +167,19 @@ Fields:
 - `command`: content-off executable reference plus `argv_redacted:true`, or
   `null`
 - `raw_event_id`: observed raw kernel event ID after correlation, or `null`
+- `observation_mode`: `local_shell`, `semantic_only`, or `historical`; older
+  records may omit the field. This declares the available observation path,
+  not successful execution or actual observer coverage.
 
 Adapters are `codex-jsonl`, `claude-jsonl`, `cursor-jsonl`, `pi-jsonl`, and
 `opencode-jsonl`. They write `intent` records with `intent_source` `codex`,
 `claude`, `cursor`, `pi`, or `opencode`. Content-off persistence retains an
 executable reference but omits prompts, tool results, raw argv, and secrets.
+Live hook writes use locked append and deduplicate repeated calls. A shell
+rewrite adds `# APOLYSIS_INTENT_ID=<id>` as the first comment line, followed by
+the original command body. It does not interpolate the native call ID into
+shell syntax. `--session` selects a capture session separately from the native
+session. A product-specific file name does not itself isolate sessions.
 
 Example ingestion:
 
@@ -167,13 +194,22 @@ apolysis intent ingest \
 
 ### `intent_correlation`
 
-Intent correlation records link declared harness intent to observed host-side
-timeline evidence. Correlation matches in this order: `raw_event_id`, then
-`intent_id`, then `process_command_exact`, then `process_executable` for
-`exec` events. `intent_id` matches the optional event field copied from a
-transient `APOLYSIS_INTENT_ID` token. `process_command_exact` matches a redacted
-command context. `process_executable` matches a declared command's executable
-against the observed `process_executable` or exec `resource`.
+Current intent correlation records establish an Exact Relation through a
+unique explicit identifier inside one capture session. This is a relation
+within the local integration's trust boundary, not causal or authorization
+proof. Declarations whose complete persisted JSON objects are identical apart
+from ingestion timestamp are deduplicated before matching; differences in
+retained action, target, native session, or future fields remain conflicts.
+`semantic_only` declarations cannot establish execution matches, but remain
+visible during identifier conflict detection.
+
+When an event has `intent_id`, that ID must resolve uniquely. If an explicit
+`raw_event_id` link also exists, both links must identify the same declaration;
+the recorded basis is then `raw_event_id`. Unknown, conflicting, or ambiguous
+IDs produce a diagnostic and never fall back to command or executable text.
+Without `intent_id`, a unique `raw_event_id` link can establish the relation.
+If neither explicit link is available, text/name matches become candidates
+as described below. One declaration may relate to many observed attempts.
 
 Fields:
 
@@ -183,8 +219,10 @@ Fields:
 - `intent_source`: harness or adapter name, for example `codex`
 - `intent_id`: declared intent identifier
 - `tool_name`: source tool or function name
-- `match_basis`: `raw_event_id`, `intent_id`, `process_command_exact`, or
-  `process_executable`
+- `match_basis`: current writers use `raw_event_id` or `intent_id`; historical
+  records with `process_command_exact` or `process_executable` remain readable
+  but are heuristic evidence, not newly established Exact Relations
+- `relation_status`: `exact` for current records; absent in historical records
 - `raw_event_id`: observed raw kernel event ID linked to the canonical event
 - `event_type`: observed canonical event type
 - `pid`: process ID on the observed event, or `0` if unavailable
@@ -192,6 +230,48 @@ Fields:
 - `process_command`: redacted observed command context, or `null`
 - `process_executable`: observed executable path, or `null`
 - `command`: redacted declared command or tool payload summary, or `null`
+
+### `intent_correlation_candidate`
+
+Candidate records keep possible Inferred or Ambiguous Relations visible
+without marking a declaration as matched. Their fields are the same as
+`intent_correlation`, with these differences:
+
+- `record_type`: always `intent_correlation_candidate`
+- `match_basis`: `process_command_exact`, or `process_executable` for `exec`
+  events only
+- `relation_status`: `inferred` when one candidate remains, or `ambiguous`
+  when several remain
+- `candidate_count`: number of candidates under this basis for this event
+
+Legacy redacted command equality is considered before executable-name
+comparison. Every candidate is emitted; the first record is never chosen as a
+winner. Even one candidate does not satisfy an Exact Relation or suppress a
+`missing_intent`/`unobserved_intent` Finding. Current content-off observer
+records have no `process_command`, so command equality is primarily a legacy
+input path. Candidate matching is only attempted when no explicit identifier
+is unresolved, conflicting, or ambiguous.
+
+### `intent_correlation_diagnostic`
+
+These records expose failed explicit-identifier resolution:
+
+- `record_type`: always `intent_correlation_diagnostic`
+- `session_id`: capture-session identifier
+- `raw_event_id`: observed event reference
+- `intent_id`: observed marker, or `null`
+- `reason`: `unrecognized_intent_id`, `conflicting_identifiers`,
+  `ambiguous_intent_id`, `ambiguous_raw_event_id`, or
+  `semantic_only_runtime_event` when a runtime link points at a semantic-only
+  declaration
+
+A diagnostic does not turn an event into a match. The applicable accountability
+Finding is still emitted.
+
+Deduplication compares persisted metadata, not original command contents.
+Commands that differ only in discarded arguments cannot be distinguished if
+a producer reuses the same call identity. No raw-command fingerprint is added
+to bypass the content-off boundary.
 
 Example correlation:
 
@@ -208,6 +288,13 @@ Accountability findings generated by the intent correlation pass identify
 declared-versus-observed mismatches that require review. They are append-only
 records; consumers should treat `evidence_ref` as a reference to either a
 canonical event's `raw_event_id` or an `intent_id`.
+`semantic_only` declarations do not produce `unobserved_intent`: no local
+execution evidence was promised. `historical` and legacy declarations can
+still produce it. A missing relation describes an evidence gap, not proof of
+malice, failed execution, or an independently verified unauthorized action.
+Unmatched file mutations, network-connect attempts, and credential-path
+accesses produce `missing_intent`; ordinary file-open and exec events alone
+do not, to avoid treating routine process initialization as a Finding.
 
 Fields:
 
@@ -318,10 +405,10 @@ Use these fields for deterministic joins:
 - `intent.raw_event_id` is `null` at ingestion time and may later link declared
   intent to an observed raw kernel event when a correlation pass has enough
   evidence.
-- `event.intent_id`, when present, joins an observed exec to
-  `intent.intent_id` ahead of command and executable fallbacks.
+- `event.intent_id`, when present, must resolve uniquely to `intent.intent_id`
+  in the same capture session and agree with any explicit raw-event link.
 - `intent_correlation.raw_event_id` links a declared intent to the canonical
-  event and raw kernel event that proved the observed side effect.
+  event and raw kernel event that reported the observed attempt.
 - `accountability_finding.evidence_ref` links a mismatch finding to either an
   observed `raw_event_id` or an unmatched `intent_id`.
 - `policy_violation.observed_event_id` links a policy decision to the observed
@@ -332,10 +419,26 @@ Use these fields for deterministic joins:
 Process context is a separate enrichment model. Current observer producers keep
 an allowlisted `process_executable` basename reference and
 `process_started_at_unix_ms`, but set `process_command` to `null`. Intent
-correlation can still use the normalized executable reference; unmatched
+candidate matching can still use the normalized executable reference; unmatched
 `exec` records do not by themselves produce `missing_intent` findings, which
 remain reserved for observed file, network, credential, and similar side
-effects.
+effects. These weak candidates do not count as identifier matches.
+
+The live collector reads the complete marker header directly from the command
+argument of a recognized shell invocation. It does not scan arbitrary argv
+tokens or rely on the bounded diagnostic argv payload. Kernel process context
+is keyed by TGID and checked against thread-group leader start time, propagates at
+fork, survives same-process exec when complete capture establishes no new
+marker, and accepts a valid newer marker on exec. Missing pending capture,
+unreadable or malformed headers, and unresolved shell-command slots clear old
+attribution and report `intent_capture_incomplete:true`. In-scope events carry
+that context independently of userspace
+event ordering. Userspace does not restore a missing live marker from an old
+cached process context. Missing visibility remains unattributed.
+
+The updated kernel/userspace event ABI is 648 bytes; use an eBPF object and CLI
+built together. This is not a promise of compatibility with old release BPF
+objects. Optional JSONL fields preserve readability of historical timelines.
 
 ## Redaction And Truncation
 
@@ -351,6 +454,8 @@ Persistence-time redaction applies before JSONL output:
 - Bounded capture truncation is explicit through markers such as
   `argv_truncated:true`, `payload_truncated:true`, and
   `resource_truncated:true`.
+- Uncertain intent capture retains `intent_capture_incomplete:true`, clears
+  prior intent attribution on exec, and contributes to the truncation warning.
 
 ## Local Output Rotation
 
@@ -378,6 +483,10 @@ jq -c 'select(.record_type=="event" and .process_executable!=null) | {event_type
 jq -c 'select(.record_type=="intent") | {intent_source,intent_id,tool_name,declared_action,command,raw_event_id}' timeline.jsonl
 
 jq -c 'select(.record_type=="intent_correlation") | {intent_source,intent_id,match_basis,raw_event_id,event_type,pid,resource}' intent-correlation.jsonl
+
+jq -c 'select(.record_type=="intent_correlation_candidate") | {intent_id,match_basis,relation_status,candidate_count,raw_event_id}' intent-correlation.jsonl
+
+jq -c 'select(.record_type=="intent_correlation_diagnostic")' intent-correlation.jsonl
 
 jq -c 'select(.record_type=="accountability_finding") | {kind,decision,evidence_ref,reason}' intent-correlation.jsonl
 

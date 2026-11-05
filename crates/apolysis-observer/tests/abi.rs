@@ -2,15 +2,15 @@
 
 use apolysis_observer::abi::{
     KernelEventKind, KernelEventRecord, ACTION_LEN, COMM_LEN, FLAG_ARGV_TRUNCATED,
-    FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, KERNEL_EVENT_RECORD_LEN, PAYLOAD_LEN,
-    RESOURCE_LEN,
+    FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, INTENT_ID_LEN, KERNEL_EVENT_RECORD_LEN,
+    PAYLOAD_LEN, RESOURCE_LEN,
 };
 use apolysis_observer::raw_event_from_record;
 
 #[test]
 fn kernel_event_record_matches_the_c_abi_size() {
-    assert_eq!(std::mem::size_of::<KernelEventRecord>(), 600);
-    assert_eq!(KERNEL_EVENT_RECORD_LEN, 600);
+    assert_eq!(std::mem::size_of::<KernelEventRecord>(), 648);
+    assert_eq!(KERNEL_EVENT_RECORD_LEN, 648);
 }
 
 #[test]
@@ -33,10 +33,7 @@ fn kernel_event_record_decodes_native_endian_fields_and_fixed_buffers() {
         &mut bytes[40 + COMM_LEN + RESOURCE_LEN..40 + COMM_LEN + RESOURCE_LEN + ACTION_LEN],
         b"connect",
     );
-    write_fixed(
-        &mut bytes[KERNEL_EVENT_RECORD_LEN - PAYLOAD_LEN..],
-        b"family=inet",
-    );
+    write_fixed(&mut bytes[600 - PAYLOAD_LEN..600], b"family=inet");
 
     let record = KernelEventRecord::decode(&bytes).expect("decode record");
 
@@ -58,7 +55,7 @@ fn kernel_event_record_decodes_native_endian_fields_and_fixed_buffers() {
 fn kernel_event_record_rejects_short_ring_buffer_items() {
     let error = KernelEventRecord::decode(&[0_u8; 32]).expect_err("short record must fail");
 
-    assert!(error.contains("expected 600 bytes"));
+    assert!(error.contains("expected 648 bytes"));
     assert!(error.contains("received 32"));
 }
 
@@ -139,5 +136,83 @@ fn empty_record(kind: KernelEventKind) -> KernelEventRecord {
         resource: [0; RESOURCE_LEN],
         action: [0; ACTION_LEN],
         payload: [0; PAYLOAD_LEN],
+        process_start_time_ns: 0,
+        parent_start_time_ns: 0,
+        intent_id: [0; INTENT_ID_LEN],
     }
+}
+
+#[test]
+fn dedicated_token_is_complete_even_when_diagnostic_command_is_truncated() {
+    let mut record = empty_record(KernelEventKind::Exec);
+    record.flags = FLAG_ARGV_TRUNCATED | FLAG_PAYLOAD_TRUNCATED;
+    record
+        .intent_id
+        .copy_from_slice(b"0123456789abcdef0123456789abcdef");
+    record.process_start_time_ns = 1000;
+    record.parent_start_time_ns = 500;
+    write_fixed(
+        &mut record.payload,
+        b"argv:/bin/bash -c # APOLYSIS_INTENT_ID=0123456789",
+    );
+    let raw = raw_event_from_record(&record, "session", 1).expect("record");
+    assert_eq!(
+        raw.intent_id.as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
+    assert_eq!(raw.process_start_time_ns, Some(1000));
+    assert_eq!(raw.parent_start_time_ns, Some(500));
+}
+
+#[test]
+fn malformed_or_partial_dedicated_tokens_do_not_fall_back_to_argv() {
+    for token in [
+        b"0123456789ABCDEF0123456789ABCDEF".as_slice(),
+        b"0123456789abcdef",
+        b"",
+    ] {
+        let mut record = empty_record(KernelEventKind::Exec);
+        write_fixed(&mut record.intent_id, token);
+        write_fixed(
+            &mut record.payload,
+            b"argv:/bin/bash -c # APOLYSIS_INTENT_ID=0123456789abcdef0123456789abcdef\ntrue",
+        );
+        let raw = raw_event_from_record(&record, "session", 1).expect("record");
+        assert_eq!(raw.intent_id, None);
+        assert!(raw.process_start_time_ns.is_some());
+    }
+}
+
+#[test]
+fn record_decodes_process_generations_and_fixed_token() {
+    let mut bytes = vec![0_u8; KERNEL_EVENT_RECORD_LEN];
+    bytes[600..608].copy_from_slice(&1000_u64.to_ne_bytes());
+    bytes[608..616].copy_from_slice(&500_u64.to_ne_bytes());
+    bytes[616..648].copy_from_slice(b"0123456789abcdef0123456789abcdef");
+    let record = KernelEventRecord::decode(&bytes).expect("record");
+    assert_eq!(record.process_start_time_ns, 1000);
+    assert_eq!(record.parent_start_time_ns, 500);
+    assert_eq!(
+        record.intent_id().as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
+}
+
+#[test]
+fn uncertain_capture_drops_any_token_and_survives_content_off_persistence() {
+    let mut record = empty_record(KernelEventKind::Exec);
+    record.flags = apolysis_observer::abi::FLAG_INTENT_INCOMPLETE | FLAG_PAYLOAD_TRUNCATED;
+    record
+        .intent_id
+        .copy_from_slice(b"0123456789abcdef0123456789abcdef");
+    write_fixed(&mut record.payload, b"argv:/bin/bash -c synthetic-command");
+    let raw = raw_event_from_record(&record, "session", 1).expect("record");
+    assert_eq!(raw.intent_id, None);
+    let redactor = apolysis_observer::Redactor::new("session", "/workspace");
+    let persisted =
+        apolysis_observer::RuntimeEvidencePersistence::new(&redactor).persist_raw(&raw, false);
+    assert!(persisted
+        .raw_payload
+        .contains("intent_capture_incomplete:true"));
+    assert!(!persisted.raw_payload.contains("synthetic-command"));
 }

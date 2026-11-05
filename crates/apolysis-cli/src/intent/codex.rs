@@ -41,7 +41,14 @@ pub(crate) fn records(
             "tool_call",
             tool_call.tool_name.clone(),
         )
-        .with_declared_action(super::declared_action(&tool_call.tool_name));
+        .with_declared_action(super::declared_action(&tool_call.tool_name))
+        .with_observation_mode(
+            if super::declared_action(&tool_call.tool_name) == "shell.command" {
+                "historical"
+            } else {
+                "semantic_only"
+            },
+        );
 
         if let Some(source_event_id) = tool_call.source_event_id {
             record = record.with_source_event_id(source_event_id);

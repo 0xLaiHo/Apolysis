@@ -112,18 +112,23 @@ async fn intent_hook_command(args: Vec<String>) -> Result<i32, String> {
         .map_err(|error| format!("failed to read hook input: {error}"))?;
     let value = serde_json::from_slice::<serde_json::Value>(&input)
         .map_err(|error| format!("failed to parse hook input: {error}"))?;
-    let output = intent::hook(&request.harness, &value, &request.workspace_root)?;
-    let mut store = apolysis_store::AsyncJsonlStore::create(&request.output_path)
+    let output = intent::hook(
+        &request.harness,
+        &value,
+        &request.workspace_root,
+        request.session_id.as_deref(),
+    )?;
+    if let Some(diagnostic) = output.diagnostic {
+        eprintln!("apolysis: {diagnostic}");
+    }
+    if let Some(record) = output.record {
+        tokio::task::spawn_blocking(move || {
+            apolysis_store::append_intent(&request.output_path, &record)
+        })
         .await
-        .map_err(|error| format!("failed to create intent output: {error}"))?;
-    store
-        .append(&output.record)
-        .await
-        .map_err(|error| format!("failed to write intent record: {error}"))?;
-    store
-        .flush()
-        .await
-        .map_err(|error| format!("failed to flush intent output: {error}"))?;
+        .map_err(|_| "intent writer task failed".to_string())?
+        .map_err(|error| format!("failed to append intent record: {error}"))?;
+    }
     let response = serde_json::to_string(&output.response)
         .map_err(|error| format!("failed to serialize hook response: {error}"))?;
     println!("{response}");
@@ -281,6 +286,7 @@ struct IntentHookRequest {
     harness: String,
     output_path: String,
     workspace_root: PathBuf,
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -379,6 +385,7 @@ impl IntentHookRequest {
         let mut harness = None;
         let mut output_path = None;
         let mut workspace_root = None;
+        let mut session_id = None;
         let mut i = 2;
 
         while i < args.len() {
@@ -395,6 +402,14 @@ impl IntentHookRequest {
                     i += 1;
                     workspace_root = args.get(i).cloned();
                 }
+                options::SESSION => {
+                    i += 1;
+                    let value = args
+                        .get(i)
+                        .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                        .ok_or("--session requires a nonempty capture session")?;
+                    session_id = Some(value.clone());
+                }
                 unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
             }
             i += 1;
@@ -408,6 +423,7 @@ impl IntentHookRequest {
                 workspace_root
                     .ok_or_else(|| format!("missing {}\n{}", options::WORKSPACE_ROOT, usage()))?,
             ),
+            session_id,
         })
     }
 }
@@ -498,12 +514,16 @@ impl VerifyHashChainRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IntentForCorrelation {
+    declaration: serde_json::Value,
     session_id: String,
     intent_source: String,
     intent_id: String,
+    source_event_id: Option<String>,
     tool_name: String,
     command: Option<String>,
     raw_event_id: Option<String>,
+    harness_session_id: Option<String>,
+    observation_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -558,17 +578,26 @@ fn render_correlation_summary(
 ) -> String {
     use std::fmt::Write as _;
 
-    let event_by_id: std::collections::HashMap<&str, &ObservedEventForCorrelation> = events
+    let event_by_id: std::collections::HashMap<(&str, &str), &ObservedEventForCorrelation> = events
         .iter()
-        .map(|event| (event.raw_event_id.as_str(), event))
+        .map(|event| {
+            (
+                (event.session_id.as_str(), event.raw_event_id.as_str()),
+                event,
+            )
+        })
         .collect();
 
     let mut matched = Vec::new();
     let mut findings = Vec::new();
+    let mut candidates = Vec::new();
+    let mut diagnostics = Vec::new();
     for record in records {
         match string_field(record, "record_type") {
             Some("intent_correlation") => matched.push(record),
             Some("accountability_finding") => findings.push(record),
+            Some("intent_correlation_candidate") => candidates.push(record),
+            Some("intent_correlation_diagnostic") => diagnostics.push(record),
             _ => {}
         }
     }
@@ -585,9 +614,15 @@ fn render_correlation_summary(
     );
     let _ = writeln!(
         out,
-        "  {} side effect(s) matched declared intent, {} finding(s) with no declared intent",
+        "  {} observed event(s) linked by explicit identifier, {} finding(s)",
         matched.len(),
         findings.len()
+    );
+    let _ = writeln!(
+        out,
+        "  {} inferred/ambiguous candidate(s), {} correlation diagnostic(s)",
+        candidates.len(),
+        diagnostics.len()
     );
 
     for record in &matched {
@@ -607,7 +642,8 @@ fn render_correlation_summary(
         let decision = string_field(record, "decision").unwrap_or("review");
         let reason = string_field(record, "reason").unwrap_or("");
         let evidence_ref = string_field(record, "evidence_ref").unwrap_or("");
-        let event = event_by_id.get(evidence_ref).copied();
+        let session = string_field(record, "session_id").unwrap_or("");
+        let event = event_by_id.get(&(session, evidence_ref)).copied();
         let resource = event
             .map(|event| event.resource.as_str())
             .unwrap_or(evidence_ref);
@@ -622,10 +658,27 @@ fn render_correlation_summary(
         let _ = writeln!(out, "            {reason}  [{decision}]");
     }
 
+    for record in &candidates {
+        let _ = writeln!(
+            out,
+            "  ? candidate   {} [{}; {}]",
+            string_field(record, "resource").unwrap_or(""),
+            string_field(record, "match_basis").unwrap_or(""),
+            string_field(record, "relation_status").unwrap_or("")
+        );
+    }
+    for record in &diagnostics {
+        let _ = writeln!(
+            out,
+            "  ! correlation gap   {}",
+            string_field(record, "reason").unwrap_or("")
+        );
+    }
+
     if findings.is_empty() {
         let _ = writeln!(
             out,
-            "  no findings: every observed side effect matched a declared intent."
+            "  no accountability findings emitted; this does not establish complete coverage."
         );
     }
 
@@ -642,70 +695,118 @@ fn correlate_intents(
     let mut matched_intents = vec![false; intents.len()];
 
     for event in &events {
-        let matched = intents
+        let eligible: Vec<_> = intents
             .iter()
             .enumerate()
-            .find(|(_, intent)| {
-                intent.session_id == event.session_id
-                    && intent.raw_event_id.as_deref() == Some(event.raw_event_id.as_str())
+            .filter(|(_, intent)| intent.session_id == event.session_id)
+            .collect();
+        let by_raw: Vec<_> = eligible
+            .iter()
+            .copied()
+            .filter(|(_, intent)| {
+                intent.raw_event_id.as_deref() == Some(event.raw_event_id.as_str())
             })
-            .map(|(index, intent)| (index, intent, "raw_event_id"))
-            .or_else(|| {
-                event.intent_id.as_ref().and_then(|event_intent_id| {
-                    intents
-                        .iter()
-                        .enumerate()
-                        .find(|(_, intent)| {
-                            intent.session_id == event.session_id
-                                && intent.intent_id == *event_intent_id
-                        })
-                        .map(|(index, intent)| (index, intent, "intent_id"))
-                })
-            })
-            .or_else(|| {
-                event.process_command.as_ref().and_then(|command| {
-                    intents
-                        .iter()
-                        .enumerate()
-                        .find(|(_, intent)| {
-                            intent.session_id == event.session_id
-                                && intent.command.as_deref() == Some(command.as_str())
-                        })
-                        .map(|(index, intent)| (index, intent, "process_command_exact"))
-                })
-            })
-            .or_else(|| {
-                if event.event_type != "exec" {
-                    return None;
+            .collect();
+        let mut matched = None;
+        let mut gap = None;
+        if let Some(id) = &event.intent_id {
+            let by_id: Vec<_> = eligible
+                .iter()
+                .copied()
+                .filter(|(_, intent)| intent.intent_id == *id)
+                .collect();
+            match by_id.as_slice() {
+                [(index, intent)] if by_raw.is_empty() => {
+                    matched = Some((*index, *intent, "intent_id"));
                 }
-                intents
-                    .iter()
-                    .enumerate()
-                    .find(|(_, intent)| {
-                        intent.session_id == event.session_id
-                            && intent
-                                .command
-                                .as_deref()
-                                .and_then(command_executable)
-                                .map(|executable| {
-                                    executable_matches(
-                                        executable,
-                                        event.process_executable.as_deref(),
-                                    ) || executable_matches(executable, Some(&event.resource))
+                [(index, intent)] if by_raw.len() == 1 && by_raw[0].0 == *index => {
+                    matched = Some((*index, *intent, "raw_event_id"));
+                }
+                [] => gap = Some("unrecognized_intent_id"),
+                [_] => gap = Some("conflicting_identifiers"),
+                _ => gap = Some("ambiguous_intent_id"),
+            }
+        } else {
+            match by_raw.as_slice() {
+                [(index, intent)] => matched = Some((*index, *intent, "raw_event_id")),
+                [] => {
+                    let exact: Vec<_> = eligible
+                        .iter()
+                        .copied()
+                        .filter(|(_, intent)| {
+                            intent.observation_mode.as_deref() != Some("semantic_only")
+                                && event.process_command.as_deref().is_some_and(|command| {
+                                    intent.command.as_deref() == Some(command)
                                 })
-                                .unwrap_or(false)
-                    })
-                    .map(|(index, intent)| (index, intent, "process_executable"))
-            });
-
-        if let Some((index, intent, match_basis)) = matched {
+                        })
+                        .collect();
+                    let (candidates, basis) = if !exact.is_empty() {
+                        (exact, "process_command_exact")
+                    } else {
+                        (
+                            eligible
+                                .iter()
+                                .copied()
+                                .filter(|(_, intent)| {
+                                    intent.observation_mode.as_deref() != Some("semantic_only")
+                                        && event.event_type == "exec"
+                                        && intent
+                                            .command
+                                            .as_deref()
+                                            .and_then(command_executable)
+                                            .is_some_and(|executable| {
+                                                executable_matches(
+                                                    executable,
+                                                    event.process_executable.as_deref(),
+                                                ) || executable_matches(
+                                                    executable,
+                                                    Some(&event.resource),
+                                                )
+                                            })
+                                })
+                                .collect::<Vec<_>>(),
+                            "process_executable",
+                        )
+                    };
+                    for (_, intent) in &candidates {
+                        let mut candidate = intent_correlation_record(intent, event, basis);
+                        candidate["record_type"] = "intent_correlation_candidate".into();
+                        candidate["relation_status"] = if candidates.len() == 1 {
+                            "inferred"
+                        } else {
+                            "ambiguous"
+                        }
+                        .into();
+                        candidate["candidate_count"] = candidates.len().into();
+                        records.push(candidate);
+                    }
+                }
+                _ => gap = Some("ambiguous_raw_event_id"),
+            }
+        }
+        if matched.as_ref().is_some_and(|(_, intent, _)| {
+            intent.observation_mode.as_deref() == Some("semantic_only")
+        }) {
+            matched = None;
+            gap = Some("semantic_only_runtime_event");
+        }
+        if let Some(reason) = gap {
+            records.push(serde_json::json!({
+                "record_type": "intent_correlation_diagnostic",
+                "session_id": event.session_id,
+                "raw_event_id": event.raw_event_id,
+                "intent_id": event.intent_id,
+                "reason": reason,
+            }));
+        }
+        if let Some((index, intent, basis)) = matched {
             matched_intents[index] = true;
-            records.push(intent_correlation_record(intent, event, match_basis));
+            records.push(intent_correlation_record(intent, event, basis));
         } else if event.report_missing_intent {
             records.push(accountability_finding_record(
                 &event.session_id,
                 FindingKind::MissingIntent,
-                "observed side effect has no matching declared intent",
+                "observed attempt has no explicit identifier relation to a declared intent",
                 &event.raw_event_id,
                 &event.runtime,
             )?);
@@ -713,11 +814,11 @@ fn correlate_intents(
     }
 
     for (intent, matched) in intents.iter().zip(matched_intents) {
-        if !matched {
+        if !matched && intent.observation_mode.as_deref() != Some("semantic_only") {
             records.push(accountability_finding_record(
                 &intent.session_id,
                 FindingKind::UnobservedIntent,
-                "declared intent has no matching observed side effect",
+                "declared intent has no explicit identifier relation to an observed event",
                 &intent.intent_id,
                 &RuntimeForCorrelation::default(),
             )?);
@@ -728,20 +829,35 @@ fn correlate_intents(
 }
 
 fn parse_intent_records(input: &str) -> Result<Vec<IntentForCorrelation>, String> {
-    parse_jsonl(input, "intent input")?
+    let records: Vec<IntentForCorrelation> = parse_jsonl(input, "intent input")?
         .into_iter()
         .filter(|value| string_field(value, "record_type") == Some("intent"))
-        .map(|value| {
+        .map(|mut value| {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("timestamp_unix_ms");
+            }
             Ok(IntentForCorrelation {
+                declaration: value.clone(),
                 session_id: required_string_field(&value, "session_id")?.to_string(),
                 intent_source: required_string_field(&value, "intent_source")?.to_string(),
                 intent_id: required_string_field(&value, "intent_id")?.to_string(),
+                source_event_id: string_field(&value, "source_event_id").map(ToString::to_string),
                 tool_name: required_string_field(&value, "tool_name")?.to_string(),
                 command: string_field(&value, "command").map(ToString::to_string),
                 raw_event_id: string_field(&value, "raw_event_id").map(ToString::to_string),
+                harness_session_id: string_field(&value, "harness_session_id")
+                    .map(ToString::to_string),
+                observation_mode: string_field(&value, "observation_mode").map(ToString::to_string),
             })
         })
-        .collect()
+        .collect::<Result<_, String>>()?;
+    let mut unique = Vec::new();
+    for record in records {
+        if !unique.contains(&record) {
+            unique.push(record);
+        }
+    }
+    Ok(unique)
 }
 
 fn parse_observed_events(input: &str) -> Result<Vec<ObservedEventForCorrelation>, String> {
@@ -819,15 +935,16 @@ fn command_executable(command: &str) -> Option<&str> {
 /// while the kernel records the resolved executable path. Exact equality still
 /// wins first; otherwise the file names must match and be non-empty.
 fn executable_matches(declared: &str, observed: Option<&str>) -> bool {
-    let Some(observed) = observed else {
-        return false;
-    };
-    if declared == observed {
-        return true;
+    fn name(value: &str) -> Option<&str> {
+        let value = value.strip_prefix("executable_ref:").unwrap_or(value);
+        let basename = value.rsplit('/').next()?;
+        (!basename.is_empty() && !matches!(basename, "unknown" | "executable:unavailable"))
+            .then_some(basename)
     }
-    let declared_name = declared.rsplit('/').next().unwrap_or(declared);
-    let observed_name = observed.rsplit('/').next().unwrap_or(observed);
-    !declared_name.is_empty() && declared_name == observed_name
+    match (name(declared), observed.and_then(name)) {
+        (Some(declared), Some(observed)) => declared == observed,
+        _ => false,
+    }
 }
 
 /// Sum the observer's event-loss diagnostics in a timeline into
@@ -879,6 +996,7 @@ fn intent_correlation_record(
         "intent_id": intent.intent_id,
         "tool_name": intent.tool_name,
         "match_basis": match_basis,
+        "relation_status": "exact",
         "raw_event_id": event.raw_event_id,
         "event_type": event.event_type,
         "pid": event.pid,

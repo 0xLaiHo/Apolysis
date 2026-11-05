@@ -124,10 +124,10 @@ fn intent_correlate_links_commands_and_reports_mismatches() {
     let timeline = std::fs::read_to_string(&output).expect("read correlation output");
     assert_eq!(
         timeline
-            .matches(r#""record_type":"intent_correlation""#)
+            .matches(r#""record_type":"intent_correlation_candidate""#)
             .count(),
         1,
-        "one intent should be linked to observed host evidence:\n{timeline}"
+        "legacy command equality should produce only a candidate:\n{timeline}"
     );
     assert!(timeline.contains(r#""intent_id":"codex:call-1""#));
     assert!(
@@ -140,7 +140,7 @@ fn intent_correlate_links_commands_and_reports_mismatches() {
         timeline
             .matches(r#""record_type":"accountability_finding""#)
             .count(),
-        2,
+        3,
         "unmatched observed effects and unobserved intents should both be findings:\n{timeline}"
     );
     assert!(timeline.contains(r#""kind":"missing_intent""#));
@@ -159,7 +159,7 @@ fn intent_correlate_links_commands_and_reports_mismatches() {
         .filter(|record| record["record_type"] == "accountability_finding")
         .map(|record| serde_json::from_value(record).expect("finding matches shared v1 contract"))
         .collect();
-    assert_eq!(typed_findings.len(), 2);
+    assert_eq!(typed_findings.len(), 3);
     assert!(typed_findings
         .iter()
         .any(|finding| { finding.kind == apolysis_accountability::FindingKind::MissingIntent }));
@@ -267,10 +267,10 @@ fn intent_correlate_links_truncated_live_exec_by_executable_path() {
     let timeline = std::fs::read_to_string(&output).expect("read correlation output");
     assert_eq!(
         timeline
-            .matches(r#""record_type":"intent_correlation""#)
+            .matches(r#""record_type":"intent_correlation_candidate""#)
             .count(),
         1,
-        "truncated live exec should still be linked to its declared intent:\n{timeline}"
+        "executable equality should produce only an inferred candidate:\n{timeline}"
     );
     assert!(timeline.contains(r#""intent_id":"codex:call-live-script""#));
     assert!(timeline.contains(r#""match_basis":"process_executable""#));

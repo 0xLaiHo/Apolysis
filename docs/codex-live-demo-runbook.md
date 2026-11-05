@@ -1,5 +1,12 @@
 # Codex Live Demo Runbook
 
+Historical procedure: the executable-name matches described below use the old
+correlation behavior. Current writers report those as candidates, not Exact
+Relations. For a new marker-based run use [harness integration](harness-intent.md).
+A propagated Tool Call ID may also relate the workload's credential-path
+attempt; identifier relation alone cannot establish that it was unauthorized.
+The historical recording is not validation of the current marker implementation.
+
 This runbook turns the offline Codex mismatch fixture into a real P1 recording
 procedure. It is for the public launch demo: Codex declares one test workload,
 while Apolysis records host-side evidence and later reports a fake credential

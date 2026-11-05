@@ -164,7 +164,7 @@ pub(crate) fn hex_digest(value: &str) -> Result<Vec<u8>, GatewayFailure> {
         return Err(repository_failure());
     }
     let mut decoded = Vec::with_capacity(32);
-    for pair in value.as_bytes().chunks_exact(2) {
+    for pair in value.as_bytes().as_chunks::<2>().0 {
         let high = hex_nibble(pair[0]).ok_or_else(repository_failure)?;
         let low = hex_nibble(pair[1]).ok_or_else(repository_failure)?;
         decoded.push((high << 4) | low);

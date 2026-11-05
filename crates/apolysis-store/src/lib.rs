@@ -14,6 +14,9 @@ use tokio::fs as async_fs;
 use tokio::io::{AsyncWriteExt, BufWriter as AsyncBufWriter};
 
 mod hash_chain;
+mod intent;
+
+pub use intent::{append_intent, IntentAppendOutcome};
 
 pub use hash_chain::{
     ChainRecord, HashChainStore, HashChainVerificationReport, Recovery, StoreError, ZERO_HASH,

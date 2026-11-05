@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live quickstart test-quickstart \
+.PHONY: build test lint clean build-ebpf test-live test-live-harness-intent test-harness-hooks quickstart test-quickstart \
 	test-evidence-objects-real \
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
@@ -20,6 +20,10 @@ build: build-ebpf
 
 test:
 	cargo test --workspace
+	$(MAKE) test-harness-hooks
+
+test-harness-hooks:
+	node --test hooks/tests/intent-bridges.test.mjs
 
 lint:
 	cargo fmt --all -- --check
@@ -33,6 +37,11 @@ build-ebpf:
 
 test-live: build-ebpf
 	./scripts/test-live-observer.sh
+
+# Explicit opt-in; see the script for scoped probes, synthetic workload and cleanup.
+test-live-harness-intent:
+	cargo build -p apolysis-cli
+	./scripts/test-live-harness-intent.sh
 
 # Zero-privilege trial: run the intent/side-effect accountability flow on the
 # bundled Codex mismatch fixture (no root, no eBPF). See docs/quickstart.md.

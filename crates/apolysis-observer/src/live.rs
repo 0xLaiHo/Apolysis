@@ -17,7 +17,7 @@ use apolysis_policy::PolicyRuntimeCapabilities;
 use apolysis_store::JsonlRotationPolicy;
 use apolysis_store::JsonlStore;
 use aya::maps::{Array, HashMap, MapData, RingBuf};
-use aya::programs::TracePoint;
+use aya::programs::{RawTracePoint, TracePoint};
 use aya::{Ebpf, EbpfLoader, Pod};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -25,8 +25,8 @@ use tokio::io::unix::AsyncFd;
 use tokio::process::Child;
 
 use crate::abi::{
-    KernelEventKind, KernelEventRecord, FLAG_ARGV_TRUNCATED, FLAG_PAYLOAD_SOCKADDR,
-    FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
+    KernelEventKind, KernelEventRecord, FLAG_ARGV_TRUNCATED, FLAG_INTENT_INCOMPLETE,
+    FLAG_PAYLOAD_SOCKADDR, FLAG_PAYLOAD_TRUNCATED, FLAG_RESOURCE_TRUNCATED,
 };
 use crate::capabilities::validate_live_prerequisites;
 use crate::process_context::ProcessContextTable;
@@ -1521,6 +1521,18 @@ fn attach_tracepoints(ebpf: &mut Ebpf, plan: &AyaLoaderPlan) -> Result<(), Strin
         let program = ebpf
             .program_mut(&program_name)
             .ok_or_else(|| format!("missing BPF program: {program_name}"))?;
+        if attach.name == "sched_process_fork" {
+            let tracepoint: &mut RawTracePoint = program.try_into().map_err(|error| {
+                format!("invalid raw tracepoint program {program_name}: {error}")
+            })?;
+            tracepoint.load().map_err(|error| {
+                format!("BPF load or verifier failure for {program_name}: {error}")
+            })?;
+            tracepoint.attach(&attach.name).map_err(|error| {
+                format!("BPF raw tracepoint attach failure for {program_name}: {error}")
+            })?;
+            continue;
+        }
         let tracepoint: &mut TracePoint = program
             .try_into()
             .map_err(|error| format!("invalid tracepoint program {program_name}: {error}"))?;
@@ -1721,6 +1733,9 @@ pub fn raw_event_from_record(
     if record.flags & FLAG_PAYLOAD_TRUNCATED != 0 {
         markers.push("payload_truncated:true");
     }
+    if record.flags & FLAG_INTENT_INCOMPLETE != 0 {
+        markers.push("intent_capture_incomplete:true");
+    }
     if !markers.is_empty() {
         if !payload.is_empty() {
             markers.insert(0, payload.as_str());
@@ -1728,7 +1743,7 @@ pub fn raw_event_from_record(
         payload = markers.join(",");
     }
 
-    Ok(RawKernelEvent::new(
+    let mut raw = RawKernelEvent::new(
         timestamp_unix_ms,
         session_id,
         EventSource::KernelTracepoint,
@@ -1743,7 +1758,15 @@ pub fn raw_event_from_record(
         None,
         Some(record.cgroup_id.to_string()),
         payload,
-    ))
+    );
+    raw.intent_id = if record.flags & FLAG_INTENT_INCOMPLETE == 0 {
+        record.intent_id()
+    } else {
+        None
+    };
+    raw.process_start_time_ns = Some(record.process_start_time_ns);
+    raw.parent_start_time_ns = Some(record.parent_start_time_ns);
+    Ok(raw)
 }
 
 fn decode_sockaddr(bytes: &[u8]) -> Result<(String, &'static str), String> {

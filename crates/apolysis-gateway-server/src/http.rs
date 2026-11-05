@@ -171,11 +171,11 @@ async fn finish_run(State(state): State<GatewayHttpState>, request: Request) -> 
     let (context, request) =
         match authenticate_and_decode::<FinishRunRequest>(&state, request, operation).await {
             Ok(authenticated) => authenticated,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
 
     if let Err(response) = reach_pre_operation_qualification(&state, operation).await {
-        return response;
+        return *response;
     }
 
     match state.gateway.finish_run(&context, request).await {
@@ -189,11 +189,11 @@ async fn ingest(State(state): State<GatewayHttpState>, request: Request) -> Resp
     let (context, request) =
         match authenticate_and_decode::<IngestRequest>(&state, request, operation).await {
             Ok(authenticated) => authenticated,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
 
     if let Err(response) = reach_pre_operation_qualification(&state, operation).await {
-        return response;
+        return *response;
     }
 
     match state.gateway.ingest(&context, request).await {
@@ -207,11 +207,11 @@ async fn bind_runtime(State(state): State<GatewayHttpState>, request: Request) -
     let (context, request) =
         match authenticate_and_decode::<BindRuntimeRequest>(&state, request, operation).await {
             Ok(authenticated) => authenticated,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
 
     if let Err(response) = reach_pre_operation_qualification(&state, operation).await {
-        return response;
+        return *response;
     }
 
     match state.gateway.bind_runtime(&context, request).await {
@@ -225,11 +225,11 @@ async fn open_run(State(state): State<GatewayHttpState>, request: Request) -> Re
     let (context, request) =
         match authenticate_and_decode::<OpenRunRequest>(&state, request, operation).await {
             Ok(authenticated) => authenticated,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
 
     if let Err(response) = reach_pre_operation_qualification(&state, operation).await {
-        return response;
+        return *response;
     }
 
     match state.gateway.open_run(&context, request).await {
@@ -241,14 +241,14 @@ async fn open_run(State(state): State<GatewayHttpState>, request: Request) -> Re
 async fn reach_pre_operation_qualification(
     state: &GatewayHttpState,
     operation: GatewayRouteOperation,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     state
         .qualification_hook
         .before_operation(operation)
         .await
         .map_err(|error| {
             eprintln!("Gateway pre-operation qualification barrier failed: {error}");
-            internal_response()
+            Box::new(internal_response())
         })
 }
 
@@ -274,16 +274,16 @@ async fn authenticate_and_decode<T>(
     state: &GatewayHttpState,
     request: Request,
     operation: GatewayRouteOperation,
-) -> Result<(AuthenticatedSourceContext, T), Response>
+) -> Result<(AuthenticatedSourceContext, T), Box<Response>>
 where
     T: DeserializeOwned,
 {
     let (parts, body) = request.into_parts();
     let Some(peer_certificates) = parts.extensions.get::<PeerCertificates>() else {
-        return Err(unauthenticated_response());
+        return Err(Box::new(unauthenticated_response()));
     };
     let Some(leaf_certificate) = peer_certificates.leaf() else {
-        return Err(unauthenticated_response());
+        return Err(Box::new(unauthenticated_response()));
     };
 
     let now_unix_ms = state.clock.now_unix_ms();
@@ -297,39 +297,39 @@ where
         .await
     {
         Ok(context) => context,
-        Err(error) => return Err(authority_error(error)),
+        Err(error) => return Err(Box::new(authority_error(error))),
     };
 
     if !accepts_json(&parts.headers)
         || !has_json_content_type(&parts.headers)
         || contains_disallowed_headers(&parts.headers)
     {
-        return Err(contract_error(
+        return Err(Box::new(contract_error(
             StatusCode::BAD_REQUEST,
             ContractErrorCode::InvalidContract,
             "Request headers do not match the Gateway contract",
             false,
             None,
-        ));
+        )));
     }
 
     if content_length_exceeds_limit(&parts.headers) {
-        return Err(body_too_large_response());
+        return Err(Box::new(body_too_large_response()));
     }
     let request_bytes = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(bytes) => bytes,
-        Err(_) => return Err(body_too_large_response()),
+        Err(_) => return Err(Box::new(body_too_large_response())),
     };
     let request = match serde_json::from_slice::<T>(&request_bytes) {
         Ok(request) => request,
         Err(_) => {
-            return Err(contract_error(
+            return Err(Box::new(contract_error(
                 StatusCode::BAD_REQUEST,
                 ContractErrorCode::InvalidContract,
                 "Request does not match the Gateway contract",
                 false,
                 None,
-            ))
+            )))
         }
     };
     Ok((context, request))

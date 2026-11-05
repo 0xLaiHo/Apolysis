@@ -1,5 +1,11 @@
 # Apolysis: A Flight Recorder For AI Coding Agents
 
+Historical launch draft: examples below reflect the recorded pre-marker
+correlation behavior. Current command/executable-only relations are candidates,
+not Exact Relations. Marker-based attribution and action authorization are
+separate questions; see [harness integration](harness-intent.md). These assets
+do not qualify the current live marker implementation.
+
 AI coding agents are usually reviewed through the logs their harness chooses to
 keep: prompts, tool calls, terminal snippets, and final messages. Those logs
 are useful, but they are not independent evidence. The harness is inside the

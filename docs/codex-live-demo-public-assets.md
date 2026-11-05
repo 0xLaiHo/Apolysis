@@ -1,5 +1,11 @@
 # Codex Live Demo Public Assets
 
+These are historical recordings and excerpts, preserved with their original
+correlation semantics. Current writers report command/executable-only matches
+as candidates, not Exact Relations. The recordings do not validate current
+marker propagation; a shared Tool Call ID also does not prove authorization.
+See [harness integration](harness-intent.md) for the current boundary.
+
 This page is the curated public asset boundary for the P1 Codex live demo.
 The underlying local run was validated with the privileged live observer, but
 the raw `.apolysis/` evidence stays out of git.

@@ -1,8 +1,8 @@
 # Quickstart — try Apolysis in five minutes, no root
 
-This runs the whole intent-vs-side-effect accountability flow against a bundled,
-pre-captured sample — **no root, no eBPF, no special kernel**. It shows the one
-thing Apolysis exists to catch: an agent that did something it never declared.
+This compares declared Tool Calls with a bundled, pre-captured sample —
+**no root, no eBPF, no special kernel**. It shows evidence gaps without treating
+a missing relation as proof of an agent's motive or an operation's outcome.
 
 ## Run it
 
@@ -13,23 +13,24 @@ make quickstart
 
 ## What you'll see
 
-The sample is a Codex session that declared a single action — "run the project
-tests" — captured next to the host-side timeline of what actually happened:
+The sample contains a Codex declaration to run project tests, an ordinary
+file-open event, and a fake credential-path access event. It predates live
+intent markers and has no explicit raw-event link. Current correlation reports
+zero Exact Relations and two Findings:
 
-```text
-Apolysis accountability summary  (session: codex-mismatch-demo)
-  1 side effect(s) matched declared intent, 1 finding(s) with no declared intent
-  ✓ matched   crates/apolysis-cli/tests/intent.rs
-            declared as: cargo test -p apolysis-cli --test intent  [process_command_exact]
-  ⚠ missing_intent   credential_read /tmp/apolysis-demo-home/.aws/credentials
-            by: python3 scripts/read-demo-credential.py
-            observed side effect has no matching declared intent  [review]
-```
+- `missing_intent` for the credential-path attempt with no explicit relation.
+- `unobserved_intent` for the historical declaration with no explicit relation
+  to an observed event.
 
-The agent said it ran the tests (`✓ matched`). It **also** read
-`.aws/credentials` (`⚠ missing_intent`) — a side effect no declared intent
-covers. The harness's own tool-call log would not show that; the OS-level
-timeline does. That gap is the whole point.
+This does not mean the tests never ran or that a secret was successfully read.
+The fixture lacks the identifiers needed to establish those relationships.
+The ordinary file-open event does not itself produce `missing_intent`.
+
+Other historical inputs can produce `intent_correlation_candidate` records
+from legacy command equality or exec-only executable names. One candidate is
+`inferred`; several are `ambiguous`. Candidates do not count as exact matches
+or suppress Findings. This particular fixture has no such candidate after
+content-off ingestion. See the [JSONL schema](jsonl-schema-v1.md).
 
 ## What just happened
 
@@ -39,7 +40,7 @@ timeline does. That gap is the whole point.
 1. `apolysis intent ingest` — normalize the Codex tool-call log into intent
    records.
 2. `apolysis intent correlate --summary` — join declared intent against the
-   observed timeline, print the digest above, and write the full JSONL evidence
+   observed timeline, print the digest, and write the resulting JSONL records
    to `target/quickstart/correlation.jsonl`.
 
 Nothing here needs privileges, because the observed timeline is a **fixture**.
@@ -48,5 +49,8 @@ Nothing here needs privileges, because the observed timeline is a **fixture**.
 
 To record a real timeline from your own agent at the kernel level (Linux,
 root / `CAP_BPF`, a CO-RE eBPF object), see the "Audit A Local Agent Command"
-example in the [README](../README.md). The correlation step is identical — only
-the source of the timeline changes from a fixture to the live eBPF observer.
+example in the [README](../README.md). Install the matching
+[harness hook](harness-intent.md) and align its capture-session ID with the
+observer before expecting marker-based relations. Merely replacing a fixture
+with a live timeline does not supply missing Tool Call identity. Build the CLI
+and eBPF object together; inspect loss and truncation diagnostics separately.

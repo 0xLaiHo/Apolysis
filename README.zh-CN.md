@@ -7,8 +7,8 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 Apolysis 当前是面向 AI 智能体工作负载的实验性 Linux 运行时审计遥测与问责层。它记录
-有 scope 的主机观测和 syscall 尝试子集，并把进程、文件、网络、凭证、运行时、策略和
-声明意图记录做启发式关联，形成有序审计时间线。
+有 scope 的主机观测和 syscall 尝试子集，并将进程、文件、网络、凭证、运行时、策略和
+Tool Call 声明记录关联为有序审计时间线。明确标识符关系与启发式候选保持分离。
 
 项目正在演进为 Agent 运行时证据与策略平面，把本地、CI、厂商托管、container 和
 Kubernetes Agent 环境中的 hook、SDK、OTLP、MCP、A2A、provider outcome 与可选 eBPF
@@ -117,12 +117,19 @@ argv 或重建后的 process-command content。不要在 `run` 或 argv 中放�
 command 不会写入 JSONL 或 daemon hash-chain record。只有把该源码发布为不可变 bundle，
 上述 Action 例外才会结束。后续加入 capture-off control 前，内核侧捕获仍只是瞬时实现细节。
 
+Harness 意图适配切片为 Codex、Claude Code、Cursor、Pi 和 OpenCode 提供默认不保留
+内容的声明记录，支持追加与去重、分离原生会话和采集会话，以及安全的 shell 注释标记。
+观测器跨 fork/exec 传递有界标记，关联判定显式保留标识符冲突和启发式候选。
+实时内核与产品版本资格验证仍是独立门禁。范围与限制见[设计](docs/design.zh-CN.md)、
+[路线图](docs/roadmap.zh-CN.md)和[Harness 接入](docs/harness-intent.zh-CN.md)。
+
 ## 核心能力
 
 - 通过离线数据和实时 eBPF 观测采集进程、文件、网络和凭证路径事件；持久化的 exec
   metadata 默认 content-off，并显式说明 attempt/outcome 局限。
 - 由 Apolysis 托管启动本地智能体命令，并为 Codex 等命令行智能体追踪进程树。
-- 摄入智能体声明的工具调用意图，并与主机侧观测事件做启发式关联。
+- 摄入 Tool Call 声明，通过明确标识符关联主机侧观测事件，并单独报告较弱的命令或
+  可执行文件候选。
 - 关联本地进程、Docker/containerd 和 Kubernetes 工作负载的运行时元数据。
 - 提供有序 JSONL timeline、输出轮转、daemon 本地哈希链校验、策略发现和发布验证关卡。
 
@@ -267,19 +274,22 @@ sudo -E ./target/debug/apolysis observe \
 
 ```jsonl
 {"record_type":"intent","intent_source":"codex","declared_action":"shell.command"}
-{"record_type":"intent_correlation","match_basis":"process_executable"}
+{"record_type":"intent_correlation_candidate","match_basis":"process_executable","relation_status":"inferred"}
 {"record_type":"accountability_finding","kind":"missing_intent","decision":"review"}
 ```
 
 生成的时间线、Codex 日志和报告应放在 `.apolysis/` 或 `target/` 下。不要提交
 捕获到的工作负载数据或凭证。
+历史可执行文件候选不建立 Exact Relation，也不会使原本未匹配的声明变成已匹配。
 
 ## 关键文档
 
+- [设计](docs/design.zh-CN.md)
+- [路线图](docs/roadmap.zh-CN.md)
 - [Quickstart](docs/quickstart.md)
 - [GitHub Action](docs/github-action.md)
 - [JSONL 模式](docs/jsonl-schema-v1.md)
-- [Harness 意图](docs/harness-intent.md)
+- [Harness 意图](docs/harness-intent.zh-CN.md)
 - [威胁模型](docs/threat-model.md)
 - [哈希链校验](docs/hash-chain-verification.md)
 - [时间线外运](docs/timeline-shipping.md)

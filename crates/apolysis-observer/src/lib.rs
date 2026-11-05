@@ -525,7 +525,7 @@ fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEven
     let cgroup_id = fields.optional("cgroup_id").map(ToString::to_string);
     let raw_payload = fields.optional("payload").unwrap_or_default();
 
-    Ok(RawKernelEvent::new(
+    let mut raw = RawKernelEvent::new(
         timestamp,
         session_id,
         EventSource::KernelTracepoint,
@@ -540,7 +540,25 @@ fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEven
         container_id,
         cgroup_id,
         raw_payload,
-    ))
+    );
+    raw.intent_id = fields.optional("intent_id").map(ToString::to_string);
+    raw.process_start_time_ns = fields
+        .optional("process_start_time_ns")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| "invalid process_start_time_ns".to_string())
+        })
+        .transpose()?;
+    raw.parent_start_time_ns = fields
+        .optional("parent_start_time_ns")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| "invalid parent_start_time_ns".to_string())
+        })
+        .transpose()?;
+    Ok(raw)
 }
 
 fn required_raw<'a>(fields: &'a PipeFields, key: &str) -> Result<&'a str, String> {
