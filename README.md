@@ -1,353 +1,182 @@
 # Apolysis
 
-[![Release Validation](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml/badge.svg)](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml)
-[![Latest Release](https://img.shields.io/github/v/release/0xLaiHo/Apolysis?sort=semver)](https://github.com/0xLaiHo/Apolysis/releases)
-[![License](https://img.shields.io/github/license/0xLaiHo/Apolysis)](LICENSE)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Architecture](docs/design.md)
 
-[English](README.md) | [Simplified Chinese](README.zh-CN.md)
+Apolysis is an experimental Linux audit and evidence system for AI agents. It
+collects tool declarations and scoped operating-system observations separately,
+then relates them through explicit identifiers. The resulting report shows
+what the agent declared, which process/file/network attempts were observed,
+and where evidence is missing.
 
-Apolysis is currently an experimental Linux runtime audit-telemetry and
-accountability layer for AI agent workloads. It records a scoped subset of host
-observations and syscall attempts, then relates process, file, network,
-credential, runtime, policy, and declared Tool Call records in an ordered audit
-timeline. Explicit identifier relations and heuristic candidates remain distinct.
+The local entry opens the agent's original application. Apolysis supplies
+temporary hooks and a separate eBPF collector; the agent keeps its own interface,
+tools, configuration and permission prompts. This observation path does not
+provide isolation or prove that a task succeeded.
 
-The project is evolving toward an Agent Runtime Evidence & Policy Plane that
-joins hook, SDK, OTLP, MCP, A2A, provider-outcome, and optional eBPF runtime
-evidence across local, CI, vendor-hosted, container, and Kubernetes agent
-environments. It is not a general agent orchestrator, sandbox, MCP gateway, or
-SIEM.
+## Current capabilities
 
-![Apolysis live eBPF audit: the agent's declared workload is matched and an undeclared credential-path access attempt is flagged as missing_intent — recorded from a real observe run; the credential path is redacted in the timeline](docs/assets/codex-live-demo/live-ebpf-demo.gif)
+- Native launch adapters for Codex, Claude Code, Cursor Agent, Pi and OpenCode,
+  with product-specific hook loading and native argument passthrough.
+- Process-tree or cgroup-scoped observation, runtime/container metadata,
+  policy findings, and explicit loss and truncation reporting.
+- Tool declarations and optional declared reasons, linked to execution through
+  `intent_id`. Identifier-based relations remain separate from inferred matches.
+- Local JSONL evidence and call-oriented HTML, Markdown and JSON reports.
+- Separate server foundations: versioned execution-record contracts, an
+  authenticated Gateway, PostgreSQL persistence, encrypted evidence-object
+  writes and lifecycle projections. They are not an integrated production
+  service or a delivered web console.
 
-Demo assets: [live asciinema cast](docs/assets/codex-live-demo/live-ebpf-demo.cast),
-[zero-privilege quickstart cast](docs/assets/codex-live-demo/codex-live-demo.cast),
-and [public evidence excerpt](docs/codex-live-demo-public-assets.md).
+See the [architecture](docs/design.md) for module boundaries, record semantics,
+privacy rules and the limits of each subsystem.
 
-## Try It In Five Minutes (no root)
+## Try the fixture without root
+
+With Rust/Cargo and a native build toolchain installed, run from the checkout:
 
 ```bash
-make build && make quickstart
+cargo build -p apolysis-cli
+make quickstart
 ```
 
-This runs the intent-vs-observation accountability flow on a bundled fixture —
-no root, no eBPF — and prints where declared intent and the fixture's observed
-OS events diverge. See [Quickstart](docs/quickstart.md).
+This uses checked-in declarations and observed-event fixtures. It requires no
+provider, sudo or live eBPF, and writes its results to `target/quickstart/`.
+It demonstrates correlation; it does not observe an actual agent.
 
-## Audit An Agent In CI (GitHub Action)
+## Observe a native agent
 
-```yaml
-# Post-merge evaluation shape only; the current pre-release ref is still legacy.
-- uses: 0xLaiHo/Apolysis@pre-release
-  with:
-    run: 'codex exec --json "run the project tests"'
-    session: agent-task
+Live observation requires Linux with kernel BTF, the required tracepoints and
+BPF ring-buffer support. The provided live gates also require cgroup v2.
+Building the BPF objects requires Clang/LLVM, `bpftool` and libbpf headers.
+Install the selected agent in `PATH`, configure its normal authentication, and
+have sudo access for the collector.
+
+Build the CLI and matching BPF objects as your ordinary user:
+
+```bash
+APOLYSIS_REQUIRE_BPF=1 make build
 ```
 
-Do not use that ref until the open hardening Pull Request is reviewed and
-merged. Production use must pin the later immutable hardened release commit.
+The environment variable makes missing BPF prerequisites a build failure
+instead of an optional skip. Then select an application explicitly:
 
-One step records session-scoped kernel observations and syscall attempts for the
-command, prints a digest into the job summary, and uploads the JSONL timeline as
-an artifact. See [GitHub Action](docs/github-action.md).
-
-## Current Status
-
-`v0.3.0` is the latest public research release with a prebuilt Linux CLI,
-bundled CO-RE eBPF object, release manifest, checksum, and AWS KMS-backed
-release-artifact signing evidence. It fixes an observer race that could drop
-all events for fast commands, adds a correlation summary, and warns when events
-are dropped or truncated.
-
-Apolysis is still experimental audit telemetry: current file and network
-tracepoints describe syscall attempts unless an outcome is available; CLI
-timelines are ordinary JSONL, while daemon mode can use a local hash-chain
-envelope. Neither is an independently anchored forensic record.
-
-The 26-week production-MVP direction starts with a versioned Agent Execution
-Record, an authenticated Execution Evidence Gateway, durable storage, and
-Minimum Console v0 for run inventory, separate coverage, timeline, source
-health and findings. Later source integrations culminate in Investigation
-Console v1 with Agent Run Graph, cross-run search, and bounded workflow action
-before a controlled partner pilot. Every run will expose semantic, execution,
-and outcome coverage separately.
-
-W1–W2 now has an independent `apolysis-contracts` boundary, versioned record,
-Gateway, coverage, and Query/Console wire types, compatibility fixtures, and
-normative contract documents. The current `pre-release` implementation builds
-on that input with an authenticated application core, a non-durable in-memory
-reference adapter, an initial migration-managed PostgreSQL write adapter for
-the four canonical Gateway operations, and a direct-mTLS full-lifecycle
-transport tracer backed by current PostgreSQL credential authority. These
-prototypes exercise
-server-side grant/policy joins, RFC 8785 golden digest vectors, atomic
-record-append/outbox semantics, encrypted exact-operation replay, one-update
-sequence-range allocation for novel ingest batches, and a bounded finishing
-lifecycle.
-
-A focused durable lifecycle projection foundation adds organization-qualified
-generations, strict Gateway-ingest-order projection, exact durable watermarks,
-active outbox publication, and from-zero rebuild with atomic cutover. Its read
-surface is a lifecycle-only internal model with a bounded membership cursor,
-not a public Query or Console contract.
-
-Active W3 delivery also includes an authorized encrypted evidence-object write
-lifecycle with bounded admission, retention, deletion propagation, and cleanup.
-These slices are not production-ready and do not complete W3–W6. A separate real
-PostgreSQL recovery gate now covers graceful database restart, PostgreSQL
-SIGKILL/WAL recovery, and Gateway application-process death before commit,
-after commit, and during replay while preserving rollback or exact convergence
-before a dedicated client acknowledgement is emitted. This qualifies a
-repository/application-process seam, not recovery of the HTTPS Gateway server.
-A sibling real direct-mTLS HTTPS recovery gate now covers post-commit/pre-ack
-Gateway-server death and exact replay convergence for all four lifecycle routes.
-An additional bounded two-process mTLS gate now qualifies coordinated
-writer/lifecycle races across run creation, one-use join, exact runtime binding,
-event deduplication and cross-run organization sequencing, finalization, and terminal
-irreversibility. A sibling bounded two-scenario gate now covers exact-replay
-versus novel-ingest races at a finalization deadline and at last-lease expiry;
-it does not claim the complete mixed lifecycle/retry matrix. The broader
-process-death and network pre-commit matrices, remaining mixed lifecycle/retry
-cases, load, replication, failover, backup/restore, and high availability
-remain unqualified, as do production KMS integration, database
-row-level-security deployment,
-atomic authority revalidation with ledger commit, lease/credential rotation,
-an authorized object-read resolver, evidence-object projection/read views,
-continuous background reaper operation, and capacity-qualified resource
-limits. The projection does not provide public
-Query authorization, cursor/SSE, Console, coverage, findings, source health, or
-evidence-object lifecycle views; its RLS GUC is defense in depth, not
-authorization. JWT/workload-identity transport profiles, production admission,
-and broader transport load and race qualification also remain open.
-The external exit gate remains open until three qualified
-design partners approve their deployment and data boundaries. The protected
-pre-release line now contains an Action candidate that pins
-its privileged release bundle, rejects caller-selected executable/BPF/output paths, root-seals
-the evidence artifact, and removes security-critical workflow outputs. This is
-not yet an immutable public release: the v0.3.0 Action wrapper retains its legacy
-interface. Even after publication, use a sandbox—not this audit wrapper—when a
-workload may deliberately modify same-UID runner state. The candidate applies
-Linux `no_new_privs` and proves direct sudo is rejected, but it is not a process
-or CI control-plane isolation boundary. It stages the top-level `run` text out
-of observer launch metadata, but its pinned v0.3.0 executable predates the
-content-off persistence seam and may retain child-process argv or reconstructed
-process-command content. Do not put secrets in `run` or argv; immutable
-publication requires a post-content-off bundle and remains a release no-go
-until one exists.
-
-Production implementation now proceeds through the protected `pre-release`
-branch. In current source builds, its first privacy gate makes every local
-observer persistence path content-off by default: exec argv and reconstructed
-process commands are not written to JSONL or daemon hash-chain records. The
-Action exception above ends only when that source is published as an immutable
-bundle. Kernel-side capture is still a transient implementation detail until
-the later capture-off control is added.
-
-The harness-intent adapter slice adds content-off declarations for Codex,
-Claude Code, Cursor, Pi, and OpenCode, with append/deduplication, separate
-native and capture session identities, and safe shell-comment markers. The
-optional shell bridge gives wrapped product backends an explicit inner-shell
-boundary; its shell-state limits require deliberate opt-in. The
-observer carries bounded markers across fork and exec, and correlation keeps
-identifier conflicts and heuristic candidates explicit. A separate
-declared-reason record can add a purpose code to the same Tool Call; free-text
-summaries require explicit opt-in, and a declared purpose is not a verified
-motive. A bounded synthetic
-marker gate and the general observer regression passed on one local Linux
-kernel. Bounded native runs with the explicit shell bridge passed for Claude
-Code, Pi, and OpenCode in the earlier script gate. The native entry now has
-bounded Claude, Pi, Codex and OpenCode passes under the documented test
-configurations; Cursor still requires usable authentication. A separate controlled Claude test
-linked a model-written, explicitly opted-in reason summary to an actual login
-regression file attempt; this is not a default native reason capability. Broader
-product-version, multi-kernel, and stress qualification remains open.
-The Rust [`apolysis observe --agent <product>`](docs/native-observe.md) entry opens
-the selected native application, forwards its arguments after `--`, and publishes
-local JSON, Markdown and HTML evidence reports after exit. It keeps application
-UI, tools and permission interaction native. The older
-[`apolysis chat`](docs/reason-chat.md) command remains a separate, Claude-only
-controlled-protocol experiment; it is not the native application interface.
-See [live validation](docs/harness-intent-live-validation.md),
-[design](docs/design.md), [roadmap](docs/roadmap.md), and
-[harness integration](docs/harness-intent.md) for scope and limits.
-
-## Core Capabilities
-
-- Live and fixture observation for process, file, network, and credential-path
-  events, with content-off persisted exec metadata and explicit
-  attempt/outcome limitations.
-- Managed local agent launch with process-tree attribution for Codex and other
-  command-line agents.
-- Tool Call ingestion and explicit identifier relations to observed host-side
-  events, with weaker command/executable candidates reported separately.
-- Runtime metadata correlation for local processes, Docker/containerd, and
-  Kubernetes workloads.
-- Ordered JSONL timelines, output rotation, daemon-local hash-chain
-  verification, policy findings, and release-validation gates.
-
-## Current Architecture
-
-```text
-Agent / tool runner
-  └─ declared intent logs
-
-Apolysis observer
-  ├─ live eBPF events
-  ├─ process tree attribution
-  ├─ runtime metadata
-  └─ policy evaluation
-
-Apolysis correlation
-  ├─ intent records
-  ├─ observed host events
-  └─ accountability findings
-
-Recorded timeline
-  ├─ JSONL timeline
-  ├─ rotated local files
-  └─ optional hash-chain verification
+```bash
+target/debug/apolysis observe --agent claude
+target/debug/apolysis observe --agent codex
+target/debug/apolysis observe --agent pi
+target/debug/apolysis observe --agent opencode
+target/debug/apolysis observe --agent cursor
 ```
 
-The design keeps three boundaries separate:
+Run these commands without a leading `sudo`. Only the collector requests
+elevation; the application runs as you. There is no default agent. Cursor uses
+the installed `cursor-agent` executable; the other names select their matching
+executables.
 
-- Intent: what the harness or tool runner declared.
-- Isolation: what the runtime allowed the workload to reach.
-- Evidence: what the host and runtime actually observed.
+Put Apolysis options before `--` and the application's original arguments after
+it. Argument boundaries and ordering are preserved:
 
-Core crates:
+```bash
+target/debug/apolysis observe --agent pi -- --provider deepseek --model deepseek-flash
+target/debug/apolysis observe --agent claude -- --help
+```
 
-- `apolysis-cli`: command-line entry point.
-- `apolysis-observer`: fixture and live observer backends.
-- `apolysis-core`: shared JSONL records and schema types.
-- `apolysis-contracts`: versioned production record, Gateway, and Query wire contracts.
-- `apolysis-gateway`: authenticated Gateway application core and in-memory
-  conformance adapter.
-- `apolysis-gateway-postgres`: initial PostgreSQL Gateway write adapter with
-  migration-managed ledger/outbox storage and encrypted replay records.
-- `apolysis-evidence-objects`: authorized encrypted evidence-object write
-  lifecycle with bounded admission, retention, deletion, and provider cleanup.
-- `apolysis-gateway-server`: direct-mTLS full-lifecycle Gateway tracer, current
-  PostgreSQL source authority, and bounded authority-administration tools.
-- `apolysis-projection-postgres`: generation-scoped PostgreSQL lifecycle
-  projector with durable checkpoints, rebuild/cutover, and an internal bounded
-  read model.
-- `apolysis-runtime`: local, Docker, and runtime metadata adapters.
-- `apolysis-policy`: policy parser and decision logic.
-- `apolysis-store`: append-only JSONL and hash-chain storage.
-- `apolysis-daemon`: node-local service for longer-running deployments.
+Model availability, resume options and subcommands remain application-specific.
+Standalone native help/version queries bypass collection and elevation. Native
+stdout remains suitable for piping; Apolysis status messages use stderr.
 
-## Build And Test
+| Apolysis option | Purpose |
+| --- | --- |
+| `--workspace <directory>` | Initial working directory; defaults to the current directory. |
+| `--output-dir <parent>` | Parent for a new private capture directory. |
+| `--bpf-object <path>` | Select the matching observer object explicitly. |
+| `--policy <path>` | Apply an audit policy. |
+| `--allow-reason-summary` | Opt in to bounded, filtered declared text. |
+| `--shell-bridge /bin/bash` | Opt in to an inner shell for supported shell-tool attribution. |
+
+The default shell marker may be hidden by an application's later `eval`
+wrapping. The optional shell bridge exposes that marker at a supported exec
+boundary, but introduces an inner shell: its cwd, variables and functions do
+not propagate back to the outer tool shell. Recognized options that disable
+hooks or move execution to remote, detached or shared-server processes are
+rejected because this collector cannot cover them.
+
+## Read the result
+
+Exit through the application's normal mechanism. Apolysis completes correlation
+and prints the report path. Captures default to
+`$XDG_STATE_HOME/apolysis/captures`, or `$HOME/.local/state/apolysis/captures`
+when XDG state is unset or not absolute. Each invocation gets a separate
+private directory containing `evidence/`:
+
+| File | Contents |
+| --- | --- |
+| `report.html` / `report.md` | Readable tool calls, reasons, related attempts and coverage gaps. |
+| `result.json` | Application exit, capture health and structured report totals. |
+| `intent.jsonl` / `intent.jsonl.reasons.jsonl` | Tool declarations and their optional declared reasons. |
+| `timeline.jsonl` | Observed events, runtime metadata and diagnostics. |
+| `correlation.jsonl` | Exact relations, weaker candidates, reason bindings and findings. |
+
+An exact relation establishes an identifier link within the stated trust
+boundary. It does not prove motive, authorization or outcome. File and network
+events describe attempts; application exit zero does not establish task success.
+Search, file-read and remote tools may have only semantic evidence. Missing
+reasons remain unknown, and lost events remain visible as incomplete capture.
+
+Native collection leaves full prompts, tool results and exec argument lists out
+of exported evidence. Free-text reason summaries require explicit opt-in;
+retained paths and declared text still need to be treated as private data.
+
+## Validation and limits
+
+Bounded real-provider/eBPF runs have passed for Claude Code, Codex, Pi and
+OpenCode using the explicit shell bridge. Codex's noninteractive test also
+explicitly selected workspace-write and hook-trust bypass; the daily launcher
+does not add those options. Cursor's adapter and parameter path exist, but its
+real tool-call validation remains blocked by unusable authentication. These
+results do not qualify every version, default shell wrapping or sustained load.
+
+The opt-in gate checks actual file contents, declaration-to-kernel attribution,
+capture health, report generation and privacy assertions:
+
+```bash
+scripts/test-live-native-observe.sh --agent claude --require-all
+```
+
+It makes real provider requests, starts a privileged collector and uses the
+application's noninteractive mode. It keeps generated evidence under `target/`.
+Other native options can be supplied after `--`; `--require-all` treats missing
+prerequisites as failures. Full kernel-event coverage, remote execution and
+hostile-agent or tamper-resistant evidence guarantees remain outside this path.
+
+## Develop
 
 ```bash
 make build
 make test
 make lint
+git diff --check
 ```
 
-Build only the CO-RE eBPF object:
+`make test` runs Rust regressions plus hook and adapter tests; Node.js and Python
+are used by test tooling. The native observation controller itself is Rust and
+does not depend on Python. Live BPF, provider, database and Kubernetes gates are
+explicit opt-ins. `make clean` removes Cargo build artifacts.
 
-```bash
-make build-ebpf
-```
+The source is organized into local collection/correlation crates, separate
+Gateway/storage/projection crates, `ebpf/` programs, `hooks/` adapters, `schemas/`
+contracts and `scripts/` validation runners. The [architecture](docs/design.md)
+maps these components and distinguishes implemented foundations from open work.
 
-Run the capability-aware live observer smoke test on a prepared Linux host:
+Start focused branches from updated `pre-release`, and submit Pull Requests
+back to `pre-release` with verification, privilege assumptions, privacy checks
+and cleanup notes. Require CI and review before integration; promote to `main`
+through a separate release PR. Work is tracked through Pull Requests.
 
-```bash
-make test-live
-```
+Do not commit credentials, private captures or provider transcripts. Report
+security issues through GitHub private vulnerability reporting when available,
+with the affected revision and a redacted reproduction. Apolysis's retention
+rules do not change an agent application's own conversation history.
 
-## Example: Audit A Local Agent Command
-
-Input:
-
-- Built binary: `target/debug/apolysis`
-- Built BPF object: `target/ebpf/apolysis_observer.bpf.o`
-- Policy file: `policies/local-dev.yaml`
-- Agent command: `codex exec --json "run the project tests"`
-
-Command:
-
-```bash
-sudo -E ./target/debug/apolysis observe \
-  --backend live \
-  --session codex-local-audit \
-  --policy policies/local-dev.yaml \
-  --output .apolysis/codex-live/timeline.agent-run.jsonl \
-  --bpf-object target/ebpf/apolysis_observer.bpf.o \
-  --workspace-root "$PWD" \
-  --agent-kind codex \
-  --agent-run -- codex exec --json "run the project tests"
-```
-
-Key parameters:
-
-- `--backend live`: use the live eBPF observer.
-- `--session`: stable session id written into every record.
-- `--policy`: policy file used for review and notification findings.
-- `--output`: JSONL timeline path.
-- `--bpf-object`: CO-RE observer object loaded by the live backend.
-- `--workspace-root`: workspace boundary used for path handling.
-- `--agent-kind`: agent adapter hint, for example `codex`.
-- `--agent-run -- <command>`: let Apolysis start the agent and own the root
-  process tree instead of asking the operator to find a PID manually.
-
-Output:
-
-```jsonl
-{"record_type":"event","event_type":"exec","resource":"codex"}
-{"record_type":"event","event_type":"file_open","resource":"path_token:..."}
-{"record_type":"policy_violation","rule_id":"credentials.deny_read","decision":"notify"}
-```
-
-## Example: Correlate Declared Intent
-
-Input:
-
-- Codex response-item log: `.apolysis/codex-live/codex-response-items.jsonl`
-- Observed timeline: `.apolysis/codex-live/timeline.agent-run.jsonl`
-- Session id: `codex-local-audit`
-
-Commands:
-
-```bash
-./target/debug/apolysis intent ingest \
-  --adapter codex-jsonl \
-  --input .apolysis/codex-live/codex-response-items.jsonl \
-  --session codex-local-audit \
-  --output .apolysis/codex-live/intent.codex.jsonl \
-  --workspace-root "$PWD"
-
-./target/debug/apolysis intent correlate \
-  --intent-input .apolysis/codex-live/intent.codex.jsonl \
-  --timeline-input .apolysis/codex-live/timeline.agent-run.jsonl \
-  --output .apolysis/codex-live/intent-correlation.jsonl
-```
-
-Output:
-
-```jsonl
-{"record_type":"intent","intent_source":"codex","declared_action":"shell.command"}
-{"record_type":"intent_correlation_candidate","match_basis":"process_executable","relation_status":"inferred"}
-{"record_type":"accountability_finding","kind":"missing_intent","decision":"review"}
-```
-
-Keep generated timelines, Codex logs, and reports under `.apolysis/` or
-`target/`. Do not commit captured workload data or credentials.
-Historical executable candidates do not establish an Exact Relation or satisfy
-an otherwise unmatched declaration.
-
-## Key Documents
-
-- [Design](docs/design.md)
-- [Roadmap](docs/roadmap.md)
-- [Quickstart](docs/quickstart.md)
-- [GitHub Action](docs/github-action.md)
-- [JSONL schema](docs/jsonl-schema-v1.md)
-- [Harness intent](docs/harness-intent.md)
-- [Threat model](docs/threat-model.md)
-- [Hash-chain verification](docs/hash-chain-verification.md)
-- [Timeline shipping](docs/timeline-shipping.md)
-- [Codex live demo runbook](docs/codex-live-demo-runbook.md)
-- [Codex live demo launch blog draft](docs/codex-live-demo-launch-blog.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security](SECURITY.md)
+User-space code is licensed under [Apache-2.0](LICENSE); eBPF programs are
+[GPL-2.0-only](LICENSES/GPL-2.0-only.txt).

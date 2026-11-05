@@ -57,7 +57,8 @@ install -m 0755 "$release_binary" "$stage/bin/apolysis"
 install -m 0644 "$release_bpf_object" "$stage/ebpf/apolysis_observer.bpf.o"
 install -m 0644 README.md "$stage/README.md"
 install -m 0644 README.zh-CN.md "$stage/README.zh-CN.md"
-install -m 0644 docs/jsonl-schema-v1.md "$stage/docs/jsonl-schema-v1.md"
+install -m 0644 docs/design.md "$stage/docs/design.md"
+install -m 0644 docs/design.zh-CN.md "$stage/docs/design.zh-CN.md"
 
 python3 - "$stage/$manifest_name" "$release_version" "$release_target" "$package_name" "$stage/bin/apolysis" "$stage/ebpf/apolysis_observer.bpf.o" <<'PY'
 import hashlib

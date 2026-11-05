@@ -75,7 +75,7 @@ test-live-reason-chat:
 	./scripts/test-live-reason-chat.sh --require-all
 
 # Zero-privilege trial: run the intent/side-effect accountability flow on the
-# bundled Codex mismatch fixture (no root, no eBPF). See docs/quickstart.md.
+# bundled Codex mismatch fixture (no root, no eBPF). See README.md.
 quickstart:
 	@mkdir -p target/quickstart
 	@cargo run -q -p apolysis-cli -- intent ingest \

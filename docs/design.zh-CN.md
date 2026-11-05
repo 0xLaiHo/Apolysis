@@ -1,197 +1,233 @@
-# Apolysis 设计
+# 架构设计
 
-[English](design.md) | [简体中文](design.zh-CN.md)
+[English](design.md) | [简体中文](design.zh-CN.md) | [README](../README.zh-CN.md)
 
-本文是当前源码树唯一受版本控制的设计概览。[领域词汇表](../CONTEXT.md)定义产品术语。
-[路线图](roadmap.zh-CN.md)负责方向与资格边界；实现历史保留在 Git 中。
+Apolysis 记录 agent 的声明、运行时观测，以及证据能够支持的关联。当前源码包含可用的
+本地 Linux 观测链路，以及独立的认证 Gateway 与存储基础模块，两者仍处于实验阶段。
+原生启动入口不会自动把 JSONL 上传到 Gateway，公共 Query 服务和调查控制台尚未实现。
 
-## 证据边界
+## 证据模型
 
-Apolysis 当前提供实验性的本地 Linux 审计遥测与问责。CLI 与 daemon 采集限定范围的
-Execution Evidence，结合运行时元数据及声明的 Tool Call，输出默认不保留内容的 JSONL
-记录和 Finding。当前实现的文件与网络 tracepoint 在没有独立结果信息时只描述尝试。
-观测到调用不代表 Verified Outcome。
+| 概念 | 含义 |
+| --- | --- |
+| Agent Run | 在某个授权主体下、跨一个或多个执行环境开展的工作。本地采集会话是观测边界，不等同于通用运行身份。 |
+| Tool Call | 对工具的一次声明请求，与是否观测到执行分开记录。 |
+| Semantic Evidence（语义证据） | 工具声明、声明理由，以及生产者提供的其他活动信息。 |
+| Execution Evidence（执行证据） | 某个运行时边界内可见的操作；当前文件与网络探针记录的是尝试。 |
+| Outcome Evidence（结果证据） | 对所声称结果的独立检查；工具正常退出不足以证明结果。 |
+| Exact Relation（精确关联） | 在明确的信任边界内，通过唯一、显式传播的标识符建立的关系，不证明动机或授权。 |
+| Finding（发现项） | 从证据得出的条件，例如缺失声明或不支持的强制执行能力。 |
 
-Semantic Evidence 表示工具运行器声明了什么；Execution Evidence 表示受控运行时边界
-观测到了什么；Outcome Evidence 独立检查声称的外部结果。三种边界保持分离：关联成功、
-哈希链或没有 Finding 均不代表覆盖完整或已经实现隔离。
+语义、执行和结果覆盖率分别表达。没有观测到某次声明的执行，不代表工具什么都没做；
+无法归属的事件也不自动等于恶意行为。丢失、不支持的数据源和歧义关联都应保留。
 
-本分支也包含[契约集](contracts/README.md)描述的独立生产 record/Gateway 契约与
-存储、传输基础。依照 [ADR-0001](adr/0001-independent-production-contracts.md)，
-旧版 JSONL v1 是边缘格式，不是带认证的 Gateway 或 Query 契约。Gateway、
-evidence-object、projection 和 transport 的已有限制继续以各自规范契约为准；本地
-harness 适配不代表这些部分通过资格验证。
+## 组件与数据流
 
-## Harness 声明
+```mermaid
+flowchart LR
+  subgraph Local[本地观测]
+    Agent[原生 agent] --> Hook[工具 hook]
+    Agent --> Process[进程与系统调用]
+    Hook --> Intent[意图与理由记录]
+    Process --> BPF[eBPF 观测器]
+    BPF --> Timeline[脱敏运行时时间线]
+    Intent --> Join[关联]
+    Timeline --> Join
+    Join --> Report[JSON / Markdown / HTML 报告]
+  end
+  subgraph Service[独立服务基础模块]
+    Source[经认证的证据源] --> TLS[直接 mTLS Gateway]
+    TLS --> Ledger[PostgreSQL 账本与 outbox]
+    Ledger --> Projection[生命周期投影]
+    Object[经授权的对象生命周期] --> Registry[PostgreSQL 注册表]
+    Object --> Storage[加密 S3 兼容对象]
+  end
+```
 
-文件摄入接受 Codex、Claude Code、Cursor、Pi 和 OpenCode 导出数据。产品实时 hook
-将 Tool Call 归一为相同的 `intent` 记录。原生 hook 接口仍有产品差异；支持的输入与
-安装方式见 [Harness 接入](harness-intent.zh-CN.md)。
+| 代码边界 | 职责 |
+| --- | --- |
+| [`apolysis-cli`](../crates/apolysis-cli/src) 与 [`hooks`](../hooks) | 原生启动、产品适配、导入、Tool Call 关联和报告。 |
+| [`apolysis-core`](../crates/apolysis-core/src) 与 [`apolysis-store`](../crates/apolysis-store/src) | 本地 JSONL 记录、追加存储、轮转和可选哈希链封装。 |
+| [`apolysis-observer`](../crates/apolysis-observer/src) 与 [`ebpf/observer`](../ebpf/observer) | 范围跟踪、内核采集、解码、进程身份和持久化脱敏。 |
+| [`apolysis-daemon`](../crates/apolysis-daemon/src)、[`apolysis-accountability`](../crates/apolysis-accountability/src) | 持续采集、会话登记、范围更新、保留策略和发现项。 |
+| [`apolysis-runtime`](../crates/apolysis-runtime/src)、[`apolysis-kubernetes`](../crates/apolysis-kubernetes/src)、[`apolysis-visibility`](../crates/apolysis-visibility/src) | 运行时身份、工作负载元数据和明确的可见性边界。 |
+| [`apolysis-policy`](../crates/apolysis-policy/src)、[`apolysis-feedback`](../crates/apolysis-feedback/src)、[`apolysis-validation`](../crates/apolysis-validation/src) | 策略决策、反馈、能力检查和独立验证工具。 |
+| [`apolysis-contracts`](../crates/apolysis-contracts/src) | 版本化记录、来源、覆盖率、Gateway 和 Query 线协议类型，不实现存储或传输。 |
+| [`apolysis-gateway`](../crates/apolysis-gateway/src)、[`apolysis-gateway-server`](../crates/apolysis-gateway-server/src)、[`apolysis-gateway-postgres`](../crates/apolysis-gateway-postgres/src) | 经认证的写入生命周期、直接 mTLS 传输和事务持久化。 |
+| [`apolysis-evidence-objects`](../crates/apolysis-evidence-objects/src)、[`apolysis-projection-postgres`](../crates/apolysis-projection-postgres/src) | 经授权的对象存储与删除，以及持久化生命周期读模型。 |
 
-记录把 Apolysis `session_id` 与 `harness_session_id` 分开。显式指定的采集会话必须
-与观测器一致。实时 ID 是 32 位小写十六进制值，由带长度边界的来源、采集会话、
-原生会话和调用 ID 经 SHA-256 派生；历史导入 ID 保持兼容。实时写入使用带锁追加，
-并去重重试，同一次调用不能抹掉此前的声明。
-去重比较除摄入时间外的完整持久化记录，不比较已丢弃的参数内容。若复用调用 ID 且
-差异仅在已丢弃参数中，系统无法区分，也不会保留命令指纹。
+## 原生应用生命周期
 
-默认 shell 改写在原命令正文前加入 `# APOLYSIS_INTENT_ID=<id>` 注释行，保留其他工具
-输入字段。Claude Code 保留原生许可决定；Codex 仅在受支持的 shell 改写时收到契约
-要求的 `allow` 确认。Cursor 的补充 shell 事件可以复用已有标记；缺少调用
-ID 时不能生成共享占位值。Pi 从扩展上下文获取原生会话；OpenCode 从工具执行事件
-获取原生会话和调用 ID。
+`apolysis observe --agent <product> -- <原生参数>` 以调用用户身份运行已安装的应用。
+`--` 后的参数保留边界和顺序，不会重新拼成 shell 命令。原来的终端、标准输入输出、
+工具、认证、应用历史记录和权限提示仍由原生应用管理。单独查询原生帮助或版本时，
+不采集、不申请提权。
 
-产品随后可能把改写后的命令嵌入 `eval` 或其他 shell 包装，因此默认注释未必位于
-实际 exec 参数开头。Claude Code 2.1.295 原生运行暴露了这一边界：声明与原因均已
-记录，但 fixture 文件尝试没有内核标记。采集器不会通过搜索嵌套注释来补齐它。
+| 产品 | 临时接入方式 |
+| --- | --- |
+| Codex | 会话层 `PreToolUse` 配置，启用 hooks，并使用 `--no-daemon` 把本地执行保留在观测进程树内；原生 hook 信任检查继续生效。 |
+| Claude Code | 额外加载包含 `PreToolUse` 的运行时插件。 |
+| Cursor Agent | 额外加载含 `preToolUse` 和 `beforeShellExecution` 的运行时插件；补充 shell 事件记录并放行，不独立生成新的调用身份。 |
+| Pi | 监听 `tool_call` 的扩展，从原生上下文读取会话。 |
+| OpenCode | 监听 `tool.execute.before` 的插件，追加到内存中的原生配置，并使用插件目录上下文。 |
 
-显式 `--shell-bridge /bin/bash` 则让原命令正文进入选定的受支持 shell，使其命令
-参数以严格意图头开头。它不会用 `exec` 替换产品外层 shell。输出和退出状态来自内层
-命令，但 cwd、环境和函数的改动不会回传到外层 shell。该模式默认关闭，不能描述为
-透明保留原生 shell 语义。Pi/OpenCode 的等价配置为 `APOLYSIS_SHELL_BRIDGE`；
-选定 shell 必须与显式工具输入中的 shell 一致。资格验证必须说明测试的是该模式
-还是默认注释模式。
+现有全局或项目配置不会被覆盖。已识别的禁用接入、远程执行、后台分离或共享服务器
+选项会被明确拒绝。其他 hook 或原生信任决策仍可能阻止或改变采集。Codex 托管的
+WebSearch 不走本地 `PreToolUse`，因此此适配器不能声称覆盖该来源。
 
-`observation_mode` 区分已准备的 `local_shell` 路径、`semantic_only` 声明与
-`historical` 导入。准备好标记不代表命令已经执行、产品采用了改写或观测器采集到了
-标记。
+Rust 控制器以普通用户身份创建私有临时 hook 配置和一个等待放行的子进程。独立的 sudo 采集器
+通过私有 Unix socket 接收采集设置，核对子进程身份并准备探针。原生参数和提示词
+不会放入 sudo 参数或落盘启动文件。采集器就绪后，控制器才放行子进程、交给它前台
+终端，并在确认实际退出后请求最后一次排空。初始 cwd 与 `PWD` 一致；产品自身的
+目录参数仍由原生应用处理。
 
-## 原生应用入口
+只有采集器拥有特权。其源采集文件置于 root 私有目录，普通用户控制器再原子发布到
+权限为 `0700` 的目录，导出文件权限为 `0600`。取消时恢复终端并清理所拥有的进程组
+和采集器。后续导出失败不会抹掉已经观测到的原生退出码或信号。受控原生采集使用
+8 MiB ring buffer，并在就绪前核验实际容量；原有 observer/daemon 默认值不变。
+原生时间线导出和报告读取的单个输入文件上限为 64 MiB，超限会形成不完整证据。
 
-Rust `apolysis observe --agent <product> -- <原生参数>` 入口要求显式选择 Codex、
-Claude Code、Pi、OpenCode 或 Cursor Agent。终端、标准输入输出、认证、配置、工具、
-MCP 服务与权限流程仍由原生应用管理。`--` 后的参数作为不变的参数数组交给应用；
-Apolysis 只增加对应产品的临时 hook 或插件配置。禁用 hook 或把执行移到当前采集树
-之外的冲突模式会明确拒绝，不会悄悄改写。单独查看帮助和版本不提权、不采集。
+## 工具身份与声明理由
 
-原生子进程的 cwd 与 `PWD` 使用一致的规范化启动目录；产品自己的目录/worktree
-参数保留原生语义。普通用户控制器负责原生启动、临时 hook 配置、关联和报告发布。独立的 sudo 采集器
-通过私有控制通道接收请求，在 root 私有临时目录写入源采集数据。应用参数和提示词
-不会进入 sudo 命令行元数据或持久化的启动清单。仅采集器提权；Apolysis 的提示写入
-stderr，原生 stdout 保持可供管道使用。默认观测策略不设置目录或网络允许列表，
-保留审计模式的凭证路径诊断。指定策略也不会将此观测入口变为隔离边界。
+实时 hook 把输入统一为 `intent` 记录。采集 `session_id`、产品 `intent_source`、
+原生 `harness_session_id` 和调用 `source_event_id` 分开保存。对这些身份进行长度分帧
+并计算 SHA-256，派生出 32 字符小写十六进制 `intent_id`；它不是 32 位整数。
+加锁追加会去重重试，并拒绝内容冲突的持久化记录。差异若仅存在于已丢弃的参数中，
+这项比较无法识别。
 
-受控原生采集加载器将 ring-buffer 容量覆盖为 8 MiB，以容纳启动/hook 突发事件，
-不改变事件 ABI、对象默认值及旧观测入口/daemon 默认值；采集丢失仍是明确失败。
+受支持的本地 shell 调用会加上这条完整的首行注释：
 
-原生应用退出后，默认不保留内容的 JSONL 继续作为底层证据；`result.json`、
-`report.md` 和独立 `report.html` 按 Tool Call 提供可读视图。报告检查原始与规范化
-事件身份、唯一意图、既有关联结果和有效原因绑定，才计入 Exact Relation。只有语义
-的调用、候选、冲突、未归属证据与策略提醒分别呈现。应用退出、采集健康和 Outcome
-Coverage 相互独立：退出码为零且采集检查通过，也仍将任务结果标为未验证。截断与
-丢失分别显示。格式错误、混入其他会话、缺失或过大的报告输入会明确标为不完整。
-渲染器每个源制品最多读取 64 MiB，不把完整 argv、提示词、工具结果或 provider 流
-复制进报告。
+```sh
+# APOLYSIS_INTENT_ID=<intent_id>
+```
 
-入口不向原生会话注入生成理由的提示。普通工具描述仍为 `tool_description`/`unknown`；
-保留摘要与启用 shell bridge 都需要单独选择。默认仅注释标记的模式保留既有 shell
-边界，但不能修复产品后续 `eval` 包装导致的标记不可见。原有全局 hook 仍生效，
-可能修改或阻止新 hook。原生应用可能保存自己的对话；Apolysis 的 content-off 规则
-不重配这些历史设置。用户拥有的导出证据不防篡改。参数、产品差异、执行限制和报告
-解读见[原生观测指南](native-observe.zh-CN.md)。
+其余命令和无关工具输入字段保持原样，由 hook 通过产品原生协议交还修改后的输入。
+读文件、搜索及远程工具通常仅保留 `semantic_only` 声明；有声明不代表应当存在本地
+系统调用。Cursor 的 HTTP MCP 调用忽略命令改写，也属于仅语义记录。导入的历史记录
+在适用时使用 `historical` 模式。
 
-## 声明原因
+产品可能再用 `eval` 包裹命令，使注释不再位于真实 shell exec 参数的开头。可选的
+`--shell-bridge /bin/bash` 创建一个携带标记、可识别的内部 shell 边界。该选项需要
+显式启用，因为内部 shell 对 cwd、变量和函数的改变不会传回外层 shell。hook 返回
+成功或选择了 bridge，都不能证明工具已经执行。
 
-可选的 `intent_reason` 记录描述生产者为一次 Tool Call 声明的目的。它独立于 `intent`，
-通过同一采集会话与意图 ID 引用调用，并保留原生来源身份用于校验。它不揭示模型内部
-思考，不验证动机，不授予操作权限，也不产生 Execution Evidence。意图 ID 派生与
-内核标记传递保持不变。
+`intent_reason` 是按同一调用身份关联的独立追加记录。它是声明注解，不是模型的
+隐藏推理，也不是经验证的动机：
 
-显式声明使用封闭的原因代码。受控扩展可提供顶层 `apolysis_reason` 对象；内置 shell
-工具则可在已有命令字符串开头携带 `# APOLYSIS_REASON_CODE=<code>` 注释。Hook
-仍将意图标记放在第一行。原生工具描述保留为 `tool_description`，代码为 `unknown`，
-不根据描述措辞推断 Agent 为什么执行。Schema 保留 `operator_annotation`，当前 CLI
-不会生成该来源。
+- 生产者显式提供 `apolysis_reason`，或在 shell 命令前写入
+  `# APOLYSIS_REASON_CODE=<code>`。来源为 `agent_declared`，可执行命令中的意图标记
+  仍处于首行。
+- 理由码为 `unknown`、`inspect_context`、`verify_change`、`reproduce_issue`、
+  `implement_change`、`diagnose_failure` 和 `gather_evidence`。
+- 原生工具描述记录为 `tool_description`，理由码为 `unknown`。缺失理由保持缺失；
+  原生启动入口不注入生成理由的提示词。
+- 默认不保存摘要。`--allow-reason-summary` 显式允许保存经过过滤、最多 240 个 Unicode
+  字符的单行文字；过滤不保证任意文字不含秘密。`task_ref` 是不透明引用，不是提示词。
+- 更正通过新记录的 `supersedes_reason_id` 追加表达。绑定时检查完整调用身份与更正链；
+  冲突或未绑定的理由不能建立执行关联。
 
-另一项实时验证在 Claude 原生 `Bash.description` 中使用仅供测试的
-`APOLYSIS_REASON_JSON` 协议。模型自行选择代码、撰写摘要，严格适配器将这些字段
-原封传入 `apolysis_reason`，保留原生会话与调用 ID。显式启用摘要保留及 `/bin/bash`
-bridge 后，登录回归实际执行，其文件尝试通过准确的意图 ID 关联附带同一声明摘要。
-这验证了受控协议与既有执行链，不代表自动解释普通描述，也不代表五个产品默认具有
-原生原因能力。该门禁没有增加生产原因提取逻辑；默认仍不保留摘要。
+原有 `apolysis chat` 仍是使用显式理由协议的受控 Claude/Bash 实验，与原生启动入口
+分开，也不能证明普通应用具备自动理由提取能力。
 
-实验性 Rust [`apolysis chat`](reason-chat.zh-CN.md) 命令把这一显式协议应用到用户在
-独立工作目录中输入的任务，运行时不依赖 Python。同一 Claude 进程通过 stream-JSON
-接收多轮输入，关闭会话落盘，只开放
-Bash。每次真实调用经既有 hook 处理，显式开启摘要保留与 `/bin/bash` bridge；纯
-聊天轮次不产生意图。入口显示助手文本与每次调用的准确关联计数，保留任务文件和
-默认不保留内容的观测记录。提示词、完整工具输入和原始 provider 输出不写入日志；
-声明摘要和观测路径仍属于保留数据。隐私过滤后的 `[redacted]` 摘要不使有效的原因
-代码或意图 ID 关联失效。这是观测实验：主机只读挂载，但控制目录、任务
-目录和证据目录可写，不构成针对恶意 agent 的隔离边界，也不提供防篡改证据，不修改
-全局配置。
+## 内核归属与关联
 
-root 控制器监督独立的 root 观测器，将采集源文件保存在仅 root 可访问的临时目录。
-认证仅由降权后的 Rust 启动助手读取，然后执行 Bubblewrap。快照与最终结果由以原始
-调用用户身份启动的新助手进程原子发布，root 不会为发布而重新打开 agent 可控制的
-证据路径。`hook`、`launch`、`publish` 是内部助手子命令，不是日常入口。独立 Python
-实时验证门禁仍是测试工具；对话执行链不调用它们。
+观测器按配置的进程树或 cgroup 限定采集范围，观测进程生命周期以及选定的 `exec`、
+文件操作和 `connect` tracepoint。标准输入输出、文件内容和解密后的 HTTP 正文不在
+默认观测范围内。对 gVisor 或虚拟机运行时的宿主侧观测，不等于看到了内部操作。
 
-原因记录独立追加、去重重试，并诊断冲突身份。修正使用新原因 ID，通过
-`supersedes_reason_id` 指向同一次调用已有的原因，不覆盖历史。关联步骤单独输出
-`intent_reason_binding`，只有存在唯一有效原因时才补充 Exact Relation。冲突和未绑定原因
-不能建立运行时链接，也不能提升弱候选。`semantic_only` 原因可以只绑定声明，不产生
-执行关系。
+标记解析器只接受受支持 shell 命令参数最前面的完整注释，不搜索任意 argv 文本。
+归属使用 TGID 和线程组首线程启动时间，以区分 PID 重用。内核在 fork 时复制归属，
+包括之后没有 exec 的子进程。exec 遇到合法新标记时替换；完整读取且没有新标记时
+保留；读取失败、格式错误或标记采集不完整时清空，并标记 `intent_capture_incomplete`。
+线程组退出时删除上下文。范围内每个事件携带当时的归属，用户态不会用旧进程状态
+补造缺失的标记。
 
-默认记录保留代码与可选的不透明引用，不保留原因正文。`--allow-reason-summary`
-显式允许最多 240 个 Unicode 字符、尽力脱敏的摘要；这不保证任意文本均不含秘密。
-`task_ref` 是由 1–64 个 ASCII 字母、数字、下划线或连字符组成的不透明引用，不是任务
-内容或待打开的文件。系统不会为
-构造原因而读取提示词文件。输入与字段见 [Harness 接入](harness-intent.zh-CN.md)和
-[JSONL 契约](jsonl-schema-v1.md)。
+关联是限制在同一采集会话内的独立步骤。唯一的显式 `intent_id`，或没有意图标记时
+唯一的显式 `raw_event_id`，可以建立 Exact Relation；两者同时存在时必须一致。
+未知、冲突或有歧义的标识符产生诊断，不退回启发式匹配。一次 Tool Call 可以关联
+多个操作尝试。相同命令或可执行文件元数据只形成 inferred 或 ambiguous 候选。
+理由绑定可以补充已验证的关系，但不能把候选或仅语义声明升级为精确执行证据。
 
-## 进程归属与关系
+## 本地记录与报告
 
-实时采集器把已识别 shell 命令参数中的完整前导注释读入独立的 32 字节字段，不搜索
-任意 argv token，也不依赖会截断的诊断命令 payload。识别仅覆盖受支持的 shell 调用
-形式，缺失的标记保持缺失。
+本地 JSONL 类型定义在 [`apolysis-core`](../crates/apolysis-core/src/lib.rs)，理由定义在
+[`intent_reason.rs`](../crates/apolysis-core/src/intent_reason.rs)。它们是边缘记录格式，
+与经认证的服务协议分开。
 
-内核上下文通过 TGID 加线程组首线程启动时间排除已复用的进程标识，在 fork 时传播，即使
-子进程不 exec 也能继承。同进程 exec 只有在完整采集确认没有新标记时才保留原值；
-合法新标记替换旧值。缺失 pending capture、不可读或格式错误的标记，以及无法确定
-shell 命令参数位置时清除旧值，报告 `intent_capture_incomplete:true` 并沿用截断告警。
-最后一个线程退出时清理上下文。每个范围内事件都携带内核当前归属，包括其缺失状态；用户态
-不会从过期缓存重建缺失的实时标记。这减少了对生命周期事件送达顺序的依赖，但不能
-恢复丢失事件、未观测到的进程关系或不受支持的执行后端。
+| 原生采集文件 | 内容 |
+| --- | --- |
+| `intent.jsonl` | 统一的 Tool Call 声明及观测模式。 |
+| `intent.jsonl.reasons.jsonl` | 声明理由码、来源和显式允许保留的摘要。 |
+| `timeline.jsonl` | 脱敏原始/规范化事件、运行时元数据和采集诊断。 |
+| `correlation.jsonl` | 精确关联、候选、理由绑定和发现项。 |
+| `result.json`、`report.md`、`report.html` | 按 Tool Call 分组的结构化及可读视图。 |
 
-关联仍是同一采集会话内的独立步骤。唯一的显式 `intent_id` 或 `raw_event_id` 链接
-在声明的信任边界内建立 Exact Relation。两者同时存在时必须一致。未知、冲突或存在
-歧义的标识符产生诊断，不允许回退到更弱匹配。一条声明可关联多次尝试。
+报告先核对原始/规范化事件身份、唯一声明及理由绑定，再统计精确关联。原始事件和
+规范化副本不会重复计为两次系统调用尝试。未归属事件、策略通知、缺失理由、冲突、
+截断和丢失分别呈现。输入缺失、损坏、混入其他会话或超限时，报告标记为不完整。
 
-旧版命令相等与仅限 exec 的可执行文件名匹配产生候选记录：单个候选是 Inferred
-Relation，多个是 Ambiguous Relation。两者都不计为 Exact Relation，也不抑制 Finding。
-`semantic_only` 声明不参与执行匹配，不产生 `unobserved_intent`。历史导入保持可读，
-可使用显式链接，但仅有弱候选不代表已匹配。
+应用退出、采集收尾、关联完整性和任务结果各有独立字段。`complete` 表示对应的文件
+检查通过，不表示所有操作都可见或已经归属。通用任务结果保持 `not_verified`，需要
+独立的结果检查才能确认。
 
-## 隐私与信任
+## 运行时元数据与策略
 
-意图持久化保留定宽传递 ID、原生来源标识符、工具元数据和白名单中的可执行文件引用。
-原生标识符不受传递 ID 的 32 字符限制。不持久化提示词、
-结果、原始参数、raw argv 或重建后的进程命令文本。产品需要执行命令，因此 hook
-会瞬时接触原命令。[JSONL 契约](jsonl-schema-v1.md)说明持久化字段。
+daemon 适配器登记本地、Docker/containerd 和 Kubernetes 工作负载，并更新观测范围。
+运行时身份与进程代际信息用于防止重用的 PID 或无关工作负载静默继承会话。
+运行时/可见性报告描述实际观测边界，不声称宿主能看见所有容器或虚拟机内部。
 
-标记是在协作式本地集成范围内使用的关联键，不是签名、授权令牌，也不能抵御能控制
-自身命令文本的工作负载。本地 JSONL 与 daemon 本地哈希链不提供独立证据锚定。
-远程工具和 provider 托管搜索需要自己的 Evidence Source；本地观测器无法确认它们
-的结果。
+策略评估记录请求决策、可用能力、实际后端和降级原因。原生观测入口运行在审计模式，
+tracepoint 反馈不是操作前阻断。独立的 BPF-LSM 与 seccomp 文件读取原型验证特定阻断
+路径，其有限验证不会让普通观测器成为通用隔离环境，也不会把阻断能力推广到所有
+运行时或操作。策略决策与已经确认的执行措施是不同的证据。
 
-## 验证范围
+## 经认证的 Gateway 与持久化存储
 
-Fixture 测试可验证 hook 契约、追加与去重、标记语法，以及默认不保留内容的持久化。
-产品版本兼容性、实际标记送达、进程树传递和内核事件覆盖需要 fixture 以外的独立集成
-证据。内核/用户态事件 ABI 是 648 字节，需要来自同一次构建的 CLI 与 BPF 对象；
-历史 JSONL 可读不代表兼容旧 BPF 对象。
-显式启用的 `make test-bpf-relocation` 门禁把所有已构建观测器程序的 CO-RE relocation
-应用到可读的主机 BTF，不加载 BPF 程序。原生回归测试执行共享 C 标记解析器与有界
-shell basename 判断。这些检查不能替代内核验证器接受和实时事件断言。
+[`apolysis-contracts`](../crates/apolysis-contracts/src) 拥有经验证的 v0.1 类型和
+[生成的 JSON Schema](../schemas/contracts/v0.1)。Agent Execution Record 组合组织/运行
+身份、经认证来源的 envelope、顺序、覆盖率和生命周期事实。本地 JSONL 不直接复用为
+Gateway 或 Query 线协议。Query/Console 类型是接口约定，不代表对应服务或界面已实现。
 
-有界合成标记门禁与通用实时观测器回归已在一个本地内核上通过；
-[验证详情](harness-intent-live-validation.zh-CN.md)记录环境、断言、诊断和边界。
-原生产品资格仅限已测模式：Claude Code 2.1.295、Pi 1.5.0 和 OpenCode 1.18.31 已在
-显式 `/bin/bash` bridge 下通过单条合成命令检查，将声明原因关联到准确的 fixture
-文件尝试，且持久化记录不含提示词专用 sentinel。较新的原生入口另有 Claude、Pi、
-Codex 与 OpenCode 有界通过结果；Codex 显式选择了测试用 sandbox/hook-trust 参数，
-OpenCode 显式选择了可用模型。Codex provider 通路在该配置下现已可用；Cursor
-仍需要可用认证。缺少前提条件不算通过，也不能据此断定产品本身不受支持。默认注释
-送达、更广的产品版本、其他内核与压力/丢失资格仍待验证。特权验证继续显式执行，
-缺少前提条件而跳过的运行不能计为实时验证成功。
+Gateway 在 `/gateway/v0.1/` 下提供四个直接 mTLS POST 路由：`open-run`、`bind-runtime`、
+`ingest` 和 `finish-run`。它根据已验证客户端证书的指纹识别身份，并对每次生命周期
+请求从 PostgreSQL 解析当前权限。请求字段、证书展示名称和转发证书请求头不能声明
+权限，认证上下文仅存在于服务端。写入监听器不提供浏览器 cookie/CORS 接口；包含
+租约凭据的请求和响应正文不应进入访问日志。
+
+应用服务通过 repository 边界工作，不直接操作数据库 CRUD。PostgreSQL 原子提交已接受
+的操作、记录项和一一对应的 projection outbox 条目。组织范围的顺序、唯一操作/事件
+身份、规范化请求摘要与加密精确重放，使重试不重复产生账本效果。租约与加入证明仅
+保留查找摘要。运行时绑定和有界结束处理属于同一生命周期，新的请求不能复活终态运行。
+
+[Gateway 迁移](../crates/apolysis-gateway-postgres/migrations)和
+[部署 SQL](../crates/apolysis-gateway-postgres/deploy)区分
+schema 所有者、运行时与管理角色。服务进程不执行迁移，也不拥有表。固定角色要求使用
+独立的 Apolysis PostgreSQL 集群。这种角色拆分不是租户 RLS，组织隔离仍依赖经认证的
+应用作用域。
+
+证据对象模块仅在当前来源/运行、能力、隐私、保留和配额策略允许时接收字节。它先预留
+元数据，再通过服务端持有的 S3 客户端加密上传，随后读回核验精确大小和 SHA-256，
+通过后才标记为可用。内存中明文上限为 64 MiB。`EvidenceObjectRef` 是完整性元数据，
+不是持有即能读取的凭据；经认证的对象读取解析器尚未实现。删除时先标记为不可用，清除
+存储材料，并等待已登记消费者确认，之后才释放配额并留下墓碑记录。
+
+生命周期投影按 ingest 顺序消费持久化 outbox 事实，支持组织限定的 generation、精确
+watermark 及重建/切换。它是内部生命周期读模型，不提供公共 Query 授权、SSE、来源
+健康/发现项视图或控制台。
+
+这些服务是基础模块，不代表已可用于生产。权限查询尚未与账本提交原子地重新校验；
+生产密钥托管/轮转、公共读取授权、容量边界和运行恢复/可用性仍不完整。用于崩溃或
+竞争验证的控制接口仅编入单独的特性开关验证程序，不是服务 API 选项。
+
+## 隐私与信任边界
+
+运行时持久化会移除 exec argv 和重建的命令，意图中的命令元数据只保留脱敏可执行文件
+引用。采集器仍可能为归属短暂读取 argv，因此 content-off 持久化不等于 capture-off。
+提示词、完整工具参数、工具结果和 provider 流不是 Apolysis 报告输入。工作区路径和
+结构化元数据仍可能敏感；工作区外路径和地址会在采集会话范围内转换为 token。
+原生应用自己的对话历史仍按该产品的规则保留。
+
+hook 身份和标记是协作式声明，不是对抗恶意 agent 的作者认证证明。同一用户可以修改
+其拥有的导出文件。daemon 本地哈希链能发现相对于该链的不一致，但没有独立外部锚点。
+特权宿主控制、证据源被入侵或运行时不可见，都可能破坏这些前提；没有发现项或标识符
+匹配，不能证明安全或完整执行。
