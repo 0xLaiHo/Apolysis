@@ -42,6 +42,10 @@ neither substitutes for a versioned product-hook integration run.
 Declared reasons remain optional, unverified Semantic Evidence. Codes,
 explicit corrections, and bounded opt-in summaries extend the local Tool Call
 context; they do not expand kernel coverage or qualify product-native delivery.
+A controlled Claude protocol has qualified a model-written summary through
+actual login-test execution and an exact file-attempt relation. Its test-only
+adapter, opt-in retention, and shell bridge bound that result; ordinary native
+descriptions and the other products' free-text reason delivery remain unqualified.
 An explicit shell bridge supplies a recognizable exec boundary for wrapping
 backends, with documented loss of outer-shell state propagation. Default
 comment delivery and opt-in bridge delivery require separate qualification;
@@ -81,6 +85,9 @@ to syscall mapping while any of these conditions holds:
 - A declared reason is presented as verified motive or hidden model reasoning,
   ambiguous reasons enrich an execution relation, or free-text reasons are
   retained without explicit opt-in.
+- A controlled summary protocol is presented as a default native capability,
+  or a declared summary is presented as execution-backed without verifying the
+  corresponding execution.
 - Content-off persistence is violated, or a skipped live/product validation
   is reported as passed.
 

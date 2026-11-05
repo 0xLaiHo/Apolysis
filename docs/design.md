@@ -92,6 +92,17 @@ descriptions remain `tool_description` with code `unknown`: their wording is
 not used to infer why the Agent acted. `operator_annotation` is reserved in
 the schema; the CLI does not currently produce that source.
 
+A separate live validation uses a test-only `APOLYSIS_REASON_JSON` protocol in
+Claude's native `Bash.description`. The model selects the code and writes the
+summary; a strict adapter passes those fields unchanged into `apolysis_reason`
+while preserving the native session and call ID. With summary retention and
+the `/bin/bash` bridge explicitly enabled, the login regression ran and its
+file attempt received the same declared summary through an exact intent-ID
+relation. This validates the controlled protocol and existing execution path,
+not automatic interpretation of ordinary descriptions or a default native
+reason capability across the five products. The gate adds no production
+reason-extraction logic; default summaries remain absent.
+
 Reason records append independently, deduplicate retries, and diagnose
 conflicting identities. A correction uses a new reason ID and
 `supersedes_reason_id` pointing to an existing reason for that same call;

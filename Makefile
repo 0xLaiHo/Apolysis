@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-bpf-relocation test-live test-live-harness-intent test-live-reason-products test-harness-hooks quickstart test-quickstart \
+.PHONY: build test lint clean build-ebpf test-bpf-relocation test-live test-live-harness-intent test-live-reason-products test-live-reason-summary test-reason-summary-adapter test-harness-hooks quickstart test-quickstart \
 	test-evidence-objects-real \
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
@@ -21,6 +21,7 @@ build: build-ebpf
 test:
 	cargo test --workspace
 	$(MAKE) test-harness-hooks
+	$(MAKE) test-reason-summary-adapter
 
 test-harness-hooks:
 	node --test hooks/tests/intent-bridges.test.mjs
@@ -50,6 +51,13 @@ test-live-harness-intent:
 # Explicit provider calls and inner-shell observation; build artifacts first.
 test-live-reason-products:
 	python3 -u ./scripts/test-live-reason-products.py --require-all --shell-bridge /bin/bash
+
+# Real Claude/provider, opt-in summary and privileged eBPF; build artifacts first.
+test-live-reason-summary:
+	PYTHONDONTWRITEBYTECODE=1 python3 -u ./scripts/test-live-reason-summary.py --require-all
+
+test-reason-summary-adapter:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_live_reason_summary.py'
 
 # Zero-privilege trial: run the intent/side-effect accountability flow on the
 # bundled Codex mismatch fixture (no root, no eBPF). See docs/quickstart.md.

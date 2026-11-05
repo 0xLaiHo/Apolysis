@@ -69,6 +69,13 @@ ID 时不能生成共享占位值。Pi 从扩展上下文获取原生会话；Op
 不根据描述措辞推断 Agent 为什么执行。Schema 保留 `operator_annotation`，当前 CLI
 不会生成该来源。
 
+另一项实时验证在 Claude 原生 `Bash.description` 中使用仅供测试的
+`APOLYSIS_REASON_JSON` 协议。模型自行选择代码、撰写摘要，严格适配器将这些字段
+原封传入 `apolysis_reason`，保留原生会话与调用 ID。显式启用摘要保留及 `/bin/bash`
+bridge 后，登录回归实际执行，其文件尝试通过准确的意图 ID 关联附带同一声明摘要。
+这验证了受控协议与既有执行链，不代表自动解释普通描述，也不代表五个产品默认具有
+原生原因能力。该门禁没有增加生产原因提取逻辑；默认仍不保留摘要。
+
 原因记录独立追加、去重重试，并诊断冲突身份。修正使用新原因 ID，通过
 `supersedes_reason_id` 指向同一次调用已有的原因，不覆盖历史。关联步骤单独输出
 `intent_reason_binding`，只有存在唯一有效原因时才补充 Exact Relation。冲突和未绑定原因

@@ -127,6 +127,8 @@ shell 状态限制。
 有界合成标记门禁与通用观测器回归已在一个本地 Linux 内核上通过。显式 shell bridge
 模式下，Claude Code、Pi 和 OpenCode 的有界原生运行已通过；Codex 和 Cursor 分别
 受网络与认证前提条件阻断。
+另一项受控 Claude 测试已将模型自行撰写、显式允许保留的原因摘要关联到实际登录回归
+文件尝试；这不代表产品默认具备原生原因能力。
 更广的产品版本、多内核及压力资格验证仍待完成。范围与限制见[实时验证](docs/harness-intent-live-validation.zh-CN.md)、
 [设计](docs/design.zh-CN.md)、
 [路线图](docs/roadmap.zh-CN.md)和[Harness 接入](docs/harness-intent.zh-CN.md)。

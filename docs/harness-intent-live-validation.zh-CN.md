@@ -6,7 +6,9 @@
 6.18.55-2-cachyos-lts** 上通过，使用了下述受管门控描述符修复和最终 bridge 变更。
 扩展后的 fixture 门禁已完成七次采集。原生 Claude Code、Pi、OpenCode 已在显式
 shell bridge 下通过；Codex 仍受 provider 连通性阻断，Cursor 仍受认证过期阻断，
-本报告不认定这两项通过。这些结果只验证
+本报告不认定这两项通过。
+下文另列的受控模型摘要门禁也已在 Claude 中通过，包括实际登录回归执行和准确内核
+事件归属。这些结果只验证
 列出的本地路径、产品版本和 provider 配置。其他内核及压力/丢失资格验证仍待完成。
 工作由
 [PR #87](https://github.com/0xLaiHo/Apolysis/pull/87) 跟踪。
@@ -50,6 +52,8 @@ shell bridge 下通过；Codex 仍受 provider 连通性阻断，Cursor 仍受�
 | 本地门禁 | `cargo test`：541 passed、91 ignored。observer crate：59 passed、1 ignored。CLI `observe`：20 passed、1 ignored。Node 桥接测试：14 passed。格式、Clippy、quickstart 与差异检查通过。显式 BTF 与实时结果在上方单列。 |
 | 原生产品门禁 | Claude Code、Pi、OpenCode 在显式 `/bin/bash` bridge 下通过，计数和版本见下文；Codex 连通性与 Cursor 认证问题尚未解决。 |
 | 扩展合成门禁 | 真实执行的 `eval` 包装 bridge 用例已通过，覆盖三个文件尝试进程身份及网络尝试归属，计入七次采集总数。 |
+| 模型撰写摘要门禁 | Claude Code 2.1.295：4 项登录回归通过，2,800 条 raw kernel event，12 次截断，零丢失/失败。真实原生调用的声明摘要关联到准确的 `verify_login.py` 文件尝试；这是独立于上方门禁的一次采集。 |
+| 摘要协议解析器 | 8 项无 provider 回归通过；普通描述、错误 JSON、重复或未知字段、非法代码与非法摘要均被拒绝，不补造声明。 |
 
 截断诊断被保留，涉及有界诊断 argv 和格式错误的标记反例，不代表覆盖完整。正例单独
 明确检查标记采集完整性。测试通过 `pthread_join` 确认 leader 已退出，再观察剩余
@@ -99,6 +103,8 @@ sudo env APOLYSIS_REQUIRE_BPF=1 systemd-run --scope --quiet \
 哨兵值。
 最终复跑同时临时遮蔽已有用户 shell profile 和全局 hook。所选三个产品全部通过，
 没有跳过前置条件。
+这三次运行保留 `reason_code=verify_change`，但 `reason_summary=null`，没有验证
+模型撰写的自由文本摘要。
 
 | 产品 | 测试版本/配置 | Raw kernel event | 截断 | 结果 |
 | --- | --- | --- | --- | --- |
@@ -139,8 +145,70 @@ Claude 默认注释模式虽持久化了声明和理由，但由于命令被嵌�
 入口检查原生产品成功退出、完整且非空的内核采集、一次原生工具调用声明及 content-off
 理由，以及该理由到 fixture 文件尝试的 Exact Relation。输出仅含计数和固定错误
 类别，不打印原始产品输出或凭证。正常退出和错误退出默认均清理临时采集与私有产品
-日志；仅显式使用 `--keep-failed-private` 才保留失败 fixture 供本地诊断。声明整个
+日志；仅显式使用 `--keep-failed-private` 才保留失败 fixture 供本地诊断。
 只有 Codex 和 Cursor 的剩余验证也通过后，才能宣称五产品验证全部通过。
+
+## 模型撰写摘要：受控 Claude 协议
+
+独立的 [`test-live-reason-summary.py`](../scripts/test-live-reason-summary.py)
+门禁在同一主机上，让 Claude Code **2.1.295** 操作临时合成登录项目。最终运行完成
+**4 项测试，失败与错误均为零**，产生 **2,800 条 raw kernel event**、**12 次截断**，
+loss/map-pressure/decode/load/attach 失败均为零。此前一次运行也通过；最终复跑
+补强了 raw/canonical event、可执行文件和原因字段逐项一致的断言。实际观测的模型
+声明代码为 `verify_change`，来源为 `agent_declared`，保留的摘要如下：
+
+> 运行回归测试验证登录修复是否正确
+
+任务要求模型只执行一次 `python3 verify_login.py`，并在原生 `Bash.description`
+中使用 `APOLYSIS_REASON_JSON=` 加 JSON 对象显式声明目的，对象只含
+`reason_code` 与 `reason_summary`。模型自行从支持的枚举中选择代码、撰写中文
+句子；提示词和适配器均未提供上述句子。仅供测试的适配器严格解析该协议，将两个
+值原封传入既有 `apolysis_reason` 输入，不从普通描述推断原因，不补填摘要，也不
+伪造原生身份。既有 hook 显式启用 `--allow-reason-summary` 和
+`--shell-bridge /bin/bash`；门禁检查持久化摘要与模型声明相同，且不是脱敏占位值。
+
+命令实际执行了有效登录、错误凭证、未知用户和空输入四项回归。导出证据将真实原生
+会话/调用 ID 连接到一份意图和原因，再通过 `match_basis=intent_id`、
+`relation_status=exact` 连接到 `python3` 对 `verify_login.py` 的 `openat` 尝试。
+选中的 raw event、canonical event 与关联记录具有相同意图、事件引用、进程和文件；
+关联保留相同的原因 ID、代码、来源与摘要。测试结果及原生进程成功退出另外证明了
+合成回归套件通过；单凭文件打开尝试不能证明测试通过，也不能验证模型声明的动机。
+
+脚本只在 `target/native-reason-evidence-*` 保留最小证据包：`intent.jsonl`、
+`reason.jsonl`、含选中 raw/canonical 事件对的 `kernel-evidence.jsonl`、一条
+`correlation.jsonl` 关联、`native-declaration.json` 和 `result.json`。声明回执只
+保留已接受的原因与原生身份，不保留完整工具参数或描述。结果记录测试版本、计数、
+测试结果、源码提交及 runner/CLI/BPF 制品哈希。完整采集、提示词、工具输入和私有
+产品输出不导出；临时工作文件与日志默认删除。门禁确认提示词专用 sentinel 未出现
+在持久化采集、声明、原因或关联输出中。本地证据目录权限为 `0700`，文件为 `0600`，
+证据包被 Git 忽略，不提交。两次实时运行均已删除临时 fixture 目录，清理核验未发现
+残留的 Apolysis BPF program 或 map。六个保留文件通过了提示词 canary 与凭证标记
+检查，记录的 runner/CLI/BPF 哈希也已独立复核。即使显式启用摘要保留，分享前仍须
+检查实际文本；尽力脱敏不保证任意
+内容均不含秘密。
+
+先以普通用户构建，再显式执行 provider/BPF 门禁，按变量名保留既有认证用户的网络
+环境：
+
+```bash
+cargo build -p apolysis-cli
+make build-ebpf
+make test-reason-summary-adapter
+sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy \
+  env PYTHONDONTWRITEBYTECODE=1 python3 -u ./scripts/test-live-reason-summary.py --require-all
+```
+
+`make test-live-reason-summary` 调用同一 Python 门禁，构建后可在相同的显式 sudo
+环境下运行。它要求非 root 的原始调用用户、可用的既有 Claude 认证及 provider
+通路、已安装的 Claude 和 Bubblewrap，以及实时 BPF 前提条件。如依赖既有 provider
+认证环境变量，也只按变量名保留，不把值放进命令行或仓库。入口恢复调用用户的真实
+home，复用原生门禁的临时 hook 与 shell profile 遮蔽，不修改全局配置。它会实际
+调用 provider；`--require-all` 下缺失前提条件会失败。纯解析器回归也纳入
+`make test`，不调用 provider。
+
+本次只增加验证工具，不改变生产逻辑。结果证明了显式提示、测试适配器和可选 bridge
+组成的有界声明协议，不代表未改动的 Claude 或全部五个产品会自动提供“为什么”。
+前述三产品仅代码验证与两项阻断的边界保持不变；默认仍关闭摘要保留。
 
 该有界门禁通过不代表所有进程形式、内核、负载、事件丢失或产品版本均已验证，也不
 解决与受保护 `pre-release` 分支的集成冲突。合并前仍须 CI 和 review。见

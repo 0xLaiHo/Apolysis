@@ -156,7 +156,9 @@ motive. A bounded synthetic
 marker gate and the general observer regression passed on one local Linux
 kernel. Bounded native runs with the explicit shell bridge passed for Claude
 Code, Pi, and OpenCode. Codex and Cursor runs are blocked by network and
-authentication prerequisites, respectively. Broader
+authentication prerequisites, respectively. A separate controlled Claude test
+linked a model-written, explicitly opted-in reason summary to an actual login
+regression file attempt; this is not a default native reason capability. Broader
 product-version, multi-kernel, and stress qualification remains open.
 See [live validation](docs/harness-intent-live-validation.md),
 [design](docs/design.md), [roadmap](docs/roadmap.md), and
