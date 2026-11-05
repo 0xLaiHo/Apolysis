@@ -14,8 +14,11 @@ apolysis-kubernetes = { path = "../apolysis-kubernetes" }
 apolysis-store = { path = "../apolysis-store" }
 apolysis-visibility = { path = "../apolysis-visibility" }
 serde_json = { workspace = true }
+serde.workspace = true
+libc.workspace = true
+tempfile = "3"
 sha2.workspace = true
-tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "process", "io-util", "io-std", "signal", "time"] }
 
 [[bin]]
 name = "apolysis"

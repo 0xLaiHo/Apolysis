@@ -51,8 +51,11 @@ backends, with documented loss of outer-shell state propagation. Default
 comment delivery and opt-in bridge delivery require separate qualification;
 neither mode establishes generic compatibility with long-lived shell workers.
 
-The experimental conversation runner opens the controlled Claude path to
-manual tasks and follow-up turns. Its qualification must distinguish task
+The experimental Rust `apolysis chat` command opens the controlled Claude
+path to manual tasks and follow-up turns without a Python runtime. Its
+qualification must exercise that Rust execution and shutdown path rather than
+inherit a pass from the former Python prototype or independent validation gates.
+Qualification must distinguish task
 completion, exact attribution, and capture health, including normal exit,
 interruption, timeout, and conversation-only turns. A bounded create/read/chat
 run does not qualify arbitrary tasks, other tools or products, hostile-agent

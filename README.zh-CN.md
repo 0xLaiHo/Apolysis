@@ -129,8 +129,9 @@ shell 状态限制。
 受网络与认证前提条件阻断。
 另一项受控 Claude 测试已将模型自行撰写、显式允许保留的原因摘要关联到实际登录回归
 文件尝试；这不代表产品默认具备原生原因能力。
-实验性[对话入口](docs/reason-chat.zh-CN.md)支持在独立工作目录中输入自己的任务，
-逐轮查看声明原因与执行观测，并在同一个 Claude 内存会话中保留上下文。
+实验性 Rust [`apolysis chat`](docs/reason-chat.zh-CN.md) 命令支持在独立工作目录中
+输入自己的任务，逐轮查看声明原因与执行观测，在同一个 Claude 内存会话中保留上下文，
+运行时不依赖 Python。
 更广的产品版本、多内核及压力资格验证仍待完成。范围与限制见[实时验证](docs/harness-intent-live-validation.zh-CN.md)、
 [设计](docs/design.zh-CN.md)、
 [路线图](docs/roadmap.zh-CN.md)和[Harness 接入](docs/harness-intent.zh-CN.md)。

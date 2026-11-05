@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(target_os = "linux")]
+mod chat;
 mod cli;
 mod intent;
 
@@ -34,6 +36,8 @@ async fn main() {
 
 async fn run(args: Vec<String>) -> Result<i32, String> {
     match args.first().map(String::as_str) {
+        #[cfg(target_os = "linux")]
+        Some("chat") => chat::run(&args[1..]).await,
         Some(commands::RUN) => run_command(args),
         Some(commands::OBSERVE) => observe_command(args).await,
         Some(commands::INTENT) => intent_command(args).await,

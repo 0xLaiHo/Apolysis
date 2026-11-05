@@ -103,8 +103,9 @@ not automatic interpretation of ordinary descriptions or a default native
 reason capability across the five products. The gate adds no production
 reason-extraction logic; default summaries remain absent.
 
-The experimental [conversation runner](reason-chat.md) applies that explicit
-protocol to user-entered tasks in a separate workspace. One Claude process
+The experimental Rust [`apolysis chat`](reason-chat.md) command applies that
+explicit protocol to user-entered tasks in a separate workspace, without a
+Python runtime. One Claude process
 accepts successive stream-JSON user turns with session persistence disabled;
 only Bash is available. Each real call passes through the existing hook with
 summary retention and the `/bin/bash` bridge enabled. A conversation-only turn
@@ -117,6 +118,15 @@ intent-ID relation. This is an observation experiment: the host is mounted
 read-only, but the control, workspace, and evidence directories are writable.
 It provides neither a hostile-agent boundary nor tamper-resistant evidence,
 and does not change global settings.
+
+The root controller supervises a separate root observer and retains the
+capture source in a root-only temporary directory. Authentication is read
+only by an unprivileged Rust launch helper before it executes Bubblewrap.
+Snapshots and final results are atomically published by fresh helpers running
+as the invoking user, so root does not reopen agent-controlled evidence paths
+for publication. The `hook`, `launch`, and `publish` subcommands are internal
+helpers, not the daily interface. The independent Python live-validation
+gates remain test tooling; the conversation path does not call them.
 
 Reason records append independently, deduplicate retries, and diagnose
 conflicting identities. A correction uses a new reason ID and

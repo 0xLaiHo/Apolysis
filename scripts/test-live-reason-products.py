@@ -275,8 +275,7 @@ def product_command(product, root, hook, model):
     raise PrerequisiteMissing("isolated native launch adapter is not implemented")
 
 
-def isolated_command(root, argv, operator_home, product, binary, session, shell_bridge=None,
-                     workspace=None, writable_paths=()):
+def isolated_command(root, argv, operator_home, product, binary, session, shell_bridge=None):
     bubblewrap = shutil.which("bwrap")
     if bubblewrap is None:
         raise PrerequisiteMissing("bubblewrap is required to mask global hooks")
@@ -290,9 +289,7 @@ def isolated_command(root, argv, operator_home, product, binary, session, shell_
     # Authentication stays at its original path; no credentials are copied.
     command = [bubblewrap, "--ro-bind", "/", "/", "--bind", str(root), str(root),
                "--proc", "/proc", "--dev", "/dev", "--die-with-parent",
-               "--chdir", str(workspace or root)]
-    for path in writable_paths:
-        command += ["--bind", str(path), str(path)]
+               "--chdir", str(root)]
     masks = [operator_home / ".codex/hooks.json", operator_home / ".claude/settings.json",
              operator_home / ".claude/settings.local.json", operator_home / ".cursor/hooks.json",
              operator_home / ".cursor/managed/active-team-hooks/hooks.json",

@@ -116,7 +116,7 @@ pub(crate) const DEFAULT_TIMELINE_PATH: &str = ".apolysis/timeline.jsonl";
 
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
-    format!(
+    let legacy = format!(
         "usage: apolysis {run} [{runtime} {local}|{docker}] [{image} <image>] [{docker_runtime} <oci-runtime>] {policy} <path> [{output} <path>] {separator} <command> [args...]\n       apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {policy} <path> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {policy} <path> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{scope_pid} <pid>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>] [{feedback_dir} <path>]\n       apolysis {intent} {ingest} {adapter} codex-jsonl|claude-jsonl|cursor-jsonl|pi-jsonl|opencode-jsonl {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {hook} {harness} codex|claude|cursor|pi|opencode {output} <path> {workspace_root} <path> [{session} <capture-id>] [--reason-output <path>] [--allow-reason-summary] [--shell-bridge /bin/bash|/bin/zsh|/bin/dash|/bin/sh]\n       apolysis {intent} reason {harness} codex|claude|cursor|pi|opencode {output} <path> [{session} <capture-id>] [--allow-reason-summary]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}] [--reason-input <path>]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
         run = commands::RUN,
         observe = commands::OBSERVE,
@@ -159,5 +159,6 @@ pub(crate) fn usage() -> String {
         duration_seconds = options::DURATION_SECONDS,
         workspace_root = options::WORKSPACE_ROOT,
         scenario = options::SCENARIO,
-    )
+    );
+    format!("{legacy}\n       apolysis chat [--smoke] [--turn-timeout <seconds>] [--output-dir <parent>] [--policy <path>] [--bpf-object <path>] (Linux)")
 }

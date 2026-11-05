@@ -2,7 +2,7 @@
 
 [English](reason-chat.md) | [简体中文](reason-chat.zh-CN.md)
 
-[`run-reason-chat.py`](../scripts/run-reason-chat.py) lets you type your own
+The Rust `apolysis chat` command lets you type your own
 natural-language tasks and follow-ups into one Claude conversation while
 Apolysis observes its local execution with real eBPF. There is no fixed task
 in interactive mode. Each run creates a separate workspace; it does not use
@@ -15,8 +15,9 @@ native reason capability or a hostile-agent sandbox.
 ## Start
 
 You need Linux with the live BPF prerequisites, a working Claude Code CLI and
-existing provider authentication, Bubblewrap, Python 3, and the CLI/BPF objects
-built from the same source. It makes real provider requests, which may incur
+existing provider authentication, Bubblewrap, and the CLI/BPF objects built
+from the same source. The conversation runtime does not require Python. It
+makes real provider requests, which may incur
 charges. Use a normal user terminal in the repository, build without sudo,
 then explicitly elevate the observer:
 
@@ -24,7 +25,7 @@ then explicitly elevate the observer:
 cargo build -p apolysis-cli
 make build-ebpf
 sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy \
-  env PYTHONDONTWRITEBYTECODE=1 python3 -u ./scripts/run-reason-chat.py
+  target/debug/apolysis chat
 ```
 
 Preserve any additional existing provider-auth environment variables by name
@@ -36,7 +37,7 @@ Missing build artifacts or live prerequisites produce an error rather than a
 successful demonstration.
 
 The terminal prints the new `workspace` and `evidence` directories under
-`target/reason-chat-*`. Type one message per line and wait for the reply. For
+`target/reason-chat-rust-*`. Type one message per line and wait for the reply. For
 example, send these as three separate turns:
 
 ```text
@@ -51,7 +52,16 @@ tool. The model chooses its commands and writes each call's declared reason.
 
 - `/exit` or Ctrl+D ends the conversation normally.
 - Ctrl+C ends the whole session; it is not a request to cancel only one turn.
-- `--turn-timeout 300` changes the per-turn timeout from the default 180 seconds.
+- `--turn-timeout 300` changes the per-turn timeout from the default 180 seconds
+  (accepted range: 1–3,600 seconds).
+
+The optional paths are `--output-dir <parent>` (default `target`),
+`--policy <path>` (default `policies/local-dev.yaml`), and `--bpf-object <path>`
+(default `target/ebpf/apolysis_observer.bpf.o`). They resolve from the directory
+where you launch the command. The output option selects the parent for a new
+run directory, not an existing project to operate on. Use matching CLI and BPF
+builds. `apolysis chat --help` does not start a provider or require sudo. The
+internal `hook`, `launch`, and `publish` helpers are not manual workflow steps.
 
 Each tool call uses a fresh `/bin/bash`. Files persist between calls, but
 shell directory, variable, and function changes do not carry back to the
@@ -86,6 +96,7 @@ At exit, inspect the printed capture status and `evidence/result.json`:
 
 | Field | Meaning |
 | --- | --- |
+| `controller_runtime` | `rust`, identifying the conversation implementation used for this run. |
 | `conversation_status` | Whether the conversation finished or was interrupted/failed. |
 | `capture_status` | Whether final capture checks passed, including a nonempty matching summary and successful native exit. |
 | `correlation_status` | Whether final correlation completed. |
@@ -120,10 +131,20 @@ content-free. Best-effort summary redaction does not guarantee anonymity.
 Terminal recording and the provider's own data handling are outside this
 local persistence rule.
 
-The generated root is private and Git-ignored. Control files are temporary;
-workspace and evidence remain after exit or failure. Remove only the printed
-run directory when you no longer need it. No global product configuration is
-edited, and the runner does not use Kubernetes.
+The generated run directory is private; the default `target/` location is
+Git-ignored. If you select another output parent, keep those captures out of
+version control. The root observer writes its capture source only in a
+root-owned private temporary directory. Fresh unprivileged Rust helpers
+atomically publish the timeline snapshots, correlation, and final result to
+the user-owned evidence directory; root does not reopen those mutable output
+paths for publication. The authentication helper also runs as the invoking
+user and reads the required existing settings into its child environment,
+without writing credentials to files.
+
+Control and private capture files are temporary; workspace and published
+evidence remain after exit or failure. Remove only the printed run directory
+when you no longer need it. No global product configuration is edited, and
+the command does not use Kubernetes.
 
 The mount setup makes the host read-only and permits writes to the temporary
 control directory, workspace, and evidence. Read-only mounts do not prevent
@@ -135,32 +156,82 @@ tamper-resistant records. Use non-sensitive tasks for this experiment.
 
 `--smoke` runs three real provider-backed turns: create a greeting file, read
 and count its words, then chat without a tool. Invoke it with the same sudo
-environment above, adding `--smoke`. `make test-reason-chat` runs the local
-protocol and shutdown regressions without provider calls.
+environment above, adding `--smoke`. This regression requests ordinary shell
+commands so that it can check the Rust conversation path without a Python
+interpreter. `make test-reason-chat` runs the Rust unit and CLI integration
+regressions without provider calls:
 
-The final live smoke run on 2026-11-05 with Claude Code 2.1.295 and x86_64 Linux
-6.18.55-2-cachyos-lts completed all three turns: **4,209 kernel events, 18
-truncations, zero loss/failures**, two calls in the same native session with
-67 and 98 exact relations, and no tool call in the final turn. The final result
-reports `conversation_status=finished`, `capture_status=complete`,
-`correlation_status=complete`, and `smoke_status=passed`. Complete capture here
-means normal exit and successful count/diagnostic checks, not zero truncation
-or complete syscall coverage.
+```bash
+cargo test -p apolysis-cli chat:: --bin apolysis
+cargo test -p apolysis-cli --test chat
+```
 
-The first summary was `[redacted]`, with its `implement_change` code retained.
-The second call retained the model-written summary:
+On 2026-11-05, the Rust runtime passed both paths with Claude Code 2.1.295 on
+x86_64 Linux 6.18.55-2-cachyos-lts:
 
-> 用户要求读取刚创建的问候文件并统计其中单词数量，需要读取文件并用单词统计命令计算
+| Rust run | Kernel events | Truncations | Observed result |
+| --- | --- | --- | --- |
+| Three-turn `--smoke` with outer execution tracing | 3,752 | 16 | Two calls in one native session, with 67 and 66 exact relations; no tool in the third turn. |
+| Manual terminal input, then `/exit` | 3,631 | 17 | A user request created and read back a note; its two calls had 35 and 66 exact relations, then the session exited normally. |
 
-Both calls retained exact relations. Local protocol and cleanup regressions
-also passed: `make test-reason-chat` reported 21 and 3 passing tests. The full
-Rust suite reported 541 passed, 91 ignored, and no failures; `make lint` passed.
-A separate manual terminal run without `--smoke` also passed: a user-entered
-directory-listing request caused a real `ls` call with 81 exact relations,
-then `/exit` closed normally (3,607 kernel events, 15 truncations, zero
-loss/failures; complete capture/correlation, finished conversation, and
-`smoke_status=not_requested`).
-This bounded result does not qualify arbitrary tasks, product versions,
-kernels, or loads. The existing Codex network and Cursor
+Both runs reported zero loss/failures, `controller_runtime=rust`, complete
+capture/correlation, and a finished conversation. The smoke status was
+`passed` for the three-turn run and `not_requested` for the manual run. The
+manual run's first summary was redacted; the second retained the model's
+declaration “读回文件内容以确认写入正确”. Exact relations remained valid for both.
+Complete capture means normal exit and successful count/diagnostic checks,
+not zero truncation or complete syscall coverage.
+
+Local verification passed: 38 chat unit tests, 4 CLI integration tests, and
+the full Rust suite with 583 passed, 91 ignored, and no failures. These are
+Rust results, not inherited passes from the former Python conversation script.
+The retained `test-live-reason-products.py` and `test-live-reason-summary.py`
+scripts are independent opt-in validation tools, not dependencies of
+`apolysis chat`; their historical results remain in [live validation](harness-intent-live-validation.md).
+
+### Optional execution-tracing gate
+
+[`test-live-reason-chat.sh`](../scripts/test-live-reason-chat.sh), also exposed
+as `make test-live-reason-chat`, reruns only the fixed three-turn smoke under
+an outer executable tracer. This includes controller publish/correlate helpers
+outside the observer's managed-agent scope. It requires a complete Rust smoke
+report, usable filename/count evidence, and no observed Python executable.
+This is evidence about that run, not proof against renamed or hostile code.
+
+After building, use the same explicit sudo environment:
+
+```bash
+sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy \
+  ./scripts/test-live-reason-chat.sh --require-all
+```
+
+The gate uses `APOLYSIS_STRACE` when supplied, otherwise an installed `strace`,
+and falls back to `bpftrace` when strace is unavailable. To use a separately
+verified binary without installing it globally, insert
+`env APOLYSIS_STRACE=/absolute/path/to/verified/strace` before the script path
+in that command. It also needs `jq`, `setpriv`, `timeout`, and `realpath`, plus
+`gawk` for the strace backend. These are optional validation dependencies,
+not requirements of `apolysis chat`. `--require-all` turns missing
+prerequisites into a failure rather than a successful skip.
+
+Only executable filenames and their attempt counts are exported as
+`evidence/executable-counts.json`, atomically published as the invoking user.
+The counts include failed PATH-search attempts and are not successful-exec
+counts. Filenames remain retained data. The strace backend temporarily records argv
+for this fixed synthetic workload in a root-private directory; it does not
+expand environment values, and removes raw traces on exit. Do not use this
+gate to record ordinary private conversations. It changes neither global
+product configuration nor Kubernetes state.
+
+The local bpftrace attempt failed inside its ELF handling and is not passing
+evidence. The final outer-trace gate passed using a signature-verified
+temporary strace binary without global installation. It observed **18
+`apolysis` exec attempts**, including helpers outside the managed-agent scope,
+and **no Python exec attempt**. Its Rust smoke result is the 3,752-event row
+above. Raw traces were removed on exit; only the filename/count artifact was
+retained alongside the ordinary chat evidence.
+
+Even a successful bounded run does not qualify arbitrary tasks, product
+versions, kernels, or loads. The existing Codex network and Cursor
 authentication blockers remain unchanged; see [live validation](harness-intent-live-validation.md),
 [design](design.md), and [roadmap](roadmap.md).

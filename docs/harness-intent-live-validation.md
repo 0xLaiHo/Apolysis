@@ -185,6 +185,11 @@ qualification.
 
 ## Model-written summary: controlled Claude protocol
 
+The Python scripts in this report are independent validation gates. Their
+recorded product runs and counts retain their original scope; they are not
+the runtime implementation or qualification results of the Rust
+[`apolysis chat`](reason-chat.md) command.
+
 The separate [`test-live-reason-summary.py`](../scripts/test-live-reason-summary.py)
 gate ran Claude Code **2.1.295** against a temporary synthetic login project on
 the same host. The final run completed **4 tests with no failures or errors**,

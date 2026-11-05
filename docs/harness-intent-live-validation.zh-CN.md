@@ -150,6 +150,9 @@ Claude 默认注释模式虽持久化了声明和理由，但由于命令被嵌�
 
 ## 模型撰写摘要：受控 Claude 协议
 
+本报告中的 Python 脚本是独立验证门禁，已有产品运行及计数保留原始验证范围，不是
+Rust [`apolysis chat`](reason-chat.zh-CN.md) 命令的运行时实现或资格验证结果。
+
 独立的 [`test-live-reason-summary.py`](../scripts/test-live-reason-summary.py)
 门禁在同一主机上，让 Claude Code **2.1.295** 操作临时合成登录项目。最终运行完成
 **4 项测试，失败与错误均为零**，产生 **2,800 条 raw kernel event**、**12 次截断**，

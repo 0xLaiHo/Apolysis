@@ -2,7 +2,7 @@
 
 [English](reason-chat.md) | [简体中文](reason-chat.zh-CN.md)
 
-[`run-reason-chat.py`](../scripts/run-reason-chat.py) 允许你在同一个 Claude 会话中
+Rust `apolysis chat` 命令允许你在同一个 Claude 会话中
 输入自己的自然语言任务和后续要求，同时由 Apolysis 使用真实 eBPF 观测本地执行。
 交互模式没有固定任务。每次运行创建独立工作目录，不把当前项目作为任务目录。
 
@@ -12,7 +12,7 @@
 ## 启动
 
 需要具备实时 BPF 前提条件的 Linux、可用的 Claude Code CLI 与既有 provider 认证、
-Bubblewrap、Python 3，以及来自同一源码构建的 CLI/BPF 对象。入口会实际调用
+Bubblewrap，以及来自同一源码构建的 CLI/BPF 对象。对话运行时不依赖 Python，入口会实际调用
 provider，可能产生费用。在普通用户终端进入仓库，不使用 sudo 构建，然后显式提权
 启动观测：
 
@@ -20,7 +20,7 @@ provider，可能产生费用。在普通用户终端进入仓库，不使用 su
 cargo build -p apolysis-cli
 make build-ebpf
 sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy \
-  env PYTHONDONTWRITEBYTECODE=1 python3 -u ./scripts/run-reason-chat.py
+  target/debug/apolysis chat
 ```
 
 如果当前配置还依赖 provider 认证环境变量，也只按变量名保留，不把值写入命令或
@@ -28,7 +28,7 @@ sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,ht
 受管产品。临时配置和挂载遮蔽不修改现有全局 hook、指令或 shell profile。缺少构建
 产物或实时前提条件会报错，不会计为演示成功。
 
-终端会显示 `target/reason-chat-*` 下新建的 `workspace` 和 `evidence` 目录。
+终端会显示 `target/reason-chat-rust-*` 下新建的 `workspace` 和 `evidence` 目录。
 每行输入一条消息，等回复后再输入下一轮。例如分三轮输入：
 
 ```text
@@ -42,7 +42,14 @@ sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,ht
 
 - `/exit` 或 Ctrl+D 正常结束对话。
 - Ctrl+C 结束整个会话，不是只取消当前一轮。
-- `--turn-timeout 300` 将单轮超时从默认的 180 秒改为 300 秒。
+- `--turn-timeout 300` 将单轮超时从默认的 180 秒改为 300 秒，允许范围为 1–3,600 秒。
+
+可选路径参数包括 `--output-dir <parent>`（默认 `target`）、`--policy <path>`
+（默认 `policies/local-dev.yaml`）及 `--bpf-object <path>`（默认
+`target/ebpf/apolysis_observer.bpf.o`），相对路径以启动命令时的目录为准。输出参数
+指定新运行目录的父目录，不是让 agent 操作已有项目。CLI 与 BPF 构建必须匹配。
+`apolysis chat --help` 不调用 provider，也不要求 sudo。内部 `hook`、`launch`、
+`publish` 助手不需要手动执行。
 
 每次工具调用使用新的 `/bin/bash`。文件会保留，但 shell 的目录、变量和函数变化
 不会传回产品的外层 shell；需要切换目录时，应在同一条命令里完成。对话上下文只在
@@ -69,6 +76,7 @@ sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,ht
 
 | 字段 | 含义 |
 | --- | --- |
+| `controller_runtime` | 值为 `rust`，标识本次运行采用的对话实现。 |
 | `conversation_status` | 对话正常结束，还是中断或失败。 |
 | `capture_status` | 最终采集检查是否通过，包括匹配且非空的 summary 与原生进程成功退出。 |
 | `correlation_status` | 最终关联是否完成。 |
@@ -98,9 +106,14 @@ sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,ht
 不保留内容，不代表整个目录不含内容。尽力脱敏不保证匿名。终端录制与 provider
 自身的数据处理不属于这条本地持久化规则的保证范围。
 
-生成的根目录为私有目录，并被 Git 忽略。控制文件是临时的；任务目录与证据目录在
-退出或失败后仍保留。不再需要时，只删除终端打印的本次运行目录。入口不修改全局
-产品配置，也不使用 Kubernetes。
+生成的运行目录为私有目录；默认的 `target/` 位置被 Git 忽略。若选择其他输出父目录，
+须自行确保采集数据不进入版本控制。root 观测器只在 root 拥有的私有临时目录中写入
+采集源文件。新启动的降权 Rust 助手将时间线快照、关联与最终结果原子发布到用户
+拥有的证据目录；root 不会为发布而重新打开这些可变输出路径。认证助手同样以原始
+调用用户身份运行，只将需要的既有配置读入子进程环境，不把凭证写入文件。
+
+控制文件和私有采集文件是临时的；任务目录与已发布证据在退出或失败后仍保留。不再
+需要时，只删除终端打印的本次运行目录。入口不修改全局产品配置，也不使用 Kubernetes。
 
 挂载设置将主机设为只读，允许写入临时控制目录、任务目录和证据目录。只读挂载不
 阻止读取主机文件或网络访问，agent 也能访问可写证据。因此它既不提供恶意 agent
@@ -109,27 +122,70 @@ sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,ht
 ## 验证边界
 
 `--smoke` 通过真实 provider 执行三轮：创建问候文件、读取并统计单词，再进行无工具
-聊天。在上面的相同 sudo 环境下添加 `--smoke` 即可运行。`make test-reason-chat`
-执行本地协议与关闭回归，不调用 provider。
+聊天。在上面的相同 sudo 环境下添加 `--smoke` 即可运行。该回归要求使用常规 shell
+命令，以便验证 Rust 对话链路不需要 Python 解释器。`make test-reason-chat` 执行
+Rust 单元测试及 CLI 集成回归，不调用 provider：
 
-2026-11-05，Claude Code 2.1.295 在 x86_64 Linux 6.18.55-2-cachyos-lts 上的最终
-实时 smoke 完成三轮：**4,209 条内核事件、18 次截断、零丢失/失败**。同一个原生
-会话中的两次工具调用分别有 67 和 98 条准确关联，最后一轮没有调用工具。最终结果
-为 `conversation_status=finished`、`capture_status=complete`、
-`correlation_status=complete`、`smoke_status=passed`。这里的采集完整表示正常
-退出并通过计数和诊断检查，不代表没有截断或完整 syscall 覆盖。
+```bash
+cargo test -p apolysis-cli chat:: --bin apolysis
+cargo test -p apolysis-cli --test chat
+```
 
-第一条摘要为 `[redacted]`，保留了 `implement_change` 代码。第二次调用保留了模型
-自行撰写的摘要：
+2026-11-05，Rust 运行时在 Claude Code 2.1.295、x86_64 Linux
+6.18.55-2-cachyos-lts 上通过了两条路径：
 
-> 用户要求读取刚创建的问候文件并统计其中单词数量，需要读取文件并用单词统计命令计算
+| Rust 运行 | 内核事件 | 截断 | 实际结果 |
+| --- | --- | --- | --- |
+| 带外层执行跟踪的三轮 `--smoke` | 3,752 | 16 | 同一原生会话两次调用分别有 67、66 条准确关联，第三轮没有调用工具。 |
+| 手动终端输入，再 `/exit` | 3,631 | 17 | 用户要求创建并读回便条文件，两次调用分别有 35、66 条准确关联，随后正常退出。 |
 
-两次调用均保留准确关联。本地协议和清理回归也已通过：`make test-reason-chat`
-分别报告 21 和 3 项测试通过。全仓 Rust 测试为 541 passed、91 ignored、无失败；
-`make lint` 通过。另一次不带 `--smoke` 的真实终端运行也通过：用户手动输入查看
-目录的任务，触发实际 `ls` 调用及 81 条准确关联，再输入 `/exit` 正常结束（3,607
-条内核事件、15 次截断、零丢失/失败；采集与关联 complete、对话 finished、
-`smoke_status=not_requested`）。这一有界结果不证明任意任务、产品版本、内核或负载均已通过资格
-验证。既有 Codex 网络及 Cursor
+两次运行均为零丢失/失败，`controller_runtime=rust`，采集与关联 complete，对话
+finished。三轮运行的 smoke 状态为 `passed`，手动运行则为 `not_requested`。
+手动运行的第一条摘要被脱敏，第二条保留了模型声明“读回文件内容以确认写入正确”，
+两次准确关联均保持有效。采集完整表示正常退出并通过计数和诊断检查，不代表没有
+截断或完整 syscall 覆盖。
+
+本地验证通过：38 项 chat 单元测试、4 项 CLI 集成测试；全仓 Rust 测试为 583 passed、
+91 ignored、无失败。这些是 Rust 的实际结果，没有沿用旧 Python 对话脚本的通过
+结论。保留的 `test-live-reason-products.py` 与
+`test-live-reason-summary.py` 是独立的显式验证工具，不是 `apolysis chat` 的依赖；
+其历史结果仍记录在[实时验证](harness-intent-live-validation.zh-CN.md)中。
+
+### 可选的执行跟踪门禁
+
+[`test-live-reason-chat.sh`](../scripts/test-live-reason-chat.sh)（也可通过
+`make test-live-reason-chat` 调用）只在外层可执行文件跟踪器下重跑固定三轮 smoke，
+覆盖观测器受管 agent 范围之外的控制器 publish/correlate 助手。它要求完整的 Rust
+smoke 报告、有效的文件名/计数证据，以及未观测到 Python 可执行文件。这是对该次
+运行的证据，不是针对改名或恶意代码的证明。
+
+构建后，在相同的显式 sudo 环境下运行：
+
+```bash
+sudo --preserve-env=PATH,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy \
+  ./scripts/test-live-reason-chat.sh --require-all
+```
+
+门禁优先使用指定的 `APOLYSIS_STRACE`，否则使用系统 `strace`；没有 strace 时退到
+`bpftrace`。若使用另行验证的临时二进制而不全局安装，可在上面命令的脚本路径前
+插入 `env APOLYSIS_STRACE=/absolute/path/to/verified/strace`。此外还需 `jq`、
+`setpriv`、`timeout`、`realpath`，strace 后端还需 `gawk`。这些都是可选验证依赖，
+不是 `apolysis chat` 的运行要求。`--require-all` 让缺少前提条件变为失败，不能把
+跳过计为成功。
+
+只将可执行文件名及尝试计数导出为 `evidence/executable-counts.json`，由原始调用
+用户身份原子发布。计数包括 PATH 搜索失败的尝试，不等于成功执行次数。文件名仍
+属于保留数据。strace 后端会为这个固定合成工作负载临时
+记录 argv，文件位于 root 私有目录，不展开环境变量值，退出时删除原始跟踪。
+不要将这个门禁用于录制日常私密对话。它不修改全局产品配置或 Kubernetes 状态。
+
+本机 bpftrace 尝试因其内部 ELF 处理错误失败，不能作为通过证据。最终外层跟踪
+门禁使用已验证签名的临时 strace 二进制通过，无需全局安装。它观测到 **18 次
+`apolysis` exec 尝试**，包括受管 agent 范围之外的助手，**没有 Python exec 尝试**。
+其 Rust smoke 结果对应上表的 3,752 条事件。原始跟踪在退出时已删除，只保留文件名/
+计数制品及普通对话证据。
+
+即使有界运行通过，也不证明任意任务、产品版本、内核或负载均已通过资格验证。
+既有 Codex 网络及 Cursor
 认证阻断保持不变；见[实时验证](harness-intent-live-validation.zh-CN.md)、
 [设计](design.zh-CN.md)和[路线图](roadmap.zh-CN.md)。

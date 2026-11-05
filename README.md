@@ -160,9 +160,10 @@ authentication prerequisites, respectively. A separate controlled Claude test
 linked a model-written, explicitly opted-in reason summary to an actual login
 regression file attempt; this is not a default native reason capability. Broader
 product-version, multi-kernel, and stress qualification remains open.
-An experimental [conversation runner](docs/reason-chat.md) accepts your own
+The experimental Rust [`apolysis chat`](docs/reason-chat.md) command accepts your own
 tasks in a separate workspace and shows declared reasons alongside observed
-execution, keeping the same in-memory Claude conversation across turns.
+execution, keeping the same in-memory Claude conversation across turns without
+a Python runtime dependency.
 See [live validation](docs/harness-intent-live-validation.md),
 [design](docs/design.md), [roadmap](docs/roadmap.md), and
 [harness integration](docs/harness-intent.md) for scope and limits.
