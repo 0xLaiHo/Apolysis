@@ -25,9 +25,11 @@ native approval semantics. Dedicated kernel markers and process-generation
 checks carry attribution across fork and exec. Correlation keeps explicit
 identifier relations, conflicts, and inferred or ambiguous candidates distinct;
 semantic-only declarations do not imply expected local execution evidence.
-The next boundary is versioned product-hook qualification and privileged
-kernel qualification under loss, unsupported execution shapes, and longer
-running workloads. Fixtures and local builds do not close those gates.
+A bounded synthetic live regression now establishes the local marker path on
+one Linux kernel. The next boundary remains versioned product-hook end-to-end
+qualification, multiple kernels, and stress/loss or longer-running workloads.
+The local gate does not close those broader qualification gaps; its evidence
+is recorded in [live validation](harness-intent-live-validation.md).
 
 Qualification must exercise the actual product adapters as well as the Rust
 normalizer. Kernel fixtures and privileged Linux runs are separate evidence;

@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-live test-live-harness-intent test-harness-hooks quickstart test-quickstart \
+.PHONY: build test lint clean build-ebpf test-bpf-relocation test-live test-live-harness-intent test-harness-hooks quickstart test-quickstart \
 	test-evidence-objects-real \
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
@@ -34,6 +34,10 @@ clean:
 
 build-ebpf:
 	./scripts/build-ebpf.sh
+
+# Host-BTF relocation regression gate; no BPF privileges are required.
+test-bpf-relocation:
+	./scripts/test-bpf-relocation.sh
 
 test-live: build-ebpf
 	./scripts/test-live-observer.sh

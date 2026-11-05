@@ -216,6 +216,7 @@ dependencies = [
  "apolysis-policy",
  "apolysis-store",
  "aya",
+ "aya-obj",
  "libc",
  "serde",
  "serde_json",

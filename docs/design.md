@@ -115,5 +115,15 @@ marker delivery, process-tree propagation, and kernel event coverage require
 separate integration evidence beyond fixtures. The kernel/userspace event
 ABI is 648 bytes and requires a CLI and BPF object from the same build;
 historical JSONL readability does not imply old BPF-object compatibility.
-Privileged live validation remains explicit;
-unrun or skipped live tests must not be presented as successful qualification.
+The opt-in `make test-bpf-relocation` gate checks every built observer program's
+CO-RE relocations against readable host BTF without loading a BPF program.
+Native regression tests exercise the shared C marker parser and bounded shell
+basename checks. These checks do not substitute for kernel verifier acceptance
+and live event assertions.
+
+A bounded synthetic marker gate and the general live observer regression have
+passed on one local kernel; [validation details](harness-intent-live-validation.md)
+record the environment, assertions, diagnostics, and limits. Product-native
+end-to-end runs, other kernels, and stress/loss qualification remain open.
+Privileged validation stays explicit, and prerequisite skips never count as
+successful live qualification.

@@ -147,8 +147,11 @@ The harness-intent adapter slice adds content-off declarations for Codex,
 Claude Code, Cursor, Pi, and OpenCode, with append/deduplication, separate
 native and capture session identities, and safe shell-comment markers. The
 observer carries bounded markers across fork and exec, and correlation keeps
-identifier conflicts and heuristic candidates explicit. Live kernel and
-product-version qualification remain separate gates. See [design](docs/design.md), [roadmap](docs/roadmap.md), and
+identifier conflicts and heuristic candidates explicit. A bounded synthetic
+marker gate and the general observer regression passed on one local Linux
+kernel. Real product end-to-end, multi-kernel, and stress qualification remain
+open. See [live validation](docs/harness-intent-live-validation.md),
+[design](docs/design.md), [roadmap](docs/roadmap.md), and
 [harness integration](docs/harness-intent.md) for scope and limits.
 
 ## Core Capabilities

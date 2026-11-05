@@ -203,12 +203,20 @@ cargo test -p apolysis-observer
 make test-harness-hooks
 ```
 
+`make test-bpf-relocation` is an additional opt-in check requiring readable host
+BTF and the eBPF build tools, but no BPF privileges. It parses the built object
+and relocates all programs without loading them into the kernel. Native C
+helper tests also cover complete shell basenames and malformed marker headers.
+
 Privileged live observer tests are opt-in. Missing privileges or kernel
 prerequisites are reported as a skip, not a pass. Rebuild the CLI and eBPF object
 together; the current 648-byte event ABI is not compatible with older objects.
 `make test-live-harness-intent` runs the explicit local live marker gate on a
-prepared host; the current unprivileged invocation skips for missing BPF/perf
-capabilities and does not qualify live kernel behavior.
+prepared host. An authorized privileged invocation has passed on one local
+kernel, along with the general observer regression; see
+[live validation](harness-intent-live-validation.md) for the exact scope and
+retained truncation diagnostics. This does not qualify native product
+end-to-end delivery, other kernels, or stress/loss behavior.
 The gate attaches audit-only probes to synthetic child process trees, reads
 temporary fixture files, and attempts a loopback connection. It contacts no
 provider and changes no runtime policy; process exit detaches probes and the

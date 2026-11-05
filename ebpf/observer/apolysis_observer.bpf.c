@@ -239,14 +239,17 @@ static __always_inline void read_kernel_path(struct apolysis_kernel_event *event
         event->flags |= APOLYSIS_FLAG_RESOURCE_TRUNCATED;
 }
 
-static __always_inline void read_pending_user_path(struct apolysis_pending_exec *pending,
+static __always_inline unsigned int read_pending_user_path(struct apolysis_pending_exec *pending,
                                                    const char *path)
 {
     long length;
 
     length = bpf_probe_read_user_str(pending->resource, sizeof(pending->resource), path);
-    if (length <= 0 || length == sizeof(pending->resource))
+    if (length <= 0 || length == sizeof(pending->resource)) {
         pending->flags |= APOLYSIS_FLAG_RESOURCE_TRUNCATED;
+        return 0;
+    }
+    return length - 1;
 }
 
 static __always_inline void append_exec_argv_arg(struct apolysis_pending_exec *pending,
@@ -295,36 +298,6 @@ static __always_inline void append_exec_argv_arg(struct apolysis_pending_exec *p
     *offset = off;
 }
 
-static __always_inline bool executable_is_shell(const char *path)
-{
-    unsigned int base = 0;
-    unsigned int length = 0;
-    unsigned int i;
-
-    for (i = 0; i < APOLYSIS_RESOURCE_LEN; i++) {
-        char ch = path[i];
-        if (!ch)
-            break;
-        if (ch == '/')
-            base = i + 1;
-        length = i + 1;
-    }
-    if (base > APOLYSIS_RESOURCE_LEN - 5)
-        return false;
-    length -= base;
-    if (length == 2)
-        return path[base] == 's' && path[base + 1] == 'h';
-    if (length == 3)
-        return (path[base] == 'z' || path[base] == 'k' || path[base] == 'a') &&
-               path[base + 1] == 's' && path[base + 2] == 'h';
-    if (length == 4)
-        return ((path[base] == 'b' || path[base] == 'd') &&
-                path[base + 1] == 'a' && path[base + 2] == 's' && path[base + 3] == 'h') ||
-               (path[base] == 'f' && path[base + 1] == 'i' &&
-                path[base + 2] == 's' && path[base + 3] == 'h');
-    return false;
-}
-
 /* This is a complete comment header, not a search through diagnostic argv.
  * The hook places it at the beginning of the shell's command-string argument.
  * Reading exactly the header also works when the remaining command is long. */
@@ -343,11 +316,12 @@ static __always_inline void read_intent_header(struct apolysis_pending_exec *pen
 }
 
 static __always_inline void read_exec_argv(struct apolysis_pending_exec *pending,
-                                           const char *const *argv)
+                                           const char *const *argv,
+                                           unsigned int path_length)
 {
     const char *arg = 0;
     unsigned int offset = 5;
-    bool shell = executable_is_shell(pending->resource);
+    bool shell = apolysis_executable_is_shell(pending->resource, path_length);
     bool command_next = false;
     bool command_seen = false;
     bool unknown_options = false;
@@ -403,6 +377,7 @@ static __always_inline int capture_exec_enter(const char *filename,
     struct apolysis_pending_exec *pending;
     unsigned long long pid_tgid;
     unsigned int scratch_key = 0;
+    unsigned int path_length;
 
     if (!current_is_in_scope())
         return 0;
@@ -417,8 +392,8 @@ static __always_inline int capture_exec_enter(const char *filename,
     }
 
     __builtin_memset(pending, 0, sizeof(*pending));
-    read_pending_user_path(pending, filename);
-    read_exec_argv(pending, argv);
+    path_length = read_pending_user_path(pending, filename);
+    read_exec_argv(pending, argv, path_length);
 
     if (bpf_map_update_elem(&APOLYSIS_PENDING_EXECS, &pid_tgid, pending, BPF_ANY)) {
         bpf_map_delete_elem(&APOLYSIS_PENDING_EXECS, &pid_tgid);
@@ -449,8 +424,15 @@ static __always_inline void copy_open_action(struct apolysis_kernel_event *event
         copy_action(event, "read", 5);
 }
 
+/* Raw tracepoint arguments have a fixed u64-slot ABI. Do not use vmlinux's
+ * preserve_access_index type here: its args[0] flexible array makes Aya's
+ * CO-RE relocator reject args[1] as out of bounds before any kernel load. */
+struct apolysis_fork_args {
+    unsigned long long args[2];
+};
+
 SEC("raw_tracepoint/sched_process_fork")
-int apolysis_sched_process_fork(struct bpf_raw_tracepoint_args *ctx)
+int apolysis_sched_process_fork(struct apolysis_fork_args *ctx)
 {
     struct task_struct *parent = (struct task_struct *)ctx->args[0];
     struct task_struct *child = (struct task_struct *)ctx->args[1];

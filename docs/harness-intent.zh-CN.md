@@ -177,10 +177,16 @@ cargo test -p apolysis-observer
 make test-harness-hooks
 ```
 
+`make test-bpf-relocation` 是额外的显式门禁，需要可读的主机 BTF 和 eBPF 构建工具，
+不需要 BPF 权限。它解析已构建对象并重定位所有程序，不将其加载进内核。原生 C helper
+测试也覆盖完整 shell basename 与格式错误的标记。
+
 特权实时观测器测试需要显式启用。缺少权限或内核条件应报告跳过，不能报告通过。CLI
 与 eBPF 对象必须一起重建；当前 648 字节事件 ABI 不兼容旧对象。
-`make test-live-harness-intent` 在准备好的主机上执行显式本地实时标记门禁；当前无特权
-调用因缺少 BPF/perf 能力而跳过，不代表实时内核行为通过资格验证。
+`make test-live-harness-intent` 在准备好的主机上执行显式本地实时标记门禁。经授权的
+特权运行现已在一个本地内核上通过，通用观测器回归也通过；准确范围和保留的截断诊断
+见[实时验证](harness-intent-live-validation.zh-CN.md)。这不代表原生产品端到端送达、
+其他内核或压力/丢失行为通过资格验证。
 门禁把仅审计的探针限定到合成子进程树，读取临时 fixture 文件并尝试连接 loopback。
 它不访问 provider，也不修改运行时策略；进程退出会卸载探针，脚本删除自己创建的临时目录。
 

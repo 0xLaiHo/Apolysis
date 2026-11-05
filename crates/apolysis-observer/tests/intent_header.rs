@@ -36,6 +36,17 @@ fn bounded_kernel_header_parser_and_capture_loss_transition() {
 #include <string.h>
 #include "apolysis_intent.h"
 int main(void) {
+    const char *shells[] = {"sh", "bash", "zsh", "dash", "ash", "ksh", "fish", "/bin/sh", "/usr/bin/bash", "/long/path/zsh"};
+    for (unsigned int i = 0; i < sizeof(shells) / sizeof(shells[0]); i++)
+        assert(apolysis_executable_is_shell(shells[i], strlen(shells[i])));
+    const char *other[] = {"", "h", "/", "/bash/", "notbash", "/bin/notsh", "/bin/python3", "/bin/BASH", "ssh", "sash"};
+    for (unsigned int i = 0; i < sizeof(other) / sizeof(other[0]); i++)
+        assert(!apolysis_executable_is_shell(other[i], strlen(other[i])));
+    char long_path[APOLYSIS_RESOURCE_LEN] = {0};
+    memset(long_path, 'x', sizeof(long_path) - 1);
+    memcpy(long_path + sizeof(long_path) - 6, "/bash", 5);
+    assert(apolysis_executable_is_shell(long_path, sizeof(long_path) - 1));
+    assert(!apolysis_executable_is_shell(long_path, sizeof(long_path)));
     const char valid[] = "# APOLYSIS_INTENT_ID=0123456789abcdef0123456789abcdef\n";
     char id[APOLYSIS_INTENT_ID_LEN] = {0};
     assert(sizeof(valid) - 1 == 54);

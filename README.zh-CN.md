@@ -120,7 +120,9 @@ command 不会写入 JSONL 或 daemon hash-chain record。只有把该源码发�
 Harness 意图适配切片为 Codex、Claude Code、Cursor、Pi 和 OpenCode 提供默认不保留
 内容的声明记录，支持追加与去重、分离原生会话和采集会话，以及安全的 shell 注释标记。
 观测器跨 fork/exec 传递有界标记，关联判定显式保留标识符冲突和启发式候选。
-实时内核与产品版本资格验证仍是独立门禁。范围与限制见[设计](docs/design.zh-CN.md)、
+有界合成标记门禁与通用观测器回归已在一个本地 Linux 内核上通过；真实产品端到端、
+多内核及压力资格验证仍待完成。范围与限制见[实时验证](docs/harness-intent-live-validation.zh-CN.md)、
+[设计](docs/design.zh-CN.md)、
 [路线图](docs/roadmap.zh-CN.md)和[Harness 接入](docs/harness-intent.zh-CN.md)。
 
 ## 核心能力

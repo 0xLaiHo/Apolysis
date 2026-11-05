@@ -36,6 +36,7 @@ cat > "$fixture_dir/workload.c" <<'C'
 #include <sys/wait.h>
 #include <unistd.h>
 static char **paths;
+static pthread_t main_thread;
 static void probe(const char *path) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) _exit(20);
@@ -43,7 +44,7 @@ static void probe(const char *path) {
 }
 static void *worker(void *unused) {
     (void)unused;
-    usleep(100000); /* main thread has called pthread_exit by now */
+    if (pthread_join(main_thread, NULL)) _exit(27); /* prove leader has exited */
     probe(paths[3]);
     pid_t child = fork(); /* fork from a non-leader thread */
     if (child < 0) _exit(21);
@@ -59,6 +60,7 @@ static void *worker(void *unused) {
 int main(int argc, char **argv) {
     if (argc != 4) return 23;
     paths = argv;
+    main_thread = pthread_self();
     pid_t child = fork(); /* child intentionally performs no exec */
     if (child < 0) return 24;
     if (!child) { probe(paths[1]); _exit(0); }
@@ -70,8 +72,10 @@ int main(int argc, char **argv) {
 }
 C
 clang -O2 -pthread "$fixture_dir/workload.c" -o "$fixture_dir/workload"
+chmod 755 "$fixture_dir/workload"
 for name in fork-only.txt threaded-fork.txt leader-exited.txt; do
     printf 'synthetic fixture\n' > "$fixture_dir/$name"
+    chmod 644 "$fixture_dir/$name"
 done
 python3 - "$repo_root" "$apolysis_bin" "$fixture_dir" <<'PY'
 import json
@@ -81,35 +85,59 @@ import subprocess
 import sys
 repo, binary, root = map(pathlib.Path, sys.argv[1:])
 identity = 'intent-live-regression'
+capture_counts = []
+
+def require(condition, message):
+    # These checks must still run if the caller exports PYTHONOPTIMIZE.
+    if not condition:
+        raise RuntimeError(message)
+
 original = 'exec ' + shlex.join([str(root / 'workload'), *(str(root / name) for name in ('fork-only.txt', 'threaded-fork.txt', 'leader-exited.txt'))])
 payload = {'session_id': 'synthetic-harness-session', 'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_use_id': 'synthetic-long-id-' + 'x' * 200, 'tool_input': {'command': original}}
 result = subprocess.run([str(binary), 'intent', 'hook', '--harness', 'claude', '--session', identity, '--workspace-root', str(root), '--output', str(root / 'intent.jsonl')], input=json.dumps(payload), text=True, capture_output=True, check=True)
 command = json.loads(result.stdout)['hookSpecificOutput']['updatedInput']['command']
 intent = json.loads((root / 'intent.jsonl').read_text().splitlines()[0])
 token = intent['intent_id']
-assert len(token) == 32 and all(ch in '0123456789abcdef' for ch in token)
-assert command == '# APOLYSIS_INTENT_ID=' + token + '\n' + original
+require(len(token) == 32 and all(ch in '0123456789abcdef' for ch in token), 'hook did not return a complete internal token')
+require(command == '# APOLYSIS_INTENT_ID=' + token + '\n' + original, 'hook changed the original command or omitted the exact header')
 
 def capture(name, argv):
     output = root / (name + '.jsonl')
     subprocess.run([str(binary), 'observe', '--backend', 'live', '--session', identity, '--policy', str(repo / 'policies/local-dev.yaml'), '--output', str(output), '--bpf-object', str(repo / 'target/ebpf/apolysis_observer.bpf.o'), '--workspace-root', str(root), '--duration-seconds', '5', '--agent-kind', 'intent-fixture', '--agent-run', '--', *argv], stdout=subprocess.DEVNULL, check=True)
     records = [json.loads(line) for line in output.read_text().splitlines()]
-    failures = [r for r in records if r.get('record_type') == 'observer_diagnostic' and r.get('kind') in ('ring_buffer_reserve_failure', 'map_pressure', 'decode_failure') and r.get('count', 0)]
-    assert not failures, f'{name}: evidence loss: {failures}'
+    diagnostics = [r for r in records if r.get('record_type') == 'observer_diagnostic']
+    known_kinds = {'ring_buffer_reserve_failure', 'map_pressure', 'decode_failure', 'attach_failure', 'verifier_failure', 'truncation', 'summary'}
+    require(all(r.get('kind') in known_kinds for r in diagnostics), f'{name}: unknown diagnostic kind')
+    failures = [r for r in diagnostics if r.get('kind') not in {'truncation', 'summary'} and r.get('count', 0)]
+    require(not failures, f'{name}: observer failure/loss counters: ' + ', '.join(f"{r['kind']}={r['count']}" for r in failures))
+    raw_count = sum(r.get('record_type') == 'raw_kernel_event' for r in records)
+    summaries = [r for r in diagnostics if r.get('kind') == 'summary']
+    require(len(summaries) == 1 and summaries[0].get('count') == raw_count and raw_count > 0, f'{name}: missing or empty capture summary')
+    events = [r for r in records if r.get('record_type') == 'event']
+    root_pids = [int(r['action']) for r in events if r.get('resource') == 'agent-root-pid']
+    require(len(root_pids) == 1, f'{name}: missing managed process identity')
+    executable = 'executable_ref:' + pathlib.Path(argv[0]).name
+    require(any(r.get('event_type') == 'exec' and r.get('pid') == root_pids[0] and r.get('process_executable') == executable for r in events), f'{name}: managed target exec was not observed')
+    exits = [r for r in events if r.get('resource') == 'agent-exit-status']
+    require(len(exits) == 1 and exits[0].get('action') == 'exit:0', f'{name}: managed workload did not finish successfully (or capture timed out)')
+    capture_counts.append(raw_count)
     return records
 
 records = capture('valid', ['/bin/bash', '-c', command])
+require(not any('intent_capture_incomplete:true' in r.get('raw_payload', '') for r in records), 'valid workload had incomplete intent capture')
 events = [r for r in records if r.get('record_type') == 'event']
 for name in ('fork-only.txt', 'threaded-fork.txt', 'leader-exited.txt'):
     matching = [r for r in events if r.get('event_type') == 'file_open' and r.get('resource') == str(root / name)]
-    assert matching and all(r.get('intent_id') == token for r in matching), (name, matching)
-assert any(r.get('event_type') == 'network_connect' and r.get('intent_id') == token for r in events)
-assert len({r['pid'] for r in events if r.get('event_type') == 'file_open' and r.get('resource') in {str(root / name) for name in ('fork-only.txt', 'threaded-fork.txt', 'leader-exited.txt')}}) == 3
-assert any(r.get('event_type') == 'exec' and r.get('intent_id') == token and r.get('process_executable', '').endswith('workload') for r in events), 'same-PID exec lost its token'
+    require(matching and all(r.get('intent_id') == token for r in matching), f'{name}: missing file attempt or incorrect attribution')
+require(any(r.get('event_type') == 'network_connect' and r.get('intent_id') == token for r in events), 'loopback connection attempt is missing its token')
+require(len({r['pid'] for r in events if r.get('event_type') == 'file_open' and r.get('resource') in {str(root / name) for name in ('fork-only.txt', 'threaded-fork.txt', 'leader-exited.txt')}}) == 3, 'expected three distinct fixture process identities')
+root_pid = next(int(r['action']) for r in events if r.get('resource') == 'agent-root-pid')
+require(any(r.get('event_type') == 'exec' and r.get('pid') == root_pid and r.get('intent_id') == token and r.get('process_executable') == 'executable_ref:workload' for r in events), 'same-PID exec lost its token')
 
 # No token may be manufactured by ordinary argv, a later comment, or a partial header.
 header = '# APOLYSIS_INTENT_ID=' + token + '\n'
 (root / 'noop.sh').write_text('exit 0\n')
+(root / 'noop.sh').chmod(0o644)
 for name, argv in [
     ('ordinary-arg', ['/bin/echo', header]),
     ('script-argument', ['/bin/bash', str(root / 'noop.sh'), '-c', header]),
@@ -117,6 +145,6 @@ for name, argv in [
     ('short-token', ['/bin/bash', '-c', '# APOLYSIS_INTENT_ID=' + token[:-1] + '\ntrue']),
     ('uppercase-token', ['/bin/bash', '-c', '# APOLYSIS_INTENT_ID=' + 'A' * 32 + '\ntrue']),
 ]:
-    assert not any(r.get('intent_id') for r in capture(name, argv)), name
-print('apolysis-intent-live: PASS: hook, bounded token capture, exec, fork-only, threaded fork, leader exit, loopback connect, and malformed/ordinary arguments')
+    require(not any(r.get('intent_id') for r in capture(name, argv)), f'{name}: unexpected attribution')
+print(f'apolysis-intent-live: PASS: {len(capture_counts)} complete captures, {sum(capture_counts)} kernel events; hook, bounded token capture, exec, fork-only, threaded fork, leader exit, loopback connect, and malformed/ordinary arguments')
 PY

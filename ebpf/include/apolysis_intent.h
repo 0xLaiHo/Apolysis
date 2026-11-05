@@ -7,6 +7,29 @@
 enum apolysis_intent_capture { APOLYSIS_INTENT_UNKNOWN, APOLYSIS_INTENT_ABSENT, APOLYSIS_INTENT_PRESENT };
 enum apolysis_intent_update { APOLYSIS_INTENT_CLEAR, APOLYSIS_INTENT_KEEP, APOLYSIS_INTENT_REPLACE };
 
+/* length is the complete path length returned by probe_read_user_str, minus
+ * its NUL. Fixed tail checks avoid a path-scanning loop's verifier state
+ * explosion while requiring an exact basename, not just a shell-like suffix. */
+static __inline __attribute__((always_inline)) int
+apolysis_executable_is_shell(const char *path, unsigned int length)
+{
+    if (length < 2 || length >= APOLYSIS_RESOURCE_LEN)
+        return 0;
+    if (path[length - 1] != 'h' || path[length - 2] != 's')
+        return 0;
+    if (length == 2 || path[length - 3] == '/')
+        return 1;
+    if (length < 3)
+        return 0;
+    if ((length == 3 || path[length - 4] == '/') &&
+        (path[length - 3] == 'z' || path[length - 3] == 'k' || path[length - 3] == 'a'))
+        return 1;
+    if (length < 4 || (length != 4 && path[length - 5] != '/'))
+        return 0;
+    return ((path[length - 4] == 'b' || path[length - 4] == 'd') && path[length - 3] == 'a') ||
+           (path[length - 4] == 'f' && path[length - 3] == 'i');
+}
+
 static __inline __attribute__((always_inline)) int
 apolysis_parse_intent_header(const char *header, unsigned int length, char *intent_id)
 {
