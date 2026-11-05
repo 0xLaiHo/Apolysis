@@ -119,9 +119,15 @@ command 不会写入 JSONL 或 daemon hash-chain record。只有把该源码发�
 
 Harness 意图适配切片为 Codex、Claude Code、Cursor、Pi 和 OpenCode 提供默认不保留
 内容的声明记录，支持追加与去重、分离原生会话和采集会话，以及安全的 shell 注释标记。
+可选 shell bridge 为会包装命令的产品后端提供明确的内层 shell 边界；启用前须接受其
+shell 状态限制。
 观测器跨 fork/exec 传递有界标记，关联判定显式保留标识符冲突和启发式候选。
-有界合成标记门禁与通用观测器回归已在一个本地 Linux 内核上通过；真实产品端到端、
-多内核及压力资格验证仍待完成。范围与限制见[实时验证](docs/harness-intent-live-validation.zh-CN.md)、
+独立的声明原因记录可以为同一次 Tool Call 补充目的代码；自由文本摘要需要显式启用，
+声明的目的不代表已验证动机。
+有界合成标记门禁与通用观测器回归已在一个本地 Linux 内核上通过。显式 shell bridge
+模式下，Claude Code、Pi 和 OpenCode 的有界原生运行已通过；Codex 和 Cursor 分别
+受网络与认证前提条件阻断。
+更广的产品版本、多内核及压力资格验证仍待完成。范围与限制见[实时验证](docs/harness-intent-live-validation.zh-CN.md)、
 [设计](docs/design.zh-CN.md)、
 [路线图](docs/roadmap.zh-CN.md)和[Harness 接入](docs/harness-intent.zh-CN.md)。
 

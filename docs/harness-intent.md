@@ -27,7 +27,8 @@ command body:
 cargo test
 ```
 
-This is a command-text marker, not an environment variable or a shell wrapper.
+In the default mode this is a command-text marker, not an environment variable
+or a shell wrapper.
 The hook preserves the rest of the original tool input. Claude Code receives
 no `permissionDecision`, so its native permission flow decides approval.
 Codex requires `permissionDecision:"allow"` alongside a shell `updatedInput`;
@@ -62,6 +63,139 @@ Each declaration records `observation_mode`:
 the product executed the rewrite or that the observer received the marker.
 Web search, file-read tools, and remote calls remain `semantic_only` unless a
 separate execution integration supplies evidence.
+
+## Optional shell bridge
+
+A native product may wrap the edited command in an environment-setup script
+or `eval`. A leading comment in tool input then does not guarantee a leading
+comment in the actual exec command argument. The native Claude Code 2.1.295
+run recorded the declaration and reason but did not attribute its fixture-file
+attempt under the default comment mode. The kernel parser stays strict; it
+does not search arbitrary embedded comments.
+
+Append `--shell-bridge /bin/bash` to a direct hook invocation to opt in to a
+separate shell executing the original body with the intent header at the start
+of its command argument. For Pi and OpenCode, set
+`APOLYSIS_SHELL_BRIDGE=/bin/bash`. Supported paths are `/bin/sh`, `/bin/bash`,
+`/bin/zsh`, `/bin/dash`, and the corresponding `/usr/bin/` paths; the executable
+must exist. An explicitly supplied tool-input shell must agree with this
+selection. `observation_mode` remains `local_shell`.
+
+This creates an inner shell rather than replacing the outer shell with `exec`.
+It preserves the original command body, output, and exit status, but cwd,
+environment changes, and functions do not propagate back to the product's
+outer shell. Select a shell compatible with the command language. The bridge
+is off by default; qualification with it does not establish transparent
+default-mode behavior or compatibility with stateful shell sessions.
+
+## Declared reasons
+
+An optional reason records what the producer says a Tool Call is for. It is
+unverified Semantic Evidence, not hidden model reasoning, an inferred motive,
+authorization, or proof of execution. Reasons live in separate `intent_reason`
+records. They reference the existing `session_id` and `intent_id` and retain
+`intent_source`, `harness_session_id`, and `source_event_id` for identity checks.
+They do not change the intent hash, shell intent marker, or eBPF transport.
+
+Reason codes are closed:
+
+| Code | Declared purpose |
+| --- | --- |
+| `unknown` | No categorized purpose was declared. |
+| `inspect_context` | Inspect relevant context. |
+| `verify_change` | Check a change. |
+| `reproduce_issue` | Reproduce an issue. |
+| `implement_change` | Implement a change. |
+| `diagnose_failure` | Diagnose a failure. |
+| `gather_evidence` | Gather evidence. |
+
+For builtin shell tools in any of the five products, put the reason code in
+the existing command string as a leading comment:
+
+```sh
+# APOLYSIS_REASON_CODE=verify_change
+cargo test
+```
+
+In default comment mode the hook prepends the existing intent header, so the tool command begins
+with `# APOLYSIS_INTENT_ID=<id>`, followed by the reason comment and command.
+With the optional bridge, those lines begin the inner shell's command argument.
+This interface adds no fields to a product's native tool schema. It requires
+the producer to supply the comment; Apolysis does not infer a reason from
+`cargo test` or other command text.
+
+A controlled extension can instead provide a top-level `apolysis_reason`
+object in the normalized hook input. This is an Apolysis envelope, not an
+extra argument to a product's builtin tool:
+
+```json
+{
+  "session_id": "native-session-1",
+  "tool_use_id": "call-1",
+  "tool_name": "Bash",
+  "tool_input": {"command": "cargo test"},
+  "apolysis_reason": {
+    "reason_code": "verify_change",
+    "task_ref": "task-42"
+  }
+}
+```
+
+The envelope also accepts optional `reason_summary`, `reason_id`, and
+`supersedes_reason_id`; unknown fields are rejected. When both envelope and
+comment are present, their codes must agree. Explicit declarations are `agent_declared`. A native
+tool description alone is recorded as `tool_description` with `unknown` code;
+its prose is not classified into a reason. `operator_annotation` is a reserved
+source, not a supported input mode.
+
+The hook's optional `--reason-output` selects the reason JSONL file; its
+default is `<intent-output>.reasons.jsonl`. Existing hook installations use
+that default. The Pi and OpenCode bridges also accept `APOLYSIS_REASON_OUTPUT`
+and enable summaries only with `APOLYSIS_REASON_SUMMARY=1`.
+Reason records have stable IDs, append without replacing earlier
+records, and deduplicate retries. Conflicting IDs are diagnosed. Corrections
+use a new `reason_id` and `supersedes_reason_id` referencing an existing reason
+for the same Tool Call. Cross-call references are not corrections.
+
+By default, only codes and identifiers are kept. `--allow-reason-summary`
+permits a best-effort-redacted summary of at most 240 Unicode characters.
+This explicit opt-in does not make arbitrary text safe to retain; do not put
+secrets in a reason. `task_ref`, supplied `reason_id`, and
+`supersedes_reason_id` contain 1–64 ASCII letters, digits, underscores, or
+hyphens. A task reference is not a prompt, path to read, or task document. The CLI does not read full prompt
+files to reconstruct reasons.
+
+For a late declaration or correction, save the normalized call JSON above as
+`reason-call.json`, preserving the original native session and call identity,
+then use the same capture-session override as the hook:
+
+```bash
+apolysis intent reason --harness codex --session capture-1 \
+  --output .apolysis/intent.codex.jsonl.reasons.jsonl < reason-call.json
+```
+
+`intent reason` also accepts `--workspace-root`, `--shell-bridge`, and
+`--allow-reason-summary`; it appends a reason, without executing a tool or
+rewriting its command. Pass the reason file explicitly during correlation:
+
+```bash
+apolysis intent correlate \
+  --intent-input .apolysis/intent.codex.jsonl \
+  --reason-input .apolysis/intent.codex.jsonl.reasons.jsonl \
+  --timeline-input .apolysis/timeline.jsonl \
+  --output .apolysis/intent-correlation.jsonl
+```
+
+Correlation emits separate `intent_reason_binding` records. A unique valid reason
+may enrich an existing Exact Relation; it cannot establish one. Conflicting
+or unbound reasons produce diagnostics without fabricating runtime links or
+upgrading executable-name candidates. A reason for a `semantic_only` call can
+bind only to its declaration. Missing reasons remain unknown; they are not
+reconstructed from prompts, command names, or observed syscalls.
+Several active reasons are ambiguous even when their sources differ; use an
+explicit correction to supersede a previous reason. Successful bindings and
+enriched exact correlations carry a `declared_reason` object. Resolution
+failures are separate `intent_reason_diagnostic` records.
 
 ## Codex
 
@@ -203,6 +337,38 @@ cargo test -p apolysis-observer
 make test-harness-hooks
 ```
 
+The separate `scripts/test-live-reason-products.py` gate invokes installed
+product CLIs and their configured providers with a synthetic prompt. It requires
+explicit privileged execution, an existing authenticated user, the current CLI
+and BPF object, and Bubblewrap. `--products codex,claude,cursor,pi,opencode`
+selects products; `--require-all` makes prerequisite skips fail the gate.
+Pass `--shell-bridge /bin/bash` explicitly to qualify bridge delivery; omit it
+to test the default comment path. Preserve the existing user's proxy and
+provider environment when elevating the observer, without printing values.
+For example, preserve existing `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
+their lowercase equivalents when needed, plus the selected provider's existing
+authentication variable names. Do not place credential values in command
+arguments, checked-in configuration, or logs. An installed CLI and a status
+command reporting stored login data do not prove current provider access.
+It uses temporary project hooks and masks global hooks and user shell startup
+files in a private mount
+namespace. Original authentication stays at its existing location or is bound
+read-only; Claude's existing authentication environment is passed in memory.
+The gate checks a native declaration and reason against an exact fixture-file
+attempt and rejects persistence of its prompt-only sentinel. This is a separate
+qualification run, not a claim that installing an adapter has passed it.
+Product output and captures stay private and are deleted by default.
+`--keep-failed-private` explicitly retains a failed temporary directory for
+local diagnosis; remove that reported directory after review and never commit
+its contents. The gate makes real provider requests and may incur charges.
+The bounded native bridge run has passed for Claude Code 2.1.295, Pi 1.5.0,
+and OpenCode 1.18.31. Codex is blocked by provider-network connectivity despite
+valid stored authentication; Cursor has expired access and refresh credentials.
+These prerequisites must be restored before those runs can qualify. The three passed results
+cover the single synthetic reason/comment, explicit `/bin/bash` bridge,
+exact fixture-file attempt, and prompt-sentinel privacy assertions; they do
+not qualify default comment transport or arbitrary native tool calls.
+
 `make test-bpf-relocation` is an additional opt-in check requiring readable host
 BTF and the eBPF build tools, but no BPF privileges. It parses the built object
 and relocates all programs without loading them into the kernel. Native C
@@ -215,7 +381,7 @@ together; the current 648-byte event ABI is not compatible with older objects.
 prepared host. An authorized privileged invocation has passed on one local
 kernel, along with the general observer regression; see
 [live validation](harness-intent-live-validation.md) for the exact scope and
-retained truncation diagnostics. This does not qualify native product
+retained truncation diagnostics. That synthetic gate alone does not qualify native product
 end-to-end delivery, other kernels, or stress/loss behavior.
 The gate attaches audit-only probes to synthetic child process trees, reads
 temporary fixture files, and attempts a loopback connection. It contacts no

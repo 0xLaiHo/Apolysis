@@ -885,12 +885,13 @@ fn spawn_managed_agent(
             std::io::Error::last_os_error()
         ));
     }
-    let gate_read = fds[0];
-    let gate_write_raw = fds[1];
-    // SAFETY: pipe2 returned a valid, owned write fd; wrap it for RAII.
-    let gate_write = unsafe { OwnedFd::from_raw_fd(gate_write_raw) };
+    // SAFETY: pipe2 returned two distinct owned fds. RAII closes both even when
+    // spawning fails before the wrapper can exec.
+    let gate_read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let gate_write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    let gate_read_fd = gate_read.as_raw_fd();
 
-    // fd inherited by the wrapper (cleared of CLOEXEC via dup2) that its `read`
+    // fd inherited by the wrapper (explicitly cleared of CLOEXEC) that its `read`
     // waits on. `read` fails on EOF, so a dropped gate (observer setup failed)
     // makes the wrapper exit without running the workload.
     const GATE_FD: libc::c_int = 3;
@@ -912,12 +913,15 @@ fn spawn_managed_agent(
             command.env("CODEX_HOME", codex_home);
         }
     }
-    // SAFETY: runs post-fork/pre-exec, async-signal-safe only. dup2 the gate read
-    // end onto GATE_FD (which clears CLOEXEC), so it survives the wrapper's exec
-    // and the shell can read it; the original CLOEXEC fds close on exec.
+    // SAFETY: runs post-fork/pre-exec, using only async-signal-safe fd operations.
+    // dup2 does not clear CLOEXEC when its two descriptors are equal, so clear
+    // it explicitly to keep the gate readable after the wrapper's exec.
     unsafe {
         command.pre_exec(move || {
-            if libc::dup2(gate_read, GATE_FD) < 0 {
+            if libc::dup2(gate_read_fd, GATE_FD) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(GATE_FD, libc::F_SETFD, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -931,10 +935,7 @@ fn spawn_managed_agent(
         )
     })?;
     // Only the wrapper reads the gate; the parent keeps the write end.
-    // SAFETY: gate_read is a valid fd not used again in the parent.
-    unsafe {
-        libc::close(gate_read);
-    }
+    drop(gate_read);
 
     let root_pid = child
         .id()
@@ -1857,7 +1858,7 @@ mod tests {
         .unwrap();
 
         let mut managed = spawn_managed_agent(&request, Path::new(".")).unwrap();
-        // The child is blocked in pre_exec before running the workload.
+        // The exec'd shell wrapper is blocked before running the workload.
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert!(
             !marker.exists(),
@@ -1875,6 +1876,105 @@ mod tests {
             "workload did not run after the gate was released"
         );
         let _ = std::fs::remove_file(&marker);
+    }
+
+    fn gate_fd_three_subprocess(mode: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "live::tests::managed_agent_fd_three_subprocess",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("APOLYSIS_GATE_FD_TEST_MODE", mode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated managed launch failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn managed_agent_gate_survives_exec_when_pipe_read_is_fd_three() {
+        gate_fd_three_subprocess("release");
+    }
+
+    #[test]
+    fn managed_agent_spawn_failure_closes_gate_read_fd() {
+        gate_fd_three_subprocess("spawn_failure");
+    }
+
+    // Only the isolated subprocess runs this body. Reserve fd 3 before building
+    // Tokio, then release our own descriptor so the real launch pipe receives
+    // it. No descriptor belonging to Tokio or another test thread is closed.
+    #[test]
+    fn managed_agent_fd_three_subprocess() {
+        let Ok(mode) = std::env::var("APOLYSIS_GATE_FD_TEST_MODE") else {
+            return;
+        };
+        let reservation = std::fs::File::open("/dev/null").unwrap();
+        assert_eq!(
+            reservation.as_raw_fd(),
+            3,
+            "subprocess must begin with fd 3 free"
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let marker = std::env::temp_dir().join(format!(
+            "apolysis-gate-fd-three-{}.marker",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let request = AgentRunRequest::new(
+            "sh",
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf ran > \"$1\"".to_string(),
+                "gate-workload".to_string(),
+                marker.to_string_lossy().into_owned(),
+            ],
+        )
+        .unwrap();
+        drop(reservation);
+        if mode == "spawn_failure" {
+            let missing_directory = marker.join("missing-workspace");
+            assert!(spawn_managed_agent(&request, &missing_directory).is_err());
+            // SAFETY: F_GETFD only inspects the descriptor and cannot close it.
+            assert_eq!(
+                unsafe { libc::fcntl(3, libc::F_GETFD) },
+                -1,
+                "failed spawn leaked its gate read end"
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EBADF)
+            );
+            return;
+        }
+        assert_eq!(mode, "release");
+        let mut managed = spawn_managed_agent(&request, Path::new(".")).unwrap();
+        runtime.block_on(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(!marker.exists(), "workload ran before gate release");
+            managed.release_gate();
+            let status = tokio::time::timeout(Duration::from_secs(5), managed.child.wait())
+                .await
+                .expect("released workload did not exit")
+                .unwrap();
+            assert!(
+                status.success(),
+                "managed workload failed after gate release: {status:?}"
+            );
+            assert!(marker.exists(), "workload did not run after gate release");
+        });
+        std::fs::remove_file(marker).unwrap();
     }
 
     #[test]

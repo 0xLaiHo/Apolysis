@@ -35,15 +35,52 @@ harness 适配不代表这些部分通过资格验证。
 去重比较除摄入时间外的完整持久化记录，不比较已丢弃的参数内容。若复用调用 ID 且
 差异仅在已丢弃参数中，系统无法区分，也不会保留命令指纹。
 
-Shell 改写在原命令正文前加入 `# APOLYSIS_INTENT_ID=<id>` 注释行，保留其他工具
+默认 shell 改写在原命令正文前加入 `# APOLYSIS_INTENT_ID=<id>` 注释行，保留其他工具
 输入字段。Claude Code 保留原生许可决定；Codex 仅在受支持的 shell 改写时收到契约
 要求的 `allow` 确认。Cursor 的补充 shell 事件可以复用已有标记；缺少调用
 ID 时不能生成共享占位值。Pi 从扩展上下文获取原生会话；OpenCode 从工具执行事件
 获取原生会话和调用 ID。
 
+产品随后可能把改写后的命令嵌入 `eval` 或其他 shell 包装，因此默认注释未必位于
+实际 exec 参数开头。Claude Code 2.1.295 原生运行暴露了这一边界：声明与原因均已
+记录，但 fixture 文件尝试没有内核标记。采集器不会通过搜索嵌套注释来补齐它。
+
+显式 `--shell-bridge /bin/bash` 则让原命令正文进入选定的受支持 shell，使其命令
+参数以严格意图头开头。它不会用 `exec` 替换产品外层 shell。输出和退出状态来自内层
+命令，但 cwd、环境和函数的改动不会回传到外层 shell。该模式默认关闭，不能描述为
+透明保留原生 shell 语义。Pi/OpenCode 的等价配置为 `APOLYSIS_SHELL_BRIDGE`；
+选定 shell 必须与显式工具输入中的 shell 一致。资格验证必须说明测试的是该模式
+还是默认注释模式。
+
 `observation_mode` 区分已准备的 `local_shell` 路径、`semantic_only` 声明与
 `historical` 导入。准备好标记不代表命令已经执行、产品采用了改写或观测器采集到了
 标记。
+
+## 声明原因
+
+可选的 `intent_reason` 记录描述生产者为一次 Tool Call 声明的目的。它独立于 `intent`，
+通过同一采集会话与意图 ID 引用调用，并保留原生来源身份用于校验。它不揭示模型内部
+思考，不验证动机，不授予操作权限，也不产生 Execution Evidence。意图 ID 派生与
+内核标记传递保持不变。
+
+显式声明使用封闭的原因代码。受控扩展可提供顶层 `apolysis_reason` 对象；内置 shell
+工具则可在已有命令字符串开头携带 `# APOLYSIS_REASON_CODE=<code>` 注释。Hook
+仍将意图标记放在第一行。原生工具描述保留为 `tool_description`，代码为 `unknown`，
+不根据描述措辞推断 Agent 为什么执行。Schema 保留 `operator_annotation`，当前 CLI
+不会生成该来源。
+
+原因记录独立追加、去重重试，并诊断冲突身份。修正使用新原因 ID，通过
+`supersedes_reason_id` 指向同一次调用已有的原因，不覆盖历史。关联步骤单独输出
+`intent_reason_binding`，只有存在唯一有效原因时才补充 Exact Relation。冲突和未绑定原因
+不能建立运行时链接，也不能提升弱候选。`semantic_only` 原因可以只绑定声明，不产生
+执行关系。
+
+默认记录保留代码与可选的不透明引用，不保留原因正文。`--allow-reason-summary`
+显式允许最多 240 个 Unicode 字符、尽力脱敏的摘要；这不保证任意文本均不含秘密。
+`task_ref` 是由 1–64 个 ASCII 字母、数字、下划线或连字符组成的不透明引用，不是任务
+内容或待打开的文件。系统不会为
+构造原因而读取提示词文件。输入与字段见 [Harness 接入](harness-intent.zh-CN.md)和
+[JSONL 契约](jsonl-schema-v1.md)。
 
 ## 进程归属与关系
 
@@ -92,5 +129,10 @@ shell basename 判断。这些检查不能替代内核验证器接受和实时�
 
 有界合成标记门禁与通用实时观测器回归已在一个本地内核上通过；
 [验证详情](harness-intent-live-validation.zh-CN.md)记录环境、断言、诊断和边界。
-原生产品端到端、其他内核与压力/丢失资格验证仍待完成。特权验证继续显式执行，
+原生产品资格仅限已测模式：Claude Code 2.1.295、Pi 1.5.0 和 OpenCode 1.18.31 已在
+显式 `/bin/bash` bridge 下通过单条合成命令检查，将声明原因关联到准确的 fixture
+文件尝试，且持久化记录不含提示词专用 sentinel。Codex 认证有效，但验证环境的
+provider 网络连通性阻断运行；Cursor 的访问与刷新凭证均过期。两者不能计为通过，
+也不代表产品本身不受支持。默认注释
+送达、更广的产品版本、其他内核与压力/丢失资格仍待验证。特权验证继续显式执行，
 缺少前提条件而跳过的运行不能计为实时验证成功。

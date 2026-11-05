@@ -1,4 +1,4 @@
-.PHONY: build test lint clean build-ebpf test-bpf-relocation test-live test-live-harness-intent test-harness-hooks quickstart test-quickstart \
+.PHONY: build test lint clean build-ebpf test-bpf-relocation test-live test-live-harness-intent test-live-reason-products test-harness-hooks quickstart test-quickstart \
 	test-evidence-objects-real \
 	test-gateway-postgres \
 	test-gateway-postgres-crash-recovery \
@@ -46,6 +46,10 @@ test-live: build-ebpf
 test-live-harness-intent:
 	cargo build -p apolysis-cli
 	./scripts/test-live-harness-intent.sh
+
+# Explicit provider calls and inner-shell observation; build artifacts first.
+test-live-reason-products:
+	python3 -u ./scripts/test-live-reason-products.py --require-all --shell-bridge /bin/bash
 
 # Zero-privilege trial: run the intent/side-effect accountability flow on the
 # bundled Codex mismatch fixture (no root, no eBPF). See docs/quickstart.md.

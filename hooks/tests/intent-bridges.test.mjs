@@ -6,6 +6,9 @@ import { after, beforeEach, test } from "node:test";
 const originalSpawn = childProcess.spawnSync;
 const originalWarn = console.warn;
 const originalSession = process.env.APOLYSIS_SESSION_ID;
+const originalReasonOutput = process.env.APOLYSIS_REASON_OUTPUT;
+const originalReasonSummary = process.env.APOLYSIS_REASON_SUMMARY;
+const originalShellBridge = process.env.APOLYSIS_SHELL_BRIDGE;
 let calls = [];
 let warnings = [];
 let result;
@@ -26,6 +29,9 @@ beforeEach(() => {
   spawnError = undefined;
   result = { status: 0, stdout: JSON.stringify({ command: "# marker\nls" }), stderr: "" };
   delete process.env.APOLYSIS_SESSION_ID;
+  delete process.env.APOLYSIS_REASON_OUTPUT;
+  delete process.env.APOLYSIS_REASON_SUMMARY;
+  delete process.env.APOLYSIS_SHELL_BRIDGE;
 });
 after(() => {
   childProcess.spawnSync = originalSpawn;
@@ -33,6 +39,12 @@ after(() => {
   console.warn = originalWarn;
   if (originalSession === undefined) delete process.env.APOLYSIS_SESSION_ID;
   else process.env.APOLYSIS_SESSION_ID = originalSession;
+  if (originalReasonOutput === undefined) delete process.env.APOLYSIS_REASON_OUTPUT;
+  else process.env.APOLYSIS_REASON_OUTPUT = originalReasonOutput;
+  if (originalReasonSummary === undefined) delete process.env.APOLYSIS_REASON_SUMMARY;
+  else process.env.APOLYSIS_REASON_SUMMARY = originalReasonSummary;
+  if (originalShellBridge === undefined) delete process.env.APOLYSIS_SHELL_BRIDGE;
+  else process.env.APOLYSIS_SHELL_BRIDGE = originalShellBridge;
 });
 
 function piHandler() {
@@ -169,4 +181,134 @@ test("successful no-rewrite responses do not alter commands", async () => {
   assert.equal(event.input.command, original);
   assert.equal(output.args.command, original);
   assert.equal(warnings.length, 0);
+});
+
+
+test("reason options are explicit and do not modify native tool schemas", async () => {
+  process.env.APOLYSIS_REASON_OUTPUT = "/private/DO_NOT_LOG/reasons.jsonl";
+  process.env.APOLYSIS_REASON_SUMMARY = "1";
+  result = { status: 0, stdout: "{}", stderr: "" };
+  const input = { command: "# APOLYSIS_REASON_CODE=verify_change\nprintf safe", description: "DO_NOT_LOG_DESCRIPTION" };
+  const event = { toolName: "bash", toolCallId: "call", input: { ...input } };
+  piHandler()(event, piContext);
+  const output = { args: { ...input } };
+  await installOpenCode()["tool.execute.before"](
+    { tool: "bash", sessionID: "native", callID: "call" }, output,
+  );
+  for (const call of calls) {
+    assert.equal(call.args[call.args.indexOf("--reason-output") + 1], process.env.APOLYSIS_REASON_OUTPUT);
+    assert.equal(call.args.includes("--allow-reason-summary"), true);
+    assert.deepEqual(call.payload.tool_input, input);
+    assert.equal("apolysis_reason" in call.payload, false);
+  }
+  assert.deepEqual(event.input, input);
+  assert.deepEqual(output.args, input);
+  assert.equal(warnings.length, 0);
+});
+
+test("reason summary stays disabled by default and for values other than one", async () => {
+  result = { status: 0, stdout: "{}", stderr: "" };
+  for (const option of [undefined, "", "0", "true"]) {
+    if (option === undefined) delete process.env.APOLYSIS_REASON_SUMMARY;
+    else process.env.APOLYSIS_REASON_SUMMARY = option;
+    piHandler()({ toolName: "read", toolCallId: "call", input: {} }, piContext);
+    await installOpenCode()["tool.execute.before"](
+      { tool: "read", sessionID: "native", callID: "call" }, { args: {} },
+    );
+  }
+  assert.equal(calls.length, 8);
+  for (const call of calls) {
+    assert.equal(call.args.includes("--reason-output"), false);
+    assert.equal(call.args.includes("--allow-reason-summary"), false);
+  }
+});
+
+test("reason options never expose private output paths or metadata on failure", async () => {
+  process.env.APOLYSIS_REASON_OUTPUT = "/private/DO_NOT_LOG/reasons.jsonl";
+  process.env.APOLYSIS_REASON_SUMMARY = "1";
+  spawnError = new Error("DO_NOT_LOG spawn args or tool metadata");
+  piHandler()({ toolName: "bash", toolCallId: "call", input: { description: "DO_NOT_LOG" } }, piContext);
+  await installOpenCode()["tool.execute.before"](
+    { tool: "bash", sessionID: "native", callID: "call" }, { args: { description: "DO_NOT_LOG" } },
+  );
+  assert.equal(warnings.length, 2);
+  assert.equal(warnings.join(" ").includes("DO_NOT_LOG"), false);
+});
+
+
+test("shell bridge is forwarded only when explicitly selected", async () => {
+  result = { status: 0, stdout: "{}", stderr: "" };
+  for (const shell of [undefined, "/bin/bash"]) {
+    if (shell) process.env.APOLYSIS_SHELL_BRIDGE = shell;
+    else delete process.env.APOLYSIS_SHELL_BRIDGE;
+    piHandler()({ toolName: "bash", toolCallId: "call", input: {command: "true"} }, piContext);
+    await installOpenCode()["tool.execute.before"]({tool: "bash", sessionID: "native", callID: "call"}, {args: {command: "true"}});
+    for (const call of calls.slice(-2)) {
+      assert.equal(call.args.includes("--shell-bridge"), Boolean(shell));
+      if (shell) assert.equal(call.args[call.args.indexOf("--shell-bridge") + 1], shell);
+    }
+  }
+});
+
+test("failed canonical bridge retries cannot execute stale nested intent markers", async () => {
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  const wrap = value => "/bin/bash -c " + quote(value);
+  const marker = "# APOLYSIS_INTENT_ID=0123456789abcdef0123456789abcdef\n";
+  const body = "printf '%s' \"a'b\"";
+  const command = wrap(marker + marker + wrap(marker + body));
+  result = {status: 1, stdout: "", stderr: "DO_NOT_LOG"};
+  const event = {toolName:"bash",toolCallId:"call",input:{command}};
+  piHandler()(event, piContext);
+  const output = {args:{command}};
+  await installOpenCode()["tool.execute.before"]({tool:"bash",sessionID:"native",callID:"call"},output);
+  assert.equal(event.input.command, wrap(wrap(body)));
+  assert.equal(output.args.command, wrap(wrap(body)));
+  assert.equal(warnings.join(" ").includes("DO_NOT_LOG"), false);
+});
+
+test("failed bash calls clear markers through known reason headers without changing reasons", async () => {
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  const wrap = value => "/bin/bash -c " + quote(value);
+  const marker = "# APOLYSIS_INTENT_ID=0123456789abcdef0123456789abcdef\n";
+  const reason = "# APOLYSIS_REASON_CODE=verify_change\n";
+  const body = "printf '%s' \"DO_NOT_LOG'a\"";
+  for (const [command, expected] of [
+    [reason + marker + body, reason + body],
+    [reason + wrap(marker + body), reason + wrap(body)],
+    [wrap(marker + reason + reason + wrap(marker + body)), wrap(reason + reason + wrap(body))],
+    [reason + body, reason + body],
+    ["# APOLYSIS_REASON_CODE=unsupported\n" + marker + body, "# APOLYSIS_REASON_CODE=unsupported\n" + marker + body],
+  ]) {
+    for (const failure of ["status", "timeout"]) {
+      result = {status: 1, stdout: "", stderr: "DO_NOT_LOG"};
+      spawnError = failure === "timeout" ? new Error("DO_NOT_LOG timeout") : undefined;
+      const event = {toolName:"bash",toolCallId:"call",input:{command}};
+      piHandler()(event, piContext);
+      const output = {args:{command}};
+      await installOpenCode()["tool.execute.before"]({tool:"bash",sessionID:"native",callID:"call"},output);
+      assert.equal(event.input.command, expected);
+      assert.equal(output.args.command, expected);
+    }
+  }
+  assert.equal(warnings.join(" ").includes("DO_NOT_LOG"), false);
+});
+
+test("failed non-bash tools preserve marker-shaped command data byte for byte", async () => {
+  const marker = "# APOLYSIS_INTENT_ID=0123456789abcdef0123456789abcdef\n";
+  const reason = "# APOLYSIS_REASON_CODE=verify_change\n";
+  for (const tool of ["read", "mcp_remote_exec", "shell", "Bash"]) {
+    for (const command of [marker + "DO_NOT_LOG", reason + marker + "DO_NOT_LOG", "/bin/bash -c '" + marker + "DO_NOT_LOG'"]) {
+      for (const failure of ["status", "exception"]) {
+        result = {status: 1, stdout: "", stderr: "DO_NOT_LOG"};
+        spawnError = failure === "exception" ? new Error("DO_NOT_LOG") : undefined;
+        const event = {toolName:tool,toolCallId:"call",input:{command}};
+        piHandler()(event, piContext);
+        const output = {args:{command}};
+        await installOpenCode()["tool.execute.before"]({tool,sessionID:"native",callID:"call"},output);
+        assert.equal(event.input.command, command);
+        assert.equal(output.args.command, command);
+      }
+    }
+  }
+  assert.equal(warnings.join(" ").includes("DO_NOT_LOG"), false);
 });

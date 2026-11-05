@@ -20,7 +20,7 @@ Hook 写入器通过文件锁追加，并去重同一次调用的重复事件，
 cargo test
 ```
 
-这是命令文本标记，不是环境变量，也不增加 shell 包装层。Hook 保留其他原始工具输入
+默认模式下，这是命令文本标记，不是环境变量，也不增加 shell 包装层。Hook 保留其他原始工具输入
 字段。Claude Code 不收到 `permissionDecision`，由其原生许可流程决定是否批准。
 Codex 契约要求 shell `updatedInput` 同时带有 `permissionDecision:"allow"`，因此只
 对受支持的改写返回该确认，不对所有工具统一返回。Pi 与 OpenCode 修改文档规定的可变
@@ -48,6 +48,120 @@ hook 默认采用原生 ID。观测器与 hook 必须使用相同采集 ID，仅
 
 `local_shell` 描述预期观测路径，不保证产品执行了改写，也不保证观测器收到标记。
 网页搜索、读文件工具和远程调用保持 `semantic_only`，除非另一个执行集成提供证据。
+
+## 可选 shell bridge
+
+原生产品可能把改写后的命令放入环境准备脚本或 `eval` 中。工具输入中的前导注释不
+保证出现在实际 exec 命令参数的开头。Claude Code 2.1.295 原生运行在默认注释模式下
+记录了声明和原因，却未将 fixture 文件尝试归属到该意图。内核解析器继续严格限定
+前导位置，不搜索任意嵌套注释。
+
+在直接 hook 调用中追加 `--shell-bridge /bin/bash`，即可显式选择用独立 shell 执行
+原正文，并让意图头位于该 shell 命令参数开头。Pi 和 OpenCode 设置
+`APOLYSIS_SHELL_BRIDGE=/bin/bash`。支持 `/bin/sh`、`/bin/bash`、`/bin/zsh`、
+`/bin/dash` 及对应的 `/usr/bin/` 路径，且可执行文件必须存在。工具输入若显式指定
+shell，必须与该选择一致。`observation_mode` 仍为 `local_shell`。
+
+该模式创建内层 shell，不用 `exec` 替换外层 shell。它保留原命令正文、输出与退出
+状态，但 cwd、环境改动和函数不会回传给产品外层 shell。选择与命令语言兼容的 shell。
+Bridge 默认关闭；在该模式下通过资格验证，不证明默认模式透明保留行为，也不证明
+与有状态 shell 会话兼容。
+
+## 声明原因
+
+可选原因记录生产者声称一次 Tool Call 的用途。它是未经验证的 Semantic Evidence，
+不是模型内部思考、推断的动机、授权或执行证明。原因保存在独立的 `intent_reason`
+记录中，引用已有 `session_id` 与 `intent_id`，并保留 `intent_source`、
+`harness_session_id` 和 `source_event_id` 用于身份校验。它不改变意图哈希、shell
+意图标记或 eBPF 传递机制。
+
+原因代码是封闭集合：
+
+| 代码 | 声明的目的 |
+| --- | --- |
+| `unknown` | 没有声明分类目的。 |
+| `inspect_context` | 查看相关上下文。 |
+| `verify_change` | 验证改动。 |
+| `reproduce_issue` | 复现问题。 |
+| `implement_change` | 实现改动。 |
+| `diagnose_failure` | 诊断失败。 |
+| `gather_evidence` | 收集证据。 |
+
+五个产品的内置 shell 工具都可以在已有命令字符串开头加入原因代码注释：
+
+```sh
+# APOLYSIS_REASON_CODE=verify_change
+cargo test
+```
+
+默认注释模式下，hook 会在最前面加上已有的意图头，因此工具命令先是
+`# APOLYSIS_INTENT_ID=<id>`，再是原因注释和命令正文。
+启用可选 bridge 后，这些行位于内层 shell 命令参数的开头。该接口不增加产品原生工具
+schema 字段。注释必须由生产者提供；Apolysis 不会根据 `cargo test` 或其他命令文本
+推断原因。
+
+受控扩展也可以在归一化 hook 输入中提供顶层 `apolysis_reason` 对象。这是 Apolysis
+封装，不是产品内置工具的额外参数：
+
+```json
+{
+  "session_id": "native-session-1",
+  "tool_use_id": "call-1",
+  "tool_name": "Bash",
+  "tool_input": {"command": "cargo test"},
+  "apolysis_reason": {
+    "reason_code": "verify_change",
+    "task_ref": "task-42"
+  }
+}
+```
+
+封装还接受可选的 `reason_summary`、`reason_id` 和 `supersedes_reason_id`，拒绝
+未知字段。封装与注释同时存在时，原因代码必须一致。
+显式声明来源为 `agent_declared`。只有原生工具描述时，来源为 `tool_description`、
+代码为 `unknown`，不根据正文分类原因。`operator_annotation` 是保留来源，当前
+不是受支持的输入模式。
+
+Hook 可选参数 `--reason-output` 指定原因 JSONL 文件，默认为
+`<intent-output>.reasons.jsonl`，现有 hook 配置采用该默认值。
+Pi 和 OpenCode 桥接也接受 `APOLYSIS_REASON_OUTPUT`，只有
+`APOLYSIS_REASON_SUMMARY=1` 才启用摘要。原因记录具有稳定 ID，
+追加而不替换历史记录，重试去重，冲突 ID 产生诊断。修正使用新的 `reason_id`，
+通过 `supersedes_reason_id` 引用同一次 Tool Call 已有的原因；跨调用引用不是修正。
+
+默认只保留代码与标识符。`--allow-reason-summary` 允许保留最多 240 个 Unicode
+字符、尽力脱敏的摘要。显式启用不代表任意文本都适合保留，请勿在原因中放入秘密。
+`task_ref`、显式 `reason_id` 和 `supersedes_reason_id` 由 1–64 个 ASCII 字母、
+数字、下划线或连字符组成。任务引用不是提示词、待读路径或任务文档。CLI 不会
+读取完整提示词文件来重建原因。
+
+若要晚到补充声明或修正，将上面的归一化调用 JSON 保存为 `reason-call.json`，保留
+原调用的原生会话与调用身份，并使用与 hook 相同的采集会话覆盖值：
+
+```bash
+apolysis intent reason --harness codex --session capture-1 \
+  --output .apolysis/intent.codex.jsonl.reasons.jsonl < reason-call.json
+```
+
+`intent reason` 还接受 `--workspace-root`、`--shell-bridge` 和
+`--allow-reason-summary`；它追加
+原因，不执行工具，也不改写命令。在关联时显式传入原因文件：
+
+```bash
+apolysis intent correlate \
+  --intent-input .apolysis/intent.codex.jsonl \
+  --reason-input .apolysis/intent.codex.jsonl.reasons.jsonl \
+  --timeline-input .apolysis/timeline.jsonl \
+  --output .apolysis/intent-correlation.jsonl
+```
+
+关联单独输出 `intent_reason_binding`。唯一有效原因可以补充已有 Exact Relation，不能建立
+Exact Relation。冲突或未绑定原因产生诊断，不制造运行时链接，也不提升可执行文件名
+候选。`semantic_only` 调用的原因可以只绑定声明。缺失原因保持未知，不从提示词、
+命令名或已观测 syscall 重建。
+即使来源不同，多个活跃原因也会产生歧义；应通过显式修正取代此前原因。成功绑定和
+补充后的明确关联携带 `declared_reason` 对象；解析失败单独输出
+`intent_reason_diagnostic`。
 
 ## Codex
 
@@ -177,6 +291,28 @@ cargo test -p apolysis-observer
 make test-harness-hooks
 ```
 
+独立门禁 `scripts/test-live-reason-products.py` 使用合成提示词调用已安装产品 CLI
+及其配置的 provider。它要求显式特权执行、已有认证的用户、当前 CLI 和 BPF 对象，
+以及 Bubblewrap。`--products codex,claude,cursor,pi,opencode` 选择产品；
+`--require-all` 将前提条件缺失导致的跳过视为门禁失败。
+运行时显式传入 `--shell-bridge /bin/bash` 才验证 bridge 送达；省略则测试默认注释
+路径。提权启动观测器时应保留原用户已有 proxy 与 provider 环境，但不打印其值。
+例如按需保留已有 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及对应小写变量，
+以及选定 provider 已有的认证变量名。不要把凭证值写入命令参数、纳入版本控制的
+配置或日志。CLI 已安装、状态命令显示存有登录数据，都不能证明当前 provider 可访问。
+它使用临时项目 hook，在私有
+mount namespace 中屏蔽全局 hook 与用户 shell 启动文件。原认证保留在已有位置或只读绑定；Claude 已有的
+认证环境仅在内存中传递。门禁将原生声明与原因对应到准确的 fixture 文件尝试，并
+拒绝提示词专用 sentinel 出现在持久化结果中。这是独立资格运行，不代表安装适配器
+就已通过。产品输出和采集保存在私有目录，默认删除。
+`--keep-failed-private` 显式保留失败的临时目录供本地诊断；检查后删除报告的目录，
+不要提交其中内容。该门禁会发起真实 provider 请求，可能产生费用。
+有界原生 bridge 运行已在 Claude Code 2.1.295、Pi 1.5.0 和 OpenCode 1.18.31 通过，
+Codex 存有有效认证，但 provider 网络连通性阻断运行；Cursor 的访问与刷新凭证均过期。
+恢复这些前提条件后才能完成对应资格运行。三项通过结果仅覆盖单条合成原因注释、显式 `/bin/bash` bridge、
+准确的 fixture 文件尝试，以及提示词 sentinel 隐私断言，不代表默认注释传递或任意
+原生工具调用均已验证。
+
 `make test-bpf-relocation` 是额外的显式门禁，需要可读的主机 BTF 和 eBPF 构建工具，
 不需要 BPF 权限。它解析已构建对象并重定位所有程序，不将其加载进内核。原生 C helper
 测试也覆盖完整 shell basename 与格式错误的标记。
@@ -185,7 +321,7 @@ make test-harness-hooks
 与 eBPF 对象必须一起重建；当前 648 字节事件 ABI 不兼容旧对象。
 `make test-live-harness-intent` 在准备好的主机上执行显式本地实时标记门禁。经授权的
 特权运行现已在一个本地内核上通过，通用观测器回归也通过；准确范围和保留的截断诊断
-见[实时验证](harness-intent-live-validation.zh-CN.md)。这不代表原生产品端到端送达、
+见[实时验证](harness-intent-live-validation.zh-CN.md)。该合成门禁本身不代表原生产品端到端送达、
 其他内核或压力/丢失行为通过资格验证。
 门禁把仅审计的探针限定到合成子进程树，读取临时 fixture 文件并尝试连接 loopback。
 它不访问 provider，也不修改运行时策略；进程退出会卸载探针，脚本删除自己创建的临时目录。

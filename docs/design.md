@@ -45,7 +45,7 @@ Deduplication compares the entire persisted record except ingestion time, not
 discarded argument content. Reused call IDs with differences confined to
 discarded arguments are not distinguishable; no command fingerprint is kept.
 
-Shell rewrites insert a leading `# APOLYSIS_INTENT_ID=<id>` comment followed
+Default shell rewrites insert a leading `# APOLYSIS_INTENT_ID=<id>` comment followed
 by the original command body. Remaining tool-input fields are preserved.
 Claude Code keeps its native permission decision; Codex receives the required
 `allow` acknowledgement only with a supported shell rewrite. Cursor's
@@ -54,10 +54,60 @@ marker; a missing call ID does not justify synthesizing a shared placeholder.
 Pi reads its native session from extension context. OpenCode reads the native
 session and call ID from its tool-execution event.
 
+A product can subsequently embed that updated command in an `eval` or other
+shell wrapper. The default comment then need not start an actual exec argument.
+The native Claude Code 2.1.295 run exposed this boundary: its declaration and
+reason were recorded, while the fixture file attempt had no kernel marker.
+The collector deliberately does not scan embedded comments to repair this.
+
+Explicit `--shell-bridge /bin/bash` instead executes the unchanged command body
+inside a selected supported shell whose command argument starts with the strict
+intent header. It does not replace the product's outer shell with `exec`.
+Output and exit status follow the inner command, but changes to cwd,
+environment, and functions do not propagate back to the outer shell. It is
+disabled by default and cannot be presented as transparent native shell
+semantics. The Pi/OpenCode equivalent is `APOLYSIS_SHELL_BRIDGE`; the selected
+shell must agree with an explicit tool-input shell. Qualification must identify
+whether it tested this mode or the default comment mode.
+
 `observation_mode` distinguishes a prepared `local_shell` path from
 `semantic_only` declarations and `historical` imports. A prepared marker does
 not establish that the command ran, the product honored the rewrite, or the
 observer captured it.
+
+## Declared reasons
+
+An optional `intent_reason` record describes the producer's stated purpose for
+one Tool Call. It is independent of `intent`, keyed to the same capture session
+and intent ID, with native source identity retained for validation. It does not
+expose hidden model reasoning, verify a motive, authorize an operation, or
+create Execution Evidence. Intent ID derivation and kernel marker transport
+are unchanged.
+
+Explicit declarations use a closed reason code. A controlled extension can
+provide a top-level `apolysis_reason` object; builtin shell tools can instead
+carry a leading `# APOLYSIS_REASON_CODE=<code>` comment in their existing
+command string. The hook still places the intent marker first. Native tool
+descriptions remain `tool_description` with code `unknown`: their wording is
+not used to infer why the Agent acted. `operator_annotation` is reserved in
+the schema; the CLI does not currently produce that source.
+
+Reason records append independently, deduplicate retries, and diagnose
+conflicting identities. A correction uses a new reason ID and
+`supersedes_reason_id` pointing to an existing reason for that same call;
+it does not overwrite history. Correlation emits separate `intent_reason_binding`
+records and enriches an Exact Relation only when one valid reason remains.
+Conflicts and unbound reasons cannot create runtime links or promote a weak
+candidate. A `semantic_only` reason can bind its declaration without an
+execution relation.
+
+The default record retains codes and optional opaque references, not reason
+prose. `--allow-reason-summary` explicitly permits a best-effort-redacted
+summary of at most 240 Unicode characters; it is not a guarantee that arbitrary
+text is free of secrets. `task_ref` is an opaque reference of 1–64 ASCII
+letters, digits, underscores, or hyphens, not task content or a file to open. No prompt file is read to
+construct a reason. See [harness integration](harness-intent.md) and the
+[JSONL contract](jsonl-schema-v1.md) for inputs and fields.
 
 ## Process attribution and relations
 
@@ -124,6 +174,14 @@ and live event assertions.
 A bounded synthetic marker gate and the general live observer regression have
 passed on one local kernel; [validation details](harness-intent-live-validation.md)
 record the environment, assertions, diagnostics, and limits. Product-native
-end-to-end runs, other kernels, and stress/loss qualification remain open.
+qualification is limited to the tested mode: native Claude Code 2.1.295,
+Pi 1.5.0, and OpenCode 1.18.31 have passed a single synthetic command with the
+explicit `/bin/bash` bridge, connecting its declared reason to an exact
+fixture-file attempt and keeping its prompt-only sentinel out of persisted
+records. Codex is blocked by provider-network connectivity in the validation
+environment despite valid authentication; Cursor is blocked by expired access
+and refresh credentials. Neither blocked run is a pass or a claim that the
+product itself is unsupported. Default comment delivery,
+broader product versions, other kernels, and stress/loss qualification remain open.
 Privileged validation stays explicit, and prerequisite skips never count as
 successful live qualification.

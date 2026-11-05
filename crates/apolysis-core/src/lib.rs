@@ -11,9 +11,11 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod fields;
+mod intent_reason;
 pub mod scalars;
 pub mod vocabulary;
 
+pub use intent_reason::SessionIntentReasonRecord;
 pub use vocabulary::{actions, actors, env, feedback, records, resources, runtimes};
 
 /// Anything that can be written as one JSONL record.

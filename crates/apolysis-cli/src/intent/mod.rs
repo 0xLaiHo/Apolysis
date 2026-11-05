@@ -5,6 +5,9 @@ mod codex;
 mod cursor;
 mod opencode;
 mod pi;
+pub mod reason;
+pub mod reason_binding;
+mod shell_bridge;
 
 use std::path::Path;
 
@@ -68,6 +71,19 @@ pub fn hook(
     workspace_root: &Path,
     capture_session: Option<&str>,
 ) -> Result<HookOutput, String> {
+    hook_with_shell_bridge(harness, input, workspace_root, capture_session, None)
+}
+
+pub fn hook_with_shell_bridge(
+    harness: &str,
+    input: &serde_json::Value,
+    workspace_root: &Path,
+    capture_session: Option<&str>,
+    bridge_shell: Option<&str>,
+) -> Result<HookOutput, String> {
+    if let Some(shell) = bridge_shell {
+        shell_bridge::validate(shell)?;
+    }
     if !matches!(harness, "codex" | "claude" | "cursor" | "pi" | "opencode") {
         return Err("unsupported intent hook harness".to_string());
     }
@@ -77,8 +93,10 @@ pub fn hook(
         let stamped = input
             .get("command")
             .and_then(serde_json::Value::as_str)
-            .and_then(|command| leading_stamp(command).ok().flatten())
-            .is_some();
+            .is_some_and(|command| {
+                leading_stamp(command).ok().flatten().is_some()
+                    || shell_bridge::has_complete_marker(command)
+            });
         return Ok(HookOutput {
             record: None,
             response: serde_json::json!({ "permission": "allow" }),
@@ -105,19 +123,67 @@ pub fn hook(
     let call_id = required_str(input, "tool_use_id")?;
     let intent_id = live_intent_id(harness, session_id, native_session, call_id);
     let tool_input = input.get("tool_input");
+    if let Some(shell) = bridge_shell {
+        if matches!(
+            tool_name,
+            "Bash" | "Shell" | "bash" | "exec_command" | "shell_command"
+        ) && tool_input
+            .and_then(|input| input.get("shell"))
+            .is_some_and(|value| value.as_str() != Some(shell))
+        {
+            return Err(
+                "shell bridge conflicts with the explicitly selected tool shell".to_string(),
+            );
+        }
+    }
     let command_field = shell_command_field(harness, tool_name, tool_input);
+    let unwrapped = command_field
+        .and_then(|key| tool_input.and_then(|value| value.get(key)))
+        .and_then(serde_json::Value::as_str)
+        .map(|command| shell_bridge::unwrap(command, &intent_id))
+        .transpose()?
+        .flatten();
+    if unwrapped
+        .as_ref()
+        .is_some_and(|(_, shell)| Some(*shell) != bridge_shell)
+    {
+        return Err("shell bridge retry requires the same explicitly selected shell".to_string());
+    }
     let command = command_field
         .and_then(|key| tool_input.and_then(|value| value.get(key)))
         .and_then(serde_json::Value::as_str)
+        .map(|command| {
+            unwrapped
+                .as_ref()
+                .map_or(command, |(decoded, _)| decoded.as_str())
+        })
         .map(|command| unstamped_command(command, &intent_id))
         .transpose()?;
+    if bridge_shell.is_some() {
+        if let Some(mut command) = command {
+            // Reason headers are metadata comments, not a boundary that can
+            // hide another call's executable attribution marker.
+            loop {
+                let body = reason::command_body(command);
+                if body.len() == command.len() {
+                    break;
+                }
+                command = body;
+            }
+            if leading_stamp(command)?.is_some()
+                || shell_bridge::unwrap(command, &intent_id)?.is_some()
+            {
+                return Err("shell bridge command contains nested intent markers".to_string());
+            }
+        }
+    }
     let mut record = stamped_record(
         session_id,
         harness,
         &intent_id,
         call_id,
         tool_name,
-        command,
+        command.map(reason::command_body),
         workspace_root,
     )?
     .with_harness_session_id(native_session)
@@ -139,6 +205,10 @@ pub fn hook(
     };
     if let (Some(field), Some(original)) = (command_field, command) {
         let stamped = format!("{STAMP_PREFIX}{intent_id}\n{original}");
+        let stamped = bridge_shell.map_or_else(
+            || stamped.clone(),
+            |shell| shell_bridge::wrap(shell, &stamped),
+        );
         if matches!(harness, "codex" | "claude" | "cursor") {
             // updatedInput replaces the entire object in Claude Code. Preserve
             // timeouts, cwd, descriptions, background options, and future fields.

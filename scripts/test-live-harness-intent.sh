@@ -92,14 +92,19 @@ def require(condition, message):
     if not condition:
         raise RuntimeError(message)
 
-original = 'exec ' + shlex.join([str(root / 'workload'), *(str(root / name) for name in ('fork-only.txt', 'threaded-fork.txt', 'leader-exited.txt'))])
-payload = {'session_id': 'synthetic-harness-session', 'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_use_id': 'synthetic-long-id-' + 'x' * 200, 'tool_input': {'command': original}}
+original = '# APOLYSIS_REASON_CODE=verify_change\nexec ' + shlex.join([str(root / 'workload'), *(str(root / name) for name in ('fork-only.txt', 'threaded-fork.txt', 'leader-exited.txt'))])
+payload = {'session_id': 'synthetic-harness-session', 'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_use_id': 'synthetic-long-id-' + 'x' * 200, 'tool_input': {'command': original, 'description': 'DESCRIPTION_PRIVATE_SENTINEL'}, 'prompt': 'PROMPT_PRIVATE_SENTINEL', 'tool_result': 'RESULT_PRIVATE_SENTINEL'}
 result = subprocess.run([str(binary), 'intent', 'hook', '--harness', 'claude', '--session', identity, '--workspace-root', str(root), '--output', str(root / 'intent.jsonl')], input=json.dumps(payload), text=True, capture_output=True, check=True)
 command = json.loads(result.stdout)['hookSpecificOutput']['updatedInput']['command']
 intent = json.loads((root / 'intent.jsonl').read_text().splitlines()[0])
 token = intent['intent_id']
 require(len(token) == 32 and all(ch in '0123456789abcdef' for ch in token), 'hook did not return a complete internal token')
 require(command == '# APOLYSIS_INTENT_ID=' + token + '\n' + original, 'hook changed the original command or omitted the exact header')
+reason_path = root / 'intent.jsonl.reasons.jsonl'
+reason = json.loads(reason_path.read_text().splitlines()[0])
+require(reason['intent_id'] == token and reason['reason_code'] == 'verify_change' and reason['reason_source'] == 'agent_declared', 'hook did not bind declared reason')
+require(reason['reason_summary'] is None, 'default reason capture retained text')
+require(all(sentinel not in (root / 'intent.jsonl').read_text() + reason_path.read_text() for sentinel in ('PROMPT_PRIVATE_SENTINEL', 'DESCRIPTION_PRIVATE_SENTINEL', 'RESULT_PRIVATE_SENTINEL')), 'private input reached stored intent/reason')
 
 def capture(name, argv):
     output = root / (name + '.jsonl')
@@ -134,6 +139,36 @@ require(len({r['pid'] for r in events if r.get('event_type') == 'file_open' and 
 root_pid = next(int(r['action']) for r in events if r.get('resource') == 'agent-root-pid')
 require(any(r.get('event_type') == 'exec' and r.get('pid') == root_pid and r.get('intent_id') == token and r.get('process_executable') == 'executable_ref:workload' for r in events), 'same-PID exec lost its token')
 
+# Real product shells may put the returned command inside an eval wrapper.
+# The explicit inner-shell mode must recover attribution without accepting an
+# embedded marker in the outer shell's arguments.
+bridge_result = subprocess.run([str(binary), 'intent', 'hook', '--harness', 'claude', '--session', identity, '--workspace-root', str(root), '--output', str(root / 'intent.jsonl'), '--shell-bridge', '/bin/bash'], input=json.dumps(payload), text=True, capture_output=True, check=True)
+bridge_command = json.loads(bridge_result.stdout)['hookSpecificOutput']['updatedInput']['command']
+bridged = capture('bridge-wrapper', ['/bin/bash', '-c', 'true && eval ' + shlex.quote(bridge_command)])
+for name in ('fork-only.txt', 'threaded-fork.txt', 'leader-exited.txt'):
+    attempts = [r for r in bridged if r.get('record_type') == 'event' and r.get('event_type') == 'file_open' and r.get('resource') == str(root / name)]
+    require(attempts and all(r.get('intent_id') == token for r in attempts), f'bridge {name}: native-style wrapping lost attribution')
+require(any(r.get('event_type') == 'network_connect' and r.get('intent_id') == token for r in bridged), 'bridge connection lost attribution')
+require(len((root / 'intent.jsonl').read_text().splitlines()) == 1 and len(reason_path.read_text().splitlines()) == 1, 'bridge retry changed intent or reason identity')
+
+# Verify the actual kernel events join through the original token to the reason.
+correlation_path = root / 'correlation.jsonl'
+def correlate():
+    subprocess.run([str(binary), 'intent', 'correlate', '--intent-input', str(root / 'intent.jsonl'), '--timeline-input', str(root / 'valid.jsonl'), '--reason-input', str(reason_path), '--output', str(correlation_path)], check=True, capture_output=True)
+    return [json.loads(line) for line in correlation_path.read_text().splitlines()]
+joined = correlate()
+exact = [r for r in joined if r.get('record_type') == 'intent_correlation']
+require(exact and all(r.get('declared_reason', {}).get('reason_code') == 'verify_change' for r in exact), 'kernel relations lost their declared reason')
+require(any(r.get('event_type') == 'file_open' for r in exact) and any(r.get('event_type') == 'network_connect' for r in exact), 'reason did not reach both file and network attempts')
+require(not any(r.get('record_type') == 'intent_reason_diagnostic' for r in joined), 'unexpected reason diagnostic')
+# Late correction enriches the same evidence; it must not create/change a relation.
+payload['apolysis_reason'] = {'reason_id': 'late-correction', 'reason_code': 'gather_evidence', 'supersedes_reason_id': reason['reason_id']}
+payload['tool_input'] = {}
+subprocess.run([str(binary), 'intent', 'reason', '--harness', 'claude', '--session', identity, '--output', str(reason_path)], input=json.dumps(payload), text=True, capture_output=True, check=True)
+corrected = [r for r in correlate() if r.get('record_type') == 'intent_correlation']
+require({r['raw_event_id'] for r in corrected} == {r['raw_event_id'] for r in exact}, 'late correction changed execution relations')
+require(all(r.get('declared_reason', {}).get('reason_id') == 'late-correction' for r in corrected), 'late correction was not selected')
+
 # No token may be manufactured by ordinary argv, a later comment, or a partial header.
 header = '# APOLYSIS_INTENT_ID=' + token + '\n'
 (root / 'noop.sh').write_text('exit 0\n')
@@ -146,5 +181,5 @@ for name, argv in [
     ('uppercase-token', ['/bin/bash', '-c', '# APOLYSIS_INTENT_ID=' + 'A' * 32 + '\ntrue']),
 ]:
     require(not any(r.get('intent_id') for r in capture(name, argv)), f'{name}: unexpected attribution')
-print(f'apolysis-intent-live: PASS: {len(capture_counts)} complete captures, {sum(capture_counts)} kernel events; hook, bounded token capture, exec, fork-only, threaded fork, leader exit, loopback connect, and malformed/ordinary arguments')
+print(f'apolysis-intent-live: PASS: {len(capture_counts)} complete captures, {sum(capture_counts)} kernel events; content-off reason, late correction, explicit inner shell through eval, exact syscall join, hook, bounded token capture, exec, fork-only, threaded fork, leader exit, loopback connect, and malformed/ordinary arguments')
 PY

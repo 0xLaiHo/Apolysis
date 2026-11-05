@@ -175,11 +175,17 @@ Adapters are `codex-jsonl`, `claude-jsonl`, `cursor-jsonl`, `pi-jsonl`, and
 `opencode-jsonl`. They write `intent` records with `intent_source` `codex`,
 `claude`, `cursor`, `pi`, or `opencode`. Content-off persistence retains an
 executable reference but omits prompts, tool results, raw argv, and secrets.
-Live hook writes use locked append and deduplicate repeated calls. A shell
+Live hook writes use locked append and deduplicate repeated calls. A default shell
 rewrite adds `# APOLYSIS_INTENT_ID=<id>` as the first comment line, followed by
 the original command body. It does not interpolate the native call ID into
 shell syntax. `--session` selects a capture session separately from the native
 session. A product-specific file name does not itself isolate sessions.
+An explicit `--shell-bridge` creates a separate supported shell command boundary
+for products that wrap tool input; its observation mode is still `local_shell`.
+It changes no intent identity or kernel fields. Default comment placement in
+tool input does not guarantee placement at the actual exec boundary. Bridge
+output/status follow the inner command, while its cwd/environment/function
+changes do not propagate back to the product's outer shell.
 
 Example ingestion:
 
@@ -191,6 +197,101 @@ apolysis intent ingest \
   --output .apolysis/codex-live/intent.codex.jsonl \
   --workspace-root "$PWD"
 ```
+
+### `intent_reason`
+
+An independent, append-only reason declaration references an existing Tool
+Call identity. It records the producer's stated purpose, not hidden model
+reasoning, a verified motive, authorization, or an observed outcome. It does
+not change `intent_id` derivation or the kernel ABI.
+
+Fields:
+
+- `record_type`: always `intent_reason`
+- `timestamp_unix_ms`: ingestion time
+- `session_id`: Apolysis capture-session identifier
+- `intent_id`: referenced live intent identifier, 32 lowercase hexadecimal
+  characters; historical source-prefixed IDs are not accepted by this record
+- `intent_source`: harness or adapter identity
+- `harness_session_id`: native harness session identity
+- `source_event_id`: native call identity
+- `reason_id`: stable reason-record identifier; 1–64 ASCII letters, digits,
+  underscores, or hyphens
+- `reason_code`: one of `unknown`, `inspect_context`, `verify_change`,
+  `reproduce_issue`, `implement_change`, `diagnose_failure`, or `gather_evidence`
+- `reason_source`: `agent_declared`, `tool_description`, or the reserved
+  `operator_annotation`; the CLI currently produces only the first two
+- `reason_summary`: optional best-effort-redacted text, at most 240 Unicode
+  characters, retained only with `--allow-reason-summary`
+- `task_ref`: optional opaque task reference, 1–64 ASCII letters, digits,
+  underscores, or hyphens; never
+  dereferenced as a path or read as prompt content
+- `supersedes_reason_id`: optional reference to an existing reason for the
+  same call, using the same restricted identifier syntax as `reason_id`,
+  representing a correction without overwriting history
+
+Explicit producer annotations use `agent_declared`. Native tool descriptions
+use `tool_description` and `reason_code:"unknown"`; their wording is not
+classified into an inferred reason. Reasons without explicit summary opt-in
+retain no free-text reason. Redaction is best effort and does not guarantee
+that arbitrary summaries are free of secrets.
+
+The hook writes reasons to `--reason-output`, defaulting to
+`<intent-output>.reasons.jsonl`. The separate `intent reason` command accepts
+the same normalized call identity for late declarations and corrections;
+it does not execute the command or read full prompt files. Stable retries are
+deduplicated, conflicting IDs are diagnosed, and a correction must preserve
+the original call identity. Independent reason storage does not rewrite the
+intent declaration.
+
+### `intent_reason_binding`
+
+`intent correlate --reason-input <path>` resolves reasons against declarations
+inside one capture session and emits separate `intent_reason_binding` records. A
+reason's native source identity must agree with its referenced call. Exactly
+one valid current reason can enrich an already established exact
+`intent_correlation`; a reason cannot create a runtime relation or promote an
+`intent_correlation_candidate`.
+
+Fields:
+
+- `record_type`: always `intent_reason_binding`
+- `session_id`: capture-session identifier
+- `intent_id`: referenced declaration
+- `binding_status`: always `declared`, not verified
+- `observation_mode`: the declaration's mode, or `null` for an older declaration
+- `declared_reason`: object containing `reason_id`, `reason_code`,
+  `reason_source`, `reason_summary`, and `task_ref`; the latter two can be `null`
+
+The same `declared_reason` object is added only to exact correlations for the
+same session and intent. Several active annotations are ambiguous even when
+they have different sources. A correction's predecessor must occur earlier in
+the same call's history and can have only one successor; self-reference,
+cycles, branching, and cross-call corrections are invalid.
+
+Conflicting or unbound reasons produce diagnostics without inventing runtime
+edges. A reason for a `semantic_only` Tool Call can bind to the declaration
+without producing execution evidence. A superseding reason preserves the old
+record as history; an unresolved or ambiguous correction cannot silently pick
+a winner. Without `--reason-input`, correlation retains its existing behavior.
+
+### `intent_reason_diagnostic`
+
+- `record_type`: always `intent_reason_diagnostic`
+- `session_id`: capture-session identifier
+- `intent_id`: reason's referenced intent
+- `reason`: `conflicting_reason_id`, `unbound_reason`,
+  `ambiguous_reason_intent`, `reason_identity_mismatch`,
+  `invalid_reason_correction`, or `ambiguous_reason`
+
+Reason diagnostics leave the already established runtime relations and
+accountability findings unchanged. A malformed reason record is rejected;
+these diagnostics describe resolution failures among parsed records.
+Provider connectivity or expired authentication can prevent a native
+qualification run from producing a Tool Call at all. Those preconditions are
+reported by the live gate, not converted into a reason binding or invented
+execution evidence. See [harness integration](harness-intent.md) for the
+qualified mode and current validation limits.
 
 ### `intent_correlation`
 
@@ -230,6 +331,8 @@ Fields:
 - `process_command`: redacted observed command context, or `null`
 - `process_executable`: observed executable path, or `null`
 - `command`: redacted declared command or tool payload summary, or `null`
+- `declared_reason`: optional object added only after unique valid reason
+  resolution, with the same shape as `intent_reason_binding.declared_reason`
 
 ### `intent_correlation_candidate`
 
@@ -409,6 +512,11 @@ Use these fields for deterministic joins:
   in the same capture session and agree with any explicit raw-event link.
 - `intent_correlation.raw_event_id` links a declared intent to the canonical
   event and raw kernel event that reported the observed attempt.
+- `intent_reason.session_id` and `intent_reason.intent_id` reference the
+  declaration; native source identity must also agree. `reason_id` and
+  `supersedes_reason_id` identify reason history, not kernel events.
+- `intent_reason_binding` resolves that declaration-side relationship separately;
+  it cannot supply missing runtime evidence.
 - `accountability_finding.evidence_ref` links a mismatch finding to either an
   observed `raw_event_id` or an unmatched `intent_id`.
 - `policy_violation.observed_event_id` links a policy decision to the observed

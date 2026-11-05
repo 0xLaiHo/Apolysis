@@ -73,6 +73,7 @@ async fn intent_command(args: Vec<String>) -> Result<i32, String> {
     match args.get(1).map(String::as_str) {
         Some(commands::INGEST) => intent_ingest_command(args).await,
         Some(commands::HOOK) => intent_hook_command(args).await,
+        Some("reason") => intent_reason_command(args).await,
         Some(commands::CORRELATE) => intent_correlate_command(args).await,
         _ => Err(usage()),
     }
@@ -111,19 +112,30 @@ async fn intent_hook_command(args: Vec<String>) -> Result<i32, String> {
     std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
         .map_err(|error| format!("failed to read hook input: {error}"))?;
     let value = serde_json::from_slice::<serde_json::Value>(&input)
-        .map_err(|error| format!("failed to parse hook input: {error}"))?;
-    let output = intent::hook(
+        .map_err(|_| "failed to parse hook input".to_string())?;
+    let output = intent::hook_with_shell_bridge(
         &request.harness,
         &value,
         &request.workspace_root,
         request.session_id.as_deref(),
+        request.shell_bridge.as_deref(),
     )?;
     if let Some(diagnostic) = output.diagnostic {
         eprintln!("apolysis: {diagnostic}");
     }
     if let Some(record) = output.record {
+        let reason = intent::reason::collect(&value, &record, request.allow_reason_summary)?;
+        if reason.is_some() {
+            distinct_output_paths(&request.output_path, &request.reason_output_path)?;
+        }
         tokio::task::spawn_blocking(move || {
-            apolysis_store::append_intent(&request.output_path, &record)
+            apolysis_store::append_intent(&request.output_path, &record)?;
+            if let Some(reason) = reason {
+                distinct_output_paths(&request.output_path, &request.reason_output_path)
+                    .map_err(std::io::Error::other)?;
+                apolysis_store::append_intent_reason(&request.reason_output_path, &reason)?;
+            }
+            Ok::<(), std::io::Error>(())
         })
         .await
         .map_err(|_| "intent writer task failed".to_string())?
@@ -135,15 +147,104 @@ async fn intent_hook_command(args: Vec<String>) -> Result<i32, String> {
     Ok(0)
 }
 
+// Explicit late annotations use the same native identity calculation as hooks.
+// They never rewrite a command or create a new execution declaration.
+async fn intent_reason_command(mut args: Vec<String>) -> Result<i32, String> {
+    args[1] = commands::HOOK.to_string();
+    if !args.iter().any(|arg| arg == options::WORKSPACE_ROOT) {
+        args.extend([options::WORKSPACE_ROOT.to_string(), ".".to_string()]);
+    }
+    let request = IntentHookRequest::parse(args)?;
+    let mut input = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
+        .map_err(|_| "failed to read reason input".to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&input).map_err(|_| "failed to parse reason input".to_string())?;
+    if value.get("apolysis_reason").is_none() {
+        return Err("late annotation requires apolysis_reason".to_string());
+    }
+    let output = if let Some(shell) = request.shell_bridge.as_deref() {
+        intent::hook_with_shell_bridge(
+            &request.harness,
+            &value,
+            &request.workspace_root,
+            request.session_id.as_deref(),
+            Some(shell),
+        )?
+    } else {
+        intent::hook(
+            &request.harness,
+            &value,
+            &request.workspace_root,
+            request.session_id.as_deref(),
+        )?
+    };
+    let record = output
+        .record
+        .ok_or("reason requires a native tool-call identity")?;
+    let reason = intent::reason::collect(&value, &record, request.allow_reason_summary)?
+        .ok_or("reason input has no declared reason")?;
+    tokio::task::spawn_blocking(move || {
+        apolysis_store::append_intent_reason(&request.output_path, &reason)
+    })
+    .await
+    .map_err(|_| "reason writer task failed".to_string())?
+    .map_err(|error| format!("failed to append reason record: {error}"))?;
+    Ok(0)
+}
+
+fn distinct_output_paths(left: &str, right: &str) -> Result<(), String> {
+    fn resolved(path: &str) -> Option<PathBuf> {
+        let path = std::path::Path::new(path);
+        std::fs::canonicalize(path).ok().or_else(|| {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            Some(std::fs::canonicalize(parent).ok()?.join(path.file_name()?))
+        })
+    }
+    let same_name = left == right
+        || resolved(left)
+            .zip(resolved(right))
+            .is_some_and(|(a, b)| a == b);
+    #[cfg(unix)]
+    let same_file = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(left)
+            .ok()
+            .zip(std::fs::metadata(right).ok())
+            .is_some_and(|(a, b)| a.dev() == b.dev() && a.ino() == b.ino())
+    };
+    #[cfg(not(unix))]
+    let same_file = false;
+    if same_name || same_file {
+        return Err("input/output paths must refer to separate files".to_string());
+    }
+    Ok(())
+}
+
 async fn intent_correlate_command(args: Vec<String>) -> Result<i32, String> {
     let request = IntentCorrelateRequest::parse(args)?;
+    for input in [&request.intent_input_path, &request.timeline_input_path]
+        .into_iter()
+        .chain(request.reason_input_path.iter())
+    {
+        distinct_output_paths(input, &request.output_path)?;
+    }
     let intent_input = tokio::fs::read_to_string(&request.intent_input_path)
         .await
         .map_err(|error| format!("failed to read intent input: {error}"))?;
     let timeline_input = tokio::fs::read_to_string(&request.timeline_input_path)
         .await
         .map_err(|error| format!("failed to read timeline input: {error}"))?;
-    let records = correlate_intents(&intent_input, &timeline_input)?;
+    let mut records = correlate_intents(&intent_input, &timeline_input)?;
+    if let Some(path) = &request.reason_input_path {
+        let reasons = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|error| format!("failed to read reason input: {error}"))?;
+        intent::reason_binding::enrich(&intent_input, &reasons, &mut records)?;
+    }
     let (dropped, truncated) = observer_evidence_loss(&timeline_input);
     if let Some(warning) = evidence_loss_warning(dropped, truncated) {
         eprintln!("{warning}");
@@ -287,6 +388,9 @@ struct IntentHookRequest {
     output_path: String,
     workspace_root: PathBuf,
     session_id: Option<String>,
+    reason_output_path: String,
+    allow_reason_summary: bool,
+    shell_bridge: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -295,6 +399,7 @@ struct IntentCorrelateRequest {
     timeline_input_path: String,
     output_path: String,
     summary: bool,
+    reason_input_path: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -386,6 +491,9 @@ impl IntentHookRequest {
         let mut output_path = None;
         let mut workspace_root = None;
         let mut session_id = None;
+        let mut reason_output_path = None;
+        let mut allow_reason_summary = false;
+        let mut shell_bridge = None;
         let mut i = 2;
 
         while i < args.len() {
@@ -397,6 +505,25 @@ impl IntentHookRequest {
                 options::OUTPUT => {
                     i += 1;
                     output_path = args.get(i).cloned();
+                }
+                "--reason-output" => {
+                    i += 1;
+                    reason_output_path = Some(
+                        args.get(i)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or("--reason-output requires a path")?
+                            .clone(),
+                    );
+                }
+                "--allow-reason-summary" => allow_reason_summary = true,
+                "--shell-bridge" => {
+                    i += 1;
+                    shell_bridge = Some(
+                        args.get(i)
+                            .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                            .ok_or("--shell-bridge requires an absolute shell path")?
+                            .clone(),
+                    );
                 }
                 options::WORKSPACE_ROOT => {
                     i += 1;
@@ -415,10 +542,15 @@ impl IntentHookRequest {
             i += 1;
         }
 
+        let output_path = output_path.ok_or("missing --output")?;
+        let reason_output_path =
+            reason_output_path.unwrap_or_else(|| format!("{output_path}.reasons.jsonl"));
         Ok(Self {
+            reason_output_path,
+            allow_reason_summary,
+            shell_bridge,
             harness: harness.ok_or_else(|| format!("missing {}\n{}", options::HARNESS, usage()))?,
-            output_path: output_path
-                .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
+            output_path,
             workspace_root: PathBuf::from(
                 workspace_root
                     .ok_or_else(|| format!("missing {}\n{}", options::WORKSPACE_ROOT, usage()))?,
@@ -440,6 +572,7 @@ impl IntentCorrelateRequest {
         let mut timeline_input_path = None;
         let mut output_path = None;
         let mut summary = false;
+        let mut reason_input_path = None;
         let mut i = 2;
 
         while i < args.len() {
@@ -457,6 +590,15 @@ impl IntentCorrelateRequest {
                     output_path = args.get(i).cloned();
                 }
                 options::SUMMARY => summary = true,
+                "--reason-input" => {
+                    i += 1;
+                    reason_input_path = Some(
+                        args.get(i)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or("--reason-input requires a path")?
+                            .clone(),
+                    );
+                }
                 unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
             }
             i += 1;
@@ -470,6 +612,7 @@ impl IntentCorrelateRequest {
             output_path: output_path
                 .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
             summary,
+            reason_input_path,
         })
     }
 }
@@ -597,7 +740,9 @@ fn render_correlation_summary(
             Some("intent_correlation") => matched.push(record),
             Some("accountability_finding") => findings.push(record),
             Some("intent_correlation_candidate") => candidates.push(record),
-            Some("intent_correlation_diagnostic") => diagnostics.push(record),
+            Some("intent_correlation_diagnostic" | "intent_reason_diagnostic") => {
+                diagnostics.push(record)
+            }
             _ => {}
         }
     }
@@ -635,6 +780,11 @@ fn render_correlation_summary(
             out,
             "            declared as: {tool_name} {command}  [{basis}]"
         );
+        if let Some(reason) = record.get("declared_reason") {
+            let code = string_field(reason, "reason_code").unwrap_or("unknown");
+            let source = string_field(reason, "reason_source").unwrap_or("unknown");
+            let _ = writeln!(out, "            declared reason: {code} [{source}]");
+        }
     }
 
     for record in &findings {

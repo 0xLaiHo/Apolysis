@@ -146,11 +146,19 @@ the later capture-off control is added.
 The harness-intent adapter slice adds content-off declarations for Codex,
 Claude Code, Cursor, Pi, and OpenCode, with append/deduplication, separate
 native and capture session identities, and safe shell-comment markers. The
+optional shell bridge gives wrapped product backends an explicit inner-shell
+boundary; its shell-state limits require deliberate opt-in. The
 observer carries bounded markers across fork and exec, and correlation keeps
-identifier conflicts and heuristic candidates explicit. A bounded synthetic
+identifier conflicts and heuristic candidates explicit. A separate
+declared-reason record can add a purpose code to the same Tool Call; free-text
+summaries require explicit opt-in, and a declared purpose is not a verified
+motive. A bounded synthetic
 marker gate and the general observer regression passed on one local Linux
-kernel. Real product end-to-end, multi-kernel, and stress qualification remain
-open. See [live validation](docs/harness-intent-live-validation.md),
+kernel. Bounded native runs with the explicit shell bridge passed for Claude
+Code, Pi, and OpenCode. Codex and Cursor runs are blocked by network and
+authentication prerequisites, respectively. Broader
+product-version, multi-kernel, and stress qualification remains open.
+See [live validation](docs/harness-intent-live-validation.md),
 [design](docs/design.md), [roadmap](docs/roadmap.md), and
 [harness integration](docs/harness-intent.md) for scope and limits.
 
