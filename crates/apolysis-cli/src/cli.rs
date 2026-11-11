@@ -35,6 +35,8 @@ pub(crate) mod commands {
     pub(crate) const INGEST: &str = "ingest";
     /// Correlate intent records with observed host-side timeline events.
     pub(crate) const CORRELATE: &str = "correlate";
+    /// Record one live harness tool call and print the hook response.
+    pub(crate) const HOOK: &str = "hook";
     /// Verify a hash-chain timeline file.
     pub(crate) const HASH_CHAIN: &str = "hash-chain";
 }
@@ -47,6 +49,10 @@ pub(crate) mod values {
     pub(crate) const LIVE: &str = "live";
     /// Codex JSONL response-item log adapter.
     pub(crate) const CODEX_JSONL: &str = "codex-jsonl";
+    pub(crate) const CLAUDE_JSONL: &str = "claude-jsonl";
+    pub(crate) const CURSOR_JSONL: &str = "cursor-jsonl";
+    pub(crate) const PI_JSONL: &str = "pi-jsonl";
+    pub(crate) const OPENCODE_JSONL: &str = "opencode-jsonl";
 }
 
 /// Shared CLI option names.
@@ -65,6 +71,7 @@ pub(crate) mod options {
     pub(crate) const INPUT: &str = "--input";
     /// Intent harness adapter selector.
     pub(crate) const ADAPTER: &str = "--adapter";
+    pub(crate) const HARNESS: &str = "--harness";
     /// Intent JSONL input path.
     pub(crate) const INTENT_INPUT: &str = "--intent-input";
     /// Observed timeline JSONL input path.
@@ -103,7 +110,7 @@ pub(crate) mod options {
 
 /// Render the public usage text.
 pub(crate) fn usage() -> String {
-    format!(
+    let base = format!(
         "usage: apolysis {observe} {backend} {fixture} {input} <path> {session} <id> {output} <path> [{output_max_bytes} <bytes> {output_max_files} <n>] [{kubernetes_metadata} <path>]\n       apolysis {observe} {backend} {live} {session} <id> {output} <path> {bpf_object} <path> ({scope_cgroup} <id>|{agent_kind} <kind> {agent_run} {separator} <command> [args...]|{agent_registration} <path>|{agent_kind} <kind> {agent_discover}) [{workspace_root} <path>] [{duration_seconds} <n>] [{output_max_bytes} <bytes> {output_max_files} <n>]\n       apolysis {run} {project} {input} <path> [{input} <path> ...] {output} <path>\n       apolysis {run} {view} {input} <path> {output} <path>\n       apolysis {daemon} {install} {bundle} <dir> {root} <dir>\n       apolysis {daemon} {inspect} {root} <dir>\n       apolysis {daemon} {uninstall} {root} <dir>\n       apolysis {intent} {ingest} {adapter} {codex_jsonl} {input} <path> {session} <id> {output} <path> [{workspace_root} <path>]\n       apolysis {intent} {correlate} {intent_input} <path> {timeline_input} <path> {output} <path> [{summary}]\n       apolysis {visibility} {scenario} docker-default|docker-gvisor|kubernetes-gvisor|kubernetes-kata|firecracker-prototype {input} <path> {output} <path> [{session} <id>] [{kubernetes_metadata} <path>]\n       apolysis {verify} {hash_chain} {input} <path> {output} <path>",
         observe = commands::OBSERVE,
         intent = commands::INTENT,
@@ -128,7 +135,7 @@ pub(crate) fn usage() -> String {
         intent_input = options::INTENT_INPUT,
         timeline_input = options::TIMELINE_INPUT,
         summary = options::SUMMARY,
-        codex_jsonl = values::CODEX_JSONL,
+        codex_jsonl = "codex-jsonl|claude-jsonl|cursor-jsonl|pi-jsonl|opencode-jsonl",
         fixture = values::FIXTURE,
         live = values::LIVE,
         input = options::INPUT,
@@ -145,5 +152,6 @@ pub(crate) fn usage() -> String {
         scenario = options::SCENARIO,
         bundle = options::BUNDLE,
         root = options::ROOT,
-    )
+    );
+    format!("{base}\n       apolysis intent hook --harness codex|claude|cursor|pi|opencode --output <path> --workspace-root <path> [--session <capture-id>] [--reason-output <path>] [--allow-reason-summary] [--shell-bridge <shell>]\n       apolysis intent reason --harness codex|claude|cursor|pi|opencode --output <path> [--session <capture-id>] [--allow-reason-summary]\n       apolysis intent correlate --intent-input <path> --timeline-input <path> --output <path> [--summary] [--reason-input <path>]\n       apolysis observe --agent codex|claude|cursor|pi|opencode [--workspace <directory>] [--output-dir <parent>] [--allow-reason-summary] [--shell-bridge <shell>] -- [native arguments] (Linux)\n       apolysis chat [--smoke] [--turn-timeout <seconds>] [--output-dir <parent>] [--bpf-object <path>] (Linux)")
 }

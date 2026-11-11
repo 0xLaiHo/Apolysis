@@ -19,6 +19,8 @@ pub mod records {
     pub const RAW_KERNEL_EVENT: &str = "raw_kernel_event";
     /// A declared harness or tool-call intent tied to a session.
     pub const INTENT: &str = "intent";
+    /// A declared reason or correction tied to one complete harness call identity.
+    pub const INTENT_REASON: &str = "intent_reason";
     /// Observer loss, truncation, lifecycle, or summary evidence.
     pub const OBSERVER_DIAGNOSTIC: &str = "observer_diagnostic";
     pub const OBSERVATION_GAP: &str = "observation_gap";
@@ -114,4 +116,11 @@ pub mod actions {
     pub const SANDBOX_PREFIX: &str = "sandbox:";
     /// The prefix used for Kubernetes token automount metadata.
     pub const AUTOMOUNT_PREFIX: &str = "automount:";
+}
+/// Environment variables shared between the CLI and harness integrations.
+pub mod env {
+    /// Session identifier exported into a supervised process or container.
+    pub const SESSION_ID: &str = "APOLYSIS_SESSION_ID";
+    /// Tool-call id stamped by a harness hook and read from transient exec argv.
+    pub const INTENT_ID: &str = "APOLYSIS_INTENT_ID";
 }

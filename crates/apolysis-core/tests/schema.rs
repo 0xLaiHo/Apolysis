@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use apolysis_core::{
-    actors, audit_observer_capability_contract_v1, records, resources,
+    actors, audit_observer_capability_contract_v1, env, records, resources,
     AuditObserverCapabilityContract, CanonicalEvent, CollectorCapability,
     CollectorCapabilityManifest, CollectorHealthState, CollectorLifecycleCounters,
     CollectorLifecycleRecord, CollectorLifecycleState, CollectorStopReason, EventSource, EventType,
@@ -664,4 +664,24 @@ fn runtime_identity_without_process_start_is_not_exact() {
 
     assert_eq!(raw.relation_status, RuntimeRelation::Inferred);
     assert_eq!(raw.relation_reason, "runtime_generation_unavailable");
+}
+
+#[test]
+fn canonical_event_emits_intent_id_only_when_stamped() {
+    let event = CanonicalEvent::new(
+        "session-intent",
+        EventSource::KernelTracepoint,
+        EventType::Exec,
+        10,
+        9,
+        "bash",
+        "/bin/bash",
+        "exec",
+    );
+    assert!(!event.to_json_line().contains("intent_id"));
+    let stamped = event.with_intent_id("claude:toolu_1");
+    assert!(stamped
+        .to_json_line()
+        .contains(r#""intent_id":"claude:toolu_1""#));
+    assert_eq!(env::INTENT_ID, "APOLYSIS_INTENT_ID");
 }

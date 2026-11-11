@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(target_os = "linux")]
+mod chat;
 mod cli;
+mod intent;
+#[cfg(target_os = "linux")]
+mod native;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read as IoRead, Write as IoWrite};
@@ -14,11 +19,11 @@ use apolysis_accountability::{
     FindingDecision, FindingKind, RuntimeIdentity, FINDING_SCHEMA_V1,
     MAX_AGENT_RUN_PROJECTION_BATCHES, MAX_AGENT_RUN_PROJECTION_RECORDS,
 };
-use apolysis_core::{now_unix_ms, JsonLine, SessionIntentRecord};
+use apolysis_core::{now_unix_ms, JsonLine};
 use apolysis_daemon::{LocalDaemonChange, LocalDaemonOperations};
 use apolysis_observer::{
-    observe_fixture, observe_live, redact_command_text_for_persistence, AgentDiscoveryRequest,
-    AgentRunRequest, FixtureObserveRequest, LiveObserveRequest, LiveScope,
+    observe_fixture, observe_live, AgentDiscoveryRequest, AgentRunRequest, FixtureObserveRequest,
+    LiveObserveRequest, LiveScope,
 };
 use apolysis_store::{
     read_agent_run_records, HashChainStore, JsonlRotationPolicy, LocalRecordFormat,
@@ -42,7 +47,13 @@ async fn main() {
 }
 
 async fn run(args: Vec<String>) -> Result<i32, String> {
+    #[cfg(target_os = "linux")]
+    if native::handles(&args) {
+        return native::run(&args).await;
+    }
     match args.first().map(String::as_str) {
+        #[cfg(target_os = "linux")]
+        Some("chat") => chat::run(&args[1..]).await,
         Some(commands::OBSERVE) => observe_command(args).await,
         Some(commands::RUN) => run_command(args),
         Some(commands::DAEMON) => daemon_command(args),
@@ -262,6 +273,8 @@ fn accumulate_projection_input_budget(
 async fn intent_command(args: Vec<String>) -> Result<i32, String> {
     match args.get(1).map(String::as_str) {
         Some(commands::INGEST) => intent_ingest_command(args).await,
+        Some(commands::HOOK) => intent_hook_command(args).await,
+        Some("reason") => intent_reason_command(args).await,
         Some(commands::CORRELATE) => intent_correlate_command(args).await,
         _ => Err(usage()),
     }
@@ -272,13 +285,12 @@ async fn intent_ingest_command(args: Vec<String>) -> Result<i32, String> {
     let input = tokio::fs::read_to_string(&request.input_path)
         .await
         .map_err(|error| format!("failed to read intent input: {error}"))?;
-    let records = match request.adapter {
-        IntentAdapterSelection::CodexJsonl => codex_intent_records(
-            &input,
-            &request.session_id,
-            request.workspace_root.as_deref(),
-        )?,
-    };
+    let records = intent::ingest(
+        &request.adapter,
+        &input,
+        &request.session_id,
+        request.workspace_root.as_deref(),
+    )?;
     let mut store = apolysis_store::AsyncJsonlStore::create(&request.output_path)
         .await
         .map_err(|error| format!("failed to create intent output: {error}"))?;
@@ -295,15 +307,167 @@ async fn intent_ingest_command(args: Vec<String>) -> Result<i32, String> {
     Ok(0)
 }
 
+async fn intent_hook_command(args: Vec<String>) -> Result<i32, String> {
+    let request = IntentHookRequest::parse(args)?;
+    let mut input = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
+        .map_err(|error| format!("failed to read hook input: {error}"))?;
+    let value = serde_json::from_slice::<serde_json::Value>(&input)
+        .map_err(|_| "failed to parse hook input".to_string())?;
+    let output = intent::hook_with_shell_bridge(
+        &request.harness,
+        &value,
+        &request.workspace_root,
+        request.session_id.as_deref(),
+        request.shell_bridge.as_deref(),
+    )?;
+    if let Some(diagnostic) = output.diagnostic {
+        eprintln!("apolysis: {diagnostic}");
+    }
+    if request.allow_reason_summary
+        && matches!(
+            value
+                .get("hook_event_name")
+                .and_then(serde_json::Value::as_str),
+            Some("UserPromptSubmit" | "beforeSubmitPrompt")
+        )
+    {
+        if let Some(prompt) = value.get("prompt").and_then(serde_json::Value::as_str) {
+            intent::reason::save_user_prompt(&request.reason_output_path, prompt);
+        }
+    }
+    if let Some(record) = output.record {
+        let saved_prompt = if request.allow_reason_summary {
+            intent::reason::load_user_prompt(&request.reason_output_path)
+        } else {
+            None
+        };
+        let reason = intent::reason::collect_with_user_prompt(
+            &value,
+            &record,
+            request.allow_reason_summary,
+            saved_prompt.as_deref(),
+        )?;
+        if reason.is_some() {
+            distinct_output_paths(&request.output_path, &request.reason_output_path)?;
+        }
+        tokio::task::spawn_blocking(move || {
+            apolysis_store::append_intent(&request.output_path, &record)?;
+            if let Some(reason) = reason {
+                distinct_output_paths(&request.output_path, &request.reason_output_path)
+                    .map_err(std::io::Error::other)?;
+                apolysis_store::append_intent_reason(&request.reason_output_path, &reason)?;
+            }
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .map_err(|_| "intent writer task failed".to_string())?
+        .map_err(|error| format!("failed to append intent record: {error}"))?;
+    }
+    let response = serde_json::to_string(&output.response)
+        .map_err(|error| format!("failed to serialize hook response: {error}"))?;
+    println!("{response}");
+    Ok(0)
+}
+
+// Explicit late annotations use the same native identity calculation as hooks.
+// They never rewrite a command or create a new execution declaration.
+async fn intent_reason_command(mut args: Vec<String>) -> Result<i32, String> {
+    args[1] = commands::HOOK.to_string();
+    if !args.iter().any(|arg| arg == options::WORKSPACE_ROOT) {
+        args.extend([options::WORKSPACE_ROOT.to_string(), ".".to_string()]);
+    }
+    let request = IntentHookRequest::parse(args)?;
+    let mut input = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
+        .map_err(|_| "failed to read reason input".to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&input).map_err(|_| "failed to parse reason input".to_string())?;
+    if value.get("apolysis_reason").is_none() {
+        return Err("late annotation requires apolysis_reason".to_string());
+    }
+    let output = if let Some(shell) = request.shell_bridge.as_deref() {
+        intent::hook_with_shell_bridge(
+            &request.harness,
+            &value,
+            &request.workspace_root,
+            request.session_id.as_deref(),
+            Some(shell),
+        )?
+    } else {
+        intent::hook(
+            &request.harness,
+            &value,
+            &request.workspace_root,
+            request.session_id.as_deref(),
+        )?
+    };
+    let record = output
+        .record
+        .ok_or("reason requires a native tool-call identity")?;
+    let reason = intent::reason::collect(&value, &record, request.allow_reason_summary)?
+        .ok_or("reason input has no declared reason")?;
+    tokio::task::spawn_blocking(move || {
+        apolysis_store::append_intent_reason(&request.output_path, &reason)
+    })
+    .await
+    .map_err(|_| "reason writer task failed".to_string())?
+    .map_err(|error| format!("failed to append reason record: {error}"))?;
+    Ok(0)
+}
+
+fn distinct_output_paths(left: &str, right: &str) -> Result<(), String> {
+    fn resolved(path: &str) -> Option<PathBuf> {
+        let path = std::path::Path::new(path);
+        std::fs::canonicalize(path).ok().or_else(|| {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            Some(std::fs::canonicalize(parent).ok()?.join(path.file_name()?))
+        })
+    }
+    let same_name = left == right
+        || resolved(left)
+            .zip(resolved(right))
+            .is_some_and(|(a, b)| a == b);
+    #[cfg(unix)]
+    let same_file = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(left)
+            .ok()
+            .zip(std::fs::metadata(right).ok())
+            .is_some_and(|(a, b)| a.dev() == b.dev() && a.ino() == b.ino())
+    };
+    #[cfg(not(unix))]
+    let same_file = false;
+    if same_name || same_file {
+        return Err("input/output paths must refer to separate files".to_string());
+    }
+    Ok(())
+}
+
 async fn intent_correlate_command(args: Vec<String>) -> Result<i32, String> {
     let request = IntentCorrelateRequest::parse(args)?;
+    for input in [&request.intent_input_path, &request.timeline_input_path]
+        .into_iter()
+        .chain(request.reason_input_path.iter())
+    {
+        distinct_output_paths(input, &request.output_path)?;
+    }
     let intent_input = tokio::fs::read_to_string(&request.intent_input_path)
         .await
         .map_err(|error| format!("failed to read intent input: {error}"))?;
     let timeline_input = tokio::fs::read_to_string(&request.timeline_input_path)
         .await
         .map_err(|error| format!("failed to read timeline input: {error}"))?;
-    let records = correlate_intents(&intent_input, &timeline_input)?;
+    let mut records = correlate_intents(&intent_input, &timeline_input)?;
+    if let Some(path) = &request.reason_input_path {
+        let reasons = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|error| format!("failed to read reason input: {error}"))?;
+        intent::reason_binding::enrich(&intent_input, &reasons, &mut records)?;
+    }
     let (dropped, truncated, observation_gaps) = observer_evidence_loss(&timeline_input);
     if let Some(warning) = evidence_loss_warning(dropped, truncated, observation_gaps) {
         eprintln!("{warning}");
@@ -688,11 +852,22 @@ async fn observe_command(args: Vec<String>) -> Result<i32, String> {
 
 #[derive(Debug, Eq, PartialEq)]
 struct IntentIngestRequest {
-    adapter: IntentAdapterSelection,
+    adapter: String,
     input_path: String,
     output_path: String,
     session_id: String,
     workspace_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct IntentHookRequest {
+    harness: String,
+    output_path: String,
+    workspace_root: PathBuf,
+    session_id: Option<String>,
+    reason_output_path: String,
+    allow_reason_summary: bool,
+    shell_bridge: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -701,6 +876,7 @@ struct IntentCorrelateRequest {
     timeline_input_path: String,
     output_path: String,
     summary: bool,
+    reason_input_path: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -719,11 +895,6 @@ struct ProjectRunRequest {
 struct ViewRunRequest {
     input_path: PathBuf,
     output_path: PathBuf,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum IntentAdapterSelection {
-    CodexJsonl,
 }
 
 impl ProjectRunRequest {
@@ -863,13 +1034,18 @@ impl IntentIngestRequest {
             i += 1;
         }
 
-        let adapter = match adapter
-            .ok_or_else(|| format!("missing {}\n{}", options::ADAPTER, usage()))?
-            .as_str()
-        {
-            values::CODEX_JSONL => IntentAdapterSelection::CodexJsonl,
-            unknown => return Err(format!("unsupported intent adapter '{unknown}'")),
-        };
+        let adapter =
+            adapter.ok_or_else(|| format!("missing {}\n{}", options::ADAPTER, usage()))?;
+        if !matches!(
+            adapter.as_str(),
+            values::CODEX_JSONL
+                | values::CLAUDE_JSONL
+                | values::CURSOR_JSONL
+                | values::PI_JSONL
+                | values::OPENCODE_JSONL
+        ) {
+            return Err(format!("unsupported intent adapter '{adapter}'"));
+        }
 
         Ok(Self {
             adapter,
@@ -880,6 +1056,87 @@ impl IntentIngestRequest {
             session_id: session_id
                 .ok_or_else(|| format!("missing {}\n{}", options::SESSION, usage()))?,
             workspace_root,
+        })
+    }
+}
+
+impl IntentHookRequest {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        if args.first().map(String::as_str) != Some(commands::INTENT)
+            || args.get(1).map(String::as_str) != Some(commands::HOOK)
+        {
+            return Err(usage());
+        }
+
+        let mut harness = None;
+        let mut output_path = None;
+        let mut workspace_root = None;
+        let mut session_id = None;
+        let mut reason_output_path = None;
+        let mut allow_reason_summary = false;
+        let mut shell_bridge = None;
+        let mut i = 2;
+
+        while i < args.len() {
+            match args[i].as_str() {
+                options::HARNESS => {
+                    i += 1;
+                    harness = args.get(i).cloned();
+                }
+                options::OUTPUT => {
+                    i += 1;
+                    output_path = args.get(i).cloned();
+                }
+                "--reason-output" => {
+                    i += 1;
+                    reason_output_path = Some(
+                        args.get(i)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or("--reason-output requires a path")?
+                            .clone(),
+                    );
+                }
+                "--allow-reason-summary" => allow_reason_summary = true,
+                "--shell-bridge" => {
+                    i += 1;
+                    shell_bridge = Some(
+                        args.get(i)
+                            .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                            .ok_or("--shell-bridge requires an absolute shell path")?
+                            .clone(),
+                    );
+                }
+                options::WORKSPACE_ROOT => {
+                    i += 1;
+                    workspace_root = args.get(i).cloned();
+                }
+                options::SESSION => {
+                    i += 1;
+                    let value = args
+                        .get(i)
+                        .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                        .ok_or("--session requires a nonempty capture session")?;
+                    session_id = Some(value.clone());
+                }
+                unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
+            }
+            i += 1;
+        }
+
+        let output_path = output_path.ok_or("missing --output")?;
+        let reason_output_path =
+            reason_output_path.unwrap_or_else(|| format!("{output_path}.reasons.jsonl"));
+        Ok(Self {
+            reason_output_path,
+            allow_reason_summary,
+            shell_bridge,
+            harness: harness.ok_or_else(|| format!("missing {}\n{}", options::HARNESS, usage()))?,
+            output_path,
+            workspace_root: PathBuf::from(
+                workspace_root
+                    .ok_or_else(|| format!("missing {}\n{}", options::WORKSPACE_ROOT, usage()))?,
+            ),
+            session_id,
         })
     }
 }
@@ -896,6 +1153,7 @@ impl IntentCorrelateRequest {
         let mut timeline_input_path = None;
         let mut output_path = None;
         let mut summary = false;
+        let mut reason_input_path = None;
         let mut i = 2;
 
         while i < args.len() {
@@ -913,6 +1171,15 @@ impl IntentCorrelateRequest {
                     output_path = args.get(i).cloned();
                 }
                 options::SUMMARY => summary = true,
+                "--reason-input" => {
+                    i += 1;
+                    reason_input_path = Some(
+                        args.get(i)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or("--reason-input requires a path")?
+                            .clone(),
+                    );
+                }
                 unknown => return Err(format!("unknown argument '{unknown}'\n{}", usage())),
             }
             i += 1;
@@ -926,6 +1193,7 @@ impl IntentCorrelateRequest {
             output_path: output_path
                 .ok_or_else(|| format!("missing {}\n{}", options::OUTPUT, usage()))?,
             summary,
+            reason_input_path,
         })
     }
 }
@@ -968,147 +1236,18 @@ impl VerifyHashChainRequest {
     }
 }
 
-fn codex_intent_records(
-    input: &str,
-    session_id: &str,
-    workspace_root: Option<&Path>,
-) -> Result<Vec<SessionIntentRecord>, String> {
-    let workspace_root = match workspace_root {
-        Some(path) => path.to_path_buf(),
-        None => std::env::current_dir()
-            .map_err(|error| format!("failed to resolve current workspace root: {error}"))?,
-    };
-    let mut records = Vec::new();
-
-    for (index, line) in input.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let value = serde_json::from_str::<serde_json::Value>(line).map_err(|error| {
-            format!(
-                "failed to parse codex-jsonl intent line {}: {error}",
-                index + 1
-            )
-        })?;
-        let Some(tool_call) = codex_tool_call(&value, index + 1) else {
-            continue;
-        };
-        let command = tool_call.command.map(|command| {
-            redact_command_text_for_persistence(session_id, &workspace_root, &command).value
-        });
-        let mut record = SessionIntentRecord::new(
-            session_id,
-            "codex",
-            tool_call.intent_id,
-            "tool_call",
-            tool_call.tool_name.clone(),
-        )
-        .with_declared_action(declared_action_for_tool(&tool_call.tool_name));
-
-        if let Some(source_event_id) = tool_call.source_event_id {
-            record = record.with_source_event_id(source_event_id);
-        }
-        if let Some(target) = tool_call.target {
-            record = record.with_target(target);
-        }
-        if let Some(command) = command {
-            record = record.with_command(command);
-        }
-        records.push(record);
-    }
-
-    Ok(records)
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct CodexToolCall {
-    intent_id: String,
-    source_event_id: Option<String>,
-    tool_name: String,
-    target: Option<String>,
-    command: Option<String>,
-}
-
-fn codex_tool_call(value: &serde_json::Value, line_number: usize) -> Option<CodexToolCall> {
-    let payload = value
-        .get("payload")
-        .or_else(|| value.get("item"))
-        .unwrap_or(value);
-    let item_type = payload
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| value.get("type").and_then(serde_json::Value::as_str))?;
-    if !matches!(item_type, "function_call" | "tool_call") {
-        return None;
-    }
-
-    let tool_name = payload
-        .get("name")
-        .or_else(|| payload.get("tool_name"))
-        .and_then(serde_json::Value::as_str)?
-        .to_string();
-    let source_event_id = payload
-        .get("id")
-        .or_else(|| payload.get("call_id"))
-        .or_else(|| value.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .map(ToString::to_string);
-    let intent_id = source_event_id
-        .as_ref()
-        .map(|id| format!("codex:{id}"))
-        .unwrap_or_else(|| format!("codex:line:{line_number}"));
-    let arguments = payload.get("arguments").or_else(|| payload.get("args"));
-    let command = arguments.and_then(command_from_arguments);
-
-    Some(CodexToolCall {
-        intent_id,
-        source_event_id,
-        tool_name,
-        target: command.as_ref().map(|_| "workspace".to_string()),
-        command,
-    })
-}
-
-fn command_from_arguments(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(raw) => serde_json::from_str::<serde_json::Value>(raw)
-            .ok()
-            .and_then(|parsed| command_from_arguments(&parsed))
-            .or_else(|| Some(raw.clone())),
-        serde_json::Value::Object(map) => ["cmd", "command", "command_line", "shell"]
-            .iter()
-            .find_map(|key| {
-                map.get(*key)
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string)
-            })
-            .or_else(|| {
-                serde_json::to_string(value)
-                    .ok()
-                    .filter(|serialized| serialized != "{}")
-            }),
-        _ => None,
-    }
-}
-
-fn declared_action_for_tool(tool_name: &str) -> &'static str {
-    let normalized = tool_name.to_ascii_lowercase();
-    if normalized.contains("exec") || normalized.contains("shell") || normalized.contains("command")
-    {
-        "shell.command"
-    } else {
-        "tool.call"
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IntentForCorrelation {
+    declaration: serde_json::Value,
     session_id: String,
     intent_source: String,
     intent_id: String,
+    source_event_id: Option<String>,
+    tool_name: String,
     command: Option<String>,
     raw_event_id: Option<String>,
+    harness_session_id: Option<String>,
+    observation_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1120,6 +1259,7 @@ struct ObservedEventForCorrelation {
     resource: String,
     process_command: Option<String>,
     process_executable: Option<String>,
+    intent_id: Option<String>,
     report_missing_intent: bool,
     runtime: RuntimeForCorrelation,
 }
@@ -1162,17 +1302,28 @@ fn render_correlation_summary(
 ) -> String {
     use std::fmt::Write as _;
 
-    let event_by_id: std::collections::HashMap<&str, &ObservedEventForCorrelation> = events
+    let event_by_id: std::collections::HashMap<(&str, &str), &ObservedEventForCorrelation> = events
         .iter()
-        .map(|event| (event.raw_event_id.as_str(), event))
+        .map(|event| {
+            (
+                (event.session_id.as_str(), event.raw_event_id.as_str()),
+                event,
+            )
+        })
         .collect();
 
     let mut matched = Vec::new();
     let mut findings = Vec::new();
+    let mut candidates = Vec::new();
+    let mut diagnostics = Vec::new();
     for record in records {
         match string_field(record, "record_type") {
             Some("intent_correlation") => matched.push(record),
             Some("accountability_finding") => findings.push(record),
+            Some("intent_correlation_candidate") => candidates.push(record),
+            Some("intent_correlation_diagnostic" | "intent_reason_diagnostic") => {
+                diagnostics.push(record)
+            }
             _ => {}
         }
     }
@@ -1189,17 +1340,32 @@ fn render_correlation_summary(
     );
     let _ = writeln!(
         out,
-        "  {} side effect(s) matched declared intent, {} finding(s) with no declared intent",
+        "  {} observed event(s) linked by explicit identifier, {} finding(s)",
         matched.len(),
         findings.len()
+    );
+    let _ = writeln!(
+        out,
+        "  {} inferred/ambiguous candidate(s), {} correlation diagnostic(s)",
+        candidates.len(),
+        diagnostics.len()
     );
 
     for record in &matched {
         let resource = string_field(record, "resource").unwrap_or("");
         let command = string_field(record, "command").unwrap_or("");
+        let tool_name = string_field(record, "tool_name").unwrap_or("");
         let basis = string_field(record, "match_basis").unwrap_or("");
         let _ = writeln!(out, "  \u{2713} matched   {resource}");
-        let _ = writeln!(out, "            declared as: {command}  [{basis}]");
+        let _ = writeln!(
+            out,
+            "            declared as: {tool_name} {command}  [{basis}]"
+        );
+        if let Some(reason) = record.get("declared_reason") {
+            let code = string_field(reason, "reason_code").unwrap_or("unknown");
+            let source = string_field(reason, "reason_source").unwrap_or("unknown");
+            let _ = writeln!(out, "            declared reason: {code} [{source}]");
+        }
     }
 
     for record in &findings {
@@ -1207,7 +1373,8 @@ fn render_correlation_summary(
         let decision = string_field(record, "decision").unwrap_or("review");
         let reason = string_field(record, "reason").unwrap_or("");
         let evidence_ref = string_field(record, "evidence_ref").unwrap_or("");
-        let event = event_by_id.get(evidence_ref).copied();
+        let session = string_field(record, "session_id").unwrap_or("");
+        let event = event_by_id.get(&(session, evidence_ref)).copied();
         let resource = event
             .map(|event| event.resource.as_str())
             .unwrap_or(evidence_ref);
@@ -1222,10 +1389,27 @@ fn render_correlation_summary(
         let _ = writeln!(out, "            {reason}  [{decision}]");
     }
 
+    for record in &candidates {
+        let _ = writeln!(
+            out,
+            "  ? candidate   {} [{}; {}]",
+            string_field(record, "resource").unwrap_or(""),
+            string_field(record, "match_basis").unwrap_or(""),
+            string_field(record, "relation_status").unwrap_or("")
+        );
+    }
+    for record in &diagnostics {
+        let _ = writeln!(
+            out,
+            "  ! correlation gap   {}",
+            string_field(record, "reason").unwrap_or("")
+        );
+    }
+
     if findings.is_empty() {
         let _ = writeln!(
             out,
-            "  no findings: every observed side effect matched a declared intent."
+            "  no accountability findings emitted; this does not establish complete coverage."
         );
     }
 
@@ -1236,64 +1420,149 @@ fn correlate_intents(
     intent_input: &str,
     timeline_input: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let intents = parse_intent_records(intent_input)?;
-    let events = parse_observed_events(timeline_input)?;
-    let mut records = Vec::new();
-    let mut matched_intents = vec![false; intents.len()];
+    use std::collections::HashMap;
+
+    let intents: Vec<IntentForCorrelation> = parse_intent_records(intent_input)?;
+    let events: Vec<ObservedEventForCorrelation> = parse_observed_events(timeline_input)?;
+    let mut records: Vec<serde_json::Value> = Vec::new();
+    let mut matched_intents: Vec<bool> = vec![false; intents.len()];
+
+    let mut by_session_intent_id: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    let mut by_session_raw_id: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    let mut by_session_command: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    let mut by_session_non_semantic: HashMap<&str, Vec<usize>> = HashMap::new();
+
+    for (index, intent) in intents.iter().enumerate() {
+        let session = intent.session_id.as_str();
+        by_session_intent_id
+            .entry((session, intent.intent_id.as_str()))
+            .or_default()
+            .push(index);
+        if let Some(raw_id) = intent.raw_event_id.as_deref() {
+            by_session_raw_id
+                .entry((session, raw_id))
+                .or_default()
+                .push(index);
+        }
+        if intent.observation_mode.as_deref() != Some("semantic_only") {
+            by_session_non_semantic
+                .entry(session)
+                .or_default()
+                .push(index);
+            if let Some(command) = intent.command.as_deref() {
+                by_session_command
+                    .entry((session, command))
+                    .or_default()
+                    .push(index);
+            }
+        }
+    }
 
     for event in &events {
-        let matched = intents
-            .iter()
-            .enumerate()
-            .find(|(_, intent)| {
-                intent.session_id == event.session_id
-                    && intent.raw_event_id.as_deref() == Some(event.raw_event_id.as_str())
-            })
-            .map(|(index, intent)| (index, intent, "raw_event_id"))
-            .or_else(|| {
-                event.process_command.as_ref().and_then(|command| {
-                    intents
-                        .iter()
-                        .enumerate()
-                        .find(|(_, intent)| {
-                            intent.session_id == event.session_id
-                                && intent.command.as_deref() == Some(command.as_str())
-                        })
-                        .map(|(index, intent)| (index, intent, "process_command_exact"))
-                })
-            })
-            .or_else(|| {
-                if event.event_type != "exec" {
-                    return None;
+        let session = event.session_id.as_str();
+        let by_raw = by_session_raw_id
+            .get(&(session, event.raw_event_id.as_str()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut matched = None;
+        let mut gap = None;
+        if let Some(id) = &event.intent_id {
+            let by_id = by_session_intent_id
+                .get(&(session, id.as_str()))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            match by_id {
+                [index] if by_raw.is_empty() => {
+                    matched = Some((*index, &intents[*index], "intent_id"));
                 }
-                intents
-                    .iter()
-                    .enumerate()
-                    .find(|(_, intent)| {
-                        intent.session_id == event.session_id
-                            && intent
-                                .command
-                                .as_deref()
-                                .and_then(command_executable)
-                                .map(|executable| {
-                                    executable_matches(
-                                        executable,
-                                        event.process_executable.as_deref(),
-                                    ) || executable_matches(executable, Some(&event.resource))
+                [index] if by_raw == [*index] => {
+                    matched = Some((*index, &intents[*index], "raw_event_id"));
+                }
+                [] => gap = Some("unrecognized_intent_id"),
+                [_] => gap = Some("conflicting_identifiers"),
+                _ => gap = Some("ambiguous_intent_id"),
+            }
+        } else {
+            match by_raw {
+                [index] => matched = Some((*index, &intents[*index], "raw_event_id")),
+                [] => {
+                    let exact = event
+                        .process_command
+                        .as_deref()
+                        .and_then(|command| by_session_command.get(&(session, command)))
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let (candidates, basis): (Vec<usize>, &str) = if !exact.is_empty() {
+                        (exact.to_vec(), "process_command_exact")
+                    } else if event.event_type == "exec" {
+                        (
+                            by_session_non_semantic
+                                .get(session)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[])
+                                .iter()
+                                .copied()
+                                .filter(|&index| {
+                                    intents[index]
+                                        .command
+                                        .as_deref()
+                                        .and_then(command_executable)
+                                        .is_some_and(|executable| {
+                                            executable_matches(
+                                                executable,
+                                                event.process_executable.as_deref(),
+                                            ) || executable_matches(
+                                                executable,
+                                                Some(&event.resource),
+                                            )
+                                        })
                                 })
-                                .unwrap_or(false)
-                    })
-                    .map(|(index, intent)| (index, intent, "process_executable"))
-            });
-
-        if let Some((index, intent, match_basis)) = matched {
+                                .collect(),
+                            "process_executable",
+                        )
+                    } else {
+                        (Vec::new(), "process_executable")
+                    };
+                    for index in &candidates {
+                        let intent = &intents[*index];
+                        let mut candidate = intent_correlation_record(intent, event, basis);
+                        candidate["record_type"] = "intent_correlation_candidate".into();
+                        candidate["relation_status"] = if candidates.len() == 1 {
+                            "inferred"
+                        } else {
+                            "ambiguous"
+                        }
+                        .into();
+                        candidate["candidate_count"] = candidates.len().into();
+                        records.push(candidate);
+                    }
+                }
+                _ => gap = Some("ambiguous_raw_event_id"),
+            }
+        }
+        if matched.as_ref().is_some_and(|(_, intent, _)| {
+            intent.observation_mode.as_deref() == Some("semantic_only")
+        }) {
+            matched = None;
+            gap = Some("semantic_only_runtime_event");
+        }
+        if let Some(reason) = gap {
+            records.push(serde_json::json!({
+                "record_type": "intent_correlation_diagnostic",
+                "session_id": event.session_id,
+                "raw_event_id": event.raw_event_id,
+                "intent_id": event.intent_id,
+                "reason": reason,
+            }));
+        }
+        if let Some((index, intent, basis)) = matched {
             matched_intents[index] = true;
-            records.push(intent_correlation_record(intent, event, match_basis));
+            records.push(intent_correlation_record(intent, event, basis));
         } else if event.report_missing_intent {
             records.push(accountability_finding_record(
                 &event.session_id,
                 FindingKind::MissingIntent,
-                "observed side effect has no matching declared intent",
+                "observed attempt has no explicit identifier relation to a declared intent",
                 &event.raw_event_id,
                 &event.runtime,
             )?);
@@ -1301,11 +1570,11 @@ fn correlate_intents(
     }
 
     for (intent, matched) in intents.iter().zip(matched_intents) {
-        if !matched {
+        if !matched && intent.observation_mode.as_deref() != Some("semantic_only") {
             records.push(accountability_finding_record(
                 &intent.session_id,
                 FindingKind::UnobservedIntent,
-                "declared intent has no matching observed side effect",
+                "declared intent has no explicit identifier relation to an observed event",
                 &intent.intent_id,
                 &RuntimeForCorrelation::default(),
             )?);
@@ -1316,19 +1585,42 @@ fn correlate_intents(
 }
 
 fn parse_intent_records(input: &str) -> Result<Vec<IntentForCorrelation>, String> {
-    parse_jsonl(input, "intent input")?
+    use std::collections::HashMap;
+
+    let records: Vec<IntentForCorrelation> = parse_jsonl(input, "intent input")?
         .into_iter()
         .filter(|value| string_field(value, "record_type") == Some("intent"))
-        .map(|value| {
+        .map(|mut value| {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("timestamp_unix_ms");
+            }
             Ok(IntentForCorrelation {
+                declaration: value.clone(),
                 session_id: required_string_field(&value, "session_id")?.to_string(),
                 intent_source: required_string_field(&value, "intent_source")?.to_string(),
                 intent_id: required_string_field(&value, "intent_id")?.to_string(),
+                source_event_id: string_field(&value, "source_event_id").map(ToString::to_string),
+                tool_name: required_string_field(&value, "tool_name")?.to_string(),
                 command: string_field(&value, "command").map(ToString::to_string),
                 raw_event_id: string_field(&value, "raw_event_id").map(ToString::to_string),
+                harness_session_id: string_field(&value, "harness_session_id")
+                    .map(ToString::to_string),
+                observation_mode: string_field(&value, "observation_mode").map(ToString::to_string),
             })
         })
-        .collect()
+        .collect::<Result<_, String>>()?;
+    let mut unique: Vec<IntentForCorrelation> = Vec::with_capacity(records.len());
+    let mut by_key: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for record in records {
+        let indices = by_key
+            .entry((record.session_id.clone(), record.intent_id.clone()))
+            .or_default();
+        if !indices.iter().any(|&idx| unique[idx] == record) {
+            indices.push(unique.len());
+            unique.push(record);
+        }
+    }
+    Ok(unique)
 }
 
 fn parse_observed_events(input: &str) -> Result<Vec<ObservedEventForCorrelation>, String> {
@@ -1356,6 +1648,7 @@ fn parse_observed_events(input: &str) -> Result<Vec<ObservedEventForCorrelation>
                 process_command: string_field(&value, "process_command").map(ToString::to_string),
                 process_executable: string_field(&value, "process_executable")
                     .map(ToString::to_string),
+                intent_id: string_field(&value, "intent_id").map(ToString::to_string),
                 runtime: RuntimeForCorrelation {
                     runtime: string_field(&value, "runtime")
                         .unwrap_or("local")
@@ -1405,19 +1698,63 @@ fn command_executable(command: &str) -> Option<&str> {
 /// while the kernel records the resolved executable path. Exact equality still
 /// wins first; otherwise the file names must match and be non-empty.
 fn executable_matches(declared: &str, observed: Option<&str>) -> bool {
-    let Some(observed) = observed else {
-        return false;
-    };
-    if declared == observed {
-        return true;
+    fn name(value: &str) -> Option<&str> {
+        let value = value.strip_prefix("executable_ref:").unwrap_or(value);
+        let basename = value.rsplit('/').next()?;
+        (!basename.is_empty() && !matches!(basename, "unknown" | "executable:unavailable"))
+            .then_some(basename)
     }
-    let declared_name = declared.rsplit('/').next().unwrap_or(declared);
-    let observed_name = observed.rsplit('/').next().unwrap_or(observed);
-    !declared_name.is_empty() && declared_name == observed_name
+    match (name(declared), observed.and_then(name)) {
+        (Some(declared), Some(observed)) => declared == observed,
+        _ => false,
+    }
 }
 
 /// Sum the observer's event-loss diagnostics in a timeline into
 /// (dropped, truncated, observation gaps). Malformed input yields zeros.
+// Native reports track truncation separately from a complete capture transaction.
+#[cfg(target_os = "linux")]
+fn native_capture_boundary_valid(rows: &[serde_json::Value], truncations: u64) -> bool {
+    use apolysis_accountability::ProjectionIssueCode;
+    use apolysis_core::CollectorLifecycleState;
+
+    let metadata: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row["record_type"].as_str(),
+                Some("collector_capability_manifest" | "collector_lifecycle" | "observation_gap")
+            )
+        })
+        .cloned()
+        .collect();
+    if metadata.is_empty() {
+        return true; // Legacy saved native captures predate lifecycle records.
+    }
+    let Ok(record) = project_agent_run([AgentRunRecordBatch::plain(metadata)]) else {
+        return false;
+    };
+    let Some(terminal) = record.collector_lifecycle.last() else {
+        return false;
+    };
+    let counters = terminal.counters;
+    terminal.state == CollectorLifecycleState::Stopped
+        && record.issues.iter().all(|issue| {
+            matches!(
+                issue.code,
+                ProjectionIssueCode::NoRuntimeObservations | ProjectionIssueCode::CollectorLoss
+            )
+        })
+        && counters.global_reserve_failures == 0
+        && counters.global_map_pressure == 0
+        && counters.global_abi_mismatches == 0
+        && counters.global_decode_failures == 0
+        && counters.scope_missing_entries == 0
+        && counters.scope_missing_exits == 0
+        && counters.scope_pending == 0
+        && counters.global_truncations == truncations
+}
+
 fn observer_evidence_loss(timeline_input: &str) -> (u64, u64, u64) {
     let records = parse_jsonl(timeline_input, "timeline input").unwrap_or_default();
     let mut dropped = 0;
@@ -1474,7 +1811,9 @@ fn intent_correlation_record(
         "session_id": event.session_id,
         "intent_source": intent.intent_source,
         "intent_id": intent.intent_id,
+        "tool_name": intent.tool_name,
         "match_basis": match_basis,
+        "relation_status": "exact",
         "raw_event_id": event.raw_event_id,
         "event_type": event.event_type,
         "pid": event.pid,

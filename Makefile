@@ -5,11 +5,48 @@
 	qualify-runtime-binding-live qualify-private-containerd-live qualify-local-daemon-systemd \
 	qualify-local-daemon-install qualify-live
 
+.PHONY: test-bpf-relocation test-live-harness-intent test-live-reason-products \
+	test-live-reason-summary test-live-reason-chat test-reason-summary-adapter \
+	test-reason-chat test-harness-hooks test-native-observe
+
 build: build-ebpf
 	cargo build --workspace
 
 test:
 	cargo test --workspace
+	$(MAKE) test-harness-hooks
+	$(MAKE) test-reason-summary-adapter
+
+test-harness-hooks:
+	node --test hooks/tests/intent-bridges.test.mjs
+
+test-reason-summary-adapter:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_live_reason_summary.py'
+
+test-reason-chat:
+	cargo test -p apolysis-cli chat:: --bin apolysis
+	cargo test -p apolysis-cli --test chat
+
+test-native-observe:
+	cargo test -p apolysis-cli native:: --bin apolysis
+	cargo test -p apolysis-cli --test native --test native_process
+
+test-bpf-relocation:
+	./scripts/test-bpf-relocation.sh
+
+# Explicit provider and privileged eBPF gates; see each script's prerequisites.
+test-live-harness-intent:
+	cargo build -p apolysis-cli
+	./scripts/test-live-harness-intent.sh
+
+test-live-reason-products:
+	python3 -u ./scripts/test-live-reason-products.py --require-all --shell-bridge /bin/bash
+
+test-live-reason-summary:
+	PYTHONDONTWRITEBYTECODE=1 python3 -u ./scripts/test-live-reason-summary.py --require-all
+
+test-live-reason-chat:
+	./scripts/test-live-reason-chat.sh --require-all
 
 lint:
 	cargo fmt --all -- --check

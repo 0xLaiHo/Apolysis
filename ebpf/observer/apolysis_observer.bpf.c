@@ -5,6 +5,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include "../include/apolysis_observer.h"
+#include "../include/apolysis_intent.h"
 
 char LICENSE[] SEC("license") = "GPL";
 
@@ -19,8 +20,15 @@ char LICENSE[] SEC("license") = "GPL";
 
 struct apolysis_pending_exec {
     unsigned int flags;
+    unsigned int intent_capture_complete;
     char resource[APOLYSIS_RESOURCE_LEN];
     char payload[APOLYSIS_PAYLOAD_LEN];
+    char intent_id[APOLYSIS_INTENT_ID_LEN];
+};
+
+struct apolysis_intent_context {
+    unsigned long long start_time_ns;
+    char intent_id[APOLYSIS_INTENT_ID_LEN];
 };
 
 struct apolysis_process_identity {
@@ -94,9 +102,18 @@ struct {
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
-    __type(key, unsigned int);
+    __type(key, unsigned long long);
     __type(value, struct apolysis_pending_exec);
 } APOLYSIS_PENDING_EXECS SEC(".maps");
+
+/* Attribution is inherited before ring-buffer delivery. A dropped fork/exec
+ * notification must not make later events use an older tool's attribution. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, unsigned int);
+    __type(value, struct apolysis_intent_context);
+} APOLYSIS_INTENT_CONTEXTS SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -705,6 +722,7 @@ static __always_inline bool advance_current_exec_generation(void)
 
 static __always_inline bool initialize_child_process_identity(
     unsigned int child_pid,
+    unsigned long long child_start,
     struct apolysis_process_identity *child)
 {
     struct apolysis_process_identity parent;
@@ -715,6 +733,7 @@ static __always_inline bool initialize_child_process_identity(
     child->process_generation = bpf_ktime_get_ns();
     if (!child->process_generation)
         child->process_generation = 1;
+    child->process_start_time_ns = child_start;
     if (ensure_current_process_identity(&parent)) {
         child->parent_process_generation = parent.process_generation;
         child->parent_exec_generation = parent.exec_generation;
@@ -768,6 +787,31 @@ static __always_inline bool process_group_is_dead(
     return BPF_CORE_READ(task, signal, live.counter) == 0;
 }
 
+static __always_inline unsigned long long process_start_time(struct task_struct *task)
+{
+    struct task_struct *leader = BPF_CORE_READ(task, group_leader);
+
+    if (!leader)
+        leader = task;
+    if (bpf_core_field_exists(leader->start_boottime))
+        return BPF_CORE_READ(leader, start_boottime);
+    return BPF_CORE_READ(leader, start_time);
+}
+
+static __always_inline void fill_intent_context(struct apolysis_kernel_event *event)
+{
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
+    struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+    struct apolysis_intent_context *intent;
+    unsigned int pid = event->pid;
+
+    event->parent_start_time_ns = process_start_time(parent);
+    intent = bpf_map_lookup_elem(&APOLYSIS_INTENT_CONTEXTS, &pid);
+    if (intent && intent->start_time_ns &&
+        intent->start_time_ns == process_start_time(task))
+        __builtin_memcpy(event->intent_id, intent->intent_id, sizeof(event->intent_id));
+}
+
 static __always_inline struct apolysis_kernel_event *reserve_event_unchecked(unsigned int kind)
 {
     struct apolysis_kernel_event *event;
@@ -799,6 +843,7 @@ static __always_inline struct apolysis_kernel_event *reserve_event_unchecked(uns
     if (ensure_current_process_identity(&identity))
         fill_process_identity(event, &identity);
     bpf_get_current_comm(event->comm, sizeof(event->comm));
+    fill_intent_context(event);
     return event;
 }
 
@@ -844,14 +889,17 @@ static __always_inline void read_kernel_path(struct apolysis_kernel_event *event
         event->flags |= APOLYSIS_FLAG_RESOURCE_TRUNCATED;
 }
 
-static __always_inline void read_pending_user_path(struct apolysis_pending_exec *pending,
+static __always_inline unsigned int read_pending_user_path(struct apolysis_pending_exec *pending,
                                                    const char *path)
 {
     long length;
 
     length = bpf_probe_read_user_str(pending->resource, sizeof(pending->resource), path);
-    if (length == sizeof(pending->resource))
+    if (length <= 0 || length == sizeof(pending->resource)) {
         pending->flags |= APOLYSIS_FLAG_RESOURCE_TRUNCATED;
+        return 0;
+    }
+    return length - 1;
 }
 
 static __always_inline void append_exec_argv_arg(struct apolysis_pending_exec *pending,
@@ -900,14 +948,39 @@ static __always_inline void append_exec_argv_arg(struct apolysis_pending_exec *p
     *offset = off;
 }
 
+/* This is a complete comment header, not a search through diagnostic argv.
+ * The hook places it at the beginning of the shell's command-string argument.
+ * Reading exactly the header also works when the remaining command is long. */
+static __always_inline void read_intent_header(struct apolysis_pending_exec *pending,
+                                               const char *command)
+{
+    char header[APOLYSIS_INTENT_HEADER_LEN + 1] = {};
+    long length = bpf_probe_read_user_str(header, sizeof(header), command);
+    int capture;
+
+    if (length <= 0)
+        return;
+    capture = apolysis_parse_intent_header(header, length - 1, pending->intent_id);
+    pending->intent_capture_complete = capture != APOLYSIS_INTENT_UNKNOWN;
+
+}
+
 static __always_inline void read_exec_argv(struct apolysis_pending_exec *pending,
-                                           const char *const *argv)
+                                           const char *const *argv,
+                                           unsigned int path_length)
 {
     const char *arg = 0;
     unsigned int offset = 5;
+    bool shell = apolysis_executable_is_shell(pending->resource, path_length);
+    bool command_next = false;
+    bool skip_option_arg = false;
+    bool command_seen = false;
+    bool unknown_options = false;
     int i;
 
     __builtin_memcpy(pending->payload, "argv:", 5);
+    if (!shell && !(pending->flags & APOLYSIS_FLAG_RESOURCE_TRUNCATED))
+        pending->intent_capture_complete = 1;
 
 #pragma unroll
     for (i = 0; i < APOLYSIS_EXEC_ARGC_LIMIT; i++) {
@@ -915,8 +988,43 @@ static __always_inline void read_exec_argv(struct apolysis_pending_exec *pending
             pending->flags |= APOLYSIS_FLAG_ARGV_TRUNCATED;
             return;
         }
-        if (!arg)
+        if (!arg) {
+            if (shell && !command_seen && !command_next && !skip_option_arg && !unknown_options)
+                pending->intent_capture_complete = 1;
             return;
+        }
+        if (shell && !command_seen && i > 0) {
+            char option[APOLYSIS_SHELL_OPTION_LEN] = {};
+            if (command_next) {
+                read_intent_header(pending, arg);
+                command_seen = true;
+            } else if (skip_option_arg) {
+                if (bpf_probe_read_user_str(option, sizeof(option), arg) > 0)
+                    skip_option_arg = false;
+                else
+                    command_seen = true;
+            } else {
+                long opt_len = bpf_probe_read_user_str(option, sizeof(option), arg);
+                int kind = opt_len <= 0
+                    ? APOLYSIS_SHELL_OPT_UNKNOWN
+                    : apolysis_classify_shell_option(option, opt_len - 1);
+                if (kind == APOLYSIS_SHELL_OPT_SCRIPT || kind == APOLYSIS_SHELL_OPT_END) {
+                    /* A script filename or -- ends option parsing. Later -c
+                     * arguments belong to the script, not to the shell. */
+                    command_seen = true;
+                    pending->intent_capture_complete = !unknown_options;
+                } else if (kind == APOLYSIS_SHELL_OPT_COMMAND) {
+                    command_next = !unknown_options;
+                    if (unknown_options)
+                        command_seen = true;
+                } else if (kind == APOLYSIS_SHELL_OPT_TAKES_ARG) {
+                    skip_option_arg = true;
+                } else if (kind == APOLYSIS_SHELL_OPT_UNKNOWN) {
+                    unknown_options = true;
+                    command_seen = true;
+                }
+            }
+        }
         append_exec_argv_arg(pending, &offset, arg);
     }
 
@@ -929,12 +1037,15 @@ static __always_inline int capture_exec_enter(const char *filename,
 {
     struct apolysis_pending_exec *pending;
     unsigned long long pid_tgid;
-    unsigned int pid;
     unsigned int scratch_key = 0;
+    unsigned int path_length;
 
     if (!current_is_in_scope())
         return 0;
 
+    pid_tgid = bpf_get_current_pid_tgid();
+    /* A previous failed exec must not be mistaken for this attempt. */
+    bpf_map_delete_elem(&APOLYSIS_PENDING_EXECS, &pid_tgid);
     pending = bpf_map_lookup_elem(&APOLYSIS_EXEC_SCRATCH, &scratch_key);
     if (!pending) {
         count_map_pressure();
@@ -942,13 +1053,13 @@ static __always_inline int capture_exec_enter(const char *filename,
     }
 
     __builtin_memset(pending, 0, sizeof(*pending));
-    read_pending_user_path(pending, filename);
-    read_exec_argv(pending, argv);
+    path_length = read_pending_user_path(pending, filename);
+    read_exec_argv(pending, argv, path_length);
 
-    pid_tgid = bpf_get_current_pid_tgid();
-    pid = pid_tgid >> 32;
-    if (bpf_map_update_elem(&APOLYSIS_PENDING_EXECS, &pid, pending, BPF_ANY))
+    if (bpf_map_update_elem(&APOLYSIS_PENDING_EXECS, &pid_tgid, pending, BPF_ANY)) {
+        bpf_map_delete_elem(&APOLYSIS_PENDING_EXECS, &pid_tgid);
         count_map_pressure();
+    }
     return 0;
 }
 
@@ -1151,26 +1262,40 @@ static __always_inline int capture_file_exit(struct trace_event_raw_sys_exit *ct
     return 0;
 }
 
-SEC("tracepoint/sched/sched_process_fork")
-int apolysis_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
+/* Raw tracepoint arguments have a fixed u64-slot ABI. Do not use vmlinux's
+ * preserve_access_index type here: its args[0] flexible array makes Aya's
+ * CO-RE relocator reject args[1] as out of bounds before any kernel load. */
+struct apolysis_fork_args {
+    unsigned long long args[2];
+};
+
+SEC("raw_tracepoint/sched_process_fork")
+int apolysis_sched_process_fork(struct apolysis_fork_args *ctx)
 {
+    struct task_struct *parent = (struct task_struct *)ctx->args[0];
+    struct task_struct *child = (struct task_struct *)ctx->args[1];
     struct apolysis_scope_config *config = scope_config();
     struct apolysis_kernel_event *event;
     struct apolysis_process_identity child_identity;
     unsigned long long event_cgroup_id;
     bool update_scoped;
-    unsigned int child_pid;
     struct apolysis_tracked_process_identity tracked = {
         .state = APOLYSIS_TRACKED_PROCESS_FORK_PENDING,
     };
+    struct apolysis_intent_context *parent_intent;
+    struct apolysis_intent_context inherited = {};
+    unsigned int parent_pid = BPF_CORE_READ(parent, tgid);
+    unsigned int child_pid = BPF_CORE_READ(child, tgid);
+    unsigned long long parent_start = process_start_time(parent);
+    unsigned long long child_start = process_start_time(child);
 
-    if (!config)
+    /* Threads share their TGID's context. Do not create an entry keyed by TID. */
+    if (!config || parent_pid == child_pid)
         return 0;
 
     if (pid_tree_bookkeeping_scope(config)) {
         if (!current_pid_tree_is_tracked())
             return 0;
-        child_pid = ctx->child_pid;
         if (bpf_map_update_elem(&APOLYSIS_TRACKED_PIDS, &child_pid, &tracked, BPF_ANY))
             count_map_pressure();
         if (config->mode == APOLYSIS_SCOPE_PID_TREE_SEEDING)
@@ -1179,7 +1304,20 @@ int apolysis_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
         return 0;
     }
 
-    initialize_child_process_identity(ctx->child_pid, &child_identity);
+    initialize_child_process_identity(child_pid, child_start, &child_identity);
+    parent_intent = bpf_map_lookup_elem(&APOLYSIS_INTENT_CONTEXTS, &parent_pid);
+    if (parent_intent && parent_start && child_start &&
+        parent_intent->start_time_ns == parent_start) {
+        inherited.start_time_ns = child_start;
+        __builtin_memcpy(inherited.intent_id, parent_intent->intent_id,
+                         sizeof(inherited.intent_id));
+        if (bpf_map_update_elem(&APOLYSIS_INTENT_CONTEXTS, &child_pid, &inherited, BPF_ANY)) {
+            bpf_map_delete_elem(&APOLYSIS_INTENT_CONTEXTS, &child_pid);
+            count_map_pressure();
+        }
+    } else {
+        bpf_map_delete_elem(&APOLYSIS_INTENT_CONTEXTS, &child_pid);
+    }
 
     event = reserve_process_event(APOLYSIS_EVENT_FORK, &event_cgroup_id,
                                   &update_scoped);
@@ -1187,13 +1325,17 @@ int apolysis_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
         end_scope_counter_update(event_cgroup_id, update_scoped);
         return 0;
     }
-
-    event->pid = ctx->child_pid;
-    event->ppid = ctx->parent_pid;
+    event->pid = child_pid;
+    event->ppid = parent_pid;
     if (process_identity_tracking_failed())
         clear_process_identity(event);
     else
         fill_process_identity(event, &child_identity);
+    event->parent_start_time_ns = parent_start;
+    __builtin_memset(event->intent_id, 0, sizeof(event->intent_id));
+    parent_intent = bpf_map_lookup_elem(&APOLYSIS_INTENT_CONTEXTS, &child_pid);
+    if (parent_intent && parent_intent->start_time_ns == child_start)
+        __builtin_memcpy(event->intent_id, parent_intent->intent_id, sizeof(event->intent_id));
     copy_action(event, "fork", 5);
     bpf_ringbuf_submit(event, 0);
     end_scope_counter_update(event_cgroup_id, update_scoped);
@@ -1203,38 +1345,64 @@ int apolysis_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx)
 SEC("tracepoint/sched/sched_process_exec")
 int apolysis_sched_process_exec(struct trace_event_raw_sched_process_exec *ctx)
 {
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
     struct apolysis_kernel_event *event;
     struct apolysis_pending_exec *pending;
+    struct apolysis_intent_context intent = {};
     const char *filename;
     unsigned long long event_cgroup_id;
     bool update_scoped;
     bool identity_advanced;
-    unsigned int pid;
+    unsigned long long pid_tgid = bpf_get_current_pid_tgid();
+    unsigned int pid = pid_tgid >> 32;
+    /* A non-leader exec changes TID during de_thread(); old_pid identifies the
+     * matching sys_enter_execve capture without mixing concurrent threads. */
+    unsigned long long pending_key = ((unsigned long long)pid << 32) | (unsigned int)ctx->old_pid;
 
     if (!current_is_in_scope())
         return 0;
     identity_advanced = advance_current_exec_generation();
-
+    if ((unsigned int)ctx->old_pid != pid) {
+        struct apolysis_scope_config *config = scope_config();
+        unsigned int old_tid = ctx->old_pid;
+        if (config && config->mode == APOLYSIS_SCOPE_PID_TREE)
+            bpf_map_delete_elem(&APOLYSIS_TRACKED_PIDS, &old_tid);
+    }
+    pending = bpf_map_lookup_elem(&APOLYSIS_PENDING_EXECS, &pending_key);
+    int update = apolysis_intent_update_for_capture(pending != 0,
+        pending ? pending->intent_capture_complete : 0,
+        pending ? pending->intent_id[0] : 0);
+    if (update == APOLYSIS_INTENT_CLEAR) {
+        bpf_map_delete_elem(&APOLYSIS_INTENT_CONTEXTS, &pid);
+    } else if (update == APOLYSIS_INTENT_REPLACE && pending) {
+        intent.start_time_ns = process_start_time(task);
+        __builtin_memcpy(intent.intent_id, pending->intent_id, sizeof(intent.intent_id));
+        if (bpf_map_update_elem(&APOLYSIS_INTENT_CONTEXTS, &pid, &intent, BPF_ANY)) {
+            /* Never keep the previous tool's token after a failed replacement. */
+            bpf_map_delete_elem(&APOLYSIS_INTENT_CONTEXTS, &pid);
+            count_map_pressure();
+        }
+    }
     event = reserve_process_event(APOLYSIS_EVENT_EXEC, &event_cgroup_id,
                                   &update_scoped);
     if (!event) {
+        bpf_map_delete_elem(&APOLYSIS_PENDING_EXECS, &pending_key);
         end_scope_counter_update(event_cgroup_id, update_scoped);
         return 0;
     }
     if (!identity_advanced)
         clear_process_identity(event);
-
+    if (update == APOLYSIS_INTENT_CLEAR)
+        event->flags |= APOLYSIS_FLAG_INTENT_INCOMPLETE | APOLYSIS_FLAG_PAYLOAD_TRUNCATED;
     filename = (const char *)ctx + (ctx->__data_loc_filename & 0xffff);
-    pid = event->pid;
-    pending = bpf_map_lookup_elem(&APOLYSIS_PENDING_EXECS, &pid);
     if (pending) {
         __builtin_memcpy(event->resource, pending->resource, sizeof(event->resource));
         __builtin_memcpy(event->payload, pending->payload, sizeof(event->payload));
         event->flags |= pending->flags;
-        bpf_map_delete_elem(&APOLYSIS_PENDING_EXECS, &pid);
     } else {
         read_kernel_path(event, filename);
     }
+    bpf_map_delete_elem(&APOLYSIS_PENDING_EXECS, &pending_key);
     copy_action(event, "exec", 5);
     bpf_ringbuf_submit(event, 0);
     end_scope_counter_update(event_cgroup_id, update_scoped);
@@ -1279,6 +1447,7 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     pid_tgid = bpf_get_current_pid_tgid();
     tgid = pid_tgid >> 32;
     tid = (unsigned int)pid_tgid;
+    bpf_map_delete_elem(&APOLYSIS_PENDING_EXECS, &pid_tgid);
     group_dead = process_group_is_dead(ctx);
     if (group_dead) {
         event = reserve_process_event(APOLYSIS_EVENT_EXIT, &event_cgroup_id,
@@ -1331,8 +1500,10 @@ int apolysis_sched_process_exit(struct trace_event_raw_sched_process_exit *ctx)
     }
     if (tid != tgid)
         bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &tid);
-    if (group_dead)
+    if (group_dead) {
         bpf_map_delete_elem(&APOLYSIS_PROCESS_IDENTITIES, &tgid);
+        bpf_map_delete_elem(&APOLYSIS_INTENT_CONTEXTS, &tgid);
+    }
     return 0;
 }
 

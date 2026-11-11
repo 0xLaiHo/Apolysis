@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Record the README demo GIF/cast as a REAL terminal recording of the
+# Record a local demo GIF/cast as a REAL terminal recording of the
 # zero-privilege quickstart. Every line of output is produced by the real
 # `apolysis` binary on the bundled fixture — nothing is hand-authored or
 # re-rendered from a transcript.
@@ -23,7 +23,8 @@ for tool in asciinema agg; do
     }
 done
 
-asset_dir="docs/assets/codex-live-demo"
+asset_dir="target/quickstart-demo"
+mkdir -p "$asset_dir"
 cast="$asset_dir/codex-live-demo.cast"
 gif="$asset_dir/codex-live-demo.gif"
 scene="$(mktemp)"
