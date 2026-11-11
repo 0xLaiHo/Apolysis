@@ -18,8 +18,9 @@ apolysis-viewer = { path = "../apolysis-viewer" }
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = "3"
 sha2 = { workspace = true }
-tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "process", "io-util", "io-std", "signal", "time", "net", "sync"] }
 
 [[bin]]
 name = "apolysis"

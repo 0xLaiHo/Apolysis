@@ -2213,6 +2213,8 @@ fn file_outcome_batch_for_path(cgroup_id: u64, path: &str) -> DaemonObserverBatc
                 resource,
                 action,
                 payload: [0; PAYLOAD_LEN],
+                parent_start_time_ns: 0,
+                intent_id: [0; 32],
             },
         }],
         ..DaemonObserverBatch::default()

@@ -1,5 +1,0 @@
-{"version": 2, "width": 80, "height": 24, "timestamp": 1783509606, "env": {"SHELL": "/usr/bin/zsh", "TERM": "xterm-ghostty"}}
-[0.607611, "o", "# Your AI agent said it ran the tests. Did it also touch your credentials?\r\n"]
-[2.009659, "o", "# make quickstart -- zero privileges: no root, no eBPF, a bundled fixture\r\n"]
-[3.211372, "o", "$ make quickstart\r\n"]
-[3.785676, "o", "\r\nApolysis accountability summary  (session: codex-mismatch-demo)\r\n  1 side effect(s) matched declared intent, 1 finding(s) with no declared intent\r\n  ✓ matched   crates/apolysis-cli/tests/intent.rs\r\n            declared as: cargo test -p apolysis-cli --test intent  [process_command_exact]\r\n  ⚠ missing_intent   credential_read /tmp/apolysis-demo-home/.aws/credentials\r\n            by: python3 scripts/read-demo-credential.py\r\n            observed side effect has no matching declared intent  [review]\r\n"]

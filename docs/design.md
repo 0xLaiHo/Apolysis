@@ -1,7 +1,7 @@
 # Apolysis Design
 
 > English | [Simplified Chinese](design.zh-CN.md)
-> Last reviewed: 2026-08-12
+> Last reviewed: 2026-11-12
 
 This is the sole detailed product document. It is the authority for what
 Apolysis is, how its target system works, its stable record and qualification
@@ -15,9 +15,9 @@ file, network, and credential-related operations, groups them into an Agent
 Run, attributes them to runtime identities, and reports collector health and
 observation gaps.
 
-The eBPF collector is a required primary source. Provider hooks, Agent logs,
-protocol traces, and remote export are deferred; they do not define the active
-product and cannot replace runtime observation.
+The eBPF collector is a required primary source. Native harness hooks and log
+imports supply optional declared-intent context; they cannot replace runtime
+observation. Generic protocol tracing and remote export remain deferred.
 
 The active target is a bounded beta, not a production evidence plane. Gateway,
 PostgreSQL, evidence-object, projection, and cross-provider contract prototypes
@@ -33,6 +33,87 @@ builds; none is an observer-side product dependency.
 | Beta target | Required by the active eBPF observability roadmap but not yet qualified |
 | Deferred | Retained as a possible future extension only after repeated user demand |
 | Out of scope | Not part of the product direction |
+
+### Native application and intent integration
+
+`apolysis observe --agent <product> -- <native arguments>` starts Codex, Claude
+Code, Cursor Agent, Pi or OpenCode with the original stdio, interface, tools,
+authentication and permission prompts. Arguments retain their boundaries.
+Native help/version bypasses capture. The ordinary-user Rust controller creates
+temporary hook configuration and a gated child; only a separate collector uses
+sudo. Capture setup travels over a private Unix socket, never native argv or
+prompts. Readiness follows probe attachment, scope qualification and durable
+collector start; only then is the child released. Actual application exit and
+final drain precede atomic mode-0600 evidence publication inside a mode-0700
+directory. Controlled capture uses a verified 8 MiB ring and a 64 MiB bound per
+export/report input. Cancellation restores the terminal and cleans up owned
+processes. Export failure preserves an already observed application exit.
+
+| Product | Temporary integration |
+| --- | --- |
+| Codex | Session-layer `PreToolUse`, hooks enabled and `--no-daemon`; native hook trust remains effective. Hosted WebSearch is outside this hook. |
+| Claude Code | Runtime plugin with `UserPromptSubmit` and `PreToolUse`. |
+| Cursor Agent | Runtime plugin with `beforeSubmitPrompt`, `preToolUse` and `beforeShellExecution`; the supplemental event does not assign another call identity. |
+| Pi | Extension with `tool_call` and opt-in `input` prompt context. |
+| OpenCode | V2 `setup(ctx)`, `tool.hook("execute.before")`, `session.hook("prompt")`, plus the V1 `server()` entry; temporary plugin directory and `--standalone`. |
+
+Global/project configuration is not overwritten. Recognized hook-disabling,
+remote, detached and shared-server options are rejected. Other native hooks or
+trust decisions can still prevent capture. Cursor's real tool-call gate remains
+authentication-blocked; successful bounded provider demonstrations do not
+qualify every version, interactive flow or runtime profile.
+
+Hooks keep capture `session_id`, product `intent_source`, native
+`harness_session_id` and `source_event_id` distinct. A length-framed SHA-256
+derivation yields a 32-character lowercase hexadecimal `intent_id`. Locked
+append deduplicates retries and rejects conflicting retained records. Supported
+shell inputs receive a complete leading `# APOLYSIS_INTENT_ID=<id>` comment.
+An explicit `--shell-bridge /bin/bash` exposes it at an inner-shell exec boundary
+when native `eval` wrapping hides it; cwd, variables and functions changed there
+do not propagate to the outer shell. Non-shell, remote and hosted tools generally
+remain `semantic_only`; imported records may be `historical`.
+
+The bounded kernel parser recognizes supported shell flags, `-o`/`-O` pairs,
+`-c` arguments and child scripts. It never searches arbitrary argv text.
+TGID plus group-leader birth time keys token inheritance at fork and across exec.
+A new complete marker replaces attribution; a complete capture without one
+preserves it. Malformed, unreadable or incomplete capture clears attribution and
+sets `intent_capture_incomplete`; thread-group exit removes it. Userspace treats
+live absence as authoritative. Stable host/scope/process/exec generations remain
+the separate Runtime Identity contract. ABI v4 is 696 bytes, adding parent birth
+time and the fixed token to v3; return-value and incomplete-intent flags occupy
+distinct bits. The live decoder requires the matching object; saved-run
+projection accepts both v3/656 and v4/696 manifests.
+
+Correlation is capture-session scoped. Unique explicit `intent_id` or
+`raw_event_id` links can be exact; if both are present they must agree. Unknown,
+conflicting or ambiguous identifiers produce diagnostics, without heuristic
+fallback. Command/executable candidates remain inferred. Indexes accelerate
+explicit-ID joins; executable fallback still scans session declarations.
+
+`intent_reason` is a separate append-only annotation, not hidden reasoning or
+verified motive. Producers may supply `apolysis_reason` or a leading
+`APOLYSIS_REASON_CODE` comment. Codes are `unknown`, `inspect_context`,
+`verify_change`, `reproduce_issue`, `implement_change`, `diagnose_failure` and
+`gather_evidence`. Native descriptions and optional prompt summaries use
+`tool_description` with code `unknown`. `--allow-reason-summary` retains filtered,
+single-line text bounded to 240 Unicode characters; filtering is not a secrecy
+guarantee. Corrections use `supersedes_reason_id`, and binding checks the full
+call identity and correction chain. Reasons never promote a candidate to exact.
+Prompt context is latest-prompt state, not a structured per-turn causal model.
+
+Native captures publish `intent.jsonl`, `intent.jsonl.reasons.jsonl`,
+`timeline.jsonl`, `correlation.jsonl`, `result.json`, `report.md` and `report.html`.
+Reports validate raw/canonical identity and reason bindings, avoid double
+counting canonical copies, and print an English terminal tree on stderr. Tree
+grouping parses matching prompt/description text for presentation; it is not
+independent proof of task causality. User text retains its language. Native
+capture status describes transaction integrity, with truncation reported
+separately; the saved-run AOR still treats truncation as degraded, incomplete
+evidence. Loss, gaps, conflicts and missing inputs invalidate native capture;
+application exit, capture health, correlation integrity and task outcome are
+independent. Generic task outcome stays `not_verified`. The older `apolysis chat`
+command is a separate controlled Claude/Bash reason-protocol experiment.
 
 ## 2. User and decision
 
@@ -245,7 +326,7 @@ Userspace decodes the kernel ABI, assigns deterministic source sequence,
 normalizes event types, joins runtime metadata, applies content-off privacy,
 and writes the Agent Observation Record.
 
-Kernel ABI v3 carries a bounded scope generation, process generation, kernel
+Kernel ABI v4 carries a bounded scope generation, process generation, kernel
 process-start timestamp, exec generation, and parent process/exec generations.
 The live userspace boundary attaches the host boot ID read once when the
 collector starts. Process context is keyed by host boot, PID, process
@@ -815,8 +896,8 @@ object whose values are non-negative counts.
 | `agent_run_id` | string | Owning Agent Run |
 | `collector` | string | Constant `apolysis_observer` |
 | `collector_version` | string | Userspace package version |
-| `kernel_abi_version` | u32 | Current live ABI is `3` |
-| `kernel_record_size` | u32 | Current ABI-v3 size is `656` |
+| `kernel_abi_version` | u32 | Current live ABI is `4`; saved projection also accepts `3` |
+| `kernel_record_size` | u32 | ABI-v4 is `696`; the legacy v3 layout is `656` |
 | `observation_scope` | enum | `process_tree` or `cgroup` |
 | `privacy_profile` | enum | Constant `content_off` |
 | `capabilities` | array<object> | Ordered capability objects |
@@ -1551,13 +1632,13 @@ A quiet timeline is never proof that the Agent performed no relevant action.
 Implemented today:
 
 - `ebpf/observer` and `apolysis-observer`: CO-RE tracepoints, ring buffer,
-  process-tree/cgroup scopes, ABI v3, bounded process/exec and cgroup scope
+  process-tree/cgroup scopes, ABI v4, bounded process/exec and cgroup scope
   generations, outcome-aware selected file operations and network connect,
   protected existing-process TGID seeding, per-cgroup operation gap counters,
   redaction, lifecycle checkpoints and terminals, and health/gap diagnostics;
 - `apolysis-cli`: fixture/live observation, managed Agent launch, protected
   existing-process attach through registration or discovery, non-privileged
-  saved-run projection and Saved Run Viewer publication, optional Codex intent
+  saved-run projection and Saved Run Viewer publication, optional native harness intent
   correlation, visibility, verification, and bounded daemon
   install/inspect/uninstall commands;
 - `apolysis-core`: current JSONL vocabulary, record types, versioned Collector
@@ -1738,8 +1819,8 @@ no silent absence, stable identity before inference, privacy before
 persistence, observation rather than enforcement, a non-privileged viewer, and
 expansion only when repeated use changes a real investigation decision.
 
-The following remain explicitly deferred: provider Hook/SDK/OTLP/MCP/A2A
-families; generic remote export or custody; remote outcome verification; live
+The following remain explicitly deferred: general SDK/OTLP/MCP/A2A
+families beyond the native harness adapters; generic remote export or custody; remote outcome verification; live
 tailing and cross-run search; central authenticated ingest, multi-user query,
 PostgreSQL/S3/KMS custody and multi-tenant retention; policy denial or
 containment; portable evidence receipts; public SaaS, HA and multi-region;

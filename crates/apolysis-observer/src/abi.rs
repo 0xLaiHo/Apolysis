@@ -10,13 +10,16 @@ pub const COMM_LEN: usize = 16;
 pub const RESOURCE_LEN: usize = 256;
 pub const ACTION_LEN: usize = 32;
 pub const PAYLOAD_LEN: usize = 256;
-pub const KERNEL_ABI_VERSION: u32 = 3;
-pub const KERNEL_EVENT_RECORD_LEN: usize = 96 + COMM_LEN + RESOURCE_LEN + ACTION_LEN + PAYLOAD_LEN;
+pub const KERNEL_ABI_VERSION: u32 = 4;
+pub const INTENT_ID_LEN: usize = 32;
+pub const KERNEL_EVENT_RECORD_LEN: usize =
+    96 + COMM_LEN + RESOURCE_LEN + ACTION_LEN + PAYLOAD_LEN + 8 + INTENT_ID_LEN;
 pub const FLAG_RESOURCE_TRUNCATED: u32 = 1 << 0;
 pub const FLAG_PAYLOAD_TRUNCATED: u32 = 1 << 1;
 pub const FLAG_PAYLOAD_SOCKADDR: u32 = 1 << 2;
 pub const FLAG_ARGV_TRUNCATED: u32 = 1 << 3;
 pub const FLAG_RETURN_VALUE: u32 = 1 << 4;
+pub const FLAG_INTENT_INCOMPLETE: u32 = 1 << 5;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
@@ -277,6 +280,8 @@ pub struct KernelEventRecord {
     pub resource: [u8; RESOURCE_LEN],
     pub action: [u8; ACTION_LEN],
     pub payload: [u8; PAYLOAD_LEN],
+    pub parent_start_time_ns: u64,
+    pub intent_id: [u8; INTENT_ID_LEN],
 }
 
 impl KernelEventRecord {
@@ -330,6 +335,8 @@ impl KernelEventRecord {
             resource: [0; RESOURCE_LEN],
             action: [0; ACTION_LEN],
             payload: [0; PAYLOAD_LEN],
+            parent_start_time_ns: read_u64(bytes, 656),
+            intent_id: [0; INTENT_ID_LEN],
         };
 
         let mut offset = 96;
@@ -337,6 +344,8 @@ impl KernelEventRecord {
         copy_fixed(bytes, &mut offset, &mut record.resource);
         copy_fixed(bytes, &mut offset, &mut record.action);
         copy_fixed(bytes, &mut offset, &mut record.payload);
+        offset += 8;
+        copy_fixed(bytes, &mut offset, &mut record.intent_id);
         Ok(record)
     }
 
@@ -366,6 +375,14 @@ impl KernelEventRecord {
 
     pub fn return_value(&self) -> Option<i64> {
         (self.flags & FLAG_RETURN_VALUE != 0).then_some(self.return_value)
+    }
+
+    /// Only complete, fixed-width internal tokens can cross the kernel ABI.
+    pub fn intent_id(&self) -> Option<String> {
+        self.intent_id
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+            .then(|| String::from_utf8_lossy(&self.intent_id).into_owned())
     }
 }
 

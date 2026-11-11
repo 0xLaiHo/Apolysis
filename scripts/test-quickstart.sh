@@ -23,7 +23,8 @@ require_contains() {
 
 # The readable summary and both sides of the verdict must be present.
 require_contains "Apolysis accountability summary"
-require_contains "matched declared intent"
+require_contains "linked by explicit identifier"
+require_contains "inferred/ambiguous candidate(s)"
 require_contains "missing_intent"
 require_contains "unobserved_intent"
 require_contains "codex:call-run-tests"
@@ -33,6 +34,20 @@ require_contains ".aws/credentials"
 # The correlation JSONL must be written for anyone who wants the raw evidence.
 if [[ ! -s target/quickstart/correlation.jsonl ]]; then
     echo "quickstart check failed: target/quickstart/correlation.jsonl was not written" >&2
+    exit 1
+fi
+
+while IFS= read -r expected; do
+    if ! grep -qF -- "$expected" target/quickstart/correlation.jsonl; then
+        printf 'quickstart check failed: expected evidence field is missing\n' >&2
+        exit 1
+    fi
+done < tests/fixtures/codex-mismatch/expected-findings.contains
+
+# This historical fixture has no propagated identifier. It must not claim an
+# Exact Relation after the correlation hardening.
+if grep -qF '"record_type":"intent_correlation"' target/quickstart/correlation.jsonl; then
+    printf 'quickstart check failed: legacy fixture produced an exact relation\n' >&2
     exit 1
 fi
 
