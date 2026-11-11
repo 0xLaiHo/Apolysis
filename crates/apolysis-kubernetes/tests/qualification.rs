@@ -934,13 +934,17 @@ fn multi_container_transition_writes_one_gap_then_all_retires_then_observations(
         effect,
         KubernetesAttributionEffect::RetireAttribution { .. }
     )));
-    assert!(plan.effects[3..].chunks_exact(2).all(|pair| matches!(
-        (&pair[0], &pair[1]),
-        (
-            KubernetesAttributionEffect::EnsureRuntimeObserved { .. },
-            KubernetesAttributionEffect::ObserveAttribution { .. }
-        )
-    )));
+    assert!(plan.effects[3..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .all(|pair| matches!(
+            (&pair[0], &pair[1]),
+            (
+                KubernetesAttributionEffect::EnsureRuntimeObserved { .. },
+                KubernetesAttributionEffect::ObserveAttribution { .. }
+            )
+        )));
 }
 
 #[test]

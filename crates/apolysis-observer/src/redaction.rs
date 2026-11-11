@@ -215,6 +215,7 @@ fn content_off_exec_payload(payload: &str) -> String {
         "resource_truncated:true",
         "argv_truncated:true",
         "payload_truncated:true",
+        "intent_capture_incomplete:true",
     ] {
         if payload.split(',').any(|part| part == marker) {
             markers.push(marker);

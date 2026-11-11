@@ -1,312 +1,198 @@
 # Apolysis
 
-[![Release Validation](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml/badge.svg)](https://github.com/0xLaiHo/Apolysis/actions/workflows/release-validation.yml)
-[![Latest Release](https://img.shields.io/github/v/release/0xLaiHo/Apolysis?sort=semver)](https://github.com/0xLaiHo/Apolysis/releases)
-[![License](https://img.shields.io/github/license/0xLaiHo/Apolysis)](https://github.com/0xLaiHo/Apolysis/blob/main/LICENSE)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Architecture](docs/design.md)
 
-[English](README.md) | [Simplified Chinese](README.zh-CN.md)
+Apolysis is an experimental Linux eBPF runtime observability system for AI agents. It
+collects tool declarations and scoped operating-system observations separately,
+then relates them through explicit identifiers. The resulting report shows
+what the agent declared, which process/file/network attempts were observed,
+and where evidence is missing.
 
-Apolysis is an experimental **eBPF Agent Runtime Observability Platform** for
-operator-controlled Linux environments. It groups supported process, file,
-network, and credential-related runtime observations into an Agent Run,
-attributes them to process and workload identities, and makes collector loss,
-truncation, and unsupported paths explicit.
-
-The project is resetting its scope around this Linux runtime workflow. eBPF is
-the required primary observation source, not an optional add-on to a broader
-cross-provider evidence platform. Apolysis is not an Agent orchestrator,
-sandbox, policy-enforcement engine, MCP gateway, SIEM, or multi-tenant evidence
-SaaS.
-
-![Apolysis live eBPF audit: the declared Agent workload is matched and an undeclared credential-path access attempt is marked missing_intent; credential paths are redacted in the timeline](https://raw.githubusercontent.com/0xLaiHo/Apolysis/main/docs/assets/codex-live-demo/live-ebpf-demo.gif)
-
-Demo assets: [live asciinema cast](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/live-ebpf-demo.cast),
-[unprivileged quickstart cast](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/codex-live-demo.cast),
-the [public summary](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/summary.json), and the
-[redacted evidence excerpt](https://github.com/0xLaiHo/Apolysis/blob/main/docs/assets/codex-live-demo/evidence-excerpt.jsonl).
-Raw live timelines are not committed; public assets are curated, bounded, and
-redacted before publication.
-
-## Five-minute unprivileged tour
-
-```bash
-make build && make quickstart
-```
-
-The quickstart runs the observation and optional declared-intent comparison
-against packaged fixtures. It does not require root or eBPF. The fixture shows
-one declared action matched to an observation and one undeclared credential
-read reported as `missing_intent`; it writes generated output only below
-`target/quickstart/`.
-
-## Product question
-
-For a supported Agent Run, Apolysis should let an operator answer:
-
-1. Which processes did the Agent start?
-2. Which supported file, network, and credential operations were observed?
-3. Which container, cgroup, Pod, or process identity owns each observation?
-4. Did the operation succeed, fail, or remain unknown?
-5. Was the collector healthy, and where are the observation gaps?
-6. Which bounded findings require operator review?
-
-The product does not claim that an unobserved operation did not occur. It only
-describes activity inside its declared scope and capability boundary.
-
-## Active product boundary
-
-| In scope | Not in active scope |
-| --- | --- |
-| Operator-controlled Linux hosts | Vendor-hosted Agent kernels unavailable to the operator |
-| Managed Agent launch, PID-tree, and cgroup scope | General Agent orchestration or sandboxing |
-| Process, selected file, network, and credential observations | Indiscriminate full-syscall or plaintext capture |
-| Local, Docker/containerd, and bounded Kubernetes attribution | Cross-provider Hook, OTLP, MCP, and A2A integration matrix |
-| Collector health, loss, truncation, and capability gaps | Remote outcome verification and portable evidence custody |
-| Local run storage, query, and operator viewer | Multi-tenant Gateway, PostgreSQL/S3 platform, billing, or HA |
-| Review-oriented findings | BPF-LSM blocking, approval workflow, or universal enforcement |
-
-Provider or harness metadata may be added later as optional context. It cannot
-replace the eBPF runtime source or silently upgrade an inferred relationship to
-an exact one.
+The local entry opens the agent's original application. Apolysis supplies
+temporary hooks and a separate eBPF collector; the agent keeps its own interface,
+tools, configuration and permission prompts. This observation path does not
+provide isolation or prove that a task succeeded.
 
 ## Current capabilities
 
-- CO-RE eBPF observation of fork, exec, exit, outcome-aware selected file
-  operations, and outcome-aware network connect operations.
-- A versioned kernel/userspace ABI and per-Agent-Run capability manifest that
-  states the attached event sources and supported outcome semantics.
-- Per-Agent-Run collector lifecycle records with durable starts, periodic
-  health/loss checkpoints, explicit normal or failed terminal states, and a
-  persisted restart gap when the daemon recovers an unfinished instance.
-- Stable in-run runtime identity across PID reuse, exec, and numeric cgroup-ID
-  reuse, with exact versus inferred attribution recorded explicitly.
-- PID-tree, single-cgroup, and multi-cgroup observation scopes.
-- Managed local Agent launch plus protected existing-process attach with an
-  explicit late-attach Collection Boundary.
-- Existing-process admission qualifies the current root; exact in-run event
-  identity begins after activation.
-- Qualified Docker/containerd runtime binding and bounded source recovery from
-  stable, complete inventories. The exact identity, transition, and gap
-  contracts are defined in the design document.
-- The deterministic K1 Kubernetes attribution contract is implemented for
-  containerd and K3s nodes: typed operator claims, Pod/runtime identity
-  qualification, explicit attribution lifecycle and gaps, tenant-gated query,
-  saved-run projection, and offline viewing. The Kubernetes profile remains
-  Experimental until its designated live VKE qualification passes.
-- Content-off persistence for exec arguments and process commands, with
-  credential and network redaction.
-- Ordered JSONL output, rotation, optional local hash-chain envelopes, and
-  typed diagnostics for drops, map pressure, ABI mismatches, decode failures,
-  and truncation.
-- Manifest-v2-verified Linux daemon packaging and bounded `apolysis daemon
-  install`, `inspect`, and `uninstall` operations over a fixed managed path
-  set with receipt-owned replacement and removal. Staged-root operations never
-  activate systemd, interrupted managed changes recover fail closed on reopen,
-  and default uninstall preserves saved Agent Run state.
-- Deterministic, non-privileged projection of one saved Agent Run into a
-  queryable Agent Observation Record with independent evidence, collector
-  health, and review states. Plain/rotated JSONL and verified hash-chain input
-  are bounded and fail closed on corruption or mixed runs.
-- Deterministic, non-privileged viewing of one Agent Observation Record as a
-  private, self-contained offline HTML investigation. It keeps the three state
-  axes independent and links Findings to source-ordered observations.
-- Agent-Run-scoped Observation Gaps for unmatched or still-pending selected
-  file and network-connect entry/exit pairs, including isolated multi-cgroup
-  daemon scopes.
-- Optional Codex declared-intent ingestion and heuristic mismatch findings.
+- Native launch adapters for Codex, Claude Code, Cursor Agent, Pi and OpenCode,
+  with product-specific hook loading and native argument passthrough.
+- Process-tree or cgroup-scoped observation, stable process/exec generations,
+  outcome-aware selected file/connect operations, and explicit loss and gaps.
+- Tool declarations and optional declared reasons (including opt-in sanitized
+  user prompt and tool-description summaries), linked to execution through
+  `intent_id`. Identifier-based relations remain separate from inferred matches.
+- Local JSONL evidence, an on-exit English terminal summary tree, and
+  call-oriented HTML, Markdown and JSON reports.
+- Protected existing-process attach, durable collector lifecycle, qualified
+  Docker/containerd identities and bounded Kubernetes attribution.
+- Non-privileged saved-run projection/offline viewing and receipt-owned local
+  daemon install/inspect/uninstall operations that preserve saved runs.
 
-Selected file operations and network connect use bounded entry/exit matching
-and report return value and errno. File outcomes are succeeded, failed, or
-denied; connect additionally supports pending. The collector does not observe
-every Linux operation path.
+See the [architecture](docs/design.md) for module boundaries, record semantics,
+privacy rules and the limits of each subsystem.
 
-## Target shape
+## Try the fixture without root
 
-```text
-Agent command / container / Pod
-  -> Observation Scope
-  -> eBPF Collector
-     - process lifecycle
-     - selected file operations
-     - network connections
-     - collector health and gaps
-  -> userspace normalization and redaction
-  -> bounded local store
-  -> CLI and saved-run viewer
+With Rust/Cargo and a native build toolchain installed, run from the checkout:
+
+```bash
+cargo build -p apolysis-cli
+make quickstart
 ```
 
-The privileged collector and non-privileged operator viewer remain separate
-trust boundaries. Remote export and any central multi-tenant evidence plane are
-deferred beyond the bounded beta.
+This uses checked-in declarations and observed-event fixtures. It requires no
+provider, sudo or live eBPF, and writes its results to `target/quickstart/`.
+It demonstrates correlation; it does not observe an actual agent.
 
-On Kubernetes, the target deployment is one two-container DaemonSet Pod per
-node. A root collector owns eBPF, host runtime access, and local state but has no
-Kubernetes API token. A non-root metadata source has only namespace-scoped Pod
-`list/watch` access and sends bounded snapshots over a shared-group Unix
-socket. Operators register exact, typed workload claims through the local
-`apolysisd-control` boundary. The host state directory must be pre-created as a
-root-owned mode-`0700` directory.
+## Observe a native agent
 
-The shipped canonical manifest is limited to its own dedicated Agent namespace
-and the VKE/containerd socket; it is not cluster-wide. K3s is implemented but
-requires an operator-supplied manifest or overlay with the matching K3s socket
-and the same trust controls. That namespace must be operator-controlled; an
-untrusted tenant must not be able to create or modify Pods in it. Typed claims
-prevent metadata from expanding authorization, but do not prevent a namespace
-writer from degrading K1 availability with malformed marked metadata. The
-collector is still node-trusted because a host
-CRI socket carries mutating protocol authority. Token isolation, reduced
-capabilities, and content-off pseudonyms narrow exposure but do not make that
-collector read-only or the metadata anonymous.
+Live observation requires Linux with kernel BTF, the required tracepoints and
+BPF ring-buffer support. The provided live gates also require cgroup v2.
+Building the BPF objects requires Clang/LLVM, `bpftool` and libbpf headers.
+Install the selected agent in `PATH`, configure its normal authentication, and
+have sudo access for the collector.
 
-## Supported environments
+Build the CLI and matching BPF objects as your ordinary user:
 
-| Environment | Direction |
+```bash
+APOLYSIS_REQUIRE_BPF=1 make build
+```
+
+The environment variable makes missing BPF prerequisites a build failure
+instead of an optional skip. Then select an application explicitly:
+
+```bash
+target/debug/apolysis observe --agent claude
+target/debug/apolysis observe --agent codex
+target/debug/apolysis observe --agent pi
+target/debug/apolysis observe --agent opencode
+target/debug/apolysis observe --agent cursor
+```
+
+Run these commands without a leading `sudo`. Only the collector requests
+elevation; the application runs as you. There is no default agent. Cursor uses
+the installed `cursor-agent` executable; the other names select their matching
+executables.
+
+Put Apolysis options before `--` and the application's original arguments after
+it. Argument boundaries and ordering are preserved:
+
+```bash
+target/debug/apolysis observe --agent pi -- --provider deepseek --model deepseek-flash
+target/debug/apolysis observe --agent claude -- --help
+```
+
+Model availability, resume options and subcommands remain application-specific.
+Standalone native help/version queries bypass collection and elevation. Native
+stdout remains suitable for piping; Apolysis status messages use stderr.
+
+| Apolysis option | Purpose |
 | --- | --- |
-| Local Linux Agent CLI | First stable workflow |
-| Docker/containerd on operator-controlled Linux | Stable target after local collector correctness |
-| Kubernetes containerd/K3s node and Pod attribution | Deterministic K1 implementation present; Experimental pending designated live VKE qualification |
-| Linux self-hosted CI runner | CLI managed-run path only; no maintained composite Action |
-| macOS, Windows, or vendor-managed Agent runtime | Unsupported for eBPF runtime observation |
+| `--workspace <directory>` | Initial working directory; defaults to the current directory. |
+| `--output-dir <parent>` | Parent for a new private capture directory. |
+| `--bpf-object <path>` | Select the matching observer object explicitly. |
+| `--allow-reason-summary` | Opt in to bounded, filtered declared text (user prompt intent and tool description). |
+| `--shell-bridge /bin/bash` | Opt in to an inner shell for supported shell-tool attribution. |
 
-## Current repository state
+The default shell marker may be hidden by an application's later `eval`
+wrapping. The optional shell bridge exposes that marker at a supported exec
+boundary, but introduces an inner shell: its cwd, variables and functions do
+not propagate back to the outer tool shell. Recognized options that disable
+hooks or move execution to remote, detached or shared-server processes are
+rejected because this collector cannot cover them.
 
-`v0.3.0` remains the latest public research release and demonstrates the live
-collector, managed Agent launch, JSONL timeline, privacy redaction, and release
-packaging. The active Cargo workspace is now limited to eleven crates: core,
-observer, accountability findings, local storage, daemon, CLI, saved-run
-viewer, Kubernetes attribution, the isolated Kubernetes metadata source,
-visibility assessment, and release verification.
-Superseded contracts, central services, policy actuation, Agent feedback
-control, sandbox execution, and broad production-qualification prototypes have
-left active builds and default gates.
+## Read the result
 
-The local `apolysis run project` path now writes one private, atomic JSON Agent
-Observation Record for a saved run. `apolysis run view` validates exactly one
-such v1 record and writes a private, self-contained offline HTML investigation.
-The local projection and viewer do not add live tailing, cross-run search, a
-central query service, or a change to the experimental support status.
+Exit through the application's normal mechanism. Apolysis completes correlation,
+prints an English session summary tree on stderr (grouping tool calls by intent
+and listing observed `network_connect`, `exec`, file and credential-path events), and
+prints the report path. Captures default to
+`$XDG_STATE_HOME/apolysis/captures`, or `$HOME/.local/state/apolysis/captures`
+when XDG state is unset or not absolute. Each invocation gets a separate
+private directory containing `evidence/`:
 
-The local daemon operations direction now includes a manifest-verified Linux
-bundle and a bounded, state-preserving host lifecycle. Its detailed filesystem,
-recovery, and qualification contracts live in the design; this work does not
-change the experimental support status by itself.
+| File | Contents |
+| --- | --- |
+| `report.html` / `report.md` | Readable tool calls, reasons, related attempts and coverage gaps. |
+| `result.json` | Application exit, capture health and structured report totals. |
+| `intent.jsonl` / `intent.jsonl.reasons.jsonl` | Tool declarations and their optional declared reasons. |
+| `timeline.jsonl` | Observed events, runtime metadata and diagnostics. |
+| `correlation.jsonl` | Exact relations, weaker candidates, reason bindings and findings. |
 
-The D1/D2 runtime-binding implementation, deterministic contracts, and retained
-non-destructive qualification are complete for both Docker and an independently
-isolated private standalone containerd runtime. The K1 contract and
-implementation are also complete for the bounded containerd/K3s Kubernetes
-workflow, without promoting that profile. Evidence remains profile-specific:
-Docker and private-containerd results do not qualify Kubernetes. The designated
-VKE live gate has not run in this workspace because its required kubeconfig and
-`kubectl` are unavailable; its canonical result is a skip, not a pass.
-Destructive runtime-service restart and release qualification also remain open.
+An exact relation establishes an identifier link within the stated trust
+boundary. It does not prove motive, authorization or task outcome. Selected file
+and connect events report syscall return values and outcomes; these do not prove
+remote effects or task success. Application exit zero is also insufficient.
+Search, file-read and remote tools may have only semantic evidence. Missing
+reasons remain unknown, and lost events remain visible as incomplete capture.
 
-The scope reset is a roadmap decision, not a retroactive production claim.
-Apolysis remains experimental until the supported collector, attribution,
-failure, performance, and privacy paths pass their new bounded beta gates.
-The qualification contract names Linux 6.12/x86_64 native host as Candidate;
-no environment is yet Supported, while container and Kubernetes profiles
-remain Experimental. The exact machine-readable authority and promotion rules
-are described in the [design](docs/design.md).
+Native collection leaves full prompts, tool results and exec argument lists out
+of exported evidence. Free-text reason summaries require explicit opt-in;
+retained paths and declared text still need to be treated as private data.
 
-## Build and test
+## Validation and limits
+
+Bounded real-provider/eBPF runs have passed for Claude Code, Codex, Pi and
+OpenCode using the explicit shell bridge. Codex's noninteractive test also
+explicitly selected workspace-write and hook-trust bypass; the daily launcher
+does not add those options. Cursor's adapter and parameter path exist, but its
+real tool-call validation remains blocked by unusable authentication. These
+results do not qualify every version, default shell wrapping or sustained load.
+
+The opt-in gate checks actual file contents, declaration-to-kernel attribution,
+capture health, report generation and privacy assertions:
+
+```bash
+scripts/test-live-native-observe.sh --agent claude --require-all
+```
+
+It makes real provider requests, starts a privileged collector and uses the
+application's noninteractive mode. It keeps generated evidence under `target/`.
+Other native options can be supplied after `--`; `--require-all` treats missing
+prerequisites as failures. Full kernel-event coverage, remote execution and
+hostile-agent or tamper-resistant evidence guarantees remain outside this path.
+
+## Develop
+
+Saved runs can also be projected and viewed without root:
+
+```bash
+target/debug/apolysis run project --input <timeline.jsonl> --output <run.json>
+target/debug/apolysis run view --input <run.json> --output <run.html>
+```
+
+The current qualification contract grants no Supported environment. Linux
+6.12/x86_64 native host is Candidate; container/Kubernetes profiles remain
+Experimental. Native provider demonstrations do not replace those gates.
 
 ```bash
 make build
 make test
 make lint
+git diff --check
 ```
 
-Build only the CO-RE eBPF object:
+`make test` runs Rust regressions plus hook and adapter tests; Node.js and Python
+are used by test tooling. The native observation controller itself is Rust and
+does not depend on Python. Live BPF, provider and Kubernetes gates are
+explicit opt-ins. `make clean` removes Cargo build artifacts.
 
-```bash
-make build-ebpf
-```
+The source is organized into local collection/correlation, daemon, storage,
+viewer and Kubernetes crates, `ebpf/` programs, `hooks/` adapters and `scripts/`
+validation runners. Central Gateway/PostgreSQL/S3 and policy-enforcement planes
+are historical code, outside the active workspace. The [architecture](docs/design.md)
+maps these components and distinguishes implemented foundations from open work.
 
-Run the opt-in live observer test on a prepared Linux host:
+Start focused branches from updated `pre-release`, and submit Pull Requests
+back to `pre-release` with verification, privilege assumptions, privacy checks
+and cleanup notes. Require CI and review before integration; promote to `main`
+through a separate release PR. Work is tracked through Pull Requests.
 
-```bash
-make test-live
-```
+Do not commit credentials, private captures or provider transcripts. Report
+security issues through GitHub private vulnerability reporting when available,
+with the affected revision and a redacted reproduction. Apolysis's retention
+rules do not change an agent application's own conversation history.
 
-Privileged tests skip cleanly when Linux BTF, cgroup v2, tracepoints, or the
-required BPF capabilities are unavailable.
-
-Project a saved run without root access:
-
-```bash
-./target/debug/apolysis run project \
-  --input .apolysis/codex-live/timeline.agent-run.jsonl \
-  --output .apolysis/codex-live/agent-observation-record.json
-```
-
-Render that record as an offline Saved Run Viewer without root access:
-
-```bash
-./target/debug/apolysis run view \
-  --input .apolysis/codex-live/agent-observation-record.json \
-  --output .apolysis/codex-live/saved-run-view.html
-```
-
-Verify a copied hash-chain timeline without modifying it:
-
-```bash
-./target/debug/apolysis verify hash-chain \
-  --input /var/lib/apolysis/sessions/<agent-run-id>/timeline.jsonl \
-  --output target/hash-chain-verification.json
-```
-
-Exit `0` is valid, `1` is a written failed-verification report, and `2` means
-the command could not run.
-
-## Live managed Agent example
-
-```bash
-sudo -E ./target/debug/apolysis observe \
-  --backend live \
-  --session codex-local-observation \
-  --output .apolysis/codex-live/timeline.agent-run.jsonl \
-  --bpf-object target/ebpf/apolysis_observer.bpf.o \
-  --workspace-root "$PWD" \
-  --agent-kind codex \
-  --agent-run -- codex exec --json "run the project tests"
-```
-
-Do not place secrets in the managed command or arguments. Raw command content
-is disabled at the persistence boundary, but privileged in-kernel capture and
-third-party workload behavior still require a documented threat model.
-
-## High-level roadmap
-
-1. Keep the implemented K1 contract bounded to explicit operator claims,
-   containerd/K3s identity, node-local collection, and content-off metadata.
-2. Run the least-privilege K1 live gate on the designated, runtime- and
-   network-ready VKE cluster when its explicit prerequisites are available.
-3. Keep destructive runtime-service restart qualification separate and prepare
-   a release without extending Docker evidence to containerd or Kubernetes.
-4. Promote a release only after applicable kernel, runtime, privacy,
-   performance, packaging, cleanup, and no-silent-gap gates pass.
-
-## Contributing
-
-Use a focused branch and submit changes through the repository's integration
-Pull Request workflow. Follow the checked-in automation and Pull Request
-template for the applicable validation and operational disclosures. Never
-commit secrets, kubeconfigs, signing material, private captures, generated
-timelines, or local release artifacts.
-
-## Security reporting
-
-Apolysis is observability, not a sandbox or independent attestation boundary.
-Report vulnerabilities through GitHub private vulnerability reporting. If it
-is unavailable, open only a minimal public notice and do not include exploit
-details, secrets, private logs, paths, argv, socket values, labels, annotations,
-or payloads. Reports should identify the affected commit or release,
-reproduction boundary, required privileges, and impact on confidentiality,
-integrity, availability, or observation accuracy.
-
-## Documentation
-
-- [English design and complete product contract](docs/design.md)
-- [Simplified Chinese design and complete product contract](docs/design.zh-CN.md)
+User-space code is licensed under [Apache-2.0](LICENSE); eBPF programs are
+[GPL-2.0-only](LICENSES/GPL-2.0-only.txt).

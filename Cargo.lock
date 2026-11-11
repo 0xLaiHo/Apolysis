@@ -78,6 +78,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
 ]
 
@@ -142,6 +143,7 @@ dependencies = [
  "apolysis-kubernetes",
  "apolysis-store",
  "aya",
+ "aya-obj",
  "libc",
  "serde",
  "serde_json",

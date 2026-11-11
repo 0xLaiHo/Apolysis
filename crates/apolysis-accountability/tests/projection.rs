@@ -7,6 +7,32 @@ use apolysis_accountability::{
 use serde_json::{json, Value};
 
 #[test]
+fn saved_runs_accept_both_abi_generations_but_reject_mixed_layouts() {
+    for (version, size, accepted) in [
+        (3, 656, true),
+        (4, 696, true),
+        (3, 696, false),
+        (4, 656, false),
+    ] {
+        let mut manifest = capability("run-abi", 1000);
+        manifest["kernel_abi_version"] = json!(version);
+        manifest["kernel_record_size"] = json!(size);
+        let result = project_agent_run([AgentRunRecordBatch::plain(vec![
+            manifest,
+            lifecycle("run-abi", 1001, "started", "healthy", Value::Null),
+            network_observation("run-abi", 1002),
+            lifecycle("run-abi", 1003, "stopped", "healthy", json!("agent_exited")),
+        ])]);
+        assert_eq!(result.is_ok(), accepted, "ABI {version}/{size}");
+        if let Ok(mut record) = result {
+            validate_agent_observation_record_v1(&record).unwrap();
+            record.capability_manifests[0].kernel_record_size += 8;
+            assert!(validate_agent_observation_record_v1(&record).is_err());
+        }
+    }
+}
+
+#[test]
 fn complete_agent_run_projects_one_queryable_aggregate_and_summary() {
     let record = project_agent_run([AgentRunRecordBatch::plain(vec![
         capability("run-42", 1000),

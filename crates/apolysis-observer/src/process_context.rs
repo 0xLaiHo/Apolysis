@@ -11,6 +11,7 @@ struct ProcessContext {
     command: String,
     executable: String,
     started_at_unix_ms: u128,
+    intent_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -75,10 +76,41 @@ impl ProcessContextTable {
     pub(crate) fn observe(
         &mut self,
         raw: &RawKernelEvent,
-        canonical: CanonicalEvent,
+        mut canonical: CanonicalEvent,
     ) -> Result<CanonicalEvent, String> {
         let key = ProcessContextKey::from_raw(raw);
-        if canonical.event_type == EventType::Exec {
+        let own = raw
+            .intent_id
+            .as_ref()
+            .filter(|id| valid_intent_id(id))
+            .cloned();
+        // Only identity-free fixtures inherit in userspace; live absence is authoritative.
+        let legacy = matches!(key, Some(ProcessContextKey::LegacyPid(_)));
+        let is_fork = raw.event_name == "sched_process_fork";
+        let parent_key = match key.as_ref() {
+            Some(ProcessContextKey::Stable { host_boot_id, .. }) => raw
+                .parent_process_generation
+                .zip(raw.parent_exec_generation)
+                .map(
+                    |(process_generation, exec_generation)| ProcessContextKey::Stable {
+                        host_boot_id: host_boot_id.clone(),
+                        pid: raw.ppid,
+                        process_generation,
+                        exec_generation,
+                    },
+                ),
+            Some(ProcessContextKey::LegacyPid(_)) => Some(ProcessContextKey::LegacyPid(raw.ppid)),
+            None => None,
+        };
+        let parent = parent_key
+            .as_ref()
+            .and_then(|key| self.by_identity.get(key))
+            .cloned();
+        let previous = key
+            .as_ref()
+            .and_then(|key| self.by_identity.get(key))
+            .cloned();
+        if canonical.event_type == EventType::Exec || is_fork {
             if let Some(ProcessContextKey::Stable {
                 host_boot_id,
                 pid,
@@ -101,16 +133,46 @@ impl ProcessContextTable {
                 self.by_identity.insert(
                     key.clone(),
                     ProcessContext {
-                        command: exec_command(raw).unwrap_or_else(|| raw.resource.clone()),
-                        executable: raw.resource.clone(),
+                        command: if is_fork {
+                            parent
+                                .as_ref()
+                                .map(|context| context.command.clone())
+                                .unwrap_or_else(|| raw.comm.clone())
+                        } else {
+                            exec_command(raw).unwrap_or_else(|| raw.resource.clone())
+                        },
+                        executable: if is_fork {
+                            parent
+                                .as_ref()
+                                .map(|context| context.executable.clone())
+                                .unwrap_or_else(|| raw.resource.clone())
+                        } else {
+                            raw.resource.clone()
+                        },
                         started_at_unix_ms: raw.timestamp_unix_ms,
+                        intent_id: own.clone().or_else(|| {
+                            if legacy {
+                                (if is_fork {
+                                    parent.as_ref()
+                                } else {
+                                    previous.as_ref().or(parent.as_ref())
+                                })
+                                .and_then(|context| context.intent_id.clone())
+                            } else {
+                                None
+                            }
+                        }),
                     },
                 );
             }
         }
 
-        let enriched = if should_enrich(&canonical.event_type) {
+        canonical.intent_id = own;
+        let enriched = if should_enrich(&canonical.event_type) || is_fork {
             if let Some(context) = key.as_ref().and_then(|key| self.by_identity.get(key)) {
+                if legacy && canonical.intent_id.is_none() {
+                    canonical.intent_id = context.intent_id.clone();
+                }
                 canonical.with_process_context(
                     context.command.clone(),
                     context.executable.clone(),
@@ -153,6 +215,7 @@ fn exec_command(raw: &RawKernelEvent) -> Option<String> {
         .raw_payload
         .strip_prefix("argv:")
         .or_else(|| raw.raw_payload.strip_prefix("argv="))?;
+    let command = strip_exec_payload_marker(command, "intent_capture_incomplete:true");
     let command = strip_exec_payload_marker(command, "payload_truncated:true");
     let command = strip_exec_payload_marker(command, "argv_truncated:true");
     let command = strip_exec_payload_marker(command, "resource_truncated:true");
@@ -162,6 +225,13 @@ fn exec_command(raw: &RawKernelEvent) -> Option<String> {
     } else {
         Some(command.to_string())
     }
+}
+
+fn valid_intent_id(value: &str) -> bool {
+    value.len() == crate::abi::INTENT_ID_LEN
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn strip_exec_payload_marker<'a>(value: &'a str, marker: &str) -> &'a str {
@@ -175,6 +245,130 @@ fn strip_exec_payload_marker<'a>(value: &'a str, marker: &str) -> &'a str {
 mod tests {
     use super::*;
     use apolysis_core::{EventSource, RuntimeRelation};
+
+    const FIRST: &str = "0123456789abcdef0123456789abcdef";
+    const SECOND: &str = "abcdef0123456789abcdef0123456789";
+
+    fn fixture(pid: u32, ppid: u32, event: &str) -> RawKernelEvent {
+        RawKernelEvent::new(
+            100,
+            "session",
+            EventSource::KernelTracepoint,
+            event,
+            pid,
+            ppid,
+            1000,
+            1000,
+            "bash",
+            "/bin/bash",
+            "action",
+            None,
+            None,
+            "",
+        )
+    }
+
+    fn observe(table: &mut ProcessContextTable, raw: RawKernelEvent) -> CanonicalEvent {
+        let event_type = match raw.event_name.as_str() {
+            "exec" => EventType::Exec,
+            "exit" => EventType::ProcessExit,
+            "open" => EventType::FileOpen,
+            _ => EventType::RuntimeMetadata,
+        };
+        table
+            .observe(&raw, canonical_event(event_type, raw.pid))
+            .unwrap()
+    }
+
+    #[test]
+    fn fixtures_inherit_across_exec_and_fork_but_new_tokens_override() {
+        let mut table = ProcessContextTable::default();
+        observe(&mut table, fixture(40, 1, "exec").with_intent_id(FIRST));
+        assert_eq!(
+            observe(&mut table, fixture(40, 1, "exec"))
+                .intent_id
+                .as_deref(),
+            Some(FIRST)
+        );
+        observe(&mut table, fixture(41, 40, "sched_process_fork"));
+        observe(&mut table, fixture(40, 1, "exit"));
+        assert_eq!(
+            observe(&mut table, fixture(41, 1, "open"))
+                .intent_id
+                .as_deref(),
+            Some(FIRST)
+        );
+        assert_eq!(
+            observe(&mut table, fixture(41, 1, "exec"))
+                .intent_id
+                .as_deref(),
+            Some(FIRST)
+        );
+        observe(&mut table, fixture(41, 1, "exec").with_intent_id(SECOND));
+        assert_eq!(
+            observe(&mut table, fixture(41, 1, "open"))
+                .intent_id
+                .as_deref(),
+            Some(SECOND)
+        );
+    }
+
+    fn live(pid: u32, event: &str, generation: u64) -> RawKernelEvent {
+        fixture(pid, 1, event).with_process_identity(
+            Some("boot-test".into()),
+            Some(1),
+            Some(generation),
+            Some(generation),
+            Some(1),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn kernel_tokens_are_authoritative_even_without_lifecycle_events() {
+        let mut table = ProcessContextTable::default();
+        let event = observe(&mut table, live(41, "open", 1000).with_intent_id(FIRST));
+        assert_eq!(event.intent_id.as_deref(), Some(FIRST));
+        assert_eq!(event.process_executable, None);
+        observe(&mut table, live(40, "exec", 1000).with_intent_id(FIRST));
+        assert_eq!(observe(&mut table, live(40, "open", 1000)).intent_id, None);
+        assert_eq!(
+            observe(&mut table, live(40, "open", 1000).with_intent_id(SECOND))
+                .intent_id
+                .as_deref(),
+            Some(SECOND)
+        );
+    }
+
+    #[test]
+    fn reused_pid_and_delayed_exit_do_not_transfer_or_delete_new_context() {
+        let mut table = ProcessContextTable::default();
+        observe(&mut table, live(40, "exec", 1000).with_intent_id(FIRST));
+        let reused = observe(&mut table, live(40, "open", 2000));
+        assert_eq!(reused.intent_id, None);
+        assert_eq!(reused.process_executable, None);
+        observe(&mut table, live(40, "exec", 2000).with_intent_id(SECOND));
+        observe(&mut table, live(40, "exit", 1000));
+        let current = observe(&mut table, live(40, "open", 2000).with_intent_id(SECOND));
+        assert_eq!(current.intent_id.as_deref(), Some(SECOND));
+        assert_eq!(current.process_executable.as_deref(), Some("/bin/bash"));
+    }
+
+    #[test]
+    fn diagnostic_argv_and_malformed_tokens_never_impart_attribution() {
+        for token in [
+            "",
+            "0123456789abcdef",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcdef0",
+        ] {
+            let mut table = ProcessContextTable::default();
+            let mut raw = fixture(40, 1, "exec").with_intent_id(token);
+            raw.raw_payload = format!("argv:/bin/bash -c # APOLYSIS_INTENT_ID={FIRST}\ntrue");
+            assert_eq!(observe(&mut table, raw).intent_id, None);
+        }
+    }
 
     #[test]
     fn partial_live_identity_never_falls_back_to_pid_context() {

@@ -905,8 +905,10 @@ fn projected_unsupported_capability_count(
         || manifest.privacy_profile != CONTENT_OFF_PRIVACY_PROFILE
         || manifest.collector != AUDIT_OBSERVER_COLLECTOR
         || manifest.collector_version.is_empty()
-        || manifest.kernel_abi_version != 3
-        || manifest.kernel_record_size != 656
+        || !matches!(
+            (manifest.kernel_abi_version, manifest.kernel_record_size),
+            (3, 656) | (4, 696)
+        )
         || !matches!(
             manifest.observation_scope.as_str(),
             PROCESS_TREE_OBSERVATION_SCOPE | CGROUP_OBSERVATION_SCOPE
@@ -2415,8 +2417,10 @@ fn validate_capability_manifest(
     }
     if wire.collector != AUDIT_OBSERVER_COLLECTOR
         || wire.collector_version.is_empty()
-        || wire.kernel_abi_version != 3
-        || wire.kernel_record_size != 656
+        || !matches!(
+            (wire.kernel_abi_version, wire.kernel_record_size),
+            (3, 656) | (4, 696)
+        )
         || !matches!(
             wire.observation_scope.as_str(),
             PROCESS_TREE_OBSERVATION_SCOPE | CGROUP_OBSERVATION_SCOPE

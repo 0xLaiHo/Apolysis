@@ -202,10 +202,10 @@ fn intent_correlate_links_commands_and_reports_mismatches() {
     let timeline = std::fs::read_to_string(&output).expect("read correlation output");
     assert_eq!(
         timeline
-            .matches(r#""record_type":"intent_correlation""#)
+            .matches(r#""record_type":"intent_correlation_candidate""#)
             .count(),
         1,
-        "one intent should be linked to observed host evidence:\n{timeline}"
+        "legacy command equality should produce only a candidate:\n{timeline}"
     );
     assert!(timeline.contains(r#""intent_id":"codex:call-1""#));
     assert!(
@@ -218,7 +218,7 @@ fn intent_correlate_links_commands_and_reports_mismatches() {
         timeline
             .matches(r#""record_type":"accountability_finding""#)
             .count(),
-        2,
+        3,
         "unmatched observed effects and unobserved intents should both be findings:\n{timeline}"
     );
     assert!(timeline.contains(r#""kind":"missing_intent""#));
@@ -237,7 +237,7 @@ fn intent_correlate_links_commands_and_reports_mismatches() {
         .filter(|record| record["record_type"] == "accountability_finding")
         .map(|record| serde_json::from_value(record).expect("finding matches shared v1 contract"))
         .collect();
-    assert_eq!(typed_findings.len(), 2);
+    assert_eq!(typed_findings.len(), 3);
     assert!(typed_findings
         .iter()
         .any(|finding| { finding.kind == apolysis_accountability::FindingKind::MissingIntent }));
@@ -345,10 +345,10 @@ fn intent_correlate_links_truncated_live_exec_by_executable_path() {
     let timeline = std::fs::read_to_string(&output).expect("read correlation output");
     assert_eq!(
         timeline
-            .matches(r#""record_type":"intent_correlation""#)
+            .matches(r#""record_type":"intent_correlation_candidate""#)
             .count(),
         1,
-        "truncated live exec should still be linked to its declared intent:\n{timeline}"
+        "executable equality should produce only an inferred candidate:\n{timeline}"
     );
     assert!(timeline.contains(r#""intent_id":"codex:call-live-script""#));
     assert!(timeline.contains(r#""match_basis":"process_executable""#));
@@ -373,6 +373,47 @@ fn intent_correlate_links_truncated_live_exec_by_executable_path() {
     let _ = std::fs::remove_file(&intent_input);
     let _ = std::fs::remove_file(&timeline_input);
     let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn correlate_prefers_intent_id_over_executable_name() {
+    let intent = temp_jsonl("apolysis-intent-id-intent");
+    let timeline = temp_jsonl("apolysis-intent-id-timeline");
+    let output = temp_jsonl("apolysis-intent-id-output");
+    std::fs::write(
+        &intent,
+        concat!(
+            r#"{"record_type":"intent","timestamp_unix_ms":1,"session_id":"s","intent_source":"claude","intent_id":"claude:toolu_1","source_event_id":"toolu_1","intent_type":"tool_call","tool_name":"Bash","declared_action":"shell.command","target":"workspace","command":"executable_ref:bash argv_redacted:true","raw_event_id":null}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &timeline,
+        concat!(
+            r#"{"record_type":"event","timestamp_unix_ms":2,"session_id":"s","event_source":"kernel_tracepoint","event_type":"exec","raw_event_id":"raw-1","pid":41,"ppid":40,"actor":"cargo","resource":"/usr/bin/cargo","action":"exec","container_id":null,"cgroup_id":null,"process_command":null,"process_executable":"cargo","process_started_at_unix_ms":2,"intent_id":"claude:toolu_1"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let status = apolysis_command()
+        .args([
+            "intent",
+            "correlate",
+            "--intent-input",
+            intent.to_str().unwrap(),
+            "--timeline-input",
+            timeline.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--summary",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let body = std::fs::read_to_string(output).unwrap();
+    assert!(body.contains(r#""match_basis":"intent_id""#));
+    assert!(body.contains(r#""tool_name":"Bash""#));
 }
 
 fn apolysis_command() -> Command {

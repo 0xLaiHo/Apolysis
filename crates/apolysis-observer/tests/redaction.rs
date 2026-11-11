@@ -175,3 +175,45 @@ fn persisted_command_text_keeps_only_an_executable_reference() {
     assert!(!persisted.value.contains("write-the-secret"));
     assert!(!persisted.value.contains("sk-test-secret"));
 }
+
+#[test]
+fn content_off_persistence_keeps_intent_id_and_drops_command() {
+    let redactor = Redactor::new("session-intent", std::path::Path::new("/workspace"));
+    let raw = RawKernelEvent::new(
+        1,
+        "session-intent",
+        EventSource::KernelTracepoint,
+        "sched_process_exec",
+        4,
+        1,
+        1000,
+        1000,
+        "bash",
+        "/bin/bash",
+        "exec",
+        None,
+        None,
+        "argv:/bin/bash -lc APOLYSIS_INTENT_ID=pi:call_123 cargo test",
+    );
+    let canonical = CanonicalEvent::new(
+        "session-intent",
+        EventSource::KernelTracepoint,
+        EventType::Exec,
+        4,
+        1,
+        "bash",
+        "/bin/bash",
+        "exec",
+    )
+    .with_process_context(
+        "/bin/bash -lc APOLYSIS_INTENT_ID=pi:call_123 cargo test",
+        "/bin/bash",
+        1,
+    )
+    .with_intent_id("pi:call_123");
+    let (_, persisted) =
+        RuntimeEvidencePersistence::new(&redactor).persist_event(&raw, &canonical, false);
+    assert_eq!(persisted.process_command, None);
+    assert_eq!(persisted.intent_id.as_deref(), Some("pi:call_123"));
+    assert!(!persisted.to_json_line().contains("cargo test"));
+}

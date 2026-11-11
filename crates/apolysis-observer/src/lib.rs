@@ -17,12 +17,13 @@ mod scope;
 pub use live::{
     discover_agent_registration, discover_process_tree_scope_identities,
     discover_process_tree_scope_pids, enable_multi_cgroup_scope, file_operation_observation_gaps,
-    network_connect_observation_gaps, observe_live, raw_event_from_record, scope_observation_gaps,
-    AgentDiscoveryRequest, AgentRegistration, AgentRunRequest, DaemonKernelEvent, DaemonObserver,
-    DaemonObserverBatch, DaemonObserverConfig, DaemonObserverCounters, FileOperationCounters,
-    LiveObserveRequest, LiveScope, NetworkConnectCounters, ObserverBatchDecoder,
-    OperationPairCounters, ProcStartClock, ProcessRuntimeIdentity, QualificationTelemetryConfig,
-    ScopeGeneration, ScopeObservationGapCounters, StartBoottimeWindow,
+    network_connect_observation_gaps, observe_live, observe_live_controlled, raw_event_from_record,
+    scope_observation_gaps, AgentDiscoveryRequest, AgentRegistration, AgentRunRequest,
+    DaemonKernelEvent, DaemonObserver, DaemonObserverBatch, DaemonObserverConfig,
+    DaemonObserverCounters, FileOperationCounters, LiveObserveControl, LiveObserveRequest,
+    LiveScope, NetworkConnectCounters, ObserverBatchDecoder, OperationPairCounters, ProcStartClock,
+    ProcessRuntimeIdentity, QualificationTelemetryConfig, ScopeGeneration,
+    ScopeObservationGapCounters, StartBoottimeWindow,
 };
 pub use redaction::{
     redact_command_text_for_persistence, RedactedValue, Redactor, RuntimeEvidencePersistence,
@@ -501,7 +502,7 @@ fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEven
     let parent_exec_generation = parse_optional_raw_u32(&fields, "parent_exec_generation")?;
     let raw_payload = fields.optional("payload").unwrap_or_default();
 
-    Ok(RawKernelEvent::new(
+    let mut raw = RawKernelEvent::new(
         timestamp,
         session_id,
         EventSource::KernelTracepoint,
@@ -525,7 +526,17 @@ fn parse_fixture_raw_event(line: &str, session_id: &str) -> Result<RawKernelEven
         exec_generation,
         parent_process_generation,
         parent_exec_generation,
-    ))
+    );
+    raw.intent_id = fields.optional("intent_id").map(ToString::to_string);
+    raw.parent_start_time_ns = fields
+        .optional("parent_start_time_ns")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| "invalid parent_start_time_ns".to_string())
+        })
+        .transpose()?;
+    Ok(raw)
 }
 
 fn required_raw<'a>(fields: &'a PipeFields, key: &str) -> Result<&'a str, String> {

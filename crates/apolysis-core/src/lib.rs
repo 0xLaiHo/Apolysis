@@ -10,11 +10,13 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod fields;
+mod intent_reason;
 mod kubernetes_attribution;
 mod runtime_binding;
 pub mod scalars;
 pub mod vocabulary;
 
+pub use intent_reason::SessionIntentReasonRecord;
 pub use kubernetes_attribution::{
     kubernetes_reference_v1, KubernetesAttributionOptionalRef, KubernetesAttributionRecordType,
     KubernetesAttributionWireV1, KubernetesAttributionWireValidationError, KubernetesContainerKind,
@@ -28,7 +30,7 @@ pub use runtime_binding::{
     RuntimeBindingRecordType, RuntimeBindingRuntimeHandler, RuntimeBindingWireV1,
     RuntimeBindingWireValidationError, RUNTIME_BINDING_SCHEMA_VERSION,
 };
-pub use vocabulary::{actions, actors, records, resources};
+pub use vocabulary::{actions, actors, env, records, resources};
 
 /// Anything that can be written as one JSONL record.
 ///
@@ -927,6 +929,7 @@ pub struct CanonicalEvent {
     pub process_command: Option<String>,
     pub process_executable: Option<String>,
     pub process_started_at_unix_ms: Option<u128>,
+    pub intent_id: Option<String>,
 }
 
 impl CanonicalEvent {
@@ -968,6 +971,7 @@ impl CanonicalEvent {
             process_command: None,
             process_executable: None,
             process_started_at_unix_ms: None,
+            intent_id: None,
         }
     }
 
@@ -1027,6 +1031,12 @@ impl CanonicalEvent {
         self
     }
 
+    /// Attach the harness intent id observed in transient exec argv.
+    pub fn with_intent_id(mut self, intent_id: impl Into<String>) -> Self {
+        self.intent_id = Some(intent_id.into());
+        self
+    }
+
     /// Render this event as a JSONL record.
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
@@ -1059,7 +1069,7 @@ impl JsonLine for CanonicalEvent {
             .map(|errno| errno.to_string())
             .unwrap_or_else(|| "null".to_string());
 
-        format!(
+        let mut line = format!(
             "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_type\":{},\"raw_event_id\":{},\"pid\":{},\"ppid\":{},\"actor\":{},\"resource\":{},\"action\":{},\"outcome\":{outcome},\"return_value\":{return_value},\"errno\":{errno},\"container_id\":{},\"cgroup_id\":{},\"host_boot_id\":{},\"scope_generation\":{},\"process_generation\":{},\"process_start_time_ns\":{},\"exec_generation\":{},\"parent_process_generation\":{},\"parent_exec_generation\":{},\"relation_status\":{},\"relation_reason\":{},\"process_command\":{},\"process_executable\":{},\"process_started_at_unix_ms\":{}}}",
             json_string(records::EVENT),
             self.timestamp_unix_ms,
@@ -1088,7 +1098,12 @@ impl JsonLine for CanonicalEvent {
             self.process_started_at_unix_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "null".to_string())
-        )
+        );
+        if let Some(intent_id) = &self.intent_id {
+            line.pop();
+            line.push_str(&format!(",\"intent_id\":{}}}", json_string(intent_id)));
+        }
+        line
     }
 }
 
@@ -1119,6 +1134,9 @@ pub struct RawKernelEvent {
     pub relation_status: RuntimeRelation,
     pub relation_reason: String,
     pub raw_payload: String,
+    /// Complete transport token captured independently of the diagnostic argv.
+    pub intent_id: Option<String>,
+    pub parent_start_time_ns: Option<u64>,
 }
 
 impl RawKernelEvent {
@@ -1166,6 +1184,8 @@ impl RawKernelEvent {
             relation_status: RuntimeRelation::Inferred,
             relation_reason: "pid_only_runtime_identity".to_string(),
             raw_payload: raw_payload.into(),
+            intent_id: None,
+            parent_start_time_ns: None,
         }
     }
 
@@ -1215,6 +1235,11 @@ impl RawKernelEvent {
         self
     }
 
+    pub fn with_intent_id(mut self, intent_id: impl Into<String>) -> Self {
+        self.intent_id = Some(intent_id.into());
+        self
+    }
+
     /// Render this raw kernel event as a JSONL record.
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
@@ -1246,7 +1271,7 @@ impl JsonLine for RawKernelEvent {
             .and_then(|result| result.errno)
             .map(|errno| errno.to_string())
             .unwrap_or_else(|| "null".to_string());
-        format!(
+        let mut line = format!(
             "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"event_source\":{},\"event_name\":{},\"event_id\":{},\"pid\":{},\"ppid\":{},\"uid\":{},\"gid\":{},\"comm\":{},\"resource\":{},\"action\":{},\"outcome\":{outcome},\"return_value\":{return_value},\"errno\":{errno},\"container_id\":{},\"cgroup_id\":{},\"host_boot_id\":{},\"scope_generation\":{},\"process_generation\":{},\"process_start_time_ns\":{},\"exec_generation\":{},\"parent_process_generation\":{},\"parent_exec_generation\":{},\"relation_status\":{},\"relation_reason\":{},\"raw_payload\":{}}}",
             json_string(records::RAW_KERNEL_EVENT),
             self.timestamp_unix_ms,
@@ -1273,7 +1298,16 @@ impl JsonLine for RawKernelEvent {
             json_string(self.relation_status.as_str()),
             json_string(&self.relation_reason),
             json_string(&self.raw_payload)
-        )
+        );
+        if let Some(intent_id) = &self.intent_id {
+            line.pop();
+            line.push_str(&format!(",\"intent_id\":{}}}", json_string(intent_id)));
+        }
+        if let Some(start) = self.parent_start_time_ns {
+            line.pop();
+            line.push_str(&format!(",\"parent_start_time_ns\":{start}}}"));
+        }
+        line
     }
 }
 
@@ -1290,6 +1324,10 @@ pub struct SessionIntentRecord {
     pub target: Option<String>,
     pub command: Option<String>,
     pub raw_event_id: Option<String>,
+    /// Native product session, distinct from an explicitly mapped capture session.
+    pub harness_session_id: Option<String>,
+    /// local_shell, semantic_only, or historical; omitted by legacy producers.
+    pub observation_mode: Option<String>,
 }
 
 impl SessionIntentRecord {
@@ -1313,6 +1351,8 @@ impl SessionIntentRecord {
             target: None,
             command: None,
             raw_event_id: None,
+            harness_session_id: None,
+            observation_mode: None,
         }
     }
 
@@ -1346,6 +1386,16 @@ impl SessionIntentRecord {
         self
     }
 
+    pub fn with_harness_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.harness_session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_observation_mode(mut self, mode: impl Into<String>) -> Self {
+        self.observation_mode = Some(mode.into());
+        self
+    }
+
     pub fn to_json_line(&self) -> String {
         <Self as JsonLine>::to_json_line(self)
     }
@@ -1353,7 +1403,7 @@ impl SessionIntentRecord {
 
 impl JsonLine for SessionIntentRecord {
     fn to_json_line(&self) -> String {
-        format!(
+        let mut line = format!(
             "{{\"record_type\":{},\"timestamp_unix_ms\":{},\"session_id\":{},\"intent_source\":{},\"intent_id\":{},\"source_event_id\":{},\"intent_type\":{},\"tool_name\":{},\"declared_action\":{},\"target\":{},\"command\":{},\"raw_event_id\":{}}}",
             json_string(records::INTENT),
             self.timestamp_unix_ms,
@@ -1367,7 +1417,19 @@ impl JsonLine for SessionIntentRecord {
             optional_json_string(self.target.as_deref()),
             optional_json_string(self.command.as_deref()),
             optional_json_string(self.raw_event_id.as_deref()),
-        )
+        );
+        if let Some(session_id) = &self.harness_session_id {
+            line.pop();
+            line.push_str(&format!(
+                ",\"harness_session_id\":{}}}",
+                json_string(session_id)
+            ));
+        }
+        if let Some(mode) = &self.observation_mode {
+            line.pop();
+            line.push_str(&format!(",\"observation_mode\":{}}}", json_string(mode)));
+        }
+        line
     }
 }
 

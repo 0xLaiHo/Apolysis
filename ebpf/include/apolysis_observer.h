@@ -7,8 +7,9 @@
 #define APOLYSIS_RESOURCE_LEN 256
 #define APOLYSIS_ACTION_LEN 32
 #define APOLYSIS_PAYLOAD_LEN 256
-#define APOLYSIS_KERNEL_ABI_VERSION 3
-#define APOLYSIS_KERNEL_EVENT_RECORD_LEN 656
+#define APOLYSIS_KERNEL_ABI_VERSION 4
+#define APOLYSIS_KERNEL_EVENT_RECORD_LEN 696
+#define APOLYSIS_INTENT_ID_LEN 32
 
 enum apolysis_kernel_event_kind {
     APOLYSIS_EVENT_EXEC = 1,
@@ -28,6 +29,7 @@ enum apolysis_event_flags {
     APOLYSIS_FLAG_PAYLOAD_SOCKADDR = 1 << 2,
     APOLYSIS_FLAG_ARGV_TRUNCATED = 1 << 3,
     APOLYSIS_FLAG_RETURN_VALUE = 1 << 4,
+    APOLYSIS_FLAG_INTENT_INCOMPLETE = 1 << 5,
 };
 
 enum apolysis_scope_mode {
@@ -139,6 +141,8 @@ struct apolysis_kernel_event {
     char resource[APOLYSIS_RESOURCE_LEN];
     char action[APOLYSIS_ACTION_LEN];
     char payload[APOLYSIS_PAYLOAD_LEN];
+    unsigned long long parent_start_time_ns;
+    char intent_id[APOLYSIS_INTENT_ID_LEN];
 };
 
 _Static_assert(sizeof(struct apolysis_kernel_event) == APOLYSIS_KERNEL_EVENT_RECORD_LEN,

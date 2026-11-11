@@ -348,6 +348,8 @@ fn kernel_event(cgroup_id: u64) -> DaemonKernelEvent {
             resource: [0; RESOURCE_LEN],
             action: [0; ACTION_LEN],
             payload: [0; PAYLOAD_LEN],
+            parent_start_time_ns: 0,
+            intent_id: [0; 32],
         },
     }
 }

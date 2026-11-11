@@ -1,7 +1,7 @@
 # Apolysis 设计文档
 
 > [English](design.md) | 简体中文
-> 最后审查：2026-08-12
+> 最后审查：2026-11-12
 
 本文是唯一的详细产品文档，权威定义 Apolysis 是什么、目标系统如何工作、稳定记录格式与
 资格验证约定、当前已经实现什么、未来方向，以及产品声明止步于何处。
@@ -12,8 +12,8 @@ Apolysis 是面向用户可控 Linux 环境的实验性 **eBPF 智能体（Agent
 进程、文件、网络和凭证相关操作，把它们组织到一次智能体运行中，归属到运行时身份，
 并报告采集器健康和观测缺口。
 
-eBPF 采集器是必需的主要观测源。服务提供方挂钩、智能体日志、协议跟踪和远程导出
-都保持暂缓；它们不定义当前产品，也不能替代运行时观测。
+eBPF 采集器是必需的主要观测源。原生 harness hook 与日志导入提供可选的声明意图上下文，
+不能替代运行时观测。通用协议跟踪和远程导出仍然暂缓。
 
 当前目标是有界测试版（Beta），而不是生产级证据平面。网关、PostgreSQL、证据对象、
 投影与跨服务提供方约定原型已经移出当前工作区。策略执行、智能体反馈控制、
@@ -27,6 +27,66 @@ eBPF 采集器是必需的主要观测源。服务提供方挂钩、智能体日
 | 测试版目标 | 活跃 eBPF 观测路线图要求交付，但尚未完成资格验证 |
 | 暂缓 | 只有在出现重复用户需求后才可能进入的未来扩展 |
 | 范围外 | 不属于产品方向 |
+
+### 原生应用与意图接入
+
+`apolysis observe --agent <product> -- <原生参数>` 启动 Codex、Claude Code、Cursor
+Agent、Pi 或 OpenCode，保留原来的标准输入输出、界面、工具、认证和权限提示。
+参数边界保持不变，单独查询原生帮助/版本时绕过采集。普通用户 Rust 控制器创建临时 hook
+配置和等待放行的子进程，只有独立采集器通过 sudo 提权。私有 Unix socket 传输采集设置，
+不传输原生参数和提示词。探针附加、范围核验与采集开始记录持久化后才报告就绪并放行。
+确认应用实际退出且完成排空后，在 mode-0700 目录中原子发布 mode-0600 证据。
+受控采集使用经核验的 8 MiB ring，每个导出/报告输入上限为 64 MiB。取消会恢复终端并
+清理拥有的进程；导出失败不会抹掉已观测到的应用退出结果。
+
+| 产品 | 临时接入方式 |
+| --- | --- |
+| Codex | 会话层 `PreToolUse`、启用 hooks 和 `--no-daemon`；保留原生 hook 信任检查，托管 WebSearch 不在此 hook 范围。 |
+| Claude Code | 含 `UserPromptSubmit` 和 `PreToolUse` 的运行时插件。 |
+| Cursor Agent | 含 `beforeSubmitPrompt`、`preToolUse` 和 `beforeShellExecution` 的插件；补充事件不重新分配调用身份。 |
+| Pi | 监听 `tool_call` 及显式启用后的 `input` 上下文的扩展。 |
+| OpenCode | V2 `setup(ctx)`、`tool.hook("execute.before")`、`session.hook("prompt")`，兼容 V1 `server()`；临时插件目录及 `--standalone`。 |
+
+不覆盖全局/项目配置；已识别的禁用 hook、远程、分离或共享服务器选项会被拒绝。
+其他原生 hook 或信任决策仍可阻止采集。Cursor 真实工具调用门禁仍受认证阻塞；
+已通过的有界模型服务演示不代表所有版本、交互流程或运行时配置均通过资格验证。
+
+hook 区分采集 `session_id`、产品 `intent_source`、原生 `harness_session_id` 与
+`source_event_id`。长度分帧后经 SHA-256 派生 32 字符小写十六进制 `intent_id`。
+加锁追加去重重试，拒绝保留字段冲突。受支持 shell 输入增加完整首行
+`# APOLYSIS_INTENT_ID=<id>` 注释。原生 `eval` 隐藏标记时，显式选项
+`--shell-bridge /bin/bash` 创建可识别的内层 shell exec 边界；其中 cwd、变量和函数
+变化不会传回外层。非 shell、远程和托管工具通常保留为 `semantic_only`，导入记录
+可使用 `historical`。
+
+有界内核解析器识别支持的 shell 标志、`-o`/`-O` 对、`-c` 参数和子脚本，不搜索任意
+argv 内容。归属以 TGID 和线程组首线程出生时间校验，在 fork 和 exec 间继承。
+完整新标记替换归属；完整采集且无新标记则保留；格式错误、不可读或不完整采集清空归属
+并设置 `intent_capture_incomplete`，线程组退出时删除。用户态以实时事件中的缺失为准。
+宿主/范围/进程/exec 代际身份仍遵循独立的 Runtime Identity 约定。ABI v4 为 696 字节，
+在 v3 上增加父进程出生时间及定长 token；返回值和意图不完整标志使用不同位。
+实时解码要求配套对象，已保存运行投影兼容 v3/656 与 v4/696 清单。
+
+关联限定在同一采集会话内。唯一显式 `intent_id` 或 `raw_event_id` 可以形成精确关联，
+两者同时出现时必须一致。未知、冲突和歧义标识符输出诊断，不回退为启发式匹配；
+命令/可执行文件候选保持 inferred。索引加速显式 ID 关联，可执行文件回退仍扫描会话声明。
+
+`intent_reason` 是独立追加注解，不是隐藏推理或经验证的动机。生产者可提供
+`apolysis_reason` 或首行 `APOLYSIS_REASON_CODE`。理由码为 `unknown`、`inspect_context`、
+`verify_change`、`reproduce_issue`、`implement_change`、`diagnose_failure` 和
+`gather_evidence`。原生描述及可选提示摘要使用 `tool_description`，理由码为 `unknown`。
+`--allow-reason-summary` 保留经过过滤、最多 240 个 Unicode 字符的单行文本，过滤不保证
+绝不含秘密。更正用 `supersedes_reason_id`，绑定核验完整调用身份与更正链，不把候选
+升级为精确关联。提示上下文使用最新提问状态，不是结构化的逐轮因果模型。
+
+原生采集发布 `intent.jsonl`、`intent.jsonl.reasons.jsonl`、`timeline.jsonl`、
+`correlation.jsonl`、`result.json`、`report.md` 和 `report.html`。报告核验原始/规范化
+身份及理由绑定，不重复计数规范化副本，结束时在标准错误打印英文树状摘要。
+按匹配的提问/描述文本分组仅用于展示，不是任务因果关系的独立证据；用户文本保留原语言。
+原生 capture 状态表示采集事务完整性，截断单独报告；已保存运行 AOR 仍将截断视为降级、
+不完整证据。丢失、缺口、冲突和缺失输入会令原生采集不完整。应用退出、采集健康、关联完整性和
+任务结果彼此独立，通用任务结果保持 `not_verified`。旧的 `apolysis chat` 是独立的
+受控 Claude/Bash 理由协议实验。
 
 ## 2. 用户与决策
 
@@ -205,7 +265,7 @@ tracepoint，再建立进程树初始集合；先加入注册验证通过或推�
 用户空间解码内核 ABI，分配确定性来源序列号，标准化事件类型，关联
 运行时元数据，应用原文不落盘（content-off）隐私策略，并写入智能体观测记录。
 
-内核 ABI v3 携带有界的范围代次、进程代次、内核进程启动时间戳、exec 代次以及父进程的
+内核 ABI v4 携带有界的范围代次、进程代次、内核进程启动时间戳、exec 代次以及父进程的
 进程／exec 代次。当前用户空间边界会附加采集器启动时读取一次的主机启动 ID。进程上下文
 按主机启动 ID、PID、进程代次与 exec 代次键控，而不是只按 PID 键控，因此 PID 复用或
 exec 转换不会继承陈旧的可执行文件上下文。进程身份映射表与用户空间上下文表保持有界；
@@ -612,8 +672,8 @@ JSON `null`；其他字段都不可为空。`u32`、`u64` 与 `u128` 是对应 R
 | `agent_run_id` | 字符串 | 所属智能体运行 |
 | `collector` | 字符串 | 常量 `apolysis_observer` |
 | `collector_version` | 字符串 | 用户空间软件包版本 |
-| `kernel_abi_version` | u32 | 当前 ABI 为 `3` |
-| `kernel_record_size` | u32 | 当前 ABI-v3 大小为 `656` |
+| `kernel_abi_version` | u32 | 当前实时 ABI 为 `4`，已保存投影也兼容 `3` |
+| `kernel_record_size` | u32 | ABI-v4 为 `696`，旧 v3 布局为 `656` |
 | `observation_scope` | 枚举 | `process_tree` 或 `cgroup` |
 | `privacy_profile` | 枚举 | 常量 `content_off` |
 | `capabilities` | 对象数组 | 有序能力对象 |
@@ -1259,13 +1319,13 @@ cgroup v1／混合范围、无 root 主机采集、非 Linux，或低于功能�
 当前已实现：
 
 - `ebpf/observer` 与 `apolysis-observer`：CO-RE tracepoint、环形缓冲区、
-  进程树/cgroup 范围、ABI v3、有界进程/exec 与 cgroup 范围代次、
+  进程树/cgroup 范围、ABI v4、有界进程/exec 与 cgroup 范围代次、
   结果感知的选定文件操作与网络连接、受保护现有进程的 TGID 初始集合、按 cgroup 统计的
   操作缺口计数器、脱敏、生命周期检查点／终止以及健康状态／缺口
   诊断；
 - `apolysis-cli`：夹具／实时观测、托管智能体启动、通过注册或发现
   完成的受保护的现有进程挂接、非特权已保存运行投影与已保存运行查看器
-  发布、可选 Codex 意图关联、可见性、验证与有界守护进程安装／检查／卸载命令；
+  发布、可选原生 harness 意图关联、可见性、验证与有界守护进程安装／检查／卸载命令；
 - `apolysis-core`：当前 JSONL 词汇表、记录类型、版本化采集器能力
   清单与采集器生命周期模式，包括由生产者与投影共同消费的唯一
   生命周期词汇表和完整 AuditObserver v1 操作／来源／结果约定；
@@ -1386,7 +1446,7 @@ D1 复用、已观测／已退役／已暂停生命周期、显式 API／CRI／�
 身份再推断、先处理隐私再持久化、只做观测而非强制执行、查看器保持非特权，以及只有重复
 使用能够改变真实调查决策时才扩展。
 
-以下能力明确暂缓：服务提供方钩子／SDK／OTLP／MCP／A2A 系列；通用远程导出／托管链；
+以下能力明确暂缓：超出原生 harness 适配器的通用 SDK／OTLP／MCP／A2A 系列；通用远程导出／托管链；
 远程结果验证；实时追踪与跨运行搜索；中央认证摄取、多用户查询、PostgreSQL／S3／KMS
 托管链与多租户留存；策略拒绝／遏制；可移植证据收据；公共 SaaS、高可用与多区域；通用
 软件包管理器抽象；卸载时自动清除已保留智能体运行。只有出现明确需求并做出新架构决策后，
