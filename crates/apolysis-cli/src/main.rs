@@ -133,8 +133,30 @@ async fn intent_hook_command(args: Vec<String>) -> Result<i32, String> {
     if let Some(diagnostic) = output.diagnostic {
         eprintln!("apolysis: {diagnostic}");
     }
+    if request.allow_reason_summary
+        && matches!(
+            value
+                .get("hook_event_name")
+                .and_then(serde_json::Value::as_str),
+            Some("UserPromptSubmit" | "beforeSubmitPrompt")
+        )
+    {
+        if let Some(prompt) = value.get("prompt").and_then(serde_json::Value::as_str) {
+            intent::reason::save_user_prompt(&request.reason_output_path, prompt);
+        }
+    }
     if let Some(record) = output.record {
-        let reason = intent::reason::collect(&value, &record, request.allow_reason_summary)?;
+        let saved_prompt = if request.allow_reason_summary {
+            intent::reason::load_user_prompt(&request.reason_output_path)
+        } else {
+            None
+        };
+        let reason = intent::reason::collect_with_user_prompt(
+            &value,
+            &record,
+            request.allow_reason_summary,
+            saved_prompt.as_deref(),
+        )?;
         if reason.is_some() {
             distinct_output_paths(&request.output_path, &request.reason_output_path)?;
         }
@@ -849,86 +871,111 @@ fn correlate_intents(
     intent_input: &str,
     timeline_input: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let intents = parse_intent_records(intent_input)?;
-    let events = parse_observed_events(timeline_input)?;
-    let mut records = Vec::new();
-    let mut matched_intents = vec![false; intents.len()];
+    use std::collections::HashMap;
+
+    let intents: Vec<IntentForCorrelation> = parse_intent_records(intent_input)?;
+    let events: Vec<ObservedEventForCorrelation> = parse_observed_events(timeline_input)?;
+    let mut records: Vec<serde_json::Value> = Vec::new();
+    let mut matched_intents: Vec<bool> = vec![false; intents.len()];
+
+    let mut by_session_intent_id: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    let mut by_session_raw_id: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    let mut by_session_command: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    let mut by_session_non_semantic: HashMap<&str, Vec<usize>> = HashMap::new();
+
+    for (index, intent) in intents.iter().enumerate() {
+        let session = intent.session_id.as_str();
+        by_session_intent_id
+            .entry((session, intent.intent_id.as_str()))
+            .or_default()
+            .push(index);
+        if let Some(raw_id) = intent.raw_event_id.as_deref() {
+            by_session_raw_id
+                .entry((session, raw_id))
+                .or_default()
+                .push(index);
+        }
+        if intent.observation_mode.as_deref() != Some("semantic_only") {
+            by_session_non_semantic
+                .entry(session)
+                .or_default()
+                .push(index);
+            if let Some(command) = intent.command.as_deref() {
+                by_session_command
+                    .entry((session, command))
+                    .or_default()
+                    .push(index);
+            }
+        }
+    }
 
     for event in &events {
-        let eligible: Vec<_> = intents
-            .iter()
-            .enumerate()
-            .filter(|(_, intent)| intent.session_id == event.session_id)
-            .collect();
-        let by_raw: Vec<_> = eligible
-            .iter()
-            .copied()
-            .filter(|(_, intent)| {
-                intent.raw_event_id.as_deref() == Some(event.raw_event_id.as_str())
-            })
-            .collect();
+        let session = event.session_id.as_str();
+        let by_raw = by_session_raw_id
+            .get(&(session, event.raw_event_id.as_str()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let mut matched = None;
         let mut gap = None;
         if let Some(id) = &event.intent_id {
-            let by_id: Vec<_> = eligible
-                .iter()
-                .copied()
-                .filter(|(_, intent)| intent.intent_id == *id)
-                .collect();
-            match by_id.as_slice() {
-                [(index, intent)] if by_raw.is_empty() => {
-                    matched = Some((*index, *intent, "intent_id"));
+            let by_id = by_session_intent_id
+                .get(&(session, id.as_str()))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            match by_id {
+                [index] if by_raw.is_empty() => {
+                    matched = Some((*index, &intents[*index], "intent_id"));
                 }
-                [(index, intent)] if by_raw.len() == 1 && by_raw[0].0 == *index => {
-                    matched = Some((*index, *intent, "raw_event_id"));
+                [index] if by_raw == [*index] => {
+                    matched = Some((*index, &intents[*index], "raw_event_id"));
                 }
                 [] => gap = Some("unrecognized_intent_id"),
                 [_] => gap = Some("conflicting_identifiers"),
                 _ => gap = Some("ambiguous_intent_id"),
             }
         } else {
-            match by_raw.as_slice() {
-                [(index, intent)] => matched = Some((*index, *intent, "raw_event_id")),
+            match by_raw {
+                [index] => matched = Some((*index, &intents[*index], "raw_event_id")),
                 [] => {
-                    let exact: Vec<_> = eligible
-                        .iter()
-                        .copied()
-                        .filter(|(_, intent)| {
-                            intent.observation_mode.as_deref() != Some("semantic_only")
-                                && event.process_command.as_deref().is_some_and(|command| {
-                                    intent.command.as_deref() == Some(command)
-                                })
-                        })
-                        .collect();
-                    let (candidates, basis) = if !exact.is_empty() {
-                        (exact, "process_command_exact")
-                    } else {
+                    let exact = event
+                        .process_command
+                        .as_deref()
+                        .and_then(|command| by_session_command.get(&(session, command)))
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let (candidates, basis): (Vec<usize>, &str) = if !exact.is_empty() {
+                        (exact.to_vec(), "process_command_exact")
+                    } else if event.event_type == "exec" {
                         (
-                            eligible
+                            by_session_non_semantic
+                                .get(session)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[])
                                 .iter()
                                 .copied()
-                                .filter(|(_, intent)| {
-                                    intent.observation_mode.as_deref() != Some("semantic_only")
-                                        && event.event_type == "exec"
-                                        && intent
-                                            .command
-                                            .as_deref()
-                                            .and_then(command_executable)
-                                            .is_some_and(|executable| {
-                                                executable_matches(
-                                                    executable,
-                                                    event.process_executable.as_deref(),
-                                                ) || executable_matches(
-                                                    executable,
-                                                    Some(&event.resource),
-                                                )
-                                            })
+                                .filter(|&index| {
+                                    intents[index]
+                                        .command
+                                        .as_deref()
+                                        .and_then(command_executable)
+                                        .is_some_and(|executable| {
+                                            executable_matches(
+                                                executable,
+                                                event.process_executable.as_deref(),
+                                            ) || executable_matches(
+                                                executable,
+                                                Some(&event.resource),
+                                            )
+                                        })
                                 })
-                                .collect::<Vec<_>>(),
+                                .collect(),
                             "process_executable",
                         )
+                    } else {
+                        (Vec::new(), "process_executable")
                     };
-                    for (_, intent) in &candidates {
+                    for index in &candidates {
+                        let intent = &intents[*index];
                         let mut candidate = intent_correlation_record(intent, event, basis);
                         candidate["record_type"] = "intent_correlation_candidate".into();
                         candidate["relation_status"] = if candidates.len() == 1 {
@@ -989,6 +1036,8 @@ fn correlate_intents(
 }
 
 fn parse_intent_records(input: &str) -> Result<Vec<IntentForCorrelation>, String> {
+    use std::collections::HashMap;
+
     let records: Vec<IntentForCorrelation> = parse_jsonl(input, "intent input")?
         .into_iter()
         .filter(|value| string_field(value, "record_type") == Some("intent"))
@@ -1011,9 +1060,14 @@ fn parse_intent_records(input: &str) -> Result<Vec<IntentForCorrelation>, String
             })
         })
         .collect::<Result<_, String>>()?;
-    let mut unique = Vec::new();
+    let mut unique: Vec<IntentForCorrelation> = Vec::with_capacity(records.len());
+    let mut by_key: HashMap<(String, String), Vec<usize>> = HashMap::new();
     for record in records {
-        if !unique.contains(&record) {
+        let indices = by_key
+            .entry((record.session_id.clone(), record.intent_id.clone()))
+            .or_default();
+        if !indices.iter().any(|&idx| unique[idx] == record) {
+            indices.push(unique.len());
             unique.push(record);
         }
     }

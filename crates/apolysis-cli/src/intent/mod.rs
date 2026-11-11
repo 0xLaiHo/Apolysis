@@ -87,6 +87,22 @@ pub fn hook_with_shell_bridge(
     if !matches!(harness, "codex" | "claude" | "cursor" | "pi" | "opencode") {
         return Err("unsupported intent hook harness".to_string());
     }
+    if matches!(
+        input
+            .get("hook_event_name")
+            .and_then(serde_json::Value::as_str),
+        Some("UserPromptSubmit" | "beforeSubmitPrompt")
+    ) {
+        return Ok(HookOutput {
+            record: None,
+            response: if harness == "cursor" {
+                serde_json::json!({ "continue": true })
+            } else {
+                serde_json::json!({})
+            },
+            diagnostic: None,
+        });
+    }
     if harness == "cursor" && required_str(input, "hook_event_name")? == "beforeShellExecution" {
         // This event has no native tool-call id. The preceding preToolUse hook owns
         // the declaration; never invent an identity or append a duplicate here.
@@ -126,7 +142,7 @@ pub fn hook_with_shell_bridge(
     if let Some(shell) = bridge_shell {
         if matches!(
             tool_name,
-            "Bash" | "Shell" | "bash" | "exec_command" | "shell_command"
+            "Bash" | "Shell" | "bash" | "shell" | "exec_command" | "shell_command"
         ) && tool_input
             .and_then(|input| input.get("shell"))
             .is_some_and(|value| value.as_str() != Some(shell))
@@ -246,7 +262,7 @@ fn shell_command_field(
         ("codex" | "claude", "Bash") | ("cursor", "Shell") => "command",
         ("codex", "exec_command") => "cmd",
         ("codex", "shell_command") => "command",
-        ("pi" | "opencode", "bash") => "command",
+        ("pi", "bash") | ("opencode", "bash" | "shell") => "command",
         _ => return None,
     };
     let input = input?;

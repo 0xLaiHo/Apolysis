@@ -169,6 +169,16 @@ corrected = [r for r in correlate() if r.get('record_type') == 'intent_correlati
 require({r['raw_event_id'] for r in corrected} == {r['raw_event_id'] for r in exact}, 'late correction changed execution relations')
 require(all(r.get('declared_reason', {}).get('reason_id') == 'late-correction' for r in corrected), 'late correction was not selected')
 
+# Shell flags (-e, -o pipefail) before -c and child shells with flags (-eu)
+# must preserve attribution across exec and descendant scripts.
+(root / 'child-script.sh').write_text(f'cat {shlex.quote(str(root / "fork-only.txt"))} >/dev/null\n')
+(root / 'child-script.sh').chmod(0o755)
+flagged_cmd = '# APOLYSIS_INTENT_ID=' + token + '\n/bin/bash -eu ' + shlex.quote(str(root / 'child-script.sh'))
+flagged = capture('shell-flags', ['/bin/bash', '-e', '-o', 'pipefail', '-c', flagged_cmd])
+require(not any('intent_capture_incomplete:true' in r.get('raw_payload', '') for r in flagged), 'shell-flags workload had incomplete intent capture')
+flagged_opens = [r for r in flagged if r.get('record_type') == 'event' and r.get('event_type') == 'file_open' and r.get('resource') == str(root / 'fork-only.txt')]
+require(flagged_opens and all(r.get('intent_id') == token for r in flagged_opens), 'shell-flags child script lost parent attribution')
+
 # No token may be manufactured by ordinary argv, a later comment, or a partial header.
 header = '# APOLYSIS_INTENT_ID=' + token + '\n'
 (root / 'noop.sh').write_text('exit 0\n')

@@ -66,10 +66,10 @@ flowchart LR
 | 产品 | 临时接入方式 |
 | --- | --- |
 | Codex | 会话层 `PreToolUse` 配置，启用 hooks，并使用 `--no-daemon` 把本地执行保留在观测进程树内；原生 hook 信任检查继续生效。 |
-| Claude Code | 额外加载包含 `PreToolUse` 的运行时插件。 |
-| Cursor Agent | 额外加载含 `preToolUse` 和 `beforeShellExecution` 的运行时插件；补充 shell 事件记录并放行，不独立生成新的调用身份。 |
-| Pi | 监听 `tool_call` 的扩展，从原生上下文读取会话。 |
-| OpenCode | 监听 `tool.execute.before` 的插件，追加到内存中的原生配置，并使用插件目录上下文。 |
+| Claude Code | 额外加载包含 `UserPromptSubmit` 与 `PreToolUse` 的运行时插件。 |
+| Cursor Agent | 额外加载含 `beforeSubmitPrompt`、`preToolUse` 和 `beforeShellExecution` 的运行时插件；补充 shell 事件记录并放行，不独立生成新的调用身份。 |
+| Pi | 监听 `tool_call`（及启用 `--allow-reason-summary` 时监听 `input`）的扩展，从原生上下文读取会话。 |
+| OpenCode | 同时支持 V2 `tool.hook("execute.before")` / `session.hook("prompt")` 与 V1 `tool.execute.before` 的插件目录，追加到内存中的原生配置，并使用 `--standalone` 将执行保留在观测进程树内。 |
 
 现有全局或项目配置不会被覆盖。已识别的禁用接入、远程执行、后台分离或共享服务器
 选项会被明确拒绝。其他 hook 或原生信任决策仍可能阻止或改变采集。Codex 托管的
@@ -119,10 +119,11 @@ Rust 控制器以普通用户身份创建私有临时 hook 配置和一个等待
   仍处于首行。
 - 理由码为 `unknown`、`inspect_context`、`verify_change`、`reproduce_issue`、
   `implement_change`、`diagnose_failure` 和 `gather_evidence`。
-- 原生工具描述记录为 `tool_description`，理由码为 `unknown`。缺失理由保持缺失；
-  原生启动入口不注入生成理由的提示词。
+- 原生工具描述及显式启用后的用户提问摘要记录为 `tool_description`，理由码为 `unknown`。
+  缺失理由保持缺失；原生启动入口不注入生成理由的提示词。
 - 默认不保存摘要。`--allow-reason-summary` 显式允许保存经过过滤、最多 240 个 Unicode
-  字符的单行文字；过滤不保证任意文字不含秘密。`task_ref` 是不透明引用，不是提示词。
+  字符的单行文字（在可用时合并脱敏后的用户提问意图与工具描述）；过滤不保证任意文字
+  不含秘密。`task_ref` 是不透明引用，不是提示词。
 - 更正通过新记录的 `supersedes_reason_id` 追加表达。绑定时检查完整调用身份与更正链；
   冲突或未绑定的理由不能建立执行关联。
 
@@ -135,12 +136,13 @@ Rust 控制器以普通用户身份创建私有临时 hook 配置和一个等待
 文件操作和 `connect` tracepoint。标准输入输出、文件内容和解密后的 HTTP 正文不在
 默认观测范围内。对 gVisor 或虚拟机运行时的宿主侧观测，不等于看到了内部操作。
 
-标记解析器只接受受支持 shell 命令参数最前面的完整注释，不搜索任意 argv 文本。
+标记解析器只接受受支持 shell 命令参数最前面的完整注释（可识别 `-c` 或脚本路径前的标准
+短/长 shell 标志与 `-o`/`-O` 选项对），不搜索任意 argv 文本。
 归属使用 TGID 和线程组首线程启动时间，以区分 PID 重用。内核在 fork 时复制归属，
-包括之后没有 exec 的子进程。exec 遇到合法新标记时替换；完整读取且没有新标记时
-保留；读取失败、格式错误或标记采集不完整时清空，并标记 `intent_capture_incomplete`。
-线程组退出时删除上下文。范围内每个事件携带当时的归属，用户态不会用旧进程状态
-补造缺失的标记。
+包括之后没有 exec 的子进程。exec 遇到合法新标记时替换；完整读取且没有新标记（包括
+携带受支持标志执行子脚本的 shell）时保留；读取失败、格式错误、含未知选项或标记采集
+不完整时清空，并标记 `intent_capture_incomplete`。线程组退出时删除上下文。范围内
+每个事件携带当时的归属，用户态不会用旧进程状态补造缺失的标记。
 
 关联是限制在同一采集会话内的独立步骤。唯一的显式 `intent_id`，或没有意图标记时
 唯一的显式 `raw_event_id`，可以建立 Exact Relation；两者同时存在时必须一致。
@@ -162,9 +164,10 @@ Rust 控制器以普通用户身份创建私有临时 hook 配置和一个等待
 | `correlation.jsonl` | 精确关联、候选、理由绑定和发现项。 |
 | `result.json`、`report.md`、`report.html` | 按 Tool Call 分组的结构化及可读视图。 |
 
-报告先核对原始/规范化事件身份、唯一声明及理由绑定，再统计精确关联。原始事件和
-规范化副本不会重复计为两次系统调用尝试。未归属事件、策略通知、缺失理由、冲突、
-截断和丢失分别呈现。输入缺失、损坏、混入其他会话或超限时，报告标记为不完整。
+报告先核对原始/规范化事件身份、唯一声明及理由绑定，再统计精确关联，并在结束时向标准
+错误输出默认英文的树状关联摘要。原始事件和规范化副本不会重复计为两次系统调用尝试。
+未归属事件、策略通知、缺失理由、冲突、截断和丢失分别呈现。输入缺失、损坏、混入其他
+会话或超限时，报告标记为不完整。
 
 应用退出、采集收尾、关联完整性和任务结果各有独立字段。`complete` 表示对应的文件
 检查通过，不表示所有操作都可见或已经归属。通用任务结果保持 `not_verified`，需要

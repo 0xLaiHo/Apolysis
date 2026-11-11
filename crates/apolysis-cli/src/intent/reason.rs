@@ -20,7 +20,30 @@ pub fn collect(
     record: &SessionIntentRecord,
     allow_summary: bool,
 ) -> Result<Option<SessionIntentReasonRecord>, String> {
+    collect_with_user_prompt(input, record, allow_summary, None)
+}
+
+pub fn collect_with_user_prompt(
+    input: &Value,
+    record: &SessionIntentRecord,
+    allow_summary: bool,
+    saved_prompt: Option<&str>,
+) -> Result<Option<SessionIntentReasonRecord>, String> {
     let comment_code = shell_reason_code(input, record)?;
+    let user_prompt = if allow_summary {
+        input
+            .get("user_prompt")
+            .and_then(Value::as_str)
+            .or(saved_prompt)
+            .filter(|prompt| !prompt.trim().is_empty())
+    } else {
+        None
+    };
+    let description = input
+        .pointer("/tool_input/description")
+        .and_then(Value::as_str)
+        .filter(|description| !description.trim().is_empty());
+    let combined_prose = combine_prompt_and_description(user_prompt, description);
     let (code, source, summary, task_ref, supplied_id, supersedes) =
         if let Some(envelope) = input.get("apolysis_reason") {
             let envelope = envelope
@@ -41,22 +64,18 @@ pub fn collect(
             (
                 code,
                 "agent_declared",
-                optional_text(envelope, "reason_summary")?,
+                optional_text(envelope, "reason_summary")?.map(ToString::to_string),
                 optional_identifier(envelope, "task_ref")?,
                 optional_identifier(envelope, "reason_id")?,
                 optional_identifier(envelope, "supersedes_reason_id")?,
             )
         } else if let Some(code) = comment_code.as_deref() {
-            (code, "agent_declared", None, None, None, None)
-        } else if let Some(description) = input
-            .pointer("/tool_input/description")
-            .and_then(Value::as_str)
-            .filter(|description| !description.trim().is_empty())
-        {
+            (code, "agent_declared", combined_prose, None, None, None)
+        } else if combined_prose.is_some() || description.is_some() {
             (
                 "unknown",
                 "tool_description",
-                Some(description),
+                combined_prose.or_else(|| description.map(ToString::to_string)),
                 None,
                 None,
                 None,
@@ -92,7 +111,7 @@ pub fn collect(
         reason_code: code.to_string(),
         reason_source: source.to_string(),
         reason_summary: if allow_summary {
-            summary.and_then(sanitize_summary)
+            summary.as_deref().and_then(sanitize_summary)
         } else {
             None
         },
@@ -239,6 +258,50 @@ fn default_reason_id(record: &SessionIntentRecord, source: &str) -> String {
         .collect()
 }
 
+fn combine_prompt_and_description(
+    user_prompt: Option<&str>,
+    description: Option<&str>,
+) -> Option<String> {
+    let clean_prompt = user_prompt
+        .and_then(sanitize_summary)
+        .filter(|value| value != REDACTED_SUMMARY);
+    let clean_desc = description
+        .and_then(sanitize_summary)
+        .filter(|value| value != REDACTED_SUMMARY);
+    match (clean_prompt, clean_desc) {
+        (Some(p), Some(d)) if p != d => Some(format!("{p}（{d}）")),
+        (Some(p), _) => Some(p),
+        (None, _) => description.or(user_prompt).map(ToString::to_string),
+    }
+}
+
+pub fn save_user_prompt(reason_output_path: &str, prompt: &str) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let Some(sanitized) = sanitize_summary(prompt).filter(|value| value != REDACTED_SUMMARY) else {
+        return;
+    };
+    let path = format!("{reason_output_path}.prompt");
+    let _ = std::fs::remove_file(&path);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+    {
+        let _ = file.write_all(sanitized.as_bytes());
+    }
+}
+
+pub fn load_user_prompt(reason_output_path: &str) -> Option<String> {
+    let path = format!("{reason_output_path}.prompt");
+    std::fs::read_to_string(path)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
 /// Keep only short, plain prose. Suspicious input is replaced as a whole so
 /// removing a keyword cannot leave its adjacent value behind. Detection runs
 /// before truncation, including on content past the retained character limit.
@@ -274,7 +337,7 @@ fn sanitize_summary(summary: &str) -> Option<String> {
     .iter()
     .any(|word| lower.contains(word));
     let non_prose = summary.chars().any(|ch| {
-        (!ch.is_alphabetic()
+        (!ch.is_alphanumeric()
             && !ch.is_whitespace()
             && !matches!(
                 ch,
@@ -284,6 +347,8 @@ fn sanitize_summary(summary: &str) -> Option<String> {
                     | '!'
                     | '?'
                     | '-'
+                    | '('
+                    | ')'
                     | '，'
                     | '。'
                     | '；'
@@ -291,17 +356,19 @@ fn sanitize_summary(summary: &str) -> Option<String> {
                     | '！'
                     | '？'
                     | '、'
+                    | '（'
+                    | '）'
             ))
             || (ch.is_control() && !ch.is_whitespace())
     });
     let address_or_token = normalized.split_whitespace().any(|token| {
-        let token = token.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        let token = token.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '）']);
         token.contains('.')
             || (token.len() >= 24
                 && token.is_ascii()
                 && token
                     .chars()
-                    .all(|ch| ch.is_ascii_alphabetic() || ch == '-'))
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
     });
     if sensitive_word || non_prose || address_or_token {
         return Some(REDACTED_SUMMARY.to_string());
@@ -572,6 +639,22 @@ mod tests {
         assert_eq!(
             sanitize_summary(" Run\n\t focused   tests ").as_deref(),
             Some("Run focused tests")
+        );
+        assert_eq!(
+            sanitize_summary("帮我查询一下纽约未来7天的天气").as_deref(),
+            Some("帮我查询一下纽约未来7天的天气")
+        );
+        let with_prompt = collect_with_user_prompt(
+            &json!({"tool_input":{"description":"Fetch 7-day NYC forecast"}}),
+            &intent(),
+            true,
+            Some("帮我查询一下纽约未来7天的天气"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            with_prompt.reason_summary.as_deref(),
+            Some("帮我查询一下纽约未来7天的天气（Fetch 7-day NYC forecast）")
         );
         let long = "检查修改结果".repeat(60);
         let summary = sanitize_summary(&long).unwrap();

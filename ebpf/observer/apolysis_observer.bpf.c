@@ -323,6 +323,7 @@ static __always_inline void read_exec_argv(struct apolysis_pending_exec *pending
     unsigned int offset = 5;
     bool shell = apolysis_executable_is_shell(pending->resource, path_length);
     bool command_next = false;
+    bool skip_option_arg = false;
     bool command_seen = false;
     bool unknown_options = false;
     int i;
@@ -338,30 +339,40 @@ static __always_inline void read_exec_argv(struct apolysis_pending_exec *pending
             return;
         }
         if (!arg) {
-            if (shell && !command_seen && !command_next && !unknown_options)
+            if (shell && !command_seen && !command_next && !skip_option_arg && !unknown_options)
                 pending->intent_capture_complete = 1;
             return;
         }
         if (shell && !command_seen && i > 0) {
-            char option[4] = {};
+            char option[APOLYSIS_SHELL_OPTION_LEN] = {};
             if (command_next) {
                 read_intent_header(pending, arg);
                 command_seen = true;
-            } else if (bpf_probe_read_user_str(option, sizeof(option), arg) > 0) {
-                if (option[0] != '-' || (option[1] == '-' && option[2] == '\0')) {
+            } else if (skip_option_arg) {
+                if (bpf_probe_read_user_str(option, sizeof(option), arg) > 0)
+                    skip_option_arg = false;
+                else
+                    command_seen = true;
+            } else {
+                long opt_len = bpf_probe_read_user_str(option, sizeof(option), arg);
+                int kind = opt_len <= 0
+                    ? APOLYSIS_SHELL_OPT_UNKNOWN
+                    : apolysis_classify_shell_option(option, opt_len - 1);
+                if (kind == APOLYSIS_SHELL_OPT_SCRIPT || kind == APOLYSIS_SHELL_OPT_END) {
                     /* A script filename or -- ends option parsing. Later -c
                      * arguments belong to the script, not to the shell. */
                     command_seen = true;
                     pending->intent_capture_complete = !unknown_options;
-                }
-                command_next = option[0] == '-' &&
-                    ((option[1] == 'c' && option[2] == '\0') ||
-                     (option[1] == 'l' && option[2] == 'c' && option[3] == '\0') ||
-                     (option[1] == 'c' && option[2] == 'l' && option[3] == '\0'));
-                if (option[0] == '-' && !command_next)
+                } else if (kind == APOLYSIS_SHELL_OPT_COMMAND) {
+                    command_next = !unknown_options;
+                    if (unknown_options)
+                        command_seen = true;
+                } else if (kind == APOLYSIS_SHELL_OPT_TAKES_ARG) {
+                    skip_option_arg = true;
+                } else if (kind == APOLYSIS_SHELL_OPT_UNKNOWN) {
                     unknown_options = true;
-            } else {
-                command_seen = true; /* unreadable option: leave capture unknown */
+                    command_seen = true;
+                }
             }
         }
         append_exec_argv_arg(pending, &offset, arg);

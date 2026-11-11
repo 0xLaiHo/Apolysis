@@ -1,9 +1,30 @@
 import { spawnSync } from "node:child_process";
 
-type ToolInput = { tool: string; sessionID: string; callID: string };
+type ToolInput = { tool: string; sessionID: string; callID: string; userPrompt?: string };
 type ToolOutput = { args: { command?: string } & Record<string, unknown> };
+type V2ToolEvent = {
+  tool: string;
+  sessionID: string;
+  id?: string;
+  callID?: string;
+  input: { command?: string } & Record<string, unknown>;
+};
+type V2PromptEvent = {
+  sessionID?: string;
+  prompt?: { text?: string };
+};
+type V2Context = {
+  directory?: string;
+  location?: { directory?: string };
+  session?: {
+    hook(name: "prompt", callback: (event: V2PromptEvent) => Promise<void> | void): Promise<unknown>;
+  };
+  tool: {
+    hook(name: "execute.before", callback: (event: V2ToolEvent) => Promise<void> | void): Promise<unknown>;
+  };
+};
 
-export default function apolysisIntent(context?: { directory?: string }) {
+export function apolysisIntent(context?: { directory?: string }) {
   return {
     "tool.execute.before": async (input: ToolInput, output: ToolOutput) => {
       try {
@@ -32,14 +53,18 @@ export default function apolysisIntent(context?: { directory?: string }) {
         if (process.env.APOLYSIS_REASON_SUMMARY === "1") {
           args.push("--allow-reason-summary");
         }
+        const payload: Record<string, unknown> = {
+          session_id: input.sessionID,
+          hook_event_name: "tool.execute.before",
+          tool_name: input.tool,
+          tool_use_id: input.callID,
+          tool_input: output.args,
+        };
+        if (process.env.APOLYSIS_REASON_SUMMARY === "1" && input.userPrompt) {
+          payload.user_prompt = input.userPrompt;
+        }
         const result = spawnSync(process.env.APOLYSIS_BIN ?? "apolysis", args, {
-          input: JSON.stringify({
-            session_id: input.sessionID,
-            hook_event_name: "tool.execute.before",
-            tool_name: input.tool,
-            tool_use_id: input.callID,
-            tool_input: output.args,
-          }),
+          input: JSON.stringify(payload),
           encoding: "utf8",
           timeout: 10_000,
         });
@@ -70,6 +95,37 @@ export default function apolysisIntent(context?: { directory?: string }) {
     },
   };
 }
+
+export default {
+  id: "apolysis-intent",
+  async setup(ctx: V2Context) {
+    const directory = ctx?.location?.directory || ctx?.directory;
+    const before = apolysisIntent({ directory })["tool.execute.before"];
+    const prompts = new Map<string, string>();
+    if (ctx.session?.hook) {
+      await ctx.session.hook("prompt", (event: V2PromptEvent) => {
+        if (event?.sessionID && typeof event.prompt?.text === "string" && event.prompt.text.trim()) {
+          prompts.set(event.sessionID, event.prompt.text);
+        }
+      });
+    }
+    await ctx.tool.hook("execute.before", async (event: V2ToolEvent) => {
+      const tool = event.tool === "shell" ? "bash" : event.tool;
+      await before(
+        {
+          tool,
+          sessionID: event.sessionID,
+          callID: event.id ?? event.callID ?? "",
+          userPrompt: prompts.get(event.sessionID),
+        },
+        { args: event.input },
+      );
+    });
+  },
+  async server(context?: { directory?: string }) {
+    return apolysisIntent(context);
+  },
+};
 
 // Remove only complete markers, including inside our canonical optional bridge.
 // Preserve its explicit shell boundary and never evaluate quoted shell text.

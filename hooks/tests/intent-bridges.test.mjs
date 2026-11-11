@@ -21,7 +21,7 @@ childProcess.spawnSync = (binary, args, options) => {
 syncBuiltinESMExports();
 console.warn = (message) => warnings.push(message);
 const { default: installPi } = await import("../pi/apolysis-intent.ts");
-const { default: installOpenCode } = await import("../opencode/apolysis-intent.ts");
+const { default: openCodePlugin, apolysisIntent: installOpenCode } = await import("../opencode/apolysis-intent.ts");
 
 beforeEach(() => {
   calls = [];
@@ -49,7 +49,12 @@ after(() => {
 
 function piHandler() {
   let handler;
-  installPi({ on: (event, callback) => { assert.equal(event, "tool_call"); handler = callback; } });
+  installPi({
+    on: (event, callback) => {
+      assert.ok(event === "tool_call" || event === "input");
+      if (event === "tool_call") handler = callback;
+    },
+  });
   return handler;
 }
 const piContext = { cwd: "/workspace", sessionManager: { getSessionId: () => "real-pi-session" } };
@@ -90,6 +95,47 @@ test("OpenCode uses its native project context when it differs from launcher cwd
   assert.equal(calls[0].args[calls[0].args.indexOf("--workspace-root") + 1], nativeDirectory);
   assert.deepEqual(output.args, { command: "# marker\nls", description: "retained" });
   assert.equal(warnings.length, 0);
+});
+
+test("OpenCode V2 plugin object registers tool.hook execute.before and maps shell tool", async () => {
+  process.env.APOLYSIS_REASON_SUMMARY = "1";
+  assert.equal(typeof openCodePlugin, "object");
+  assert.equal(openCodePlugin.id, "apolysis-intent");
+  let v2Handler;
+  let promptHandler;
+  await openCodePlugin.setup({
+    location: { directory: "/workspace/v2-project" },
+    session: {
+      hook: async (name, callback) => {
+        assert.equal(name, "prompt");
+        promptHandler = callback;
+      },
+    },
+    tool: {
+      hook: async (name, callback) => {
+        assert.equal(name, "execute.before");
+        v2Handler = callback;
+      },
+    },
+  });
+  await promptHandler({
+    sessionID: "v2-session",
+    prompt: { text: "帮我查询一下纽约未来7天的天气" },
+  });
+  const event = {
+    tool: "shell",
+    sessionID: "v2-session",
+    id: "v2-call",
+    input: { command: "ls", description: "retained" },
+  };
+  await v2Handler(event);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.session_id, "v2-session");
+  assert.equal(calls[0].payload.tool_use_id, "v2-call");
+  assert.equal(calls[0].payload.tool_name, "bash");
+  assert.equal(calls[0].payload.user_prompt, "帮我查询一下纽约未来7天的天气");
+  assert.equal(calls[0].args[calls[0].args.indexOf("--workspace-root") + 1], "/workspace/v2-project");
+  assert.deepEqual(event.input, { command: "# marker\nls", description: "retained" });
 });
 
 test("missing product identity produces a diagnostic without an invented id", async () => {

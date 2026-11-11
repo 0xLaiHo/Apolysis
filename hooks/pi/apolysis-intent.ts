@@ -12,9 +12,17 @@ interface PiContext {
 }
 
 export default function apolysisIntent(pi: {
-  on(event: "tool_call", handler: (event: PiToolCall, ctx: PiContext) => void): void;
+  on(event: string, handler: (event: any, ctx: PiContext) => void): void;
 }) {
-  pi.on("tool_call", (event, ctx) => {
+  let latestPrompt = "";
+  if (process.env.APOLYSIS_REASON_SUMMARY === "1") {
+    pi.on("input", (event: { text?: string }) => {
+      if (typeof event?.text === "string" && event.text.trim()) {
+        latestPrompt = event.text;
+      }
+    });
+  }
+  pi.on("tool_call", (event: PiToolCall, ctx: PiContext) => {
     try {
       const sessionId = ctx.sessionManager.getSessionId();
       if (!sessionId || !event.toolCallId) {
@@ -42,14 +50,18 @@ export default function apolysisIntent(pi: {
       if (process.env.APOLYSIS_REASON_SUMMARY === "1") {
         args.push("--allow-reason-summary");
       }
+      const payload: Record<string, unknown> = {
+        session_id: sessionId,
+        hook_event_name: "tool_call",
+        tool_name: event.toolName,
+        tool_use_id: event.toolCallId,
+        tool_input: event.input,
+      };
+      if (process.env.APOLYSIS_REASON_SUMMARY === "1" && latestPrompt) {
+        payload.user_prompt = latestPrompt;
+      }
       const result = spawnSync(process.env.APOLYSIS_BIN ?? "apolysis", args, {
-        input: JSON.stringify({
-          session_id: sessionId,
-          hook_event_name: "tool_call",
-          tool_name: event.toolName,
-          tool_use_id: event.toolCallId,
-          tool_input: event.input,
-        }),
+        input: JSON.stringify(payload),
         encoding: "utf8",
         timeout: 10_000,
       });

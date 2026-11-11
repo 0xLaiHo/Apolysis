@@ -72,6 +72,24 @@ int main(void) {
     assert(apolysis_intent_update_for_capture(1, 0, 1) == APOLYSIS_INTENT_CLEAR);
     assert(apolysis_intent_update_for_capture(1, 1, 0) == APOLYSIS_INTENT_KEEP);
     assert(apolysis_intent_update_for_capture(1, 1, 1) == APOLYSIS_INTENT_REPLACE);
+
+    /* Shell option classification preserves attribution across standard flags and -o/-O options. */
+    const char *cmd_opts[] = {"-c", "-lc", "-cl", "-ec", "-xc", "-euc", "-euxc", "-lic"};
+    for (unsigned int i = 0; i < sizeof(cmd_opts) / sizeof(cmd_opts[0]); i++)
+        assert(apolysis_classify_shell_option(cmd_opts[i], strlen(cmd_opts[i])) == APOLYSIS_SHELL_OPT_COMMAND);
+    const char *flag_opts[] = {"-e", "-u", "-x", "-l", "-i", "-s", "-eu", "-eux", "+e", "+x", "--login", "--norc", "--noprofile", "--posix", "--noediting"};
+    for (unsigned int i = 0; i < sizeof(flag_opts) / sizeof(flag_opts[0]); i++)
+        assert(apolysis_classify_shell_option(flag_opts[i], strlen(flag_opts[i])) == APOLYSIS_SHELL_OPT_FLAG);
+    const char *arg_opts[] = {"-o", "+o", "-O", "+O"};
+    for (unsigned int i = 0; i < sizeof(arg_opts) / sizeof(arg_opts[0]); i++)
+        assert(apolysis_classify_shell_option(arg_opts[i], strlen(arg_opts[i])) == APOLYSIS_SHELL_OPT_TAKES_ARG);
+    const char *scripts[] = {"script.sh", "/bin/script.sh", "./run.sh", "-", "/tmp/very-long-directory-name/child-script.sh"};
+    for (unsigned int i = 0; i < sizeof(scripts) / sizeof(scripts[0]); i++)
+        assert(apolysis_classify_shell_option(scripts[i], strlen(scripts[i])) == APOLYSIS_SHELL_OPT_SCRIPT);
+    assert(apolysis_classify_shell_option("--", 2) == APOLYSIS_SHELL_OPT_END);
+    const char *unknown_opts[] = {"", "+", "+c", "-R", "-Z", "--rcfile", "--init-file", "-euo", "-oerrexit", "-abcdef"};
+    for (unsigned int i = 0; i < sizeof(unknown_opts) / sizeof(unknown_opts[0]); i++)
+        assert(apolysis_classify_shell_option(unknown_opts[i], strlen(unknown_opts[i])) == APOLYSIS_SHELL_OPT_UNKNOWN);
     return 0;
 }
 "##).expect("write native regression");

@@ -81,7 +81,7 @@ Do not use file-edit tools, run Python, change directories, inspect home configu
 case "$agent" in
     claude) native_args=(-p --allowedTools Bash --output-format json) ;;
     pi) native_args=(-p) ;;
-    opencode) native_args=(run --dir "$workspace" --format json) ;;
+    opencode) native_args=(run --auto --format json) ;;
     codex) native_args=(exec --skip-git-repo-check --json) ;;
     cursor) native_args=(--print --output-format json) ;;
 esac

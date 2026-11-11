@@ -37,6 +37,7 @@ pub(super) struct RenderedReport {
     pub json: String,
     pub markdown: String,
     pub html: String,
+    pub summary: String,
     pub complete: bool,
 }
 
@@ -350,6 +351,7 @@ pub(super) fn render(evidence: &Path, outcome: &RunOutcome) -> RenderedReport {
         correlation_valid = false;
     }
     let mut calls = Vec::new();
+    let mut call_resources: Vec<BTreeMap<String, Vec<String>>> = Vec::new();
     let mut admitted = BTreeSet::new();
     let mut exact_total = 0_u64;
     let mut semantic_count = 0_u64;
@@ -400,6 +402,7 @@ pub(super) fn render(evidence: &Path, outcome: &RunOutcome) -> RenderedReport {
         let mut event_counts = BTreeMap::new();
         let mut basis_counts = BTreeMap::new();
         let mut samples = Vec::new();
+        let mut resources_by_type: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut seen_raw = BTreeSet::new();
         for (index, relation) in correlations.rows.iter().enumerate().filter(|(_, row)| {
             kind(row) == "intent_correlation" && string(row, "intent_id") == Some(id)
@@ -421,14 +424,19 @@ pub(super) fn render(evidence: &Path, outcome: &RunOutcome) -> RenderedReport {
             }
             admitted.insert(index);
             exact_total += 1;
-            increment(
-                &mut event_counts,
-                string(relation, "event_type").unwrap_or("unknown"),
-            );
+            let ev_type = string(relation, "event_type").unwrap_or("unknown");
+            increment(&mut event_counts, ev_type);
             increment(
                 &mut basis_counts,
                 string(relation, "match_basis").unwrap_or("unknown"),
             );
+            let res = bounded(string(relation, "resource").unwrap_or("unknown"));
+            if !res.is_empty() && res != "unknown" {
+                let list = resources_by_type.entry(bounded(ev_type)).or_default();
+                if list.len() < 3 && !list.contains(&res) {
+                    list.push(res);
+                }
+            }
             samples.push(json!({
                 "event_type": clean_field(relation, "event_type"),
                 "raw_event_id": clean_field(relation, "raw_event_id"),
@@ -444,6 +452,7 @@ pub(super) fn render(evidence: &Path, outcome: &RunOutcome) -> RenderedReport {
             });
             samples.truncate(6);
         }
+        call_resources.push(resources_by_type);
         calls.push(json!({
             "intent_id": bounded(id), "tool_name": clean_field(call, "tool_name"),
             "observation_mode": clean_field(call, "observation_mode"),
@@ -530,8 +539,165 @@ pub(super) fn render(evidence: &Path, outcome: &RunOutcome) -> RenderedReport {
         json: format!("{document:#}\n"),
         markdown: markdown(&document),
         html: html(&document),
+        summary: terminal_summary(&document, &call_resources),
         complete,
     }
+}
+
+fn split_intent_and_detail(reason: &Value) -> (String, Option<String>) {
+    if reason.is_null() {
+        return ("undeclared".into(), None);
+    }
+    match string(reason, "reason_summary") {
+        Some("[redacted]") => ("[redacted]".into(), None),
+        Some(summary) if !summary.is_empty() => {
+            if let Some((intent, detail)) =
+                summary.strip_suffix('）').and_then(|s| s.split_once('（'))
+            {
+                return (intent.to_string(), Some(detail.to_string()));
+            }
+            (summary.to_string(), None)
+        }
+        _ => (
+            format!(
+                "{} ({})",
+                text(reason, "reason_code"),
+                text(reason, "reason_source")
+            ),
+            None,
+        ),
+    }
+}
+
+fn terminal_summary(report: &Value, call_resources: &[BTreeMap<String, Vec<String>>]) -> String {
+    let totals = &report["totals"];
+    let mut out = format!(
+        "Apolysis Session Summary (agent: {} | tool calls: {} | exact relations: {} | dropped: {})\n",
+        text(report, "agent"),
+        count(totals, "tool_calls"),
+        count(totals, "exact_relations"),
+        count(report, "loss_or_failure_count"),
+    );
+    let Some(calls) = report["calls"].as_array() else {
+        return out;
+    };
+    if calls.is_empty() {
+        let _ = writeln!(
+            out,
+            "└─ (no tool declarations recorded; {} kernel events observed)",
+            count(report, "kernel_events")
+        );
+        return out;
+    }
+    struct GroupedCall<'a> {
+        index: usize,
+        call: &'a Value,
+        detail: Option<String>,
+    }
+    let mut groups: Vec<(String, Vec<GroupedCall<'_>>)> = Vec::new();
+    for (index, call) in calls.iter().enumerate() {
+        let (intent, detail) = split_intent_and_detail(&call["reason"]);
+        let item = GroupedCall {
+            index,
+            call,
+            detail,
+        };
+        if let Some((_, items)) = groups.iter_mut().find(|(key, _)| *key == intent) {
+            items.push(item);
+        } else {
+            groups.push((intent, vec![item]));
+        }
+    }
+    let order = [
+        "network_connect",
+        "exec",
+        "file_create",
+        "file_truncate",
+        "file_unlink",
+        "file_rename",
+        "file_open",
+        "credential_read",
+    ];
+    for (group_idx, (intent, items)) in groups.iter().enumerate() {
+        let is_last_group = group_idx + 1 == groups.len();
+        let group_branch = if is_last_group { "└─" } else { "├─" };
+        let group_prefix = if is_last_group { "   " } else { "│  " };
+        let _ = writeln!(out, "{group_branch} Intent: {intent}");
+        for (item_idx, item) in items.iter().enumerate() {
+            let (call_idx, call, detail) = (item.index, item.call, &item.detail);
+            let is_last_item = item_idx + 1 == items.len();
+            let item_branch = if is_last_item { "└─" } else { "├─" };
+            let item_prefix = if is_last_item { "   " } else { "│  " };
+            let tool = text(call, "tool_name");
+            let detail_suffix = detail
+                .as_deref()
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default();
+            let exact = count(call, "exact_relations");
+            let exec_status = text(call, "execution_status");
+            let short_id: String = text(call, "intent_id").chars().take(8).collect();
+            if exec_status == "semantic_only" {
+                let _ = writeln!(
+                    out,
+                    "{group_prefix}{item_branch} [{}] {}{} — semantic_only (0 kernel events) [intent_id: {}...]",
+                    call_idx + 1,
+                    tool,
+                    detail_suffix,
+                    short_id
+                );
+                continue;
+            }
+            let _ = writeln!(
+                out,
+                "{group_prefix}{item_branch} [{}] {}{} — {} kernel event(s) [intent_id: {}...]",
+                call_idx + 1,
+                tool,
+                detail_suffix,
+                exact,
+                short_id
+            );
+            if let Some(counts) = call["event_counts"].as_object() {
+                let mut ordered_events: Vec<(&str, u64)> = order
+                    .iter()
+                    .copied()
+                    .filter_map(|name| counts.get(name).and_then(Value::as_u64).map(|c| (name, c)))
+                    .collect();
+                for (name, val) in counts {
+                    if !order.contains(&name.as_str()) {
+                        if let Some(c) = val.as_u64() {
+                            ordered_events.push((name.as_str(), c));
+                        }
+                    }
+                }
+                let resources_map = call_resources.get(call_idx);
+                for (ev_idx, (ev_name, ev_count)) in ordered_events.iter().enumerate() {
+                    let ev_branch = if ev_idx + 1 == ordered_events.len() {
+                        "└─"
+                    } else {
+                        "├─"
+                    };
+                    let samples = resources_map
+                        .and_then(|m| m.get(*ev_name))
+                        .filter(|list| !list.is_empty())
+                        .map(|list| {
+                            let joined =
+                                list.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+                            if *ev_count as usize > list.len().min(3) {
+                                format!(": {joined}, ...")
+                            } else {
+                                format!(": {joined}")
+                            }
+                        })
+                        .unwrap_or_default();
+                    let _ = writeln!(
+                        out,
+                        "{group_prefix}{item_prefix}{ev_branch} {ev_name} ({ev_count}){samples}"
+                    );
+                }
+            }
+        }
+    }
+    out
 }
 
 fn normalized(rows: &[Value]) -> Vec<String> {
@@ -908,6 +1074,11 @@ mod tests {
         assert_eq!(value["truncations"], 2);
         assert_eq!(value["task_outcome"], "not_verified");
         assert!(report.html.contains("凭证泄露"));
+        assert!(report
+            .summary
+            .contains("Apolysis Session Summary (agent: claude | tool calls: 1 | exact relations: 1 | dropped: 0)"));
+        assert!(report.summary.contains("Intent: 读取文件确认结果"));
+        assert!(report.summary.contains("file_open (1): /work/example.txt"));
     }
 
     #[test]
@@ -1053,6 +1224,7 @@ mod tests {
             assert!(!report.json.contains(canary));
             assert!(!report.html.contains(canary));
             assert!(!report.markdown.contains(canary));
+            assert!(!report.summary.contains(canary));
         }
     }
 

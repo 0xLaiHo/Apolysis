@@ -241,6 +241,7 @@ pub(crate) async fn run(args: &[String]) -> Result<i32, String> {
         eprintln!("Apolysis: native launch or capture failed; see the incomplete report.");
     }
     let status = record_supervision_result(&mut outcome, observed, native_status);
+    let _ = fs::remove_file(evidence.join("intent.jsonl.reasons.jsonl.prompt"));
     let correlation_args = vec![
         "intent".into(),
         "correlate".into(),
@@ -272,6 +273,7 @@ pub(crate) async fn run(args: &[String]) -> Result<i32, String> {
     atomic_write(&evidence.join("result.json"), rendered.json.as_bytes())?;
     atomic_write(&evidence.join("report.md"), rendered.markdown.as_bytes())?;
     atomic_write(&evidence.join("report.html"), rendered.html.as_bytes())?;
+    eprint!("{}", rendered.summary);
     eprintln!(
         "Apolysis: report: {}",
         evidence.join("report.html").display()

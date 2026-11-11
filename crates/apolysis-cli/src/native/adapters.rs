@@ -142,8 +142,12 @@ pub(super) fn prepare(request: &PrepareRequest<'_>) -> Result<Plan, String> {
             environment = extension_environment(request)?;
         }
         "opencode" => {
-            let plugin = request.control.join("apolysis-opencode.ts");
-            private_file(&plugin, OPENCODE_PLUGIN.as_bytes())?;
+            let plugin = request.control.join("apolysis-opencode");
+            private_dir(&plugin)?;
+            private_file(&plugin.join("index.ts"), OPENCODE_PLUGIN.as_bytes())?;
+            if !options.iter().any(|option| option.name == "--standalone") {
+                prefix.push("--standalone".into());
+            }
             let content = match std::env::var("OPENCODE_CONFIG_CONTENT") {
                 Ok(value) => Some(value),
                 Err(std::env::VarError::NotPresent) => None,
@@ -251,9 +255,16 @@ fn create_plugin(
         b"{\"name\":\"apolysis-native-observe\",\"version\":\"1.0.0\",\"description\":\"Record tool declarations for this Apolysis capture\"}\n",
     )?;
     let value = if product == "claude" {
-        json!({"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":command}]}]}})
+        json!({"hooks":{
+            "UserPromptSubmit":[{"matcher":".*","hooks":[{"type":"command","command":command}]}],
+            "PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":command}]}]
+        }})
     } else {
-        json!({"version":1,"hooks":{"preToolUse":[{"command":command}],"beforeShellExecution":[{"command":command}]}})
+        json!({"version":1,"hooks":{
+            "beforeSubmitPrompt":[{"command":command}],
+            "preToolUse":[{"command":command}],
+            "beforeShellExecution":[{"command":command}]
+        }})
     };
     let data = serde_json::to_vec(&value).map_err(|_| "cannot encode native hook configuration")?;
     private_file(&hooks.join("hooks.json"), &data)?;
@@ -313,7 +324,12 @@ fn opencode_content(existing: Option<&str>, plugin_url: &str) -> Result<String, 
     let object = value
         .as_object_mut()
         .ok_or("existing OPENCODE_CONFIG_CONTENT must be a JSON object")?;
-    let plugins = object.entry("plugin").or_insert_with(|| json!([]));
+    let key = if object.contains_key("plugins") && !object.contains_key("plugin") {
+        "plugins"
+    } else {
+        "plugin"
+    };
+    let plugins = object.entry(key).or_insert_with(|| json!([]));
     let plugins = plugins
         .as_array_mut()
         .ok_or("existing OPENCODE_CONFIG_CONTENT plugin field must be an array")?;
@@ -541,6 +557,7 @@ fn value_option(product: &str, name: &str) -> bool {
         "opencode" => [
             "--dir",
             "--attach",
+            "--server",
             "--log-level",
             "--port",
             "--hostname",
@@ -572,7 +589,7 @@ fn reject_incompatible_modes(product: &str, options: &[NativeOption<'_>]) -> Res
             ("codex", "--disable") if option.value.is_some_and(|v| matches!(v, "hooks" | "codex_hooks")) => return Err("native hooks cannot be disabled while collecting tool declarations".into()),
             ("codex", "--config" | "-c") if option.value.is_some_and(codex_hook_override) => return Err("native Codex hook/daemon config overrides conflict with this capture; keep those hooks in the original user/project config instead".into()),
             ("opencode", "--pure") if option.value != Some("false") => return Err("OpenCode --pure disables the runtime plugin required for intent observation".into()),
-            ("opencode", "--attach") => return Err("OpenCode --attach executes in an existing server outside this local process-tree capture".into()),
+            ("opencode", "--attach" | "--server") => return Err("OpenCode --attach/--server executes in an existing server outside this local process-tree capture".into()),
             _ => {}
         }
     }
@@ -846,22 +863,39 @@ mod tests {
     fn opencode_merges_inline_configuration_without_losing_native_values() {
         let source = r#"{"model":"local/model","permission":{"bash":"ask"},"plugin":["existing"],"mcp":{"demo":{"enabled":false}}}"#;
         let merged: Value =
-            serde_json::from_str(&opencode_content(Some(source), "file:///temp/ours.ts").unwrap())
+            serde_json::from_str(&opencode_content(Some(source), "file:///temp/ours").unwrap())
                 .unwrap();
         let original: Value = serde_json::from_str(source).unwrap();
         assert_eq!(merged["model"], original["model"]);
         assert_eq!(merged["permission"], original["permission"]);
         assert_eq!(merged["mcp"], original["mcp"]);
+        assert_eq!(merged["plugin"], json!(["existing", "file:///temp/ours"]));
+        let v2_source = r#"{"model":"local/model","plugins":["existing-v2"]}"#;
+        let v2_merged: Value =
+            serde_json::from_str(&opencode_content(Some(v2_source), "file:///temp/ours").unwrap())
+                .unwrap();
         assert_eq!(
-            merged["plugin"],
-            json!(["existing", "file:///temp/ours.ts"])
+            v2_merged["plugins"],
+            json!(["existing-v2", "file:///temp/ours"])
         );
+        let fixture = Fixture::new();
+        let native = args(&["--standalone", "run", "hi"]);
+        let plan = prepare(&fixture.request("opencode", &native)).unwrap();
+        assert_eq!(
+            plan.args
+                .iter()
+                .filter(|arg| *arg == "--standalone")
+                .count(),
+            1
+        );
+        assert!(fixture.control.join("apolysis-opencode/index.ts").is_file());
         assert!(
             !opencode_content(Some("private malformed value"), "file:///p")
                 .unwrap_err()
                 .contains("private malformed value")
         );
         assert!(opencode_content(Some(r#"{"plugin":false}"#), "file:///p").is_err());
+        assert!(opencode_content(Some(r#"{"plugins":false}"#), "file:///p").is_err());
     }
 
     #[test]
@@ -930,6 +964,10 @@ mod tests {
             (
                 "opencode",
                 args(&["run", "--attach", "http://localhost:1234"]),
+            ),
+            (
+                "opencode",
+                args(&["run", "--server", "http://localhost:1234"]),
             ),
         ] {
             assert!(

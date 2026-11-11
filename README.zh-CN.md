@@ -16,9 +16,10 @@ Apolysis 是面向 AI agent 的实验性 Linux 审计与证据系统。它分别
   产品支持的 hook，并透传原生参数。
 - 按进程树或 cgroup 范围观测，补充运行时与容器元数据，输出策略发现，明确报告
   事件丢失和截断。
-- 采集工具声明及可选的显式调用理由，通过 `intent_id` 关联执行证据；基于标识符
-  的精确关联与推断候选保持分离。
-- 保存本地 JSONL 证据，生成按工具调用组织的 HTML、Markdown 和 JSON 报告。
+- 采集工具声明及可选的显式调用理由（含显式启用后经脱敏的用户提问意图与工具描述摘要），
+  通过 `intent_id` 关联执行证据；基于标识符的精确关联与推断候选保持分离。
+- 保存本地 JSONL 证据，退出时在终端输出默认英文的树状关联摘要，并生成按工具调用
+  组织的 HTML、Markdown 和 JSON 报告。
 - 独立的服务端基础：版本化执行记录契约、经过认证的 Gateway、PostgreSQL
   持久化、加密证据对象写入及生命周期投影。目前还不是集成的生产服务，也没有
   已交付的网页控制台。
@@ -80,7 +81,7 @@ target/debug/apolysis observe --agent claude -- --help
 | `--output-dir <parent>` | 新建私有采集目录的父目录。 |
 | `--bpf-object <path>` | 显式指定配套的观测器对象。 |
 | `--policy <path>` | 应用审计策略。 |
-| `--allow-reason-summary` | 显式允许保留有长度限制并经过过滤的声明文本。 |
+| `--allow-reason-summary` | 显式允许保留有长度限制并经过过滤的声明文本（用户提问意图与工具描述）。 |
 | `--shell-bridge /bin/bash` | 显式增加内层 shell，用于受支持的 shell 工具归属。 |
 
 默认 shell 标记可能被应用后续的 `eval` 包装隐藏。可选 shell bridge 会在受支持的
@@ -90,7 +91,9 @@ exec 边界暴露标记，但引入了内层 shell：其中的工作目录、变
 
 ## 查看结果
 
-通过应用原有方式退出后，Apolysis 完成关联并打印报告路径。采集结果默认位于
+通过应用原有方式退出后，Apolysis 完成关联，在标准错误输出默认英文的会话关联摘要树
+（按意图聚合工具调用，并列出观测到的 `network_connect`、`exec`、文件与策略事件），
+随后打印报告路径。采集结果默认位于
 `$XDG_STATE_HOME/apolysis/captures`；XDG 状态目录未设置或不是绝对路径时，使用
 `$HOME/.local/state/apolysis/captures`。每次调用创建独立私有目录，其中的
 `evidence/` 包含：

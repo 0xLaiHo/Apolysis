@@ -19,9 +19,11 @@ provide isolation or prove that a task succeeded.
   with product-specific hook loading and native argument passthrough.
 - Process-tree or cgroup-scoped observation, runtime/container metadata,
   policy findings, and explicit loss and truncation reporting.
-- Tool declarations and optional declared reasons, linked to execution through
+- Tool declarations and optional declared reasons (including opt-in sanitized
+  user prompt and tool-description summaries), linked to execution through
   `intent_id`. Identifier-based relations remain separate from inferred matches.
-- Local JSONL evidence and call-oriented HTML, Markdown and JSON reports.
+- Local JSONL evidence, an on-exit English terminal summary tree, and
+  call-oriented HTML, Markdown and JSON reports.
 - Separate server foundations: versioned execution-record contracts, an
   authenticated Gateway, PostgreSQL persistence, encrypted evidence-object
   writes and lifecycle projections. They are not an integrated production
@@ -91,7 +93,7 @@ stdout remains suitable for piping; Apolysis status messages use stderr.
 | `--output-dir <parent>` | Parent for a new private capture directory. |
 | `--bpf-object <path>` | Select the matching observer object explicitly. |
 | `--policy <path>` | Apply an audit policy. |
-| `--allow-reason-summary` | Opt in to bounded, filtered declared text. |
+| `--allow-reason-summary` | Opt in to bounded, filtered declared text (user prompt intent and tool description). |
 | `--shell-bridge /bin/bash` | Opt in to an inner shell for supported shell-tool attribution. |
 
 The default shell marker may be hidden by an application's later `eval`
@@ -103,8 +105,10 @@ rejected because this collector cannot cover them.
 
 ## Read the result
 
-Exit through the application's normal mechanism. Apolysis completes correlation
-and prints the report path. Captures default to
+Exit through the application's normal mechanism. Apolysis completes correlation,
+prints an English session summary tree on stderr (grouping tool calls by intent
+and listing observed `network_connect`, `exec`, file and policy events), and
+prints the report path. Captures default to
 `$XDG_STATE_HOME/apolysis/captures`, or `$HOME/.local/state/apolysis/captures`
 when XDG state is unset or not absolute. Each invocation gets a separate
 private directory containing `evidence/`:

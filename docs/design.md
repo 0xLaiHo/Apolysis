@@ -72,10 +72,10 @@ capture and privilege elevation.
 | Product | Temporary integration |
 | --- | --- |
 | Codex | Session-layer `PreToolUse` configuration, hooks enabled, and `--no-daemon` to keep local work in the observed process tree. Native hook trust remains effective. |
-| Claude Code | Additional runtime plugin containing `PreToolUse`. |
-| Cursor Agent | Additional runtime plugin containing `preToolUse` and `beforeShellExecution`; the supplementary shell event records/allows rather than independently assigning a new call. |
-| Pi | Extension listening to `tool_call`, using the native session context. |
-| OpenCode | Plugin listening to `tool.execute.before`, appended to the in-memory native configuration and using the plugin directory context. |
+| Claude Code | Additional runtime plugin containing `UserPromptSubmit` and `PreToolUse`. |
+| Cursor Agent | Additional runtime plugin containing `beforeSubmitPrompt`, `preToolUse` and `beforeShellExecution`; the supplementary shell event records/allows rather than independently assigning a new call. |
+| Pi | Extension listening to `tool_call` (and `input` when `--allow-reason-summary` is enabled), using the native session context. |
+| OpenCode | Plugin directory listening to V2 `tool.hook("execute.before")` / `session.hook("prompt")` and V1 `tool.execute.before`, appended to the in-memory native configuration with `--standalone` so execution stays in the observed process tree. |
 
 Existing global/project configuration is not overwritten. Known options that
 disable the integration or move execution into remote, detached or shared-server
@@ -138,10 +138,12 @@ It is an annotation, not hidden model reasoning or verified intent:
   `agent_declared`; the intent marker remains first in the executable command.
 - Codes are `unknown`, `inspect_context`, `verify_change`, `reproduce_issue`,
   `implement_change`, `diagnose_failure` and `gather_evidence`.
-- Native tool descriptions use `tool_description` with code `unknown`. Missing
-  reasons stay missing. The native launcher injects no reason-generation prompt.
+- Native tool descriptions and opt-in prompt-hook summaries use
+  `tool_description` with code `unknown`. Missing reasons stay missing. The
+  native launcher injects no reason-generation prompt.
 - Summaries are absent by default. `--allow-reason-summary` opts into filtered,
-  single-line text of at most 240 Unicode characters. Filtering is not a secrecy
+  single-line text of at most 240 Unicode characters (combining sanitized user
+  prompt text and tool description when available). Filtering is not a secrecy
   guarantee. `task_ref` is an opaque reference, not prompt content.
 - Corrections append a new reason with `supersedes_reason_id`. Binding validates
   the full call identity and correction chain; conflicting or unbound reasons
@@ -160,14 +162,17 @@ of the default observer. Host-side observations of gVisor or VM-backed runtimes
 do not imply visibility into guest operations.
 
 The marker parser accepts only a complete leading comment in a supported shell
-command argument. It does not search arbitrary argv text. Attribution uses TGID
-and the thread-group leader's start time to distinguish reused PIDs. The kernel
-copies attribution at fork, including children that never exec. At exec, a valid
-new marker replaces the current value; complete capture with no new marker
-preserves it. Unreadable, malformed or incomplete marker capture clears the
-value and sets `intent_capture_incomplete`. Context is removed when the thread
-group exits. Each in-scope event carries its current attribution; userspace does
-not invent a missing marker from stale process state.
+command argument (recognizing standard short/long shell flags and `-o`/`-O`
+option pairs before `-c` or a script path). It does not search arbitrary argv
+text. Attribution uses TGID and the thread-group leader's start time to
+distinguish reused PIDs. The kernel copies attribution at fork, including
+children that never exec. At exec, a valid new marker replaces the current
+value; complete capture with no new marker (including child shells executing
+scripts with supported flags) preserves it. Unreadable, malformed, unknown-flag
+or incomplete marker capture clears the value and sets
+`intent_capture_incomplete`. Context is removed when the thread group exits.
+Each in-scope event carries its current attribution; userspace does not invent
+a missing marker from stale process state.
 
 Correlation is a separate pass restricted to one capture session. A unique
 explicit `intent_id`, or a unique explicit `raw_event_id` when no intent marker
@@ -193,8 +198,9 @@ They remain an edge format, separate from the authenticated service contract.
 | `result.json`, `report.md`, `report.html` | Structured and human-readable views grouped by Tool Call. |
 
 Reports validate raw/canonical identity, unique declarations and reason bindings
-before counting exact relations. Raw events and canonical copies are not counted
-as two syscall attempts. Unattributed events, policy notices, missing reasons,
+before counting exact relations, and emit an English session summary tree on
+stderr upon completion. Raw events and canonical copies are not counted as two
+syscall attempts. Unattributed events, policy notices, missing reasons,
 conflicts, truncation and loss stay separate. Malformed, foreign-session,
 missing or oversized inputs make the report incomplete.
 
